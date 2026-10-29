@@ -511,6 +511,8 @@ async def execute_task(args: dict):
                     isinstance(error, httpx.HTTPStatusError)
                     and error.response.status_code == 409
                 ):
+                    if error.response.json().get("code") == "browser_busy":
+                        raise RuntimeError("browser_not_dispatched") from None
                     result = {
                         "state": "blocked",
                         "reason": error.response.json().get(

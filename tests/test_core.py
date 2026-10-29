@@ -93,6 +93,34 @@ def test_pause_fences_queued_publish(agent):
         assert not all_rows(c, "SELECT * FROM lead.actions")
 
 
+@pytest.mark.asyncio
+async def test_profile_backup_defers_task_without_requesting_user_action(
+    agent, monkeypatch
+):
+    from lead_app import activities
+
+    domain.connect_lab(agent)
+    task = domain.queue_lab_publish(agent, "wait through backup", uid())
+
+    async def temporarily_busy(*args, **kwargs):
+        request = httpx.Request("POST", "http://browser.invalid/publish")
+        response = httpx.Response(
+            409,
+            json={"detail": "环境正在备份", "code": "browser_busy"},
+            request=request,
+        )
+        raise httpx.HTTPStatusError(
+            "temporary maintenance", request=request, response=response
+        )
+
+    monkeypatch.setattr(activities, "browser_rpc", temporarily_busy)
+    with pytest.raises(RuntimeError, match="browser_not_dispatched"):
+        await activities.execute_task({"agent_id": agent, "task_id": str(task["id"])})
+    with tx(agent) as c:
+        assert one(c, "SELECT state FROM lead.tasks")["state"] == "running"
+        assert one(c, "SELECT state FROM lead.actions")["state"] == "prepared"
+
+
 def test_action_ledger_immutable_and_state_machine(agent):
     domain.connect_lab(agent)
     task = domain.queue_lab_publish(agent, "只发布一次", "immutable")

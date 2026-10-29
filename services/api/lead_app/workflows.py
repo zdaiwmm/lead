@@ -50,12 +50,30 @@ class ChatWorkflow:
 class PublishWorkflow:
     @workflow.run
     async def run(self, args: dict):
+        resilient = workflow.patched("publish-transient-retry-v1")
+        policy = (
+            RetryPolicy(
+                initial_interval=timedelta(seconds=2),
+                maximum_interval=timedelta(seconds=60),
+                maximum_attempts=0,
+                non_retryable_error_types=[
+                    "ValueError",
+                    "LookupError",
+                    "TypeError",
+                    "KeyError",
+                    "PermissionError",
+                ],
+            )
+            if resilient
+            else RETRY
+        )
         try:
             result = await workflow.execute_activity(
                 "execute_task",
                 args,
                 start_to_close_timeout=timedelta(minutes=4),
-                retry_policy=RETRY,
+                retry_policy=policy,
+                schedule_to_close_timeout=timedelta(days=1) if resilient else None,
             )
         except ActivityError:
             await workflow.execute_activity(
@@ -74,7 +92,8 @@ class PublishWorkflow:
                     "execute_task",
                     args,
                     start_to_close_timeout=timedelta(minutes=4),
-                    retry_policy=RETRY,
+                    retry_policy=policy,
+                    schedule_to_close_timeout=timedelta(days=1) if resilient else None,
                 )
         elif result.get("state") == "unknown":
             await workflow.sleep(5)
@@ -82,7 +101,8 @@ class PublishWorkflow:
                 "execute_task",
                 args,
                 start_to_close_timeout=timedelta(minutes=4),
-                retry_policy=RETRY,
+                retry_policy=policy,
+                schedule_to_close_timeout=timedelta(days=1) if resilient else None,
             )
         return result
 

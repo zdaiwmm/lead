@@ -34,6 +34,10 @@ from .security import internal_token, token
 from .telemetry import TelemetryMiddleware
 
 
+class BrowserBusy(ValueError):
+    code = "browser_busy"
+
+
 class Actor:
     def __init__(self, aid):
         self.aid = aid
@@ -62,7 +66,7 @@ class Actor:
                 c,
                 "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
             ):
-                raise ValueError("环境正在备份，请稍后重试")
+                raise BrowserBusy("环境正在备份，请稍后重试")
         folder = STATE / "profiles" / self.aid
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.file = (folder / "actor.lock").open("a")
@@ -712,14 +716,14 @@ class Gateway:
                     c,
                     "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
                 ):
-                    raise ValueError("此环境正在备份，请稍后重试")
+                    raise BrowserBusy("此环境正在备份，请稍后重试")
             if aid in self.actors:
                 existing = self.actors[aid]
                 if not existing.disconnected:
                     existing.touch()
                     return existing
                 if existing.lock.locked():
-                    raise ValueError("浏览器正在恢复，请稍后重试")
+                    raise BrowserBusy("浏览器正在恢复，请稍后重试")
                 self.actors.pop(aid)
                 try:
                     await existing.close()
@@ -814,7 +818,9 @@ async def auth(request, call_next):
         message = str(e)
         if not any("\u4e00" <= ch <= "\u9fff" for ch in message):
             message = "浏览器状态不允许此操作"
-        return JSONResponse({"detail": message[:250]}, status_code=409)
+        return JSONResponse(
+            {"detail": message[:250], "code": getattr(e, "code", None)}, status_code=409
+        )
 
 
 class OpenRequest(BaseModel):
