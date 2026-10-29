@@ -26,6 +26,11 @@ async def test_browser_process_crash_reopens_same_profile(monkeypatch):
     monkeypatch.setattr(domain, "emit", lambda *args, **kwargs: None)
     aid = domain.create_agent()
     gateway = Gateway()
+    from lead_app.research import begin_run, finish_run
+
+    rid = begin_run(
+        aid, "Owned browser process recovery verification", mode="verification"
+    )
     try:
         actor = await gateway.get(aid)
         await actor.page.goto("http://127.0.0.1:8088/lab/" + aid + "/")
@@ -65,6 +70,7 @@ async def test_browser_process_crash_reopens_same_profile(monkeypatch):
         )
     finally:
         await gateway.close(aid)
+        finish_run(aid, rid)
         domain.set_control(aid, "archive")
 
 
