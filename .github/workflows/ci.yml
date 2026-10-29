@@ -1,0 +1,50 @@
+name: lead checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+          cache: pip
+      - run: python -m venv .venv
+      - run: .venv/bin/python -m pip install -r requirements.lock.txt
+      - run: .venv/bin/python scripts/bootstrap.py
+      - name: Start isolated CI database
+        run: |
+          docker compose --env-file .state/infra.env -f infra/compose.yaml up -d postgres
+          for attempt in $(seq 1 30); do
+            if docker compose --env-file .state/infra.env -f infra/compose.yaml exec -T postgres pg_isready -U lead_owner -d lead; then break; fi
+            sleep 1
+          done
+          .venv/bin/python scripts/migrate.py
+      - run: .venv/bin/ruff check services scripts tests
+      - run: .venv/bin/python scripts/check_repository.py
+      - name: Database, media and authorization tests
+        run: .venv/bin/pytest -q --junitxml=.state/ci-tests.xml
+      - if: always()
+        run: docker compose --env-file .state/infra.env -f infra/compose.yaml down
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build

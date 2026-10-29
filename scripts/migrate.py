@@ -65,6 +65,21 @@ with psycopg.connect(**database_kwargs(True), autocommit=True) as conn:
             ),
         )
     conn.execute(
-        "UPDATE lead.platform_capabilities SET permission_state='approved',adapter_version=CASE WHEN technical_state='verified' THEN adapter_version ELSE 'telegram-webk-1' END,evidence_ref=CASE WHEN technical_state='verified' THEN evidence_ref ELSE 'docs/policies/telegram-owned-channel.md' END,reviewed_at=now() WHERE platform='telegram' AND action_type='publish' AND target_type='channel'"
+        "UPDATE lead.platform_capabilities SET permission_state='approved',adapter_version=CASE WHEN technical_state='verified' THEN adapter_version ELSE 'telegram-webk-2' END,evidence_ref=CASE WHEN technical_state='verified' THEN evidence_ref ELSE 'docs/policies/telegram-owned-channel.md' END,reviewed_at=now() WHERE platform='telegram' AND action_type='publish' AND target_type='channel'"
     )
+    from lead_app.adapters.catalog import SPECS
+
+    for spec in SPECS.values():
+        for target_type in (
+            ["profile", "page"] if spec.platform == "linkedin" else [spec.target_type]
+        ):
+            conn.execute(
+                "INSERT INTO lead.platform_capabilities(platform,action_type,target_type,technical_state,permission_state,adapter_version) VALUES(%s,'publish',%s,'unverified',%s,%s) ON CONFLICT(platform,action_type,target_type) DO UPDATE SET adapter_version=excluded.adapter_version,technical_state=CASE WHEN lead.platform_capabilities.adapter_version=excluded.adapter_version THEN lead.platform_capabilities.technical_state ELSE 'unverified' END,permission_state=CASE WHEN excluded.permission_state='restricted' THEN 'restricted' ELSE lead.platform_capabilities.permission_state END",
+                (
+                    spec.platform,
+                    target_type,
+                    "approved" if spec.platform == "telegram" else spec.policy,
+                    spec.version,
+                ),
+            )
 print("Database schema and scoped runtime role ready.")

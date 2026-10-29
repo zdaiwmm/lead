@@ -21,6 +21,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from .adapters.catalog import SPECS
 from .config import STATE, TENANT, env, proxy_for
 from .db import j, one, require_agent, tx, uid
 from .domain import PLATFORMS
@@ -43,6 +44,9 @@ class Actor:
         self.forward_proxy = None
 
     async def launch(self):
+        from .resources import ensure_capacity
+
+        ensure_capacity(256)
         folder = STATE / "profiles" / self.aid
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.file = (folder / "actor.lock").open("a")
@@ -217,8 +221,13 @@ class Actor:
         self.used = time.monotonic()
 
     def gate(self, c, action):
+        from .resources import ensure_capacity
+
+        ensure_capacity(64)
         platform = action["intent"].get("platform")
-        if platform not in ("lab", "telegram"):
+        from .adapters.catalog import SPECS
+
+        if platform not in ("lab", "telegram") and platform not in SPECS:
             raise ValueError("该频道的自动发布适配尚未开放")
         a = require_agent(c, self.aid, True)
         if (
@@ -246,6 +255,10 @@ class Actor:
         )
         if not grant or "publish" not in grant["allowed_actions"]:
             raise ValueError("授权已失效")
+        if platform in SPECS:
+            from .social_publish import gate
+
+            gate(self, c, action)
         if platform == "telegram":
             task = one(
                 c, "SELECT input FROM lead.tasks WHERE id=%s", (action["task_id"],)
@@ -285,7 +298,7 @@ class Actor:
             elif (
                 a["desired_state"] != "running"
                 or cap["technical_state"] != "verified"
-                or cap["adapter_version"] != "telegram-webk-1"
+                or cap["adapter_version"] != SPECS[platform].version
                 or not target["verified_permissions"].get("publishing_verified")
             ):
                 raise ValueError("请先完成这个频道的真实发布验证")
@@ -462,6 +475,7 @@ class Actor:
             folder.mkdir(exist_ok=True, parents=True, mode=0o700)
             path = folder / (str(action_id) + ".png")
             await self.page.screenshot(path=str(path))
+            path.chmod(0o600)
             external_id = target["external_target_id"] + ":" + observed["mid"]
             with tx(self.aid) as c:
                 c.execute(
@@ -469,8 +483,8 @@ class Actor:
                     (external_id, str(path), action_id),
                 )
                 c.execute(
-                    "UPDATE lead.action_attempts SET outcome='confirmed',ended_at=now(),evidence_ref=%s WHERE action_id=%s AND ended_at IS NULL",
-                    (str(path), action_id),
+                    "UPDATE lead.action_attempts SET outcome='confirmed',ended_at=now(),evidence_ref=%s WHERE action_id=%s AND attempt=(SELECT max(attempt) FROM lead.action_attempts WHERE action_id=%s)",
+                    (str(path), action_id, action_id),
                 )
             return {
                 "state": "confirmed",
@@ -725,6 +739,40 @@ class TelegramTargetRequest(BaseModel):
     url: str = Field(max_length=2000)
 
 
+@app.post("/agents/{aid}/account/inspect")
+async def inspect_account(aid: UUID, body: OpenRequest):
+    from .adapters import get_adapter
+
+    actor = await gateway.get(str(aid))
+    async with actor.lock:
+        return await get_adapter(body.platform).account(actor.page)
+
+
+@app.post("/agents/{aid}/target/inspect")
+async def inspect_target(aid: UUID, body: TelegramTargetRequest):
+    from .adapters import get_adapter
+
+    aid = str(aid)
+    with tx(aid) as c:
+        account = one(
+            c,
+            "SELECT * FROM lead.social_accounts WHERE id=%s AND state='connected'",
+            (body.account_id,),
+        )
+        if not account:
+            raise HTTPException(404, "已连接账号不存在")
+        if one(
+            c,
+            "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('active','requested','ending') AND expires_at>now()",
+        ):
+            raise ValueError("请先结束浏览器接管")
+    actor = await gateway.get(aid)
+    async with actor.lock:
+        return await get_adapter(account["platform"]).target(
+            actor.page, body.url, account["external_account_id"]
+        )
+
+
 @app.post("/agents/{aid}/telegram/account")
 async def inspect_telegram_account(aid: UUID):
     from .telegram import inspect_account
@@ -769,16 +817,27 @@ async def publish_action(aid: UUID, body: PublishRequest):
         if not action:
             raise HTTPException(404)
     actor = await gateway.get(aid)
-    if action["intent"].get("platform") == "telegram":
-        if env().get("LEAD_DEPLOYMENT_MODE") == "production":
-            from .identity import check
+    if (
+        action["intent"].get("platform") in SPECS
+        and env().get("LEAD_DEPLOYMENT_MODE") == "production"
+    ):
+        from .identity import check
 
-            measured = await check(actor)
-            if not measured["verified"]:
-                return {"state": "blocked", "reason": "固定独立出口核验未通过"}
+        measured = await check(actor)
+        if not measured["verified"]:
+            return {"state": "blocked", "reason": "固定独立出口核验未通过"}
+    if action["intent"].get("platform") == "telegram":
+        if action["intent"].get("media"):
+            from .social_publish import execute
+
+            return await execute(actor, body.action_id)
         return await actor.publish_telegram(body.action_id)
     if action["intent"].get("platform") == "lab":
         return await actor.publish_lab(body.action_id)
+    if action["intent"].get("platform") in SPECS:
+        from .social_publish import execute
+
+        return await execute(actor, body.action_id)
     raise HTTPException(409, "该渠道尚未通过发布适配验证")
 
 

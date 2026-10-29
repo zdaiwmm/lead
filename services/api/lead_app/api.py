@@ -7,7 +7,7 @@ from typing import Literal
 from uuid import UUID
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -21,15 +21,22 @@ from pydantic import BaseModel, Field
 from . import domain
 from .analytics import router as analytics_router
 from .config import STATE, TENANT, env, model_config
+from .conversions import router as conversion_router
 from .db import all_rows, audit, one, record, require_agent, tx
+from .events import router as event_router
 from .security import internal_token, token, valid
+from .upload_limit import UploadLimit
 
 app = FastAPI(title="lead", version="0.1.0", docs_url=None, redoc_url=None)
+app.add_middleware(UploadLimit)
 app.add_middleware(
     TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"]
 )
 ORIGINS = {"http://localhost:3100", "http://127.0.0.1:3100", "http://127.0.0.1:8088"}
 app.include_router(analytics_router)
+
+app.include_router(event_router)
+app.include_router(conversion_router)
 
 
 @app.middleware("http")
@@ -49,7 +56,9 @@ async def local_auth(request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "same-origin"
-    response.headers["Cache-Control"] = "no-store"
+    response.headers["Cache-Control"] = (
+        "no-store, no-transform" if path == "/api/events" else "no-store"
+    )
     if path.startswith("/lab/"):
         response.headers["Content-Security-Policy"] = (
             "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
@@ -80,10 +89,51 @@ class CreateAgent(BaseModel):
 class Message(BaseModel):
     text: str = Field(min_length=1, max_length=10000)
     client_message_id: UUID
+    asset_ids: list[UUID] = Field(default_factory=list, max_length=10)
+
+
+@app.post("/api/agents/{aid}/assets")
+async def upload_asset(aid: UUID, file: UploadFile = File(...)):
+    from .assets import upload
+
+    return await upload(str(aid), file)
+
+
+@app.get("/api/agents/{aid}/assets")
+def list_assets(aid: UUID):
+    from .assets import listing
+
+    return listing(str(aid))
+
+
+@app.get("/api/agents/{aid}/assets/{asset_id}")
+def get_asset(aid: UUID, asset_id: UUID):
+    from .assets import resolve
+
+    asset, path = resolve(str(aid), str(asset_id))
+    return FileResponse(
+        path,
+        media_type=asset["media_type"],
+        filename=path.name,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'",
+        },
+    )
 
 
 class Control(BaseModel):
     action: Literal["pause", "resume", "start", "archive"]
+
+
+class RevisionRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+
+
+@app.post("/api/agents/{aid}/memory/{memory_id}/remove")
+def remove_preference(aid: UUID, memory_id: UUID, body: RevisionRequest):
+    return domain.forget_preference(str(aid), str(memory_id), body.expected_revision)
 
 
 class Connection(BaseModel):
@@ -113,15 +163,44 @@ class AccountTargetRequest(BaseModel):
 
 @app.post("/api/agents/{aid}/telegram/verify-login")
 async def verify_telegram(aid: UUID):
-    from .channels import store_account
+    return await verify_login(aid, Connection(platform="telegram"))
 
+
+@app.post("/api/agents/{aid}/accounts/verify-login")
+async def verify_login(aid: UUID, body: Connection):
+    from .adapters.catalog import SPECS
+    from .channels import store_account, store_target
+
+    platform = body.platform
+    if platform not in SPECS:
+        raise ValueError("频道不存在")
     aid = str(aid)
-    observed = (await gateway("/agents/" + aid + "/telegram/account")).json()
-    account_id = await asyncio.to_thread(store_account, aid, "telegram", observed)
+    observed = (
+        await gateway(f"/agents/{aid}/account/inspect", body={"platform": platform})
+    ).json()
+    auto = {
+        "instagram": f"https://www.instagram.com/{observed['external_account_id']}/",
+        "x": f"https://x.com/{observed['external_account_id']}/",
+        "threads": f"https://www.threads.com/@{observed['external_account_id']}/",
+        "tiktok": f"https://www.tiktok.com/@{observed['external_account_id']}/",
+        "linkedin": f"https://www.linkedin.com/in/{observed['external_account_id']}/",
+        "youtube": f"https://www.youtube.com/channel/{observed['external_account_id']}/",
+    }
+    account_id = await asyncio.to_thread(
+        store_account, aid, platform, observed, platform not in auto
+    )
     with tx(aid) as c:
         c.execute(
             "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('active','requested','ending')"
         )
+    if platform in auto:
+        target = (
+            await gateway(
+                f"/agents/{aid}/target/inspect",
+                body={"account_id": account_id, "url": auto[platform]},
+            )
+        ).json()
+        await asyncio.to_thread(store_target, aid, account_id, target)
     return {"ok": True, "account_id": account_id}
 
 
@@ -136,11 +215,30 @@ async def bind_target(aid: UUID, account_id: UUID, body: AccountTargetRequest):
 
     observed = (
         await gateway(
-            f"/agents/{aid}/telegram/target",
+            f"/agents/{aid}/target/inspect",
             body={"account_id": str(account_id), "url": body.url},
         )
     ).json()
     return await asyncio.to_thread(store_target, str(aid), str(account_id), observed)
+
+
+class VerificationRequest(BaseModel):
+    asset_ids: list[UUID] = Field(default_factory=list, max_length=10)
+    ai_generated: bool | None = None
+    made_for_kids: bool | None = None
+
+
+@app.post("/api/agents/{aid}/targets/{target_id}/verification")
+def create_verification(aid: UUID, target_id: UUID, body: VerificationRequest):
+    from .channels import create_verification
+
+    return create_verification(
+        str(aid),
+        str(target_id),
+        [str(x) for x in body.asset_ids],
+        body.made_for_kids,
+        body.ai_generated,
+    )
 
 
 @app.post("/api/agents/{aid}/cards/{card_id}/respond")
@@ -274,7 +372,10 @@ def browser_evidence(aid: UUID, evidence_id: UUID):
 @app.post("/api/agents/{aid}/messages", status_code=202)
 def message(aid: UUID, body: Message):
     return domain.submit_message(
-        str(aid), body.text.strip(), str(body.client_message_id)
+        str(aid),
+        body.text.strip(),
+        str(body.client_message_id),
+        [str(x) for x in body.asset_ids],
     )
 
 

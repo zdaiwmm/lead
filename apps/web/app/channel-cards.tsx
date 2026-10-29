@@ -1,18 +1,23 @@
 "use client";
 
 type Row = Record<string, any>;
+import { AssetPreview, MediaVerification } from "./media-upload";
 export default function ChannelCards({
   cards,
   states,
   busy,
   respond,
   start,
+  aid,
+  onComplete,
 }: {
   cards: (Row | string)[];
   states: Row[];
   busy: boolean;
   respond: (card: Row, accepted: boolean) => void;
   start: () => void;
+  aid: string;
+  onComplete: () => void;
 }) {
   return (
     <>
@@ -20,6 +25,15 @@ export default function ChannelCards({
         .filter((card) => card === "start" || typeof card === "object")
         .map((value, i) => {
           const card: Row = typeof value === "string" ? { type: value } : value;
+          if (card.type === "media_verification")
+            return (
+              <MediaVerification
+                key={card.target_id}
+                aid={aid}
+                card={card}
+                onComplete={onComplete}
+              />
+            );
           if (card.type === "channel_target") return null;
           if (card.type === "start")
             return (
@@ -51,7 +65,42 @@ export default function ChannelCards({
               {card.type === "authorize" ? (
                 <p>允许发布 · 每天最多 3 条</p>
               ) : (
-                <p className="channel-preview">{card.body}</p>
+                <>
+                  <p className="channel-preview">
+                    {state.payload?.title && (
+                      <strong>
+                        {state.payload.title}
+                        <br />
+                      </strong>
+                    )}
+                    {card.body}
+                  </p>
+                  {(state.payload?.media || []).map((asset: Row) => (
+                    <AssetPreview
+                      key={asset.id}
+                      aid={aid}
+                      assetId={asset.id}
+                      kind={asset.kind}
+                    />
+                  ))}
+                  {state.payload?.made_for_kids != null && (
+                    <p>面向儿童：{state.payload.made_for_kids ? "是" : "否"}</p>
+                  )}
+                  {(state.payload?.media || []).some(
+                    (asset: Row) => asset.ai_generated != null,
+                  ) && (
+                    <p>
+                      包含 AI 生成素材：
+                      {state.payload.media.some(
+                        (asset: Row) => asset.ai_generated,
+                      )
+                        ? "是"
+                        : "否"}
+                    </p>
+                  )}
+                  {state.payload?.commercial_disclosure === "own_brand" &&
+                    state.payload?.media?.length > 0 && <p>推广自己的业务</p>}
+                </>
               )}
               {label ? (
                 <span className="muted small">{label}</span>

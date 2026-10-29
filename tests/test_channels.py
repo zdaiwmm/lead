@@ -203,5 +203,27 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
         with tx(aid) as c:
             assert one(c, "SELECT count(*) AS n FROM lead.action_attempts")["n"] == 1
             assert domain.metrics(c)["published"] == 0
+            before = one(
+                c,
+                "SELECT technical_state,adapter_version FROM lead.platform_capabilities WHERE platform='telegram' AND target_type='channel' AND action_type='publish'",
+            )
+            c.execute("SAVEPOINT verify_probe_contract")
+            assert one(
+                c, "SELECT lead.confirm_channel_probe(%s) AS ok", (action["id"],)
+            )["ok"]
+            permissions = one(
+                c,
+                "SELECT verified_permissions FROM lead.account_targets WHERE id=%s",
+                (target["target_id"],),
+            )["verified_permissions"]
+            assert permissions["publishing_verified_formats"] == ["text"]
+            c.execute("ROLLBACK TO SAVEPOINT verify_probe_contract")
+            assert (
+                one(
+                    c,
+                    "SELECT technical_state,adapter_version FROM lead.platform_capabilities WHERE platform='telegram' AND target_type='channel' AND action_type='publish'",
+                )
+                == before
+            )
     finally:
         await gateway.close(aid)

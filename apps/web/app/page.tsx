@@ -19,6 +19,7 @@ import {
 import AnalyticsPanel from "./analytics-panel";
 import BrowserHistory from "./browser-history";
 import ChannelCards from "./channel-cards";
+import { MediaUpload, AssetPreview } from "./media-upload";
 
 type Row = Record<string, any>;
 type View = "home" | "agent" | "settings";
@@ -83,6 +84,7 @@ export default function Lead() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [text, setText] = useState("");
+  const [attachments, setAttachments] = useState<Row[]>([]);
   const [channels, setChannels] = useState(false);
   const [platforms, setPlatforms] = useState<Row[]>([]);
   const [browser, setBrowser] = useState<Row | null>(null);
@@ -119,8 +121,14 @@ export default function Lead() {
   }, [refresh]);
   useEffect(() => {
     if (!ready) return;
-    const timer = setInterval(() => refresh().catch(() => {}), 2500);
-    return () => clearInterval(timer);
+    const events = new EventSource("/api/events");
+    events.onmessage = () => refresh().catch(() => {});
+    events.onopen = () => refresh().catch(() => {});
+    const timer = setInterval(() => refresh().catch(() => {}), 15000);
+    return () => {
+      events.close();
+      clearInterval(timer);
+    };
   }, [ready, refresh]);
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -144,12 +152,14 @@ export default function Lead() {
     }
   }
   async function select(id: string) {
+    selected.current = id;
     setCurrent(id);
     setDetail(null);
     setView("agent");
     setTab("chat");
     setSide(false);
     setText("");
+    setAttachments([]);
     setError("");
     try {
       const d = await api("/agents/" + id);
@@ -163,6 +173,7 @@ export default function Lead() {
     const a = await api("/agents", { client_id: createKey.current });
     createKey.current = null;
     selected.current = a.id;
+    setAttachments([]);
     setCurrent(a.id);
     setView("agent");
     setTab("chat");
@@ -179,8 +190,8 @@ export default function Lead() {
     setDetail(await api("/agents/" + a.id));
   }
   async function send() {
-    if (!text.trim() || busy) return;
-    const value = text.trim();
+    if ((!text.trim() && !attachments.length) || busy) return;
+    const value = text.trim() || "我上传了素材，供后续运营使用。";
     await run(async () => {
       if (!current) {
         await create(value);
@@ -190,9 +201,13 @@ export default function Lead() {
       await api("/agents/" + current + "/messages", {
         text: value,
         client_message_id: sendKey.current,
+        asset_ids: attachments.map((a) => a.id),
       });
       sendKey.current = null;
-      setText("");
+      if (selected.current === current) {
+        setText("");
+        setAttachments([]);
+      }
     });
   }
   async function control(action: string) {
@@ -245,6 +260,28 @@ export default function Lead() {
   function composer(first = false) {
     return (
       <div className={"composer " + (first ? "first" : "")}>
+        {!!attachments.length && (
+          <div className="attachment-list">
+            {attachments.map((asset) => (
+              <div key={asset.id}>
+                <AssetPreview
+                  aid={current!}
+                  assetId={asset.id}
+                  kind={asset.metadata.kind}
+                />
+                <button
+                  className="icon"
+                  aria-label="移除此素材"
+                  onClick={() =>
+                    setAttachments(attachments.filter((a) => a.id !== asset.id))
+                  }
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <textarea
           aria-label={first ? "产品网址或介绍" : "发消息给 Agent"}
           placeholder={
@@ -268,11 +305,28 @@ export default function Lead() {
           rows={first ? 3 : 2}
         />
         <div className="composer-bottom">
-          <span>{first ? "" : "与运营人员对话"}</span>
+          <span>
+            {current && (
+              <MediaUpload
+                aid={current}
+                disabled={busy}
+                onError={(message) => {
+                  if (selected.current === current) setError(message);
+                }}
+                onUpload={(asset) => {
+                  if (selected.current !== current) return;
+                  setAttachments((old) =>
+                    old.some((a) => a.id === asset.id) ? old : [...old, asset],
+                  );
+                  sendKey.current = null;
+                }}
+              />
+            )}
+          </span>
           <button
             aria-label="发送"
             className="send"
-            disabled={!text.trim() || busy || !ready}
+            disabled={(!text.trim() && !attachments.length) || busy || !ready}
             onClick={send}
           >
             <ArrowUp size={18} />
@@ -645,6 +699,21 @@ export default function Lead() {
                       )}
                       <div className="message-content">
                         <div className="bubble">{m.content.text}</div>
+                        {!!m.content.asset_ids?.length && (
+                          <div className="attachment-list">
+                            {m.content.asset_ids.map((id: string) => (
+                              <AssetPreview
+                                key={id}
+                                aid={current!}
+                                assetId={id}
+                                kind={
+                                  detail.assets?.find((a: Row) => a.id === id)
+                                    ?.metadata.kind
+                                }
+                              />
+                            ))}
+                          </div>
+                        )}
                         {!!m.source_refs?.length && (
                           <BrowserHistory
                             aid={current!}
@@ -662,6 +731,8 @@ export default function Lead() {
                           </button>
                         )}
                         <ChannelCards
+                          aid={current!}
+                          onComplete={refresh}
                           cards={m.content.cards || []}
                           states={detail.cards || []}
                           busy={busy}
@@ -799,7 +870,9 @@ export default function Lead() {
                   aid={current!}
                   url={detail.business?.product_url}
                   request={api}
-                  onError={setError}
+                  onError={(message) => {
+                    if (selected.current === current) setError(message);
+                  }}
                 />
               </main>
             ) : (
@@ -831,6 +904,21 @@ export default function Lead() {
                     detail.memory.map((m: Row) => (
                       <div className="simple-row" key={m.id}>
                         {m.body.text}
+                        <button
+                          className="icon"
+                          aria-label="移除此偏好"
+                          disabled={busy}
+                          onClick={() =>
+                            run(async () => {
+                              await api(
+                                `/agents/${current}/memory/${m.id}/remove`,
+                                { expected_revision: detail.config_revision },
+                              );
+                            })
+                          }
+                        >
+                          <X size={14} />
+                        </button>
                       </div>
                     ))
                   ) : (
@@ -993,15 +1081,15 @@ export default function Lead() {
                 {browser.name}
               </span>
               <div>
-                {browser.platform === "telegram" && (
+                {browser.platform !== "lab" && (
                   <button
                     className="primary"
                     disabled={busy}
                     onClick={() =>
                       run(async () => {
                         await api(
-                          "/agents/" + current + "/telegram/verify-login",
-                          {},
+                          "/agents/" + current + "/accounts/verify-login",
+                          { platform: browser.platform },
                         );
                         setBrowser(null);
                         setImage("");

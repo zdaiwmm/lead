@@ -1,23 +1,15 @@
-"""Account, target and one-time scope grants. Models cannot issue these grants."""
+"""Owner-scoped account binding, targets, versioned grants and probe cards."""
 
 import secrets
 
 import psycopg
 
+from .adapters.catalog import SPECS, validate
 from .config import TENANT
-from .db import (
-    append_message,
-    audit,
-    emit,
-    j,
-    one,
-    record,
-    require_agent,
-    tx,
-)
+from .db import append_message, audit, emit, j, one, record, require_agent, tx
 
 
-def store_account(aid, platform, observed):
+def store_account(aid, platform, observed, prompt_target=True):
     with tx(aid) as c:
         require_agent(c, aid, True)
         account = one(
@@ -37,27 +29,28 @@ def store_account(aid, platform, observed):
                 ),
             )
         except psycopg.errors.UniqueViolation:
-            raise ValueError("该账号已由一个 Agent 管理，请先解除原绑定") from None
-        record(c, aid, "已验证 Telegram 登录账号")
+            raise ValueError("该账号已由另一名 Agent 管理，请先解除原绑定") from None
+        record(c, aid, "已核对登录账号", platform)
         audit(
             c,
             aid,
             "account.verified",
             {"account_id": str(account["id"]), "platform": platform},
         )
-        append_message(
-            c,
-            aid,
-            "assistant",
-            "Telegram 已登录。把你要运营的自有频道链接发给我，我会核对频道和发布权限。",
-            cards=[
-                {
-                    "type": "channel_target",
-                    "account_id": str(account["id"]),
-                    "platform": "telegram",
-                }
-            ],
-        )
+        if prompt_target:
+            append_message(
+                c,
+                aid,
+                "assistant",
+                platform + " 已登录。把你有运营权限的频道、页面或画板链接发给我。",
+                cards=[
+                    {
+                        "type": "channel_target",
+                        "account_id": str(account["id"]),
+                        "platform": platform,
+                    }
+                ],
+            )
         return str(account["id"])
 
 
@@ -66,18 +59,20 @@ def store_target(aid, account_id, observed):
         a = require_agent(c, aid, True)
         account = one(
             c,
-            "SELECT * FROM lead.social_accounts WHERE id=%s AND platform='telegram' AND state='connected'",
+            "SELECT * FROM lead.social_accounts WHERE id=%s AND state='connected'",
             (account_id,),
         )
-        if not account:
+        if not account or account["platform"] not in SPECS:
             raise ValueError("账号尚未验证")
+        spec = SPECS[account["platform"]]
         target = one(
             c,
-            "INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,external_target_id,canonical_url,display_name,verified_permissions,state) VALUES(%s,%s,%s,'channel',%s,%s,%s,%s,'active') ON CONFLICT(account_id,target_type,external_target_id) DO UPDATE SET canonical_url=excluded.canonical_url,display_name=excluded.display_name,verified_permissions=lead.account_targets.verified_permissions || excluded.verified_permissions,state='active' RETURNING *",
+            "INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,external_target_id,canonical_url,display_name,verified_permissions,state) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'active') ON CONFLICT(account_id,target_type,external_target_id) DO UPDATE SET canonical_url=excluded.canonical_url,display_name=excluded.display_name,verified_permissions=lead.account_targets.verified_permissions || excluded.verified_permissions,state='active' RETURNING *",
             (
                 TENANT,
                 aid,
                 account_id,
+                observed.get("target_type", spec.target_type),
                 observed["external_target_id"],
                 observed["canonical_url"],
                 observed["display_name"],
@@ -85,18 +80,18 @@ def store_target(aid, account_id, observed):
                     {
                         "actions": observed["verified_permissions"],
                         "public_url": observed.get("public_url"),
-                        "adapter_version": "telegram-webk-1",
+                        "adapter_version": spec.version,
                     }
                 ),
             ),
         )
-        pending = one(
+        existing = one(
             c,
             "SELECT id FROM lead.interaction_cards WHERE type='authorize_target' AND state='pending' AND expires_at>now() AND payload->>'target_id'=%s AND (payload->>'expected_authorization_version')::bigint=%s",
             (str(target["id"]), a["authorization_version"]),
         )
-        if pending:
-            return {"target_id": target["id"], "card_id": pending["id"]}
+        if existing:
+            return {"target_id": target["id"], "card_id": existing["id"]}
         card = one(
             c,
             "INSERT INTO lead.interaction_cards(tenant_id,agent_id,type,payload,expires_at) VALUES(%s,%s,'authorize_target',%s,now()+interval '1 day') RETURNING *",
@@ -107,7 +102,8 @@ def store_target(aid, account_id, observed):
                     {
                         "target_id": str(target["id"]),
                         "target_name": target["display_name"],
-                        "allowed_actions": ["publish"],
+                        "allowed_actions": ["publish", "upload_media"],
+                        "formats": list(spec.formats),
                         "limits": {"publish_per_day": 3, "read_others": False},
                         "expected_authorization_version": a["authorization_version"],
                     }
@@ -118,9 +114,9 @@ def store_target(aid, account_id, observed):
             c,
             aid,
             "assistant",
-            "已核对频道「"
+            "已核对「"
             + target["display_name"]
-            + "」的发布权限。授权后，我只会在这个频道发布，每天最多 3 条。",
+            + "」的操作权限。授权后只在此目标发布文字及可用的图片、视频，每天最多 3 条。",
             cards=[
                 {
                     "type": "authorize",
@@ -131,6 +127,112 @@ def store_target(aid, account_id, observed):
             ],
         )
         return {"target_id": target["id"], "card_id": card["id"]}
+
+
+def probe_in_tx(
+    c,
+    aid,
+    target,
+    grant_id,
+    authorization_version,
+    asset_ids=(),
+    made_for_kids=None,
+    ai_generated=None,
+):
+    media = []
+    records = []
+    for asset_id in asset_ids:
+        row = one(
+            c, "SELECT * FROM lead.assets WHERE id=%s AND state='ready'", (asset_id,)
+        )
+        if not row:
+            raise LookupError("素材不存在")
+        if ai_generated is not None:
+            c.execute(
+                "UPDATE lead.assets SET rights=rights || %s WHERE id=%s",
+                (j({"ai_generated": ai_generated}), asset_id),
+            )
+            row["rights"]["ai_generated"] = ai_generated
+        records.append(row)
+        media.append(
+            {
+                "id": str(row["id"]),
+                "sha256": row["sha256"],
+                "kind": row["metadata"]["kind"],
+                "ai_generated": row["rights"].get("ai_generated"),
+            }
+        )
+    marker = "lead-verify-" + secrets.token_hex(6)
+    publication = {
+        "body": "lead 连接验证 · " + marker,
+        "title": "lead 连接验证 " + marker,
+        "marker": marker,
+        "media": media,
+        "made_for_kids": made_for_kids,
+        "commercial_disclosure": "own_brand",
+    }
+    kind = validate(target["platform"], publication, records)
+    payload = {
+        **publication,
+        "format": kind,
+        "target_id": str(target["id"]),
+        "grant_id": str(grant_id),
+        "expected_authorization_version": authorization_version,
+    }
+    card = one(
+        c,
+        "INSERT INTO lead.interaction_cards(tenant_id,agent_id,type,payload,expires_at) VALUES(%s,%s,'verify_publish',%s,now()+interval '1 day') RETURNING *",
+        (TENANT, aid, j(payload)),
+    )
+    append_message(
+        c,
+        aid,
+        "assistant",
+        "下面是首次验证将发布的完整内容。确认后才会上传素材并提交；这条内容不计推广成果。",
+        cards=[
+            {
+                "type": "verify_publish",
+                "id": str(card["id"]),
+                "version": card["version"],
+                "target_name": target["display_name"],
+                "body": publication["body"],
+                "title": publication["title"],
+                "media": media,
+            }
+        ],
+    )
+    return {"card_id": card["id"], "version": card["version"]}
+
+
+def create_verification(
+    aid, target_id, asset_ids=(), made_for_kids=None, ai_generated=None
+):
+    if len(asset_ids) != len(set(asset_ids)) or len(asset_ids) > 10:
+        raise ValueError("素材重复或过多")
+    with tx(aid) as c:
+        a = require_agent(c, aid, True)
+        target = one(
+            c,
+            "SELECT t.*,s.platform FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id WHERE t.id=%s AND t.state='active' AND s.state='connected'",
+            (target_id,),
+        )
+        grant = one(
+            c,
+            "SELECT id FROM lead.authorization_grants WHERE target_id=%s AND revoked_at IS NULL ORDER BY version DESC LIMIT 1",
+            (target_id,),
+        )
+        if not target or not grant:
+            raise ValueError("目标尚未授权")
+        return probe_in_tx(
+            c,
+            aid,
+            target,
+            grant["id"],
+            a["authorization_version"],
+            asset_ids,
+            made_for_kids,
+            ai_generated,
+        )
 
 
 def accept_card(aid, card_id, version, accepted):
@@ -162,10 +264,10 @@ def accept_card(aid, card_id, version, accepted):
             (payload["target_id"],),
         )
         if not target or target["account_state"] != "connected":
-            raise ValueError("账号或频道状态已改变")
+            raise ValueError("账号或目标状态已改变")
         if card["type"] == "authorize_target":
             if a["authorization_version"] != payload["expected_authorization_version"]:
-                raise ValueError("授权范围已更新，请重新核对频道")
+                raise ValueError("授权范围已更新，请重新核对目标")
             ver = a["authorization_version"] + 1
             c.execute(
                 "UPDATE lead.authorization_grants SET revoked_at=now() WHERE target_id=%s AND revoked_at IS NULL",
@@ -187,47 +289,49 @@ def accept_card(aid, card_id, version, accepted):
                 "UPDATE lead.agents SET authorization_version=%s,control_version=control_version+1 WHERE id=%s",
                 (ver, aid),
             )
-            marker = "lead-verify-" + secrets.token_hex(6)
-            probe = one(
-                c,
-                "INSERT INTO lead.interaction_cards(tenant_id,agent_id,type,payload,expires_at) VALUES(%s,%s,'verify_publish',%s,now()+interval '1 day') RETURNING *",
-                (
-                    TENANT,
+            spec = SPECS[target["platform"]]
+            if "text" in spec.formats:
+                probe_in_tx(c, aid, target, grant["id"], ver)
+            else:
+                append_message(
+                    c,
                     aid,
-                    j(
+                    "assistant",
+                    "授权已保存。此平台需要媒体，请选择一份有权使用的素材来验证首次发布。",
+                    cards=[
                         {
+                            "type": "media_verification",
                             "target_id": str(target["id"]),
-                            "grant_id": str(grant["id"]),
-                            "body": "lead 频道连接验证 · " + marker,
-                            "marker": marker,
-                            "expected_authorization_version": ver,
+                            "platform": target["platform"],
+                            "formats": list(spec.formats),
                         }
-                    ),
-                ),
-            )
-            append_message(
-                c,
-                aid,
-                "assistant",
-                "授权已保存。首次连接需要在此频道验证一次真实发布，下面是将发送的完整内容。",
-                cards=[
-                    {
-                        "type": "verify_publish",
-                        "id": str(probe["id"]),
-                        "version": probe["version"],
-                        "body": probe["payload"]["body"],
-                        "target_name": target["display_name"],
-                    }
-                ],
-            )
+                    ],
+                )
         elif card["type"] == "verify_publish":
             if a["authorization_version"] != payload["expected_authorization_version"]:
-                raise ValueError("频道授权已变化")
+                raise ValueError("目标授权已变化")
+            if not one(
+                c,
+                "SELECT 1 FROM lead.authorization_grants WHERE id=%s AND target_id=%s AND revoked_at IS NULL",
+                (payload["grant_id"], target["id"]),
+            ):
+                raise ValueError("授权已撤销")
             if one(
                 c,
                 "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('active','requested','ending') AND expires_at>now()",
             ):
                 raise ValueError("请先结束浏览器接管")
+            records = []
+            for item in payload.get("media", []):
+                row = one(
+                    c,
+                    "SELECT * FROM lead.assets WHERE id=%s AND sha256=%s AND state='ready'",
+                    (item["id"], item["sha256"]),
+                )
+                if not row:
+                    raise ValueError("素材已变化或不再可用")
+                records.append(row)
+            validate(target["platform"], payload, records)
             c.execute(
                 "UPDATE lead.agents SET desired_state='draft',health_state='queued',control_version=control_version+1 WHERE id=%s",
                 (aid,),
@@ -253,8 +357,8 @@ def accept_card(aid, card_id, version, accepted):
             record(
                 c,
                 aid,
-                "已安排频道连接验证",
-                "仅用于连接验证，不计作推广成果。",
+                "已安排连接验证",
+                "仅用于连接验证，不计推广成果。",
                 task_id=task["id"],
             )
         else:

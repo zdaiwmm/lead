@@ -121,7 +121,7 @@ def agent_detail(aid):
         )
         a["accounts"] = all_rows(
             c,
-            "SELECT s.*, t.id AS target_id,t.canonical_url,t.display_name AS target_name FROM lead.social_accounts s LEFT JOIN lead.account_targets t ON t.account_id=s.id ORDER BY s.created_at",
+            "SELECT s.*, t.id AS target_id,t.canonical_url,t.display_name AS target_name,t.target_type,t.verified_permissions,t.state AS target_state FROM lead.social_accounts s LEFT JOIN lead.account_targets t ON t.account_id=s.id ORDER BY s.created_at",
         )
         a["activity"] = all_rows(
             c, "SELECT * FROM lead.activity ORDER BY created_at DESC LIMIT 50"
@@ -154,12 +154,17 @@ def agent_detail(aid):
             c,
             "SELECT id,type,state,version,payload,expires_at,expires_at>now() AS valid FROM lead.interaction_cards ORDER BY created_at",
         )
+        a["assets"] = all_rows(
+            c,
+            "SELECT id,media_type,size_bytes,sha256,metadata,rights FROM lead.assets WHERE state='ready' ORDER BY created_at DESC LIMIT 100",
+        )
         return a
 
 
 def metrics(c):
     conn = one(
-        c, "SELECT count(*) AS n FROM lead.analytics_connections WHERE state='verified'"
+        c,
+        "SELECT count(*) AS n FROM lead.analytics_connections WHERE state='verified' AND last_received_at>now()-interval '1 day'",
     )["n"]
     visits = one(
         c,
@@ -173,11 +178,27 @@ def metrics(c):
         c,
         "SELECT count(*) AS n FROM lead.visit_sessions WHERE trust_level='redirect_observed' AND exclusion_reason IS NULL AND started_at>now()-interval '30 days'",
     )["n"]
+    server = one(
+        c,
+        "SELECT count(*) FILTER(WHERE last_received_at>now()-interval '1 day') AS fresh,max(last_received_at) AS last FROM lead.analytics_credentials WHERE state='active'",
+    )
+    conversions = one(
+        c,
+        "SELECT count(*) AS n FROM lead.conversion_events WHERE trust_level='server_verified' AND occurred_at>now()-interval '30 days'",
+    )["n"]
     return {
         "clicks": clicks,
         "visits": visits["visits"] if conn else None,
         "qualified_visits": visits["qualified"] if conn else None,
-        "conversions": None,
+        "conversions": conversions if server["fresh"] else None,
+        "conversion_coverage": "connected"
+        if server["fresh"]
+        else "stale"
+        if server["last"]
+        else "not_connected",
+        "conversion_last_received_at": server["last"].isoformat()
+        if server["last"]
+        else None,
         "published": posted,
         "coverage": "connected" if conn else "not_connected",
         "period": "30d",
@@ -185,7 +206,8 @@ def metrics(c):
     }
 
 
-def submit_message(aid, text, client_id):
+def submit_message(aid, text, client_id, asset_ids=None):
+    asset_ids = list(dict.fromkeys(asset_ids or []))
     with tx(aid) as c:
         require_agent(c, aid, True)
         old = one(
@@ -194,10 +216,27 @@ def submit_message(aid, text, client_id):
             (client_id,),
         )
         if old:
-            if old["content"]["text"] != text:
+            if (
+                old["content"]["text"] != text
+                or old["content"].get("asset_ids", []) != asset_ids
+            ):
                 raise ValueError("同一个消息标识不能用于不同内容")
             return old
+        if asset_ids:
+            scoped = all_rows(
+                c,
+                "SELECT id FROM lead.assets WHERE id=ANY(%s::uuid[]) AND state='ready'",
+                (asset_ids,),
+            )
+            if len(scoped) != len(asset_ids):
+                raise LookupError("一项或多项素材不可用")
         msg = append_message(c, aid, "user", text, client_id, status="pending")
+        if asset_ids:
+            msg = one(
+                c,
+                "UPDATE lead.conversation_messages SET content=content || %s WHERE id=%s RETURNING *",
+                (j({"asset_ids": asset_ids}), msg["id"]),
+            )
         job = one(
             c,
             "INSERT INTO lead.chat_jobs(tenant_id,agent_id,message_id) VALUES(%s,%s,%s) RETURNING id",
@@ -229,7 +268,13 @@ def set_control(aid, action):
         "archive": "archived",
     }[action]
     with tx(aid) as c:
-        current = require_agent(c, aid, True)
+        current = (
+            one(c, "SELECT * FROM lead.agents WHERE id=%s FOR NO KEY UPDATE", (aid,))
+            if action == "archive"
+            else require_agent(c, aid, True)
+        )
+        if not current:
+            raise LookupError("Agent 不存在")
         if current["desired_state"] == state:
             if state in ("paused", "archived"):
                 c.execute(
@@ -241,7 +286,7 @@ def set_control(aid, action):
                 raise ValueError("请先在 .env 中填写 DEEPSEEK_API_KEY")
             if not one(
                 c,
-                "SELECT 1 FROM lead.social_accounts s JOIN lead.account_targets t ON t.account_id=s.id JOIN lead.authorization_grants g ON g.target_id=t.id JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.action_type='publish' WHERE s.state='connected' AND t.state='active' AND g.revoked_at IS NULL AND pc.technical_state='verified' AND pc.permission_state='approved' AND (s.platform='lab' OR (s.platform='telegram' AND t.verified_permissions->>'publishing_verified'='true'))",
+                "SELECT 1 FROM lead.social_accounts s JOIN lead.account_targets t ON t.account_id=s.id JOIN lead.authorization_grants g ON g.target_id=t.id JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.target_type=t.target_type AND pc.action_type='publish' WHERE s.state='connected' AND t.state='active' AND g.revoked_at IS NULL AND pc.technical_state='verified' AND pc.permission_state='approved' AND (s.platform='lab' OR (jsonb_array_length(coalesce(t.verified_permissions->'publishing_verified_formats','[]'::jsonb))>0 AND t.verified_permissions->>'adapter_version'=pc.adapter_version))",
             ):
                 raise ValueError("请先完成可运营账号的连接和授权")
         c.execute(
@@ -255,6 +300,16 @@ def set_control(aid, action):
         c.execute(
             "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending')"
         )
+        if state == "archived":
+            c.execute(
+                "UPDATE lead.social_accounts SET state='disconnected' WHERE state<>'disconnected'"
+            )
+            c.execute(
+                "UPDATE lead.authorization_grants SET revoked_at=now() WHERE revoked_at IS NULL"
+            )
+            c.execute(
+                "UPDATE lead.account_targets SET state='disabled' WHERE state='active'"
+            )
         audit(c, aid, "agent." + action)
         record(
             c,
@@ -321,17 +376,17 @@ def queue_lab_publish(aid, body, key):
         return task
 
 
-def remember(c, aid, body):
-    c.execute(
-        "INSERT INTO lead.memory_entries(tenant_id,agent_id,kind,body,source_refs,confirmation) VALUES(%s,%s,'preference',%s,'[]','user_explicit')",
-        (TENANT, aid, j({"text": body})),
-    )
+def snapshot_preferences(c, aid):
     a = require_agent(c, aid, True)
     rev = a["config_revision"] + 1
     prev = one(
         c,
         "SELECT * FROM lead.agent_revisions WHERE revision=%s",
         (a["config_revision"],),
+    )
+    active = all_rows(
+        c,
+        "SELECT id,body FROM lead.memory_entries WHERE kind='preference' AND deleted_at IS NULL ORDER BY created_at",
     )
     c.execute(
         "INSERT INTO lead.agent_revisions(tenant_id,agent_id,revision,provider,model_ref,prompt_version,toolset_version,output_schema_version,preferences) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -344,10 +399,54 @@ def remember(c, aid, body):
             prev["prompt_version"],
             prev["toolset_version"],
             prev["output_schema_version"],
-            j({**prev["preferences"], "latest": body}),
+            j(
+                {
+                    "entries": [
+                        {"id": str(m["id"]), "text": m["body"]["text"]} for m in active
+                    ]
+                }
+            ),
         ),
     )
     c.execute(
         "UPDATE lead.agents SET config_revision=%s,version=version+1 WHERE id=%s",
         (rev, aid),
     )
+    c.execute(
+        "UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE state IN ('planned','queued')"
+    )
+    emit(c, aid, "supervisor.wake")
+    return rev
+
+
+def remember(c, aid, body):
+    entry = one(
+        c,
+        "INSERT INTO lead.memory_entries(tenant_id,agent_id,kind,body,source_refs,confirmation) VALUES(%s,%s,'preference',%s,'[]','user_explicit') RETURNING id",
+        (TENANT, aid, j({"text": body})),
+    )
+    snapshot_preferences(c, aid)
+    return str(entry["id"])
+
+
+def forget_preference(aid, memory_id, expected_revision):
+    with tx(aid) as c:
+        a = require_agent(c, aid, True)
+        entry = one(
+            c,
+            "SELECT * FROM lead.memory_entries WHERE id=%s AND kind='preference'",
+            (memory_id,),
+        )
+        if not entry:
+            raise LookupError("偏好不存在")
+        if entry["deleted_at"]:
+            return {"ok": True, "duplicate": True, "revision": a["config_revision"]}
+        if a["config_revision"] != expected_revision:
+            raise ValueError("偏好刚有更新，请刷新后再操作")
+        c.execute(
+            "UPDATE lead.memory_entries SET deleted_at=now() WHERE id=%s", (memory_id,)
+        )
+        rev = snapshot_preferences(c, aid)
+        audit(c, aid, "preference.removed", {"memory_id": memory_id, "revision": rev})
+        record(c, aid, "已移除运营偏好", entry["body"]["text"])
+        return {"ok": True, "revision": rev}

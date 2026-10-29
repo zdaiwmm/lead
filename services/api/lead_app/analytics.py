@@ -57,6 +57,10 @@ def settings(aid: UUID):
             c,
             "SELECT id,public_code,platform,destination_url FROM lead.tracking_links ORDER BY created_at DESC",
         )
+        server = one(
+            c,
+            "SELECT id,last_received_at FROM lead.analytics_credentials WHERE state='active' ORDER BY created_at DESC LIMIT 1",
+        )
     if conn:
         cid = str(conn["id"])
         write_key = token("analytics:" + cid, 365 * 86400)
@@ -69,6 +73,7 @@ def settings(aid: UUID):
             {**x, "url": public_origin() + "/r/" + x["public_code"]} for x in links
         ],
         "public_url": public_origin(),
+        "server": server,
     }
 
 
@@ -249,7 +254,7 @@ def collect(cid: UUID, body: Event, request: Request):
 @router.get("/lead.js")
 def sdk():
     return Response(
-        """(()=>{const s=document.currentScript;if(!s)return;const base=new URL(s.src).origin,c=s.dataset.connection,k=s.dataset.key;if(!c||!k)return;let id;try{id=sessionStorage.getItem('lead_sid')||crypto.randomUUID();sessionStorage.setItem('lead_sid',id)}catch{id=crypto.randomUUID()}let ref=new URL(location.href).searchParams.get('lead_ref');try{if(ref)sessionStorage.setItem('lead_ref',ref);else ref=sessionStorage.getItem('lead_ref')}catch{}const send=event=>fetch(base+'/collect/'+c,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k,session_id:id,event,url:location.href,ref}),keepalive:true,credentials:'omit'}).catch(()=>{});send('pageview');let active=0,sent=false;const timer=setInterval(()=>{if(!document.hidden&&document.hasFocus())active++;if(active>=10&&!sent){sent=true;send('engagement');clearInterval(timer)}},1000)})();""",
+        """(()=>{const s=document.currentScript;if(!s)return;const base=new URL(s.src).origin,c=s.dataset.connection,k=s.dataset.key;if(!c||!k)return;let id;try{id=sessionStorage.getItem('lead_sid')||crypto.randomUUID();sessionStorage.setItem('lead_sid',id)}catch{id=crypto.randomUUID()}let ref=new URL(location.href).searchParams.get('lead_ref');try{if(ref)sessionStorage.setItem('lead_ref',ref);else ref=sessionStorage.getItem('lead_ref')}catch{}const send=event=>fetch(base+'/collect/'+c,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k,session_id:id,event,url:location.href,ref}),keepalive:true,credentials:'omit'}).catch(()=>{});window.leadAttribution=()=>({connection_id:c,session_id:id,ref});send('pageview');let active=0,sent=false;const timer=setInterval(()=>{if(!document.hidden&&document.hasFocus())active++;if(active>=10&&!sent){sent=true;send('engagement');clearInterval(timer)}},1000)})();""",
         media_type="application/javascript",
         headers={"Cache-Control": "public,max-age=300"},
     )

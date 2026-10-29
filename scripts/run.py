@@ -121,9 +121,20 @@ def supervise():
                         stdout=files[name],
                         stderr=subprocess.STDOUT,
                     )
-            (STATE / "processes.json").write_text(
-                json.dumps({name: p.pid for name, p in children.items()})
-            )
+            try:
+                (STATE / "processes.next").write_text(
+                    json.dumps({name: p.pid for name, p in children.items()})
+                )
+                os.replace(STATE / "processes.next", STATE / "processes.json")
+            except OSError:
+                # Status-file failure must not kill otherwise recoverable services.
+                pass
+            for stream in files.values():
+                try:
+                    if os.fstat(stream.fileno()).st_size > 20 * 1024**2:
+                        stream.truncate(0)
+                except OSError:
+                    pass
             time.sleep(2)
     finally:
         for p in children.values():

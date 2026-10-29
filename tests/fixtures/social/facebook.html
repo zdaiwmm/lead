@@ -1,0 +1,48 @@
+<!doctype html><meta charset="utf-8"><style>[data-composer]{display:none}[hidden]{display:none!important}button,[role=button],ytcp-button{padding:10px;display:inline-block}textarea,[contenteditable]{min-width:240px;min-height:50px;border:1px solid}img,video{width:96px;height:64px}</style><button aria-label="Your profile">Account</button><a href="/professional_dashboard">Manage</a><h1>Lead board</h1><button data-action="create" role="button">Create post</button><div role="dialog" data-composer><a href="https://www.facebook.com/profile.php?id=10002">Post as Page</a><div contenteditable="true" role="textbox" data-field="body"></div><input type="file" hidden multiple><button data-action="publish">Publish</button></div><div id="previews"></div><div id="upload-progress" role="progressbar" hidden>Uploading</div><div id="published"></div><script type="application/json" id="fixture-config">{"platform": "facebook", "element": "article", "attributes": {"role": "article"}, "author": "https://www.facebook.com/profile.php?id=10002", "post": "https://www.facebook.com/10002/posts/{n}"}</script><script type="application/json" id="fixture-posts">__POSTS__</script><script>/* Test website only: actual native file selections and HTTP multipart uploads.
+ * No production selector tables are imported here. Responses are fulfilled by
+ * the test server; this fixture never reaches a real social account. */
+const config=JSON.parse(document.querySelector('#fixture-config').textContent);
+const initial=JSON.parse(document.querySelector('#fixture-posts').textContent);
+let uploaded=[];
+const visible=el=>!!(el.getBoundingClientRect().width&&el.getBoundingClientRect().height);
+const value=name=>{const candidates=[...document.querySelectorAll('[data-field="'+name+'"]')];const el=candidates.find(visible)||candidates[0];return el?.value??el?.textContent??''};
+function render(posts){
+ const root=document.querySelector('#published');root.replaceChildren();
+ posts.forEach(post=>{
+  const el=document.createElement(config.element||'article');
+  for(const[k,v]of Object.entries(config.attributes||{}))el.setAttribute(k,v);
+  if(config.platform==='telegram'){el.className='bubble';el.dataset.mid=String(post.number)}
+  if(config.platform==='youtube'&&location.hostname==='studio.youtube.com'){el.tagName;el.dataset.videoId='abcdefghijk';}
+  const author=document.createElement('a');author.href=config.author;author.textContent='lead_owner';const byline=document.createElement('header');byline.append(author);el.append(byline);
+  const text=document.createElement('div');text.className='message';text.textContent=post.body;el.append(text);
+  const title=document.createElement('h2');title.textContent=post.title;el.append(title);
+  const link=document.createElement('a');link.href=config.post.replace('{n}',post.number);link.textContent='View post';el.append(link);
+  const status=document.createElement('span');status.dataset.visibility='public';status.setAttribute('aria-label','Public');status.textContent='Public';el.append(status);
+  root.append(el);
+ });
+}
+render(initial);
+document.querySelectorAll('[data-action=create],[data-action=attach]').forEach(el=>el.addEventListener('click',()=>{
+ document.querySelectorAll('[data-composer]').forEach(node=>node.style.display='block');
+}));
+document.querySelectorAll('[data-action=next]').forEach(el=>el.addEventListener('click',()=>{el.dataset.step=String(Number(el.dataset.step||0)+1)}));
+document.querySelectorAll('[data-board-slug]').forEach(el=>el.addEventListener('click',()=>{document.querySelector('[data-test-id=board-dropdown-select-button]').dataset.selectedBoard=el.dataset.boardSlug;}));
+document.querySelectorAll('input[type=file]').forEach(input=>input.addEventListener('change',async()=>{
+ const progress=document.querySelector('#upload-progress');progress.hidden=false;
+ const previews=document.querySelector('#previews');previews.replaceChildren();
+ const finals=document.querySelectorAll('[data-action=publish]');finals.forEach(button=>{button.disabled=true;button.setAttribute('aria-disabled','true')});
+ const form=new FormData();uploaded=[];
+ for(const file of input.files){
+   const bytes=await file.arrayBuffer();const digest=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(b=>b.toString(16).padStart(2,'0')).join('');
+   uploaded.push({name:file.name,type:file.type,size:file.size,sha256:digest});form.append('files',file);
+   const preview=document.createElement(file.type.startsWith('video/')?'video':'img');preview.src=URL.createObjectURL(file);preview.dataset.mediaPreview='true';if(preview.tagName==='VIDEO'){preview.preload='metadata';preview.addEventListener('loadedmetadata',()=>preview.dataset.decoded='true');}previews.append(preview);
+ }
+ await fetch('/__fixture/upload',{method:'POST',body:form});
+ progress.hidden=true;finals.forEach(button=>{button.disabled=false;button.setAttribute('aria-disabled','false')});
+}));
+document.querySelectorAll('[data-action=publish]').forEach(el=>el.addEventListener('click',async()=>{
+ if(el.disabled||el.getAttribute('aria-disabled')==='true')return;
+ const response=await fetch('/__fixture/publish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:value('body'),title:value('title'),files:uploaded,visibility:document.querySelector('input[name=visibility]:checked')?.value||'public'})});
+ render(await response.json());
+}));
+</script>

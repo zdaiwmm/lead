@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
   "fastapi", "uvicorn[standard]", "sqlalchemy", "psycopg[binary]",
   "temporalio", "pydantic-ai-slim[openai,anthropic,google]", "playwright",
-  "camoufox", "httpx", "cryptography", "python-multipart", "beautifulsoup4", "alembic", "python-dotenv"
+  "camoufox", "httpx", "cryptography", "python-multipart", "beautifulsoup4", "alembic", "python-dotenv", "Pillow", "av"
 ]
 
 [project.optional-dependencies]

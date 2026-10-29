@@ -45,8 +45,15 @@ CREATE TABLE IF NOT EXISTS lead.interaction_cards(
  UNIQUE(tenant_id,agent_id,id),FOREIGN KEY(tenant_id,agent_id) REFERENCES lead.agents(tenant_id,id)
 );
 ALTER TABLE lead.action_attempts ADD COLUMN IF NOT EXISTS observation jsonb;
+ALTER TABLE lead.assets ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}';
+CREATE TABLE IF NOT EXISTS lead.publish_preparations(
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid NOT NULL,agent_id uuid NOT NULL,action_id uuid NOT NULL,
+ stage text NOT NULL CHECK(stage IN ('preparing','ready','uncertain','submitted')),manifest jsonb NOT NULL,
+ observation jsonb NOT NULL DEFAULT '{}',created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(action_id),FOREIGN KEY(tenant_id,agent_id,action_id) REFERENCES lead.actions(tenant_id,agent_id,id)
+);
 DO $$ DECLARE t text; BEGIN
-FOREACH t IN ARRAY ARRAY['activity','chat_jobs','lab_posts','browser_runs','browser_steps','interaction_cards'] LOOP
+FOREACH t IN ARRAY ARRAY['activity','chat_jobs','lab_posts','browser_runs','browser_steps','interaction_cards','publish_preparations'] LOOP
  EXECUTE format('ALTER TABLE lead.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('ALTER TABLE lead.%I FORCE ROW LEVEL SECURITY',t);
  IF NOT EXISTS(SELECT 1 FROM pg_policies WHERE schemaname='lead' AND tablename=t AND policyname='agent_scope') THEN
@@ -56,23 +63,47 @@ END LOOP; END $$;
 CREATE INDEX IF NOT EXISTS activity_scope_time ON lead.activity(tenant_id,agent_id,created_at DESC);
 INSERT INTO lead.schema_versions(version) VALUES(1) ON CONFLICT DO NOTHING;
 
-CREATE OR REPLACE FUNCTION lead.confirm_telegram_probe(p_action uuid) RETURNS boolean
+CREATE OR REPLACE FUNCTION lead.confirm_channel_probe(p_action uuid) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,lead AS $$
-DECLARE target_uuid uuid;
+DECLARE target_uuid uuid; channel text; target_kind text; release text; format text; defaults jsonb;
 BEGIN
- SELECT a.target_id INTO target_uuid FROM lead.actions a
- JOIN lead.tasks t ON t.id=a.task_id AND t.tenant_id=a.tenant_id AND t.agent_id=a.agent_id
+ SELECT a.target_id,s.platform,at.target_type,a.intent->>'adapter_version',coalesce(a.intent->>'format','text'),jsonb_build_object('made_for_kids',card.payload->'made_for_kids','commercial_disclosure',card.payload->'commercial_disclosure')
+ INTO target_uuid,channel,target_kind,release,format,defaults
+ FROM lead.actions a JOIN lead.tasks t ON t.id=a.task_id AND t.tenant_id=a.tenant_id AND t.agent_id=a.agent_id
  JOIN lead.account_targets at ON at.id=a.target_id AND at.tenant_id=a.tenant_id AND at.agent_id=a.agent_id
  JOIN lead.social_accounts s ON s.id=at.account_id
+ JOIN lead.authorization_grants g ON g.id=a.grant_id AND g.target_id=a.target_id AND g.revoked_at IS NULL
  JOIN lead.interaction_cards card ON card.id::text=t.input->>'key' AND card.tenant_id=a.tenant_id AND card.agent_id=a.agent_id
+ JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.action_type='publish' AND pc.target_type=at.target_type AND pc.permission_state='approved'
  WHERE a.id=p_action AND a.tenant_id=lead.ctx_tenant() AND a.agent_id=lead.ctx_agent()
  AND a.state='confirmed' AND a.evidence_ref IS NOT NULL AND a.external_id IS NOT NULL
- AND t.input->>'bootstrap_verification'='true' AND s.platform='telegram' AND s.state='connected'
+ AND t.type='connection.verify_publish' AND t.input->>'bootstrap_verification'='true' AND s.state='connected'
  AND card.state='accepted' AND card.type='verify_publish'
- AND card.payload->>'target_id'=a.target_id::text AND card.payload->>'grant_id'=a.grant_id::text;
- IF target_uuid IS NULL THEN RETURN false; END IF;
- UPDATE lead.account_targets SET verified_permissions=verified_permissions || '{"publishing_verified":true}'::jsonb WHERE id=target_uuid;
- UPDATE lead.platform_capabilities SET technical_state='verified',adapter_version='telegram-webk-1',reviewed_at=now(),evidence_ref=p_action::text
- WHERE platform='telegram' AND action_type='publish' AND target_type='channel' AND permission_state='approved';
+ AND card.payload->>'target_id'=a.target_id::text AND card.payload->>'grant_id'=a.grant_id::text
+ AND card.payload->>'body'=a.intent->>'body'
+ AND coalesce(card.payload->'media','[]'::jsonb)=coalesce(a.intent->'media','[]'::jsonb)
+ AND card.payload->'title' IS NOT DISTINCT FROM a.intent->'title'
+ AND card.payload->'made_for_kids' IS NOT DISTINCT FROM a.intent->'made_for_kids'
+ AND card.payload->'commercial_disclosure' IS NOT DISTINCT FROM a.intent->'commercial_disclosure'
+ AND coalesce(card.payload->>'format','text')=coalesce(a.intent->>'format','text')
+ AND a.intent->>'adapter_version'=pc.adapter_version AND a.intent->>'adapter_version'=at.verified_permissions->>'adapter_version'
+ AND EXISTS(SELECT 1 FROM lead.action_attempts ap WHERE ap.action_id=a.id AND ap.outcome='confirmed' AND ap.observed_account_id=s.external_account_id AND ap.observed_target_id=at.external_target_id);
+ IF target_uuid IS NULL OR release IS NULL THEN RETURN false; END IF;
+ UPDATE lead.account_targets SET verified_permissions=verified_permissions || jsonb_build_object('publication_defaults',coalesce(verified_permissions->'publication_defaults','{}'::jsonb)||jsonb_strip_nulls(defaults),'publishing_verified',true,'publishing_verified_formats',(SELECT jsonb_agg(v) FROM (SELECT DISTINCT jsonb_array_elements(coalesce(verified_permissions->'publishing_verified_formats','[]'::jsonb)||jsonb_build_array(format)) AS v) x)) WHERE id=target_uuid;
+ UPDATE lead.platform_capabilities SET technical_state='verified',adapter_version=release,reviewed_at=now(),evidence_ref=p_action::text WHERE platform=channel AND action_type='publish' AND target_type=target_kind;
  RETURN true;
 END $$;
+CREATE OR REPLACE FUNCTION lead.confirm_telegram_probe(p_action uuid) RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,lead AS $$ SELECT lead.confirm_channel_probe(p_action) $$;
+ALTER TABLE lead.plans ADD COLUMN IF NOT EXISTS cycle_key text;
+CREATE UNIQUE INDEX IF NOT EXISTS plan_cycle_once ON lead.plans(tenant_id,agent_id,cycle_key) WHERE cycle_key IS NOT NULL;
+CREATE TABLE IF NOT EXISTS lead.analytics_credentials(
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid NOT NULL,agent_id uuid NOT NULL,connection_id uuid NOT NULL,
+ secret_sha256 text NOT NULL UNIQUE,state text NOT NULL DEFAULT 'active' CHECK(state IN ('active','revoked')),
+ created_at timestamptz NOT NULL DEFAULT now(),last_received_at timestamptz,revoked_at timestamptz,
+ UNIQUE(tenant_id,agent_id,id),FOREIGN KEY(tenant_id,agent_id,connection_id) REFERENCES lead.analytics_connections(tenant_id,agent_id,id)
+);
+ALTER TABLE lead.analytics_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE lead.analytics_credentials FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_policies WHERE schemaname='lead' AND tablename='analytics_credentials' AND policyname='agent_scope') THEN
+CREATE POLICY agent_scope ON lead.analytics_credentials USING(tenant_id=lead.ctx_tenant() AND (lead.ctx_agent() IS NULL OR agent_id=lead.ctx_agent())) WITH CHECK(tenant_id=lead.ctx_tenant() AND (lead.ctx_agent() IS NULL OR agent_id=lead.ctx_agent())); END IF; END $$;
+ALTER TABLE lead.conversion_events ADD COLUMN IF NOT EXISTS payload_sha256 text;

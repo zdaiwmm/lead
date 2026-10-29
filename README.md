@@ -15,8 +15,9 @@
 | 自主规划 → 生成内容 → 浏览器提交 → 核对结果 | 本地测试站已全链路实测，使用真实 DeepSeek |
 | 暂停、接管、退出后恢复、提交结果不确定时核对 | 已实现并验证关键路径 |
 | 11 个国际平台的独立浏览器登录入口，含 Telegram | 已提供入口；不会把打开登录页等同于账号已验证 |
-| 真实社媒无人值守发布 | Telegram 自有广播频道已实现账号识别、目标授权、一次发布验证卡、提交与核对；实号验收待用户登录及授权。其他 10 个渠道尚未实现发布适配 |
-| 推广链接、网站埋点、点击与访问分开计量 | 已实现；外部网站需公开 HTTPS 部署地址 |
+| 真实社媒无人值守发布 | Telegram 自有广播频道已实现账号识别、目标授权、一次发布验证卡、提交与核对；实号验收待用户登录及授权。其余 10 渠道的网页发布、图片/视频路径已实现并通过本地 DOM 合约测试；全部平台实号验收仍未完成，详见 [渠道矩阵](docs/CHANNELS.md) |
+| 推广链接、网站埋点、点击与访问、服务端转化 | 已实现，服务端独立密钥与事件去重已测试；真实网站接入需公开 HTTPS 地址 |
+| 素材、实时通知和运营偏好调整 | 图片/视频真实解码、Agent 范围存储；SSE 自动刷新；对话修改/撤销偏好，取消旧方向的排队内容 |
 | 每个环境独立出口、泄漏检测与第三方设备判定 | 已实现同一受控转发层处理浏览器连接和 DNS、私网阻断、代理失败关闭、双公网出口探针。当前无独立代理，不显示验证通过；OS 强制出口与全面泄漏验收未完成 |
 
 本地测试发布不会计入社媒发布数、访问人数或获客成果。界面没有预填演示流量。当前版本是可运行的工程基础，不能作为 11 个平台均已支持自主运营的商业版本交付。
@@ -65,7 +66,7 @@ LEAD_PROXY_<去掉横线并大写的AGENT_ID>=http://user:password@proxy.example
 
 高级设置「检查环境」通过实际浏览器访问 ipify 和 Cloudflare，记录设备采样和两个出口结果。还需设置 `LEAD_EXPECTED_IP_<AGENT_ID>=固定公网IP`，两次观测一致且匹配固定值、配置了上游代理、WebRTC 禁用，才能通过固定出口检查；数据库拒绝把同一已验证出口绑定到多个 Agent。结果有效 15 分钟。此检查不代表第三方一定无法关联身份，也不代替 OS 防火墙及 DNS/WebSocket/地区一致性等完整检测。
 
-默认本地所有者模式允许对自有 Telegram 频道完成显式验证；不会显示为独立出口已经通过。`LEAD_DEPLOYMENT_MODE=production` 时，Telegram 每次新提交前会重新测量出口并核对身份，失败停止提交。完整生产安全与部署验收仍未完成。
+默认本地所有者模式允许对自有 Telegram 频道完成显式验证；不会显示为独立出口已经通过。`LEAD_DEPLOYMENT_MODE=production` 时，十一个平台每次新提交前会重新测量出口并核对身份，失败停止提交。完整生产安全与部署验收仍未完成。
 
 浏览器远程接管的输入仅在有效接管期内开放，登录资料不进入 Agent 对话。验证码与平台身份验证由用户在浏览器中完成。
 
@@ -76,7 +77,7 @@ LEAD_PROXY_<去掉横线并大写的AGENT_ID>=http://user:password@proxy.example
 - 推广链接请求仅算点击，已识别的预览机器人不计入有效点击。
 - 网站实际回传会话后才计访问；仅把带当前 Agent 推广归因的会话计为其获客。
 - 当前有效访问规则 `engaged-v1`：页面前台活跃至少 10 秒，服务器同时检查两次事件的间隔。
-- 数据标记为 `client_observed`，不是经过服务端验证的成交。转化尚未接入，显示空值。
+- 数据标记为 `client_observed`，不是经过服务端验证的成交。服务端转化使用独立回传凭据并与归因会话关联，未接入或数据过期时显示空值。接入方法见 [CONVERSIONS.md](docs/CONVERSIONS.md)。
 
 客户端埋点可被伪造，当前规则不能等同于反欺诈认证或保证人工访问。
 
@@ -101,11 +102,11 @@ npm run typecheck
 npm run build
 ```
 
-验收脚本的临时业务会自动归档。测试区分公网浏览实测、真实模型调度、本地发布站、Telegram DOM 合约测试和真实 Telegram 频道实测，不互相替代。报告保存在 `.state/public-browser-verification.json`、`.state/runtime-verification.json`、`.state/environment-verification.json`、`.state/concurrency-verification.json`、`.state/test-results.xml`；截图和提交证据在 `.state/evidence/`。详细状态见 `docs/ACCEPTANCE.md`。
+验收脚本的临时业务会自动归档。测试区分公网浏览实测、真实模型调度、本地发布站、十一平台 DOM 合约测试和真实 Telegram 频道实测，不互相替代。报告保存在 `.state/public-browser-verification.json`、`.state/runtime-verification.json`、`.state/environment-verification.json`、`.state/concurrency-verification.json`、`.state/test-results.xml`；截图和提交证据在 `.state/evidence/`。详细状态见 `docs/ACCEPTANCE.md`。
 
 ## 工程结构与后续工作
 
-详细数据流、边界和发布前要求见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。前一阶段完整实施规划保留在相邻 `zaichang-prototype/docs/IMPLEMENTATION_PLAN.md`，它描述目标架构，不代表本版本已全部实现。
+详细数据流、边界和发布前要求见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。前一阶段完整实施规划保留在[IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)，它描述目标架构，不代表本版本已全部实现。
 
 首次重建环境需 Python 3.12+、Node 20.9+、Docker，以及兼容主机的 Camoufox 浏览器。本机已验证 Python 3.14.2 / Node 24.20.0 / macOS ARM64。Python 版本锁定于 `requirements.lock.txt`，前端锁定于 `apps/web/package-lock.json`，基础服务使用镜像摘要固定。
 
@@ -117,4 +118,8 @@ npm run build
 4. 系统显示完整验证消息。只有点击「发布此条验证」才会执行一次真实网页发布。收到唯一消息 ID 和截图后，这个目标才标记为发布已验证。验证消息不计推广成果。
 5. 免费启动后，Supervisor 持续按业务、偏好、近期内容及真实效果规划，并在授权范围内执行。正常帖子无需逐条审批。未知结果只核对，不再次点击；登录或权限异常需要重新连接。
 
-目前 Telegram 发布仅支持文字及链接，图片、视频上传及多媒体渠道仍未实现。没有登录和授权自有测试频道之前，M3 不能标为验收完成。
+Telegram 的文字、图片、视频网页路径均已实现；其余十个平台的格式范围、权限状态与测试边界见 [CHANNELS.md](docs/CHANNELS.md)。没有登录和授权自有测试频道之前，M3 不能标为验收完成。
+
+## GitHub 与持续检查
+
+公开源码仓库：[zdaiwmm/lead](https://github.com/zdaiwmm/lead)。仓库独立于其他项目，密钥、登录资料、数据库、素材及运行截图不提交。GitHub Actions 执行数据库权限、媒体处理、业务规则和前端构建检查；真实浏览器合约测试及真实模型测试在本机单独执行，CI 通过不替代平台实号验收。

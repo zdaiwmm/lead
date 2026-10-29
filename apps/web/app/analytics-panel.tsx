@@ -16,6 +16,7 @@ export default function AnalyticsPanel({
     [site, setSite] = useState(url || ""),
     [busy, setBusy] = useState(false),
     [copied, setCopied] = useState("");
+  const [serverKey, setServerKey] = useState("");
   async function load() {
     setData(await request("/agents/" + aid + "/analytics"));
   }
@@ -101,6 +102,49 @@ export default function AnalyticsPanel({
                   将代码加入产品网站。有效访问按前台活跃至少 10 秒计算。
                 </p>
               </>
+            )}
+            {data.connection && (
+              <details className="lab">
+                <summary>服务端转化回传</summary>
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    perform(async () => {
+                      const issued = await request(
+                        `/agents/${aid}/analytics/server-key`,
+                        { connection_id: data.connection.id },
+                      );
+                      setServerKey(issued.key);
+                    })
+                  }
+                >
+                  {data.server ? "更换回传密钥" : "生成回传密钥"}
+                </button>
+                {serverKey && (
+                  <>
+                    <p className="muted small">
+                      仅保存在网站服务端。此处只显示一次。
+                    </p>
+                    <textarea
+                      aria-label="服务端回传密钥"
+                      readOnly
+                      value={serverKey}
+                      rows={2}
+                    />
+                    <button onClick={() => copy(serverKey, "server-key")}>
+                      {copied === "server-key" ? "已复制" : "复制密钥"}
+                    </button>
+                  </>
+                )}
+                <p className="muted small">
+                  接口：{data.public_url}/collect/server/conversion
+                </p>
+                <p className="muted small">
+                  {data.server?.last_received_at
+                    ? "已收到服务端回传"
+                    : "等待服务端回传"}
+                </p>
+              </details>
             )}
             <div className="section-head">
               <h2>推广链接</h2>
