@@ -84,6 +84,7 @@ def supervise():
             ROOT,
         ),
         "worker": ([str(PYTHON), "-m", "lead_app.worker"], ROOT),
+        "maintenance": ([str(PYTHON), "-m", "lead_app.maintenance"], ROOT),
         "web": (
             [
                 "node",
@@ -151,6 +152,13 @@ def supervise():
 
 
 def start():
+    from dotenv import dotenv_values
+
+    settings = {**dotenv_values(ROOT / ".env"), **os.environ}
+    if settings.get("LEAD_DEPLOYMENT_MODE") == "production":
+        raise SystemExit(
+            "Use the production service entries; local start uses a development Temporal service."
+        )
     if current_pid():
         print("lead is already running: http://127.0.0.1:3100")
         return
@@ -194,6 +202,12 @@ def start():
         )
     for _ in range(30):
         if occupied(3100):
+            subprocess.run(
+                [str(PYTHON), str(ROOT / "scripts/soak.py"), "resume"],
+                cwd=ROOT,
+                stdout=subprocess.DEVNULL,
+                check=True,
+            )
             print("lead is running: http://127.0.0.1:3100")
             return
         if p.poll() is not None:

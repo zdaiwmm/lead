@@ -25,15 +25,22 @@ class ChatWorkflow:
     async def run(self, agent_id: str, pending: list[str] | None = None):
         self.queue = (pending or []) + self.queue
         count = 0
+        recover = workflow.patched("chat-transient-recovery-v1")
         while True:
             await workflow.wait_condition(lambda: bool(self.queue))
             job = self.queue.pop(0)
-            await workflow.execute_activity(
-                "chat_job",
-                {"agent_id": agent_id, "job_id": job},
-                start_to_close_timeout=timedelta(minutes=4),
-                retry_policy=RETRY,
-            )
+            try:
+                await workflow.execute_activity(
+                    "chat_job",
+                    {"agent_id": agent_id, "job_id": job},
+                    start_to_close_timeout=timedelta(minutes=4),
+                    retry_policy=RETRY,
+                )
+            except ActivityError:
+                if not recover:
+                    raise
+                self.queue.insert(0, job)
+                await workflow.sleep(60)
             count += 1
             if count >= 100:
                 workflow.continue_as_new(args=[agent_id, self.queue])
@@ -90,15 +97,23 @@ class SupervisorWorkflow:
         self.changed = True
 
     @workflow.run
-    async def run(self, aid: str):
+    async def run(self, aid: str, pending_cycle: str | None = None):
+        recover = workflow.patched("supervisor-transient-recovery-v1")
         for _ in range(100):
             self.changed = False
-            result = await workflow.execute_activity(
-                "autonomous_cycle",
-                {"agent_id": aid, "cycle_id": str(workflow.uuid4())},
-                start_to_close_timeout=timedelta(minutes=4),
-                retry_policy=RETRY,
-            )
+            pending_cycle = pending_cycle or str(workflow.uuid4())
+            try:
+                result = await workflow.execute_activity(
+                    "autonomous_cycle",
+                    {"agent_id": aid, "cycle_id": pending_cycle},
+                    start_to_close_timeout=timedelta(minutes=4),
+                    retry_policy=RETRY,
+                )
+                pending_cycle = None
+            except ActivityError:
+                if not recover:
+                    raise
+                result = {"delay": 60}
             if workflow.patched("stop-archived-supervisor-v1") and result.get(
                 "archived"
             ):
@@ -109,4 +124,6 @@ class SupervisorWorkflow:
                 )
             except asyncio.TimeoutError:
                 pass
+        if recover:
+            workflow.continue_as_new(args=[aid, pending_cycle])
         workflow.continue_as_new(aid)

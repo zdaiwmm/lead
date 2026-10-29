@@ -31,6 +31,7 @@ export default function ChannelCards({
                 key={card.target_id}
                 aid={aid}
                 card={card}
+                disabled={busy}
                 onComplete={onComplete}
               />
             );

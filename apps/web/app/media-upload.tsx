@@ -1,6 +1,7 @@
 "use client";
 import { useRef, useState } from "react";
 import { Paperclip } from "lucide-react";
+import { workspaceHeaders } from "./api-client";
 
 type Row = Record<string, any>;
 export async function uploadFile(aid: string, file: File) {
@@ -8,7 +9,7 @@ export async function uploadFile(aid: string, file: File) {
   data.append("file", file);
   const response = await fetch(`/api/agents/${aid}/assets`, {
     method: "POST",
-    headers: { "X-Lead-Request": "1" },
+    headers: { "X-Lead-Request": "1", ...workspaceHeaders() },
     body: data,
   });
   if (!response.ok) {
@@ -86,10 +87,12 @@ export function MediaVerification({
   aid,
   card,
   onComplete,
+  disabled = false,
 }: {
   aid: string;
   card: Row;
   onComplete: () => void;
+  disabled?: boolean;
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [ai, setAi] = useState<string>(
@@ -127,7 +130,7 @@ export function MediaVerification({
               ? "image/jpeg,image/png,image/webp"
               : "video/mp4"
         }
-        disabled={busy || done}
+        disabled={busy || done || disabled}
         onChange={(e) => {
           setFile(e.target.files?.[0] || null);
           setAi("");
@@ -166,6 +169,7 @@ export function MediaVerification({
         className="primary"
         disabled={
           busy ||
+          disabled ||
           done ||
           (!file && !existingId) ||
           (!!declared && !ai) ||
@@ -186,6 +190,7 @@ export function MediaVerification({
                 headers: {
                   "Content-Type": "application/json",
                   "X-Lead-Request": "1",
+                  ...workspaceHeaders(),
                 },
                 body: JSON.stringify({
                   asset_ids: [assetId],

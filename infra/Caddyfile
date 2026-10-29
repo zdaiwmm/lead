@@ -1,0 +1,10 @@
+{$LEAD_HOSTNAME} {
+    @private path /internal/* /lab/*
+    respond @private 404
+    reverse_proxy 127.0.0.1:3100 {
+        flush_interval -1
+        transport http {
+            response_header_timeout 120s
+        }
+    }
+}

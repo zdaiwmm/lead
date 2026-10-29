@@ -20,6 +20,8 @@ import AnalyticsPanel from "./analytics-panel";
 import BrowserHistory from "./browser-history";
 import ChannelCards from "./channel-cards";
 import { MediaUpload, AssetPreview } from "./media-upload";
+import { api, setWorkspace, getWorkspace } from "./api-client";
+import WorkspaceSettings from "./workspace-settings";
 
 type Row = Record<string, any>;
 type View = "home" | "agent" | "settings";
@@ -58,21 +60,6 @@ function time(s: string) {
     minute: "2-digit",
   });
 }
-async function api(path: string, body?: Row) {
-  const r = await fetch("/api" + path, {
-    method: body ? "POST" : "GET",
-    headers: body
-      ? { "Content-Type": "application/json", "X-Lead-Request": "1" }
-      : {},
-    body: body ? JSON.stringify(body) : undefined,
-    cache: "no-store",
-  });
-  if (!r.ok) {
-    const e = await r.json().catch(() => ({ detail: "连接暂时不可用" }));
-    throw Error(typeof e.detail === "string" ? e.detail : "操作未完成");
-  }
-  return r.json();
-}
 export default function Lead() {
   const [view, setView] = useState<View>("home");
   const [tab, setTab] = useState<Tab>("chat");
@@ -81,6 +68,9 @@ export default function Lead() {
   const [detail, setDetail] = useState<Row | null>(null);
   const [health, setHealth] = useState<Row | null>(null);
   const [ready, setReady] = useState(false);
+  const [loginUrl, setLoginUrl] = useState("");
+  const [user, setUser] = useState<Row | null>(null);
+  const readOnly = user?.role === "viewer";
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [text, setText] = useState("");
@@ -98,6 +88,13 @@ export default function Lead() {
   const selected = useRef<string | null>(null);
   selected.current = current;
   const refresh = useCallback(async () => {
+    const identity = await api("/auth/me");
+    if (getWorkspace() && getWorkspace() !== identity.tenant_id) {
+      window.location.reload();
+      return;
+    }
+    setWorkspace(identity.tenant_id);
+    setUser(identity);
     const [a, h] = await Promise.all([api("/agents"), api("/health")]);
     setAgents(a);
     setHealth(h);
@@ -110,8 +107,13 @@ export default function Lead() {
   useEffect(() => {
     let active = true;
     api("/session", {})
-      .then(() => refresh())
-      .then(() => {
+      .then(async (session) => {
+        if (!active) return;
+        if (session.login_url) {
+          setLoginUrl(session.login_url);
+          return;
+        }
+        await refresh();
         if (active) setReady(true);
       })
       .catch((e) => setError(e.message));
@@ -119,6 +121,14 @@ export default function Lead() {
       active = false;
     };
   }, [refresh]);
+  useEffect(() => {
+    const expired = (event: Event) => {
+      setLoginUrl((event as CustomEvent).detail);
+      setReady(false);
+    };
+    window.addEventListener("lead:session-expired", expired);
+    return () => window.removeEventListener("lead:session-expired", expired);
+  }, []);
   useEffect(() => {
     if (!ready) return;
     const events = new EventSource("/api/events");
@@ -140,6 +150,10 @@ export default function Lead() {
       .catch((e) => setError(e.message));
   }, [channels]);
   async function run(action: () => Promise<void>) {
+    if (readOnly) {
+      setError("当前成员仅有查看权限");
+      return;
+    }
     setError("");
     setBusy(true);
     try {
@@ -258,6 +272,7 @@ export default function Lead() {
       m.role === "user" && ["pending", "processing"].includes(m.job_status),
   );
   function composer(first = false) {
+    if (readOnly) return <p className="readonly-label">仅可查看</p>;
     return (
       <div className={"composer " + (first ? "first" : "")}>
         {!!attachments.length && (
@@ -309,7 +324,7 @@ export default function Lead() {
             {current && (
               <MediaUpload
                 aid={current}
-                disabled={busy}
+                disabled={busy || readOnly}
                 onError={(message) => {
                   if (selected.current === current) setError(message);
                 }}
@@ -340,7 +355,7 @@ export default function Lead() {
       <section className="connections">
         <div className="section-head">
           <h2>运营账号</h2>
-          <button onClick={() => setChannels(true)}>
+          <button onClick={() => setChannels(true)} disabled={readOnly}>
             <Plus size={14} />
             连接账号
           </button>
@@ -363,6 +378,17 @@ export default function Lead() {
       </section>
     );
   }
+  if (loginUrl)
+    return (
+      <main className="login-page">
+        <span className="wordmark">
+          lead<span>·</span>
+        </span>
+        <a className="primary login-button" href={loginUrl}>
+          登录
+        </a>
+      </main>
+    );
   return (
     <div className="shell">
       <aside className={"sidebar " + (side ? "open" : "")}>
@@ -378,7 +404,7 @@ export default function Lead() {
         <button
           className="new"
           onClick={() => run(() => create())}
-          disabled={busy || !ready}
+          disabled={busy || !ready || readOnly}
         >
           <Plus size={16} />
           新建 Agent
@@ -578,45 +604,55 @@ export default function Lead() {
           <main className="settings-page">
             <p className="eyebrow">WORKSPACE</p>
             <h1>设置</h1>
-            <section>
-              <h2>模型服务</h2>
-              <div className="setting-row">
-                <span>DeepSeek</span>
-                <span className="pill">
-                  {health?.model_configured ? "已配置" : "等待配置"}
-                </span>
+            {user?.mode === "oidc" && (
+              <WorkspaceSettings user={user} key={user.tenant_id} />
+            )}
+            <details className="advanced">
+              <summary>运行信息</summary>
+              <div className="advanced-content">
+                <section>
+                  <h2>模型服务</h2>
+                  <div className="setting-row">
+                    <span>DeepSeek</span>
+                    <span className="pill">
+                      {health?.model_configured ? "已配置" : "等待配置"}
+                    </span>
+                  </div>
+                  {user?.mode === "local_owner" && (
+                    <p className="muted">
+                      在项目 .env 中填写 DEEPSEEK_API_KEY 后即可使用。
+                    </p>
+                  )}
+                  <div className="setting-row">
+                    <span>模型</span>
+                    <code>{health?.model || "deepseek-flash"}</code>
+                  </div>
+                </section>
+                <section>
+                  <h2>运行服务</h2>
+                  {[
+                    ["database", "数据库"],
+                    ["worker", "任务调度"],
+                    ["browser", "浏览器"],
+                  ].map(([k, label]) => (
+                    <div className="setting-row" key={k}>
+                      <span>{label}</span>
+                      <span className="status">
+                        <i className={"dot " + (health?.[k] ? "green" : "")} />
+                        {health?.[k] ? "正常" : "未连接"}
+                      </span>
+                    </div>
+                  ))}
+                  <div className="setting-row">
+                    <span>同时运行的浏览器</span>
+                    <span>
+                      {health?.active_profiles || 0} /{" "}
+                      {health?.browser_capacity || 3}
+                    </span>
+                  </div>
+                </section>
               </div>
-              <p className="muted">
-                在项目 .env 中填写 DEEPSEEK_API_KEY 后即可使用。
-              </p>
-              <div className="setting-row">
-                <span>模型</span>
-                <code>{health?.model || "deepseek-flash"}</code>
-              </div>
-            </section>
-            <section>
-              <h2>运行服务</h2>
-              {[
-                ["database", "数据库"],
-                ["worker", "任务调度"],
-                ["browser", "浏览器"],
-              ].map(([k, label]) => (
-                <div className="setting-row" key={k}>
-                  <span>{label}</span>
-                  <span className="status">
-                    <i className={"dot " + (health?.[k] ? "green" : "")} />
-                    {health?.[k] ? "正常" : "未连接"}
-                  </span>
-                </div>
-              ))}
-              <div className="setting-row">
-                <span>同时运行的浏览器</span>
-                <span>
-                  {health?.active_profiles || 0} /{" "}
-                  {health?.browser_capacity || 3}
-                </span>
-              </div>
-            </section>
+            </details>
           </main>
         ) : (
           <>
@@ -636,13 +672,16 @@ export default function Lead() {
               <div className="agent-actions">
                 <button
                   onClick={() => setChannels(true)}
-                  disabled={!detail || busy}
+                  disabled={!detail || busy || readOnly}
                 >
                   <Plus size={15} />
                   连接账号
                 </button>
                 {detail?.desired_state === "running" ? (
-                  <button onClick={() => control("pause")} disabled={busy}>
+                  <button
+                    onClick={() => control("pause")}
+                    disabled={busy || readOnly}
+                  >
                     <Pause size={14} />
                     暂停
                   </button>
@@ -654,7 +693,7 @@ export default function Lead() {
                         detail?.desired_state === "paused" ? "resume" : "start",
                       )
                     }
-                    disabled={busy || !detail}
+                    disabled={busy || !detail || readOnly}
                   >
                     <Play size={14} />
                     {detail?.desired_state === "paused" ? "恢复" : "免费启动"}
@@ -735,7 +774,7 @@ export default function Lead() {
                           onComplete={refresh}
                           cards={m.content.cards || []}
                           states={detail.cards || []}
-                          busy={busy}
+                          busy={busy || readOnly}
                           start={() => control("start")}
                           respond={(card, accepted) =>
                             run(async () => {
@@ -762,7 +801,7 @@ export default function Lead() {
                               } as Row
                             )[m.error_code] || "模型请求未完成"}
                             <button
-                              disabled={busy}
+                              disabled={busy || readOnly}
                               onClick={() =>
                                 run(async () => {
                                   await api(
@@ -867,6 +906,7 @@ export default function Lead() {
                   <strong>{detail.metrics.published}</strong>
                 </div>
                 <AnalyticsPanel
+                  readOnly={readOnly}
                   aid={current!}
                   url={detail.business?.product_url}
                   request={api}
@@ -907,7 +947,7 @@ export default function Lead() {
                         <button
                           className="icon"
                           aria-label="移除此偏好"
-                          disabled={busy}
+                          disabled={busy || readOnly}
                           onClick={() =>
                             run(async () => {
                               await api(
@@ -948,7 +988,7 @@ export default function Lead() {
                       </span>
                     </div>
                     <button
-                      disabled={busy}
+                      disabled={busy || readOnly}
                       onClick={() =>
                         run(async () => {
                           const checked = await api(
@@ -968,7 +1008,7 @@ export default function Lead() {
                         测试站使用真实浏览器，不计入运营和获客数据。
                       </p>
                       <button
-                        disabled={busy}
+                        disabled={busy || readOnly}
                         onClick={() =>
                           run(async () => {
                             await api(
@@ -981,7 +1021,7 @@ export default function Lead() {
                         授权测试站
                       </button>
                       <button
-                        disabled={busy}
+                        disabled={busy || readOnly}
                         onClick={() =>
                           run(async () => {
                             await api("/agents/" + current + "/lab/publish", {
@@ -996,7 +1036,7 @@ export default function Lead() {
                         执行测试发布
                       </button>
                       <button
-                        disabled={busy}
+                        disabled={busy || readOnly}
                         onClick={() =>
                           connect({ id: "lab", name: "本地测试站" })
                         }
@@ -1006,7 +1046,7 @@ export default function Lead() {
                     </details>
                     <button
                       className="danger"
-                      disabled={busy}
+                      disabled={busy || readOnly}
                       onClick={() =>
                         run(async () => {
                           await api("/agents/" + current + "/control", {
@@ -1052,7 +1092,11 @@ export default function Lead() {
             <p className="muted small">登录会保存在此 Agent 的浏览器中。</p>
             <div className="platform-list">
               {platforms.map((p) => (
-                <button key={p.id} onClick={() => connect(p)} disabled={busy}>
+                <button
+                  key={p.id}
+                  onClick={() => connect(p)}
+                  disabled={busy || readOnly}
+                >
                   <span className="platform-symbol">{p.name[0]}</span>
                   <span>
                     {p.name}
@@ -1084,7 +1128,7 @@ export default function Lead() {
                 {browser.platform !== "lab" && (
                   <button
                     className="primary"
-                    disabled={busy}
+                    disabled={busy || readOnly}
                     onClick={() =>
                       run(async () => {
                         await api(
@@ -1099,13 +1143,13 @@ export default function Lead() {
                     登录完成
                   </button>
                 )}
-                <button onClick={() => run(shot)} disabled={busy}>
+                <button onClick={() => run(shot)} disabled={busy || readOnly}>
                   <RefreshCw size={14} />
                   刷新画面
                 </button>
                 <button
                   className="primary"
-                  disabled={busy}
+                  disabled={busy || readOnly}
                   onClick={() =>
                     run(async () => {
                       await api("/agents/" + current + "/takeover/end", {});
@@ -1166,7 +1210,7 @@ export default function Lead() {
               {["Enter", "Tab", "Backspace"].map((k) => (
                 <button
                   key={k}
-                  disabled={busy}
+                  disabled={busy || readOnly}
                   onClick={() =>
                     run(() => browserInput({ kind: "key", text: k }))
                   }
@@ -1175,7 +1219,7 @@ export default function Lead() {
                 </button>
               ))}
               <button
-                disabled={busy}
+                disabled={busy || readOnly}
                 onClick={() =>
                   run(() => browserInput({ kind: "scroll", y: 600 }))
                 }

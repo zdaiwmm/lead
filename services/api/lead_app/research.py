@@ -12,8 +12,9 @@ from urllib.parse import urljoin, urlsplit
 
 from playwright.async_api import TimeoutError as BrowserTimeout
 
-from .config import STATE, TENANT
+from .config import STATE
 from .db import all_rows, j, one, record, require_agent, tx, uid
+from .scope import current_tenant
 
 OBSERVE = r"""() => {
  const visible = el => {const r=el.getBoundingClientRect();const s=getComputedStyle(el);return !!(r.width&&r.height)&&s.visibility!=='hidden'&&s.display!=='none'};
@@ -177,7 +178,7 @@ class ResearchPage:
                     "INSERT INTO lead.browser_steps(id,tenant_id,agent_id,run_id,seq,command_id,operation,input,state) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'started')",
                     (
                         step,
-                        TENANT,
+                        current_tenant(),
                         self.actor.aid,
                         self.run_id,
                         seq,
@@ -302,7 +303,7 @@ class ResearchPage:
                             "INSERT INTO lead.knowledge_documents(id,tenant_id,agent_id,revision,title,source_type,source_ref,body_ref,sha256,trust_state) VALUES(%s,%s,%s,1,%s,'browser',%s,%s,%s,'untrusted_source')",
                             (
                                 doc,
-                                TENANT,
+                                current_tenant(),
                                 self.actor.aid,
                                 result["title"],
                                 result["url"],
@@ -313,7 +314,7 @@ class ResearchPage:
                         c.execute(
                             "INSERT INTO lead.knowledge_chunks(tenant_id,agent_id,document_id,ordinal,body,search_vector) VALUES(%s,%s,%s,0,%s,to_tsvector('simple',%s))",
                             (
-                                TENANT,
+                                current_tenant(),
                                 self.actor.aid,
                                 doc,
                                 result["text"],
@@ -347,7 +348,7 @@ def begin_run(aid, goal, message_id=None, task_id=None, mode="research"):
             "INSERT INTO lead.browser_runs(id,tenant_id,agent_id,message_id,task_id,goal,mode,control_version,config_revision) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (
                 rid,
-                TENANT,
+                current_tenant(),
                 aid,
                 message_id,
                 task_id,

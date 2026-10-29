@@ -11,10 +11,13 @@ config = root / ".state/config.json"
 if config.exists():
     values = json.loads(config.read_text())
     secrets += [
-        values[k]
-        for k in ("owner_password", "runtime_password", "session_secret")
-        if values.get(k)
+        value
+        for key, value in values.items()
+        if isinstance(value, str)
+        and value
+        and (key.endswith("_password") or "secret" in key)
     ]
+
 env = root / ".env"
 if env.exists():
     from dotenv import dotenv_values

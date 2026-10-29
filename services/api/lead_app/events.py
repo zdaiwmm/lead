@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from .db import all_rows, one, tx
+from .scope import current_tenant
 
 router = APIRouter()
 
@@ -62,6 +63,17 @@ async def stream(request):
     for tick in range(55):
         if await request.is_disconnected():
             return
+        from .auth import auth_mode
+
+        if auth_mode() == "oidc":
+            from .identity_store import lookup_session
+
+            identity = await asyncio.to_thread(
+                lookup_session, request.cookies.get("lead_session", "")
+            )
+            if not identity or identity["tenant_id"] != current_tenant():
+                yield 'data: {"refresh":true}\n\n'
+                return
         current = await asyncio.to_thread(revision)
         if current != previous:
             previous = current

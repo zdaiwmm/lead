@@ -5,8 +5,9 @@ import hashlib
 import ipaddress
 import json
 
-from .config import STATE, TENANT, env
+from .config import STATE, env
 from .db import j, one, require_agent, tx, uid
+from .scope import current_tenant
 
 COLLECT = r"""(async()=>{
  const hash=arr=>Array.from(arr).reduce((h,n)=>Math.imul(h^n,16777619)>>>0,2166136261);
@@ -137,7 +138,7 @@ async def check(actor):
                 "INSERT INTO lead.identity_checks(id,tenant_id,agent_id,profile_id,network_identity_id,engine_version,config_hash,observed_ip,result,checks,evidence_ref,valid_until) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now()+interval '15 minutes')",
                 (
                     check_id,
-                    TENANT,
+                    current_tenant(),
                     aid,
                     profile["id"],
                     network["id"],

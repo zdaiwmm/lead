@@ -8,8 +8,9 @@ import sys
 from pathlib import Path
 from uuid import UUID
 
-from .config import ROOT, STATE, TENANT
+from .config import ROOT, STATE
 from .db import all_rows, audit, j, one, require_agent, tx, uid
+from .scope import current_tenant
 
 MAX_UPLOAD = 128 * 1024**2
 DECODERS = asyncio.Semaphore(2)
@@ -102,7 +103,7 @@ async def _upload(aid, incoming, rights=None):
                 "INSERT INTO lead.assets(id,tenant_id,agent_id,object_ref,media_type,size_bytes,sha256,rights,state,metadata) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'ready',%s) RETURNING *",
                 (
                     asset_id,
-                    TENANT,
+                    current_tenant(),
                     aid,
                     str(path),
                     info["media_type"],

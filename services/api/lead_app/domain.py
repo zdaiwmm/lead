@@ -1,6 +1,6 @@
 import hashlib
 
-from .config import STATE, TENANT, model_config
+from .config import STATE, model_config
 from .db import (
     all_rows,
     append_message,
@@ -13,6 +13,7 @@ from .db import (
     tx,
     uid,
 )
+from .scope import actor_ref, current_tenant
 
 PLATFORMS = [
     ("telegram", "Telegram", "https://web.telegram.org/k/"),
@@ -36,37 +37,37 @@ def create_agent(request_key=None):
         if request_key:
             claimed = one(
                 c,
-                "INSERT INTO lead.idempotency_requests(tenant_id,actor_ref,scope,idempotency_key,request_hash,state,expires_at) VALUES(%s,'local','agent.create',%s,'empty','pending',now()+interval '7 days') ON CONFLICT(tenant_id,actor_ref,scope,idempotency_key) DO NOTHING RETURNING id",
-                (TENANT, request_key),
+                "INSERT INTO lead.idempotency_requests(tenant_id,actor_ref,scope,idempotency_key,request_hash,state,expires_at) VALUES(%s,%s,'agent.create',%s,'empty','pending',now()+interval '7 days') ON CONFLICT(tenant_id,actor_ref,scope,idempotency_key) DO NOTHING RETURNING id",
+                (current_tenant(), actor_ref(), request_key),
             )
             if not claimed:
                 previous = one(
                     c,
-                    "SELECT response_ref FROM lead.idempotency_requests WHERE actor_ref='local' AND scope='agent.create' AND idempotency_key=%s",
-                    (request_key,),
+                    "SELECT response_ref FROM lead.idempotency_requests WHERE actor_ref=%s AND scope='agent.create' AND idempotency_key=%s",
+                    (actor_ref(), request_key),
                 )
                 return previous["response_ref"]
         c.execute(
             "INSERT INTO lead.agents(id,tenant_id,name,health_state) VALUES(%s,%s,%s,%s)",
-            (aid, TENANT, "新 Agent", "ready"),
+            (aid, current_tenant(), "新 Agent", "ready"),
         )
         c.execute(
             "INSERT INTO lead.agent_revisions(tenant_id,agent_id,revision,provider,model_ref,prompt_version,toolset_version,output_schema_version) VALUES(%s,%s,1,'deepseek',%s,'lead-1','browser-1','1')",
-            (TENANT, aid, model["model"]),
+            (current_tenant(), aid, model["model"]),
         )
         c.execute(
             "INSERT INTO lead.conversations(tenant_id,agent_id) VALUES(%s,%s)",
-            (TENANT, aid),
+            (current_tenant(), aid),
         )
         c.execute(
             "INSERT INTO lead.network_identities(id,tenant_id,agent_id,provider_ref,endpoint_ref,secret_ref,mode,policy_version) VALUES(%s,%s,%s,'local','env','env','shared_development',1)",
-            (nid, TENANT, aid),
+            (nid, current_tenant(), aid),
         )
         c.execute(
             "INSERT INTO lead.browser_profiles(id,tenant_id,agent_id,provider,engine_version,sdk_version,config_ref,config_hash,storage_ref,key_material_ref,network_identity_id) VALUES(%s,%s,%s,'camoufox','pinned-install','0.5.8',%s,%s,%s,'local-os-permissions',%s)",
             (
                 pid,
-                TENANT,
+                current_tenant(),
                 aid,
                 str(STATE / "profiles" / aid / "identity.json"),
                 hashlib.sha256(aid.encode()).hexdigest(),
@@ -76,7 +77,7 @@ def create_agent(request_key=None):
         )
         c.execute(
             "INSERT INTO lead.profile_leases(profile_id,tenant_id,agent_id,control_version) VALUES(%s,%s,%s,1)",
-            (pid, TENANT, aid),
+            (pid, current_tenant(), aid),
         )
         append_message(
             c,
@@ -240,7 +241,7 @@ def submit_message(aid, text, client_id, asset_ids=None):
         job = one(
             c,
             "INSERT INTO lead.chat_jobs(tenant_id,agent_id,message_id) VALUES(%s,%s,%s) RETURNING id",
-            (TENANT, aid, msg["id"]),
+            (current_tenant(), aid, msg["id"]),
         )
         emit(c, aid, "chat.enqueue", {"job_id": str(job["id"])})
         return msg
@@ -334,15 +335,15 @@ def connect_lab(aid):
         account, target = uid(), uid()
         c.execute(
             "INSERT INTO lead.social_accounts(id,tenant_id,agent_id,profile_id,platform,external_account_id,display_name,state,verified_at) VALUES(%s,%s,%s,%s,'lab',%s,'本地测试站','connected',now())",
-            (account, TENANT, aid, profile["id"], aid),
+            (account, current_tenant(), aid, profile["id"], aid),
         )
         c.execute(
             "INSERT INTO lead.account_targets(id,tenant_id,agent_id,account_id,target_type,external_target_id,display_name,verified_permissions,state) VALUES(%s,%s,%s,%s,'profile',%s,'本地测试站',%s,'active')",
-            (target, TENANT, aid, account, aid, j(["publish"])),
+            (target, current_tenant(), aid, account, aid, j(["publish"])),
         )
         c.execute(
             "INSERT INTO lead.authorization_grants(tenant_id,agent_id,target_id,version,allowed_actions,granted_by) VALUES(%s,%s,%s,1,%s,'local_owner')",
-            (TENANT, aid, target, j(["publish"])),
+            (current_tenant(), aid, target, j(["publish"])),
         )
         record(c, aid, "已连接本地测试站", "仅用于真实浏览器验证，不计入获客效果。")
         audit(c, aid, "lab.authorized")
@@ -366,7 +367,7 @@ def queue_lab_publish(aid, body, key):
             c,
             "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,scheduled_at) VALUES(%s,%s,'lab.publish','queued',%s,%s,now()) RETURNING *",
             (
-                TENANT,
+                current_tenant(),
                 aid,
                 "lab:" + aid + ":" + key,
                 j({"body": body, "key": key, "control_version": a["control_version"]}),
@@ -391,7 +392,7 @@ def snapshot_preferences(c, aid):
     c.execute(
         "INSERT INTO lead.agent_revisions(tenant_id,agent_id,revision,provider,model_ref,prompt_version,toolset_version,output_schema_version,preferences) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (
-            TENANT,
+            current_tenant(),
             aid,
             rev,
             prev["provider"],
@@ -423,7 +424,7 @@ def remember(c, aid, body):
     entry = one(
         c,
         "INSERT INTO lead.memory_entries(tenant_id,agent_id,kind,body,source_refs,confirmation) VALUES(%s,%s,'preference',%s,'[]','user_explicit') RETURNING id",
-        (TENANT, aid, j({"text": body})),
+        (current_tenant(), aid, j({"text": body})),
     )
     snapshot_preferences(c, aid)
     return str(entry["id"])

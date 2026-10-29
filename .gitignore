@@ -12,6 +12,7 @@ docs/screenshots/
 *.db
 *.tar.gz
 *.zip
+*.leadbackup
 node_modules/
 .next/
 __pycache__/

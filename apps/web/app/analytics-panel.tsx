@@ -3,11 +3,13 @@ import { useEffect, useState } from "react";
 type Row = Record<string, any>;
 export default function AnalyticsPanel({
   aid,
+  readOnly = false,
   url,
   request,
   onError,
 }: {
   aid: string;
+  readOnly?: boolean;
   url?: string;
   request: (path: string, body?: Row) => Promise<any>;
   onError: (s: string) => void;
@@ -65,7 +67,7 @@ export default function AnalyticsPanel({
                 placeholder="https://"
               />
               <button
-                disabled={busy || !site}
+                disabled={busy || !site || readOnly}
                 onClick={() =>
                   perform(async () => {
                     await request("/agents/" + aid + "/analytics", {
@@ -107,7 +109,7 @@ export default function AnalyticsPanel({
               <details className="lab">
                 <summary>服务端转化回传</summary>
                 <button
-                  disabled={busy}
+                  disabled={busy || readOnly}
                   onClick={() =>
                     perform(async () => {
                       const issued = await request(
@@ -149,7 +151,7 @@ export default function AnalyticsPanel({
             <div className="section-head">
               <h2>推广链接</h2>
               <button
-                disabled={busy || !site}
+                disabled={busy || !site || readOnly}
                 onClick={() =>
                   perform(async () => {
                     await request("/agents/" + aid + "/tracking-links", {

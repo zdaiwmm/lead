@@ -19,6 +19,56 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
+async def test_browser_process_crash_reopens_same_profile(monkeypatch):
+    import psutil
+    from lead_app.config import STATE
+
+    monkeypatch.setattr(domain, "emit", lambda *args, **kwargs: None)
+    aid = domain.create_agent()
+    gateway = Gateway()
+    try:
+        actor = await gateway.get(aid)
+        await actor.page.goto("http://127.0.0.1:8088/lab/" + aid + "/")
+        await actor.page.evaluate("localStorage.setItem('crash-proof','survives')")
+        # Establish data committed by the native browser before injecting a
+        # crash. In-memory writes just before SIGKILL can be lost by Firefox.
+        await gateway.close(aid)
+        actor = await gateway.get(aid)
+        await actor.page.goto("http://127.0.0.1:8088/lab/" + aid + "/")
+        assert (
+            await actor.page.evaluate("localStorage.getItem('crash-proof')")
+            == "survives"
+        )
+        identity = (STATE / "profiles" / aid / "identity.json").read_bytes()
+        epoch = actor.epoch
+        # Kill only the browser process created for this new test profile.
+        path = str(STATE / "profiles" / aid / "storage")
+        processes = [
+            p
+            for p in psutil.Process().children(recursive=True)
+            if path in p.cmdline() and p.name().lower().startswith("camoufox")
+        ]
+        assert len(processes) == 1
+        processes[0].kill()
+        for _ in range(50):
+            if actor.disconnected:
+                break
+            await asyncio.sleep(0.1)
+        assert actor.disconnected
+        reopened = await gateway.get(aid)
+        assert reopened is not actor and reopened.epoch > epoch
+        assert (STATE / "profiles" / aid / "identity.json").read_bytes() == identity
+        await reopened.page.goto("http://127.0.0.1:8088/lab/" + aid + "/")
+        assert (
+            await reopened.page.evaluate("localStorage.getItem('crash-proof')")
+            == "survives"
+        )
+    finally:
+        await gateway.close(aid)
+        domain.set_control(aid, "archive")
+
+
+@pytest.mark.asyncio
 async def test_concurrent_profiles_restart_and_uncertain_submit(tmp_path, monkeypatch):
     monkeypatch.setattr(domain, "emit", lambda *args, **kwargs: None)
     ids = [domain.create_agent() for _ in range(3)]

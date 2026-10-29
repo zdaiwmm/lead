@@ -5,8 +5,8 @@ import secrets
 import psycopg
 
 from .adapters.catalog import SPECS, validate
-from .config import TENANT
 from .db import append_message, audit, emit, j, one, record, require_agent, tx
+from .scope import current_tenant
 
 
 def store_account(aid, platform, observed, prompt_target=True):
@@ -69,7 +69,7 @@ def store_target(aid, account_id, observed):
             c,
             "INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,external_target_id,canonical_url,display_name,verified_permissions,state) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'active') ON CONFLICT(account_id,target_type,external_target_id) DO UPDATE SET canonical_url=excluded.canonical_url,display_name=excluded.display_name,verified_permissions=lead.account_targets.verified_permissions || excluded.verified_permissions,state='active' RETURNING *",
             (
-                TENANT,
+                current_tenant(),
                 aid,
                 account_id,
                 observed.get("target_type", spec.target_type),
@@ -96,7 +96,7 @@ def store_target(aid, account_id, observed):
             c,
             "INSERT INTO lead.interaction_cards(tenant_id,agent_id,type,payload,expires_at) VALUES(%s,%s,'authorize_target',%s,now()+interval '1 day') RETURNING *",
             (
-                TENANT,
+                current_tenant(),
                 aid,
                 j(
                     {
@@ -182,7 +182,7 @@ def probe_in_tx(
     card = one(
         c,
         "INSERT INTO lead.interaction_cards(tenant_id,agent_id,type,payload,expires_at) VALUES(%s,%s,'verify_publish',%s,now()+interval '1 day') RETURNING *",
-        (TENANT, aid, j(payload)),
+        (current_tenant(), aid, j(payload)),
     )
     append_message(
         c,
@@ -277,7 +277,7 @@ def accept_card(aid, card_id, version, accepted):
                 c,
                 "INSERT INTO lead.authorization_grants(tenant_id,agent_id,target_id,version,allowed_actions,limits,granted_by) VALUES(%s,%s,%s,%s,%s,%s,'local_owner') RETURNING id",
                 (
-                    TENANT,
+                    current_tenant(),
                     aid,
                     target["id"],
                     ver,
@@ -340,7 +340,7 @@ def accept_card(aid, card_id, version, accepted):
                 c,
                 "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,scheduled_at) VALUES(%s,%s,'connection.verify_publish','queued',%s,%s,now()) RETURNING id",
                 (
-                    TENANT,
+                    current_tenant(),
                     aid,
                     "verify:" + str(card_id),
                     j(

@@ -3,9 +3,9 @@
 import re
 from uuid import UUID
 
-from .config import TENANT
 from .db import all_rows, audit, j, one, require_agent
 from .domain import remember, snapshot_preferences
+from .scope import current_tenant
 
 
 def explicit_preference(text, mode):
@@ -52,7 +52,7 @@ def apply_preference(c, aid, message, decision, expected_revision):
         c,
         "INSERT INTO lead.conversation_commands(tenant_id,agent_id,conversation_id,message_id,intent_index,command_type,operation_key,expected_revision,payload,state) VALUES(%s,%s,%s,%s,0,'preference.modify',%s,%s,%s,'accepted') RETURNING id",
         (
-            TENANT,
+            current_tenant(),
             aid,
             message["conversation_id"],
             message["id"],
@@ -183,7 +183,7 @@ def apply_asset_annotations(c, aid, message, annotations):
     c.execute(
         "INSERT INTO lead.conversation_commands(tenant_id,agent_id,conversation_id,message_id,intent_index,command_type,operation_key,expected_revision,payload,result,state) VALUES(%s,%s,%s,%s,1,'asset.annotate',%s,%s,%s,%s,'succeeded')",
         (
-            TENANT,
+            current_tenant(),
             aid,
             message["conversation_id"],
             message["id"],

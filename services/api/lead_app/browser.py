@@ -9,24 +9,29 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import logging
 import os
+import platform
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from camoufox.async_api import AsyncCamoufox
 from camoufox.fingerprints import generate_fingerprint
+from camoufox.utils import launch_options
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from .adapters.catalog import SPECS
-from .config import STATE, TENANT, env, proxy_for
+from .config import STATE, env, proxy_for
 from .db import j, one, require_agent, tx, uid
 from .domain import PLATFORMS
 from .forward_proxy import BrowserForwardProxy
+from .scope import current_tenant, scoped_agent_method, service_scope
 from .security import internal_token, token
+from .telemetry import TelemetryMiddleware
 
 
 class Actor:
@@ -42,11 +47,22 @@ class Actor:
         self.epoch = None
         self.research_pages = {}
         self.forward_proxy = None
+        self.disconnected = False
+
+    def browser_closed(self, *_):
+        self.disconnected = True
 
     async def launch(self):
         from .resources import ensure_capacity
 
         ensure_capacity(256)
+        with tx(self.aid) as c:
+            require_agent(c, self.aid)
+            if one(
+                c,
+                "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
+            ):
+                raise ValueError("环境正在备份，请稍后重试")
         folder = STATE / "profiles" / self.aid
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.file = (folder / "actor.lock").open("a")
@@ -54,7 +70,11 @@ class Actor:
         identity = folder / "identity.json"
         if not identity.exists():
             fingerprint = await asyncio.to_thread(
-                generate_fingerprint, os="mac", window=(1280, 800)
+                generate_fingerprint,
+                os={"Darwin": "macos", "Linux": "linux", "Windows": "windows"}[
+                    platform.system()
+                ],
+                window=(1280, 800),
             )
             # Stable, native engine entropy avoids assigning indistinguishable
             # audio identities when fpgen happens to draw the same common device.
@@ -75,8 +95,7 @@ class Actor:
         digest = hashlib.sha256(identity.read_bytes()).hexdigest()
         proxy = proxy_for(self.aid)
         self.forward_proxy = await BrowserForwardProxy(self.aid, proxy).start()
-        self.manager = AsyncCamoufox(
-            persistent_context=True,
+        launch_settings = dict(
             user_data_dir=str(folder / "storage"),
             fingerprint=fingerprint,
             config=native_config,
@@ -84,6 +103,26 @@ class Actor:
             window=(1280, 800),
             locale="en-US",
             block_webrtc=True,
+            env={
+                name: value
+                for name, value in os.environ.items()
+                if name
+                in {
+                    "PATH",
+                    "HOME",
+                    "TMPDIR",
+                    "TMP",
+                    "TEMP",
+                    "LANG",
+                    "LC_ALL",
+                    "DISPLAY",
+                    "WAYLAND_DISPLAY",
+                    "XDG_RUNTIME_DIR",
+                    "TZ",
+                    "SYSTEMROOT",
+                    "WINDIR",
+                }
+            },
             proxy=self.forward_proxy.browser_proxy,
             firefox_user_prefs={
                 "network.proxy.socks_remote_dns": True,
@@ -102,7 +141,30 @@ class Actor:
             i_know_what_im_doing=True,
         )
         try:
+            from . import network_namespace
+
+            if network_namespace.required():
+                from camoufox.addons import DefaultAddons
+
+                if fingerprint.get("os", "").lower() != "linux":
+                    raise ValueError("此环境需要在原系统继续运行，不能自动改写设备身份")
+                (folder / "storage").mkdir(exist_ok=True, mode=0o700)
+                (STATE / "assets" / self.aid).mkdir(
+                    parents=True, exist_ok=True, mode=0o700
+                )
+                launch_settings["exclude_addons"] = list(DefaultAddons)
+                options = await asyncio.to_thread(launch_options, **launch_settings)
+                self.manager = AsyncCamoufox(
+                    persistent_context=True,
+                    from_options=network_namespace.apply(
+                        options, self.aid, self.forward_proxy
+                    ),
+                )
+            else:
+                self.manager = AsyncCamoufox(persistent_context=True, **launch_settings)
             self.context = await self.manager.__aenter__()
+            self.disconnected = False
+            self.context.on("close", self.browser_closed)
             # Website isolation from local services. Only the authenticated lab path
             # is reachable on loopback; all social requests must resolve publicly.
             await self.context.route("**/*", self.route)
@@ -139,7 +201,7 @@ class Actor:
                     "INSERT INTO lead.browser_sessions(id,tenant_id,agent_id,profile_id,node_id,actor_id,epoch,control_version,state,heartbeat_at) VALUES(%s,%s,%s,%s,'local',%s,%s,%s,'ready',now())",
                     (
                         self.session,
-                        TENANT,
+                        current_tenant(),
                         self.aid,
                         profile["id"],
                         str(os.getpid()),
@@ -202,20 +264,22 @@ class Actor:
         if self.forward_proxy:
             await self.forward_proxy.close()
             self.forward_proxy = None
-        if self.session:
-            with tx(self.aid) as c:
-                c.execute(
-                    "UPDATE lead.browser_sessions SET state='closed',ended_at=now() WHERE id=%s AND ended_at IS NULL",
-                    (self.session,),
-                )
-                c.execute(
-                    "UPDATE lead.profile_leases SET state='released',expires_at=now() WHERE epoch=%s",
-                    (self.epoch,),
-                )
-                c.execute("UPDATE lead.browser_profiles SET state='stopped'")
-        if self.file:
-            self.file.close()
-            self.file = None
+        try:
+            if self.session:
+                with tx(self.aid) as c:
+                    c.execute(
+                        "UPDATE lead.browser_sessions SET state='closed',ended_at=now() WHERE id=%s AND ended_at IS NULL",
+                        (self.session,),
+                    )
+                    c.execute(
+                        "UPDATE lead.profile_leases SET state='released',expires_at=now() WHERE epoch=%s",
+                        (self.epoch,),
+                    )
+                    c.execute("UPDATE lead.browser_profiles SET state='stopped'")
+        finally:
+            if self.file:
+                self.file.close()
+                self.file = None
 
     def touch(self):
         self.used = time.monotonic()
@@ -224,6 +288,21 @@ class Actor:
         from .resources import ensure_capacity
 
         ensure_capacity(64)
+        recovery = one(c, "SELECT state FROM lead.recovery_control WHERE singleton")
+        if not recovery or recovery["state"] != "normal":
+            raise ValueError("恢复数据库尚待核对外部动作，已停止发布")
+        if one(
+            c,
+            "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
+        ):
+            raise ValueError("环境正在备份，已停止提交")
+        if (
+            env().get("LEAD_DEPLOYMENT_MODE") == "production"
+            and not one(
+                c, "SELECT lead.backup_ready() AND lead.offsite_backup_ready() AS ready"
+            )["ready"]
+        ):
+            raise ValueError("数据库恢复点已过期，已停止新的发布")
         platform = action["intent"].get("platform")
         from .adapters.catalog import SPECS
 
@@ -424,7 +503,7 @@ class Actor:
                         c,
                         "INSERT INTO lead.action_attempts(tenant_id,agent_id,action_id,browser_session_id,attempt,epoch,control_version,observed_account_id,observed_target_id,observation) SELECT %s,%s,%s,%s,coalesce(max(attempt),0)+1,%s,%s,%s,%s,%s FROM lead.action_attempts WHERE action_id=%s RETURNING id",
                         (
-                            TENANT,
+                            current_tenant(),
                             self.aid,
                             action_id,
                             self.session,
@@ -545,7 +624,7 @@ class Actor:
                     c,
                     "INSERT INTO lead.action_attempts(tenant_id,agent_id,action_id,browser_session_id,attempt,epoch,control_version,observed_account_id,observed_target_id) SELECT %s,%s,%s,%s,coalesce(max(attempt),0)+1,%s,%s,%s,%s FROM lead.action_attempts WHERE action_id=%s RETURNING id",
                     (
-                        TENANT,
+                        current_tenant(),
                         self.aid,
                         action_id,
                         self.session,
@@ -624,12 +703,28 @@ class Gateway:
             await self.close(aid)
             return
 
+    @scoped_agent_method
     async def get(self, aid):
         aid = str(UUID(aid))
         async with self.locks.setdefault(aid, asyncio.Lock()):
+            with tx(aid) as c:
+                if one(
+                    c,
+                    "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
+                ):
+                    raise ValueError("此环境正在备份，请稍后重试")
             if aid in self.actors:
-                self.actors[aid].touch()
-                return self.actors[aid]
+                existing = self.actors[aid]
+                if not existing.disconnected:
+                    existing.touch()
+                    return existing
+                if existing.lock.locked():
+                    raise ValueError("浏览器正在恢复，请稍后重试")
+                self.actors.pop(aid)
+                try:
+                    await existing.close()
+                finally:
+                    self.slots.release()
             if self.slots.locked():
                 await self.evict_idle()
             self.waiting += 1
@@ -649,6 +744,7 @@ class Gateway:
             self.actors[aid] = actor
             return actor
 
+    @scoped_agent_method
     async def close(self, aid):
         async with self.locks.setdefault(aid, asyncio.Lock()):
             actor = self.actors.pop(aid, None)
@@ -660,23 +756,31 @@ class Gateway:
                     self.slots.release()
 
     async def maintenance(self):
-        while True:
-            await asyncio.sleep(20)
-            if self.waiting:
-                await self.evict_idle()
-            for aid, actor in list(self.actors.items()):
-                if actor.lock.locked() or time.monotonic() - actor.used < 300:
-                    with tx(aid) as c:
-                        c.execute(
-                            "UPDATE lead.profile_leases SET expires_at=now()+interval '90 seconds' WHERE epoch=%s AND state='held'",
-                            (actor.epoch,),
+        with service_scope():
+            while True:
+                await asyncio.sleep(20)
+                if self.waiting:
+                    await self.evict_idle()
+                for aid, actor in list(self.actors.items()):
+                    try:
+                        if actor.disconnected and not actor.lock.locked():
+                            await self.close(aid)
+                        elif actor.lock.locked() or time.monotonic() - actor.used < 300:
+                            with tx(aid) as c:
+                                c.execute(
+                                    "UPDATE lead.profile_leases SET expires_at=now()+interval '90 seconds' WHERE epoch=%s AND state='held'",
+                                    (actor.epoch,),
+                                )
+                                c.execute(
+                                    "UPDATE lead.browser_sessions SET heartbeat_at=now() WHERE id=%s",
+                                    (actor.session,),
+                                )
+                        else:
+                            await self.close(aid)
+                    except Exception:
+                        logging.warning(
+                            "Browser maintenance unavailable; next cycle retries."
                         )
-                        c.execute(
-                            "UPDATE lead.browser_sessions SET heartbeat_at=now() WHERE id=%s",
-                            (actor.session,),
-                        )
-                else:
-                    await self.close(aid)
 
 
 gateway = Gateway()
@@ -704,7 +808,8 @@ async def auth(request, call_next):
     if request.headers.get("authorization") != "Bearer " + internal_token():
         return Response(status_code=403)
     try:
-        return await call_next(request)
+        with service_scope():
+            return await call_next(request)
     except (ValueError, LookupError) as e:
         message = str(e)
         if not any("\u4e00" <= ch <= "\u9fff" for ch in message):
@@ -956,3 +1061,30 @@ async def user_input(aid: str, body: InputRequest):
 async def close(aid: str):
     await gateway.close(aid)
     return {"ok": True}
+
+
+class BackupRequest(BaseModel):
+    automated: bool = False
+
+
+@app.post("/agents/{aid}/backup/begin")
+async def begin_backup(aid: UUID, body: BackupRequest | None = None):
+    from .backups import claim_profile_backup
+
+    aid = str(aid)
+    async with gateway.locks.setdefault(aid, asyncio.Lock()):
+        actor = gateway.actors.get(aid)
+        async with actor.lock if actor else nullcontext():
+            guard_id = claim_profile_backup(
+                aid, allow_running=body.automated if body else False
+            )
+            if actor:
+                try:
+                    await actor.close()
+                finally:
+                    gateway.actors.pop(aid, None)
+                    gateway.slots.release()
+    return {"guard_id": guard_id}
+
+
+app.add_middleware(TelemetryMiddleware, service="lead-browser")

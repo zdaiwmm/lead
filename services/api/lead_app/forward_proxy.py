@@ -9,13 +9,14 @@ import base64
 import hashlib
 import hmac
 import ipaddress
+import os
 import ssl
 import time
 from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .config import CONFIG
+from .config import CONFIG, STATE
 
 
 class BrowserForwardProxy:
@@ -23,6 +24,8 @@ class BrowserForwardProxy:
         self.aid = aid
         self.upstream = upstream
         self.server = None
+        self.unix_server = None
+        self.socket_path = STATE / "sockets" / (aid + ".sock")
         self.port = None
         self.password = hmac.new(
             CONFIG["session_secret"].encode(),
@@ -57,9 +60,25 @@ class BrowserForwardProxy:
             self.handle, "127.0.0.1", 0, limit=65536
         )
         self.port = self.server.sockets[0].getsockname()[1]
+        self.socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if self.socket_path.exists():
+            # A profile's OS flock is already held before this listener starts.
+            self.socket_path.unlink()
+        try:
+            self.unix_server = await asyncio.start_unix_server(
+                self.handle, self.socket_path, limit=65536
+            )
+            os.chmod(self.socket_path, 0o600)
+        except BaseException:
+            await self.close()
+            raise
         return self
 
     async def close(self):
+        if self.unix_server:
+            self.unix_server.close()
+            await self.unix_server.wait_closed()
+            self.socket_path.unlink(missing_ok=True)
         if self.server:
             self.server.close()
             await self.server.wait_closed()

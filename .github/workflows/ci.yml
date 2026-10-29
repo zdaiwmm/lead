@@ -8,7 +8,7 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -20,16 +20,32 @@ jobs:
       - run: .venv/bin/python scripts/bootstrap.py
       - name: Start isolated CI database
         run: |
-          docker compose --env-file .state/infra.env -f infra/compose.yaml up -d postgres
+          docker compose --env-file .state/infra.env -f infra/compose.yaml up -d postgres temporal
           for attempt in $(seq 1 30); do
             if docker compose --env-file .state/infra.env -f infra/compose.yaml exec -T postgres pg_isready -U lead_owner -d lead; then break; fi
             sleep 1
           done
           .venv/bin/python scripts/migrate.py
-      - run: .venv/bin/ruff check services scripts tests
+      - run: .venv/bin/ruff check services scripts tests infra/migrations
       - run: .venv/bin/python scripts/check_repository.py
+      - name: Native Linux browser and namespace prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          .venv/bin/playwright install-deps firefox
+          .venv/bin/camoufox fetch official/156.0.1-beta.36
+          .venv/bin/camoufox set official/156.0.1-beta.36
+          # This ephemeral runner permits user namespaces for the bwrap boundary.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          PYTHONPATH=services/api .venv/bin/python -m uvicorn lead_app.api:app --host 127.0.0.1 --port 8088 --no-access-log >.state/ci-api.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://127.0.0.1:8088/lead.js >/dev/null; then break; fi
+            sleep 1
+          done
       - name: Database, media and authorization tests
-        run: .venv/bin/pytest -q --junitxml=.state/ci-tests.xml
+        run: LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_WORKFLOW_TESTS=1 .venv/bin/pytest -q --junitxml=.state/ci-tests.xml
       - if: always() && hashFiles('.state/infra.env') != ''
         run: docker compose --env-file .state/infra.env -f infra/compose.yaml down
   frontend:
@@ -48,3 +64,11 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+  namespace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: docker build -f infra/namespace-test.Dockerfile -t lead-namespace-test:ci .
+      - name: Rootless isolated transport contract
+        run: docker run --rm --network none --cap-drop ALL --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined lead-namespace-test:ci

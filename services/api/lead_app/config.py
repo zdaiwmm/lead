@@ -26,14 +26,29 @@ def model_config():
     }
 
 
-def database_kwargs(owner=False):
+def database_kwargs(owner=False, auth=False):
+    values = env()
+    kind = "OWNER" if owner else "AUTH" if auth else ""
+    username_key = "LEAD_DB_" + kind + "_USER" if kind else "LEAD_DB_USER"
+    password_key = "LEAD_DB_" + kind + "_PASSWORD" if kind else "LEAD_DB_PASSWORD"
+    default_user = "lead_owner" if owner else "lead_auth" if auth else "lead_runtime"
+    config_key = (
+        "owner_password" if owner else "auth_password" if auth else "runtime_password"
+    )
+    extra = (
+        {"sslrootcert": values["LEAD_DB_CA_FILE"]}
+        if values.get("LEAD_DB_CA_FILE")
+        else {}
+    )
     return dict(
-        host="127.0.0.1",
-        port=55432,
-        dbname="lead",
-        user="lead_owner" if owner else "lead_runtime",
-        password=CONFIG["owner_password" if owner else "runtime_password"],
+        host=values.get("LEAD_DB_HOST") or "127.0.0.1",
+        port=int(values.get("LEAD_DB_PORT") or 55432),
+        dbname=values.get("LEAD_DB_NAME") or "lead",
+        user=values.get(username_key) or default_user,
+        password=values.get(password_key) or CONFIG[config_key],
         connect_timeout=5,
+        sslmode=values.get("LEAD_DB_SSLMODE") or "prefer",
+        **extra,
     )
 
 

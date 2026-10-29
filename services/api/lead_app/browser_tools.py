@@ -6,6 +6,7 @@ from pydantic_ai import Tool
 from .db import uid
 from .research import begin_run, finish_run, public_url
 from .security import internal_token
+from .telemetry import trace_headers
 
 URL_PATTERN = re.compile(
     r'https?://[^\s<>"，。；）)]+|(?<![\w@])(?:www\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.(?:com|org|net|io|ai|one|app|dev|co|xyz|me|tech|site|cn)(?:/[^\s<>"，。；）)]*)?',
@@ -68,7 +69,10 @@ class BrowserTools:
                         "operation": operation,
                         "args": args or {},
                     },
-                    headers={"Authorization": "Bearer " + internal_token()},
+                    headers={
+                        "Authorization": "Bearer " + internal_token(),
+                        **trace_headers(),
+                    },
                 )
                 if response.status_code >= 400:
                     return {
@@ -144,7 +148,10 @@ class BrowserTools:
             try:
                 await client.post(
                     f"http://127.0.0.1:8089/agents/{self.aid}/research/{self.run_id}/close",
-                    headers={"Authorization": "Bearer " + internal_token()},
+                    headers={
+                        "Authorization": "Bearer " + internal_token(),
+                        **trace_headers(),
+                    },
                 )
             except httpx.HTTPError:
                 pass

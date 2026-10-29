@@ -5,8 +5,9 @@ import asyncio
 from .adapters import get_adapter
 from .adapters.core import NeedsAuth, ScopeChanged
 from .assets import resolve
-from .config import STATE, TENANT
+from .config import STATE
 from .db import j, one, tx, uid
+from .scope import current_tenant
 
 
 async def execute(actor, action_id):
@@ -99,7 +100,7 @@ async def execute(actor, action_id):
                         actor.gate(c, action)
                         c.execute(
                             "INSERT INTO lead.publish_preparations(tenant_id,agent_id,action_id,stage,manifest) VALUES(%s,%s,%s,'preparing',%s)",
-                            (TENANT, aid, action_id, j(media_manifest)),
+                            (current_tenant(), aid, action_id, j(media_manifest)),
                         )
                     try:
                         observation = await adapter.prepare(
@@ -136,7 +137,7 @@ async def execute(actor, action_id):
                         c,
                         "INSERT INTO lead.action_attempts(tenant_id,agent_id,action_id,browser_session_id,attempt,epoch,control_version,observed_account_id,observed_target_id,observation) SELECT %s,%s,%s,%s,coalesce(max(attempt),0)+1,%s,%s,%s,%s,%s FROM lead.action_attempts WHERE action_id=%s RETURNING id",
                         (
-                            TENANT,
+                            current_tenant(),
                             aid,
                             action_id,
                             actor.session,

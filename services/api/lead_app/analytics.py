@@ -11,9 +11,10 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel, Field
 
-from .config import TENANT, env
+from .config import env
 from .db import all_rows, audit, one, require_agent, tx, uid
 from .fetch import resolve_public
+from .scope import current_tenant
 from .security import token, valid
 
 router = APIRouter()
@@ -93,7 +94,7 @@ def setup(aid: UUID, body: AnalyticsSetup):
         if not conn:
             c.execute(
                 "INSERT INTO lead.analytics_connections(tenant_id,agent_id,provider,site_host,secret_ref,state) VALUES(%s,%s,'lead_site',%s,'hmac:client-write','pending')",
-                (TENANT, aid, origin),
+                (current_tenant(), aid, origin),
             )
         audit(c, aid, "analytics.setup", {"site_host": origin})
     return settings(UUID(aid))
@@ -110,7 +111,14 @@ def create_link(aid: UUID, body: TrackingSetup):
         row = one(
             c,
             "INSERT INTO lead.tracking_links(tenant_id,agent_id,platform,public_code,destination_url,allowed_host) VALUES(%s,%s,%s,%s,%s,%s) RETURNING id,public_code",
-            (TENANT, aid, body.platform, code, body.destination_url, p.hostname),
+            (
+                current_tenant(),
+                aid,
+                body.platform,
+                code,
+                body.destination_url,
+                p.hostname,
+            ),
         )
     return {**row, "url": public_origin() + "/r/" + code}
 
@@ -142,7 +150,7 @@ def redirect(code: str, request: Request):
         c.execute(
             "INSERT INTO lead.visit_sessions(tenant_id,agent_id,tracking_link_id,source,source_session_id,trust_level,qualified,exclusion_reason,rule_version,started_at,last_seen_at) VALUES(%s,%s,%s,'redirect',%s,'redirect_observed',NULL,%s,'engaged-v1',now(),now())",
             (
-                TENANT,
+                current_tenant(),
                 link["agent_id"],
                 link["id"],
                 session,
@@ -223,7 +231,7 @@ def collect(cid: UUID, body: Event, request: Request):
             c.execute(
                 "INSERT INTO lead.visit_sessions(tenant_id,agent_id,tracking_link_id,source,source_session_id,trust_level,qualified,rule_version,started_at,last_seen_at) VALUES(%s,%s,%s,%s,%s,'client_observed',false,'engaged-v1',now(),now())",
                 (
-                    TENANT,
+                    current_tenant(),
                     aid,
                     link["id"] if link else None,
                     "site:" + str(cid),

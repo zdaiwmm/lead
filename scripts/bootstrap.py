@@ -24,6 +24,15 @@ if not config.exists():
     os.chmod(config, 0o600)
 else:
     values = json.loads(config.read_text())
+if not values.get("auth_password"):
+    values["auth_password"] = secrets.token_urlsafe(32)
+    temporary = state / "config.next"
+    with temporary.open("w") as stream:
+        os.chmod(temporary, 0o600)
+        json.dump(values, stream, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, config)
 env = state / "infra.env"
 env.write_text("LEAD_DB_OWNER_PASSWORD=" + values["owner_password"] + "\n")
 os.chmod(env, 0o600)

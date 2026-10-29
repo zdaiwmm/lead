@@ -11,8 +11,8 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .config import TENANT
 from .db import audit, one, require_agent, tx
+from .scope import current_tenant
 
 router = APIRouter()
 
@@ -54,7 +54,12 @@ def issue(aid: UUID, body: KeyRequest):
         credential = one(
             c,
             "INSERT INTO lead.analytics_credentials(tenant_id,agent_id,connection_id,secret_sha256) VALUES(%s,%s,%s,%s) RETURNING id",
-            (TENANT, aid, body.connection_id, hashlib.sha256(key.encode()).hexdigest()),
+            (
+                current_tenant(),
+                aid,
+                body.connection_id,
+                hashlib.sha256(key.encode()).hexdigest(),
+            ),
         )
         audit(
             c,
@@ -79,10 +84,15 @@ def authenticate(request, connection_id):
     if not re.fullmatch(r"Bearer lead_cv_[A-Za-z0-9_-]{43}", authorization):
         raise HTTPException(401, "回传凭据无效")
     digest = hashlib.sha256(authorization[7:].encode()).hexdigest()
-    with tx() as c:
+    from .identity_store import public_tenant
+
+    workspace = public_tenant("conversion", digest)
+    if not workspace:
+        raise HTTPException(401, "回传凭据无效")
+    with tx(tenant_id=workspace) as c:
         credential = one(
             c,
-            "SELECT k.id,k.agent_id,k.connection_id FROM lead.analytics_credentials k JOIN lead.analytics_connections n ON n.id=k.connection_id JOIN lead.agents a ON a.id=k.agent_id WHERE k.connection_id=%s AND k.secret_sha256=%s AND k.state='active' AND n.state<>'disconnected' AND a.desired_state<>'archived'",
+            "SELECT k.id,k.tenant_id,k.agent_id,k.connection_id FROM lead.analytics_credentials k JOIN lead.analytics_connections n ON n.id=k.connection_id JOIN lead.agents a ON a.id=k.agent_id WHERE k.connection_id=%s AND k.secret_sha256=%s AND k.state='active' AND n.state<>'disconnected' AND a.desired_state<>'archived'",
             (connection_id, digest),
         )
     if not credential:
@@ -93,7 +103,7 @@ def authenticate(request, connection_id):
 @router.post("/collect/server/ping")
 def ping(body: Ping, request: Request):
     credential = authenticate(request, body.connection_id)
-    with tx(str(credential["agent_id"])) as c:
+    with tx(str(credential["agent_id"]), tenant_id=str(credential["tenant_id"])) as c:
         c.execute(
             "UPDATE lead.analytics_credentials SET last_received_at=now() WHERE id=%s",
             (credential["id"],),
@@ -114,7 +124,7 @@ def receive(body: Conversion, request: Request):
     fingerprint = hashlib.sha256(
         json.dumps(body.model_dump(mode="json"), sort_keys=True).encode()
     ).hexdigest()
-    with tx(aid) as c:
+    with tx(aid, tenant_id=str(credential["tenant_id"])) as c:
         existing = one(
             c,
             "SELECT id,payload_sha256 FROM lead.conversion_events WHERE connection_id=%s AND source_event_id=%s",
@@ -140,7 +150,7 @@ def receive(body: Conversion, request: Request):
             c,
             "INSERT INTO lead.conversion_events(tenant_id,agent_id,connection_id,visit_session_id,source_event_id,type,trust_level,rule_version,occurred_at,payload_sha256) VALUES(%s,%s,%s,%s,%s,%s,'server_verified','server-attributed-v1',%s,%s) ON CONFLICT(tenant_id,connection_id,source_event_id) DO NOTHING RETURNING id",
             (
-                TENANT,
+                current_tenant(),
                 aid,
                 body.connection_id,
                 visit["id"],

@@ -18,7 +18,8 @@
 | 真实社媒无人值守发布 | Telegram 自有广播频道已实现账号识别、目标授权、一次发布验证卡、提交与核对；实号验收待用户登录及授权。其余 10 渠道的网页发布、图片/视频路径已实现并通过本地 DOM 合约测试；全部平台实号验收仍未完成，详见 [渠道矩阵](docs/CHANNELS.md) |
 | 推广链接、网站埋点、点击与访问、服务端转化 | 已实现，服务端独立密钥与事件去重已测试；真实网站接入需公开 HTTPS 地址 |
 | 素材、实时通知和运营偏好调整 | 图片/视频真实解码、Agent 范围存储；SSE 自动刷新；对话修改/撤销偏好，取消旧方向的排队内容 |
-| 每个环境独立出口、泄漏检测与第三方设备判定 | 已实现同一受控转发层处理浏览器连接和 DNS、私网阻断、代理失败关闭、双公网出口探针。当前无独立代理，不显示验证通过；OS 强制出口与全面泄漏验收未完成 |
+| OIDC、成员权限、迁移、备份和监控 | 已实现并完成本地数据库/签名协议/恢复/故障测试；真实 OIDC、异地存储和正式节点仍待验收，见 [OPERATIONS.md](docs/OPERATIONS.md) |
+| 每个环境独立出口、泄漏检测与第三方设备判定 | 已实现同一受控转发层处理浏览器连接和 DNS、私网阻断、代理失败关闭、双公网出口探针。当前无独立代理，不显示验证通过；新增 Linux 网络命名空间启动边界，OS 通道与原生浏览器完整泄漏验收分别进行，尚未完成生产验收 |
 
 本地测试发布不会计入社媒发布数、访问人数或获客成果。界面没有预填演示流量。当前版本是可运行的工程基础，不能作为 11 个平台均已支持自主运营的商业版本交付。
 
@@ -32,9 +33,9 @@
 .venv/bin/python scripts/run.py stop
 ```
 
-本地管理器启动前端、API、任务 Worker、浏览器网关，并在子进程意外退出后重新启动。数据库与 Temporal 使用持久化 Docker 卷；关闭应用不会删除数据。电脑休眠/关机期间不执行任务，恢复并启动后由 Temporal 继续处理。
+本地管理器启动前端、API、任务 Worker、浏览器网关及独立备份监控，并在子进程意外退出后重新启动。数据库与 Temporal 使用持久化 Docker 卷；关闭应用不会删除数据。电脑休眠/关机期间不执行任务，恢复并启动后由 Temporal 继续处理。
 
-进程状态和诊断在 `.state/`，默认只监听本机环回地址。当前采用本地所有者模式，尚无公网多人登录体系。不要将此开发配置直接改为监听公网地址。
+进程状态和诊断在 `.state/`，默认只监听本机环回地址。默认采用本地所有者模式；已实现 OIDC、工作室隔离和成员权限，尚未配置外部身份服务。维护者配置见 [运维、权限与恢复](docs/OPERATIONS.md)。不要将开发配置直接改为监听公网地址。
 
 ## DeepSeek
 
@@ -66,7 +67,7 @@ LEAD_PROXY_<去掉横线并大写的AGENT_ID>=http://user:password@proxy.example
 
 高级设置「检查环境」通过实际浏览器访问 ipify 和 Cloudflare，记录设备采样和两个出口结果。还需设置 `LEAD_EXPECTED_IP_<AGENT_ID>=固定公网IP`，两次观测一致且匹配固定值、配置了上游代理、WebRTC 禁用，才能通过固定出口检查；数据库拒绝把同一已验证出口绑定到多个 Agent。结果有效 15 分钟。此检查不代表第三方一定无法关联身份，也不代替 OS 防火墙及 DNS/WebSocket/地区一致性等完整检测。
 
-默认本地所有者模式允许对自有 Telegram 频道完成显式验证；不会显示为独立出口已经通过。`LEAD_DEPLOYMENT_MODE=production` 时，十一个平台每次新提交前会重新测量出口并核对身份，失败停止提交。完整生产安全与部署验收仍未完成。
+默认本地所有者模式允许对自有 Telegram 频道完成显式验证；不会显示为独立出口已经通过。`LEAD_DEPLOYMENT_MODE=production` 时，十一个平台每次新提交前会重新测量出口并核对身份，失败停止提交。新增正式 TLS 连接与服务模板；完整生产安全与部署验收仍未完成。
 
 浏览器远程接管的输入仅在有效接管期内开放，登录资料不进入 Agent 对话。验证码与平台身份验证由用户在浏览器中完成。
 
@@ -88,7 +89,7 @@ LEAD_PROXY_<去掉横线并大写的AGENT_ID>=http://user:password@proxy.example
 PYTHONPATH=services/api .venv/bin/python -m pytest tests/test_core.py -q
 
 # 需要本地 API 正在运行，使用真正的 Camoufox
-LEAD_BROWSER_TESTS=1 PYTHONPATH=services/api .venv/bin/python -m pytest tests -q
+LEAD_BROWSER_TESTS=1 LEAD_WORKFLOW_TESTS=1 PYTHONPATH=services/api .venv/bin/python -m pytest tests -q
 
 # 使用自己的 DeepSeek 密钥，产生少量真实模型调用
 .venv/bin/python scripts/test_model.py
@@ -102,7 +103,7 @@ npm run typecheck
 npm run build
 ```
 
-验收脚本的临时业务会自动归档。测试区分公网浏览实测、真实模型调度、本地发布站、十一平台 DOM 合约测试和真实 Telegram 频道实测，不互相替代。报告保存在 `.state/public-browser-verification.json`、`.state/runtime-verification.json`、`.state/environment-verification.json`、`.state/concurrency-verification.json`、`.state/test-results.xml`；截图和提交证据在 `.state/evidence/`。详细状态见 `docs/ACCEPTANCE.md`。
+验收脚本的临时业务会自动归档。测试区分公网浏览实测、真实模型调度、本地发布站、十一平台 DOM 合约测试和真实 Telegram 频道实测，不互相替代。报告保存在 `.state/public-browser-verification.json`、`.state/runtime-verification.json`、`.state/environment-verification.json`、`.state/concurrency-verification.json`、`.state/verification-tests.xml`；截图和提交证据在 `.state/evidence/`。详细状态见 `docs/ACCEPTANCE.md`。
 
 ## 工程结构与后续工作
 

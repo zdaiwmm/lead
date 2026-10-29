@@ -1,0 +1,32 @@
+[Unit]
+Description=lead %i
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=lead
+Group=lead
+WorkingDirectory=/srv/lead
+EnvironmentFile=/etc/lead/common.env
+EnvironmentFile=-/etc/lead/%i.env
+ExecStart=/srv/lead/.venv/bin/python /srv/lead/scripts/service.py %i
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/srv/lead/.state
+LimitNOFILE=8192
+TasksMax=512
+# Set MemoryMax/CPUQuota from measurements on the actual node.
+# User namespaces must remain available for the rootless browser network policy.
+
+[Install]
+WantedBy=multi-user.target

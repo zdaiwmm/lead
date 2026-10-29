@@ -1,9 +1,12 @@
 import asyncio
 import hashlib
 import html
+import re
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -20,41 +23,121 @@ from pydantic import BaseModel, Field
 
 from . import domain
 from .analytics import router as analytics_router
-from .config import STATE, TENANT, env, model_config
+from .auth import auth_mode, public_origin
+from .auth import router as auth_router
+from .config import STATE, env, model_config
 from .conversions import router as conversion_router
 from .db import all_rows, audit, one, record, require_agent, tx
 from .events import router as event_router
+from .ops import router as ops_router
+from .scope import current_tenant, tenant_scope
 from .security import internal_token, token, valid
+from .telemetry import TelemetryMiddleware, trace_headers
 from .upload_limit import UploadLimit
 
 app = FastAPI(title="lead", version="0.1.0", docs_url=None, redoc_url=None)
 app.add_middleware(UploadLimit)
 app.add_middleware(
-    TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"]
+    TrustedHostMiddleware,
+    allowed_hosts=[
+        "127.0.0.1",
+        "localhost",
+        *([] if env().get("LEAD_DEPLOYMENT_MODE") == "production" else ["testserver"]),
+        urlsplit(public_origin()).hostname,
+    ],
 )
 ORIGINS = {"http://localhost:3100", "http://127.0.0.1:3100", "http://127.0.0.1:8088"}
 app.include_router(analytics_router)
 
 app.include_router(event_router)
 app.include_router(conversion_router)
+app.include_router(auth_router)
+app.include_router(ops_router)
 
 
 @app.middleware("http")
 async def local_auth(request, call_next):
     path = request.url.path
+    identity = None
+    public_workspace = None
+    if env().get("LEAD_DEPLOYMENT_MODE") == "production" and auth_mode() != "oidc":
+        return JSONResponse({"detail": "生产服务需要启用工作室登录"}, status_code=503)
     if path.startswith("/api/"):
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             if (
-                request.headers.get("origin") not in ORIGINS
+                request.headers.get("origin")
+                not in (
+                    {public_origin()}
+                    if env().get("LEAD_DEPLOYMENT_MODE") == "production"
+                    else ORIGINS | {public_origin()}
+                )
                 or request.headers.get("x-lead-request") != "1"
             ):
                 return JSONResponse({"detail": "请求来源不可用"}, status_code=403)
-        if path != "/api/session" and not valid(
-            request.cookies.get("lead_session", ""), "owner"
-        ):
-            return JSONResponse({"detail": "请刷新页面重新连接"}, status_code=401)
-    response = await call_next(request)
+        public_auth = path in ("/api/session", "/api/auth/login", "/api/auth/callback")
+        if not public_auth:
+            if auth_mode() == "oidc":
+                from .identity_store import lookup_session
+
+                identity = await asyncio.to_thread(
+                    lookup_session, request.cookies.get("lead_session", "")
+                )
+            elif valid(request.cookies.get("lead_session", ""), "owner"):
+                identity = {
+                    "tenant_id": current_tenant(),
+                    "role": "owner",
+                    "subject": "local",
+                    "issuer": "local",
+                }
+            if not identity:
+                return JSONResponse(
+                    {"detail": "请登录工作室", "login_url": "/api/auth/login"},
+                    status_code=401,
+                )
+            expected = request.headers.get("x-lead-workspace")
+            if expected and expected != identity["tenant_id"]:
+                return JSONResponse(
+                    {
+                        "detail": "工作室已切换，请重新打开页面",
+                        "code": "workspace_changed",
+                    },
+                    status_code=409,
+                )
+            sensitive = path.endswith("/browser/screenshot")
+            viewer_exception = path in ("/api/auth/logout", "/api/workspace/switch")
+            if identity["role"] == "viewer" and (
+                (
+                    request.method not in ("GET", "HEAD", "OPTIONS")
+                    and not viewer_exception
+                )
+                or sensitive
+            ):
+                return JSONResponse({"detail": "当前成员仅有查看权限"}, status_code=403)
+    elif re.fullmatch(r"/r/[A-Za-z0-9_-]{16}", path) or re.fullmatch(
+        r"/collect/[0-9a-fA-F-]{36}", path
+    ):
+        from .identity_store import public_tenant
+
+        public_workspace = await asyncio.to_thread(
+            public_tenant,
+            "link" if path.startswith("/r/") else "analytics",
+            path.rsplit("/", 1)[-1],
+        )
+    elif path.startswith("/lab/"):
+        aid = path.split("/")[2]
+        if valid(request.cookies.get("lead_lab", ""), "lab:" + aid):
+            from .identity_store import agent_tenant
+
+            public_workspace = await asyncio.to_thread(agent_tenant, aid)
+    with ExitStack() as stack:
+        if identity:
+            stack.enter_context(tenant_scope(identity["tenant_id"], identity))
+        elif public_workspace:
+            stack.enter_context(tenant_scope(public_workspace))
+        response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
+    if identity:
+        response.headers["X-Lead-Workspace"] = identity["tenant_id"]
     response.headers["Referrer-Policy"] = "same-origin"
     response.headers["Cache-Control"] = (
         "no-store, no-transform" if path == "/api/events" else "no-store"
@@ -249,13 +332,20 @@ def respond_card(aid: UUID, card_id: UUID, body: CardResponse):
 
 
 async def gateway(path, method="POST", body=None, timeout=100):
+    matched = re.match(r"^/agents/([0-9a-fA-F-]{36})(?:/|$)", path)
+    if matched:
+        with tx(matched[1]) as c:
+            require_agent(c, matched[1])
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         try:
             r = await client.request(
                 method,
                 "http://127.0.0.1:8089" + path,
                 json=body,
-                headers={"Authorization": "Bearer " + internal_token()},
+                headers={
+                    "Authorization": "Bearer " + internal_token(),
+                    **trace_headers(),
+                },
             )
         except httpx.HTTPError:
             raise HTTPException(503, "浏览器服务暂不可用，请稍后重试") from None
@@ -268,7 +358,16 @@ async def gateway(path, method="POST", body=None, timeout=100):
 
 
 @app.post("/api/session")
-def session():
+def session(request: Request):
+    if auth_mode() == "oidc":
+        from .identity_store import lookup_session
+
+        who = lookup_session(request.cookies.get("lead_session", ""))
+        return {
+            "ok": bool(who),
+            "role": who["role"] if who else None,
+            "login_url": None if who else "/api/auth/login",
+        }
     r = JSONResponse({"ok": True})
     r.set_cookie(
         "lead_session", token("owner"), httponly=True, samesite="strict", max_age=86400
@@ -302,7 +401,7 @@ async def health():
         "model_configured": bool(model_config()["key"]),
         "model": model_config()["model"],
         "browser_capacity": int(env().get("LEAD_BROWSER_CONCURRENCY") or 3),
-        "mode": "local_owner",
+        "mode": auth_mode(),
     }
 
 
@@ -426,24 +525,29 @@ async def connect(aid: UUID, body: Connection):
         await gateway("/agents/" + aid + "/open", body={"platform": body.platform})
     ).json()
     with tx(aid) as c:
+        a = require_agent(c, aid, True)
+        if one(
+            c,
+            "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
+        ):
+            raise ValueError("此环境正在备份，请稍后重试")
         profile = one(c, "SELECT id FROM lead.browser_profiles")
         if body.platform != "lab" and not one(
             c, "SELECT id FROM lead.social_accounts WHERE platform=%s", (body.platform,)
         ):
             c.execute(
                 "INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,state) VALUES(%s,%s,%s,%s,'pending')",
-                (TENANT, aid, profile["id"], body.platform),
+                (current_tenant(), aid, profile["id"], body.platform),
             )
         c.execute(
             "UPDATE lead.takeover_sessions SET state='expired',ended_at=now() WHERE state IN ('requested','active','ending')"
         )
-        a = require_agent(c, aid)
         takeover_token = token("takeover:" + aid, 1800)
         takeover = one(
             c,
             "INSERT INTO lead.takeover_sessions(tenant_id,agent_id,browser_session_id,profile_id,token_hash,control_version,state,expires_at) VALUES(%s,%s,%s,%s,%s,%s,'active',now()+interval '30 minutes') RETURNING id",
             (
-                TENANT,
+                current_tenant(),
                 aid,
                 opened["session_id"],
                 profile["id"],
@@ -568,6 +672,9 @@ async def lab_submit(aid: str, request: Request):
         # The fixture independently deduplicates accepted submissions.
         c.execute(
             "INSERT INTO lead.lab_posts(tenant_id,agent_id,operation_key,body) VALUES(%s,%s,%s,%s) ON CONFLICT(agent_id,operation_key) DO NOTHING",
-            (TENANT, aid, key, body),
+            (current_tenant(), aid, key, body),
         )
     return RedirectResponse("/lab/" + aid + "/", status_code=303)
+
+
+app.add_middleware(TelemetryMiddleware, service="lead-api")

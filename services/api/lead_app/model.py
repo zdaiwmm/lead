@@ -11,6 +11,7 @@ from pydantic_ai.usage import UsageLimits
 from .budget import reserve, settle
 from .config import model_config
 from .db import uid
+from .telemetry import traced
 
 
 class ModelUnavailable(Exception):
@@ -97,6 +98,7 @@ business intent 只写用户提供或明确从产品网页提取的事实。禁�
 回复用普通文本，不需要 Markdown 标题。"""
 
 
+@traced("model.request")
 async def run_model(output, prompt, system=SYSTEM, agent_id=None, tools=()):
     config = model_config()
     if not config["key"]:

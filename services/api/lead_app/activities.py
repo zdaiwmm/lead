@@ -11,11 +11,13 @@ from temporalio import activity
 from .browser_tools import BrowserTools, website_for_message
 from .budget import BudgetExceeded
 from .channels import store_target
-from .config import TENANT, model_config
+from .config import model_config
 from .db import all_rows, append_message, emit, j, one, record, require_agent, tx
 from .domain import agent_detail, metrics, set_control
 from .model import ContentDecision, Decision, ModelUnavailable, run_model
+from .scope import current_tenant, scoped_activity
 from .security import internal_token
+from .telemetry import trace_headers
 
 
 async def browser_rpc(path, data=None):
@@ -23,7 +25,7 @@ async def browser_rpc(path, data=None):
         result = await client.post(
             "http://127.0.0.1:8089" + path,
             json=data or {},
-            headers={"Authorization": "Bearer " + internal_token()},
+            headers={"Authorization": "Bearer " + internal_token(), **trace_headers()},
         )
         result.raise_for_status()
         return result.json()
@@ -56,6 +58,7 @@ def direct_control(text, intent):
 
 
 @activity.defn
+@scoped_activity
 async def chat_job(args: dict):
     aid, job_id = args["agent_id"], args["job_id"]
     with tx(aid) as c:
@@ -232,7 +235,7 @@ async def chat_job(args: dict):
                 c.execute(
                     "INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,product_url,description,facts,source_refs) VALUES(%s,%s,%s,%s,%s,%s,%s)",
                     (
-                        TENANT,
+                        current_tenant(),
                         aid,
                         (old["revision"] + 1) if old else 1,
                         decision.product_url or (old["product_url"] if old else None),
@@ -407,7 +410,7 @@ def prepare_action(aid, task_id):
             c,
             "INSERT INTO lead.actions(tenant_id,agent_id,task_id,target_id,grant_id,content_id,operation_key,type,intent,expected_control_version,expected_config_revision) VALUES(%s,%s,%s,%s,%s,%s,%s,'publish',%s,%s,%s) RETURNING *",
             (
-                TENANT,
+                current_tenant(),
                 aid,
                 task_id,
                 target["id"],
@@ -460,6 +463,7 @@ def prepare_action(aid, task_id):
 
 
 @activity.defn
+@scoped_activity
 async def execute_task(args: dict):
     aid, task_id = args["agent_id"], args["task_id"]
     with tx(aid) as c:
@@ -594,6 +598,7 @@ async def execute_task(args: dict):
 
 
 @activity.defn
+@scoped_activity
 async def mark_task_failed(args: dict):
     aid, task_id = args["agent_id"], args["task_id"]
     with tx(aid) as c:
@@ -621,6 +626,7 @@ async def mark_task_failed(args: dict):
 
 
 @activity.defn
+@scoped_activity
 async def autonomous_cycle(args: dict):
     from .adapters.catalog import SPECS, validate
 
@@ -629,6 +635,11 @@ async def autonomous_cycle(args: dict):
         a = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
         if not a or a["desired_state"] == "archived":
             return {"delay": 86400, "idle": True, "archived": True}
+        if one(
+            c,
+            "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
+        ):
+            return {"delay": 300, "idle": True, "reason": "profile_snapshot"}
         if a["desired_state"] != "running":
             return {"delay": 86400, "idle": True}
         previous = one(c, "SELECT body FROM lead.plans WHERE cycle_key=%s", (cycle_id,))
@@ -849,7 +860,7 @@ async def autonomous_cycle(args: dict):
             c,
             "INSERT INTO lead.plans(tenant_id,agent_id,revision,agent_revision_id,business_profile_id,body,state,valid_until,cycle_key) SELECT %s,%s,coalesce(max(revision),0)+1,%s,%s,%s,'active',now()+interval '1 day',%s FROM lead.plans RETURNING id",
             (
-                TENANT,
+                current_tenant(),
                 aid,
                 revision["id"],
                 business["id"],
@@ -884,7 +895,7 @@ async def autonomous_cycle(args: dict):
             c,
             "INSERT INTO lead.content_items(tenant_id,agent_id,plan_id,target_id,revision,body,source_refs,validation_result,content_hash) VALUES(%s,%s,%s,%s,1,%s,%s,%s,%s) RETURNING id",
             (
-                TENANT,
+                current_tenant(),
                 aid,
                 plan["id"],
                 target["target_id"],
@@ -904,13 +915,21 @@ async def autonomous_cycle(args: dict):
             p = urlsplit(destination)
             c.execute(
                 "INSERT INTO lead.tracking_links(tenant_id,agent_id,platform,public_code,destination_url,allowed_host,content_id) VALUES(%s,%s,%s,%s,%s,%s,%s)",
-                (TENANT, aid, platform, marker, destination, p.hostname, item["id"]),
+                (
+                    current_tenant(),
+                    aid,
+                    platform,
+                    marker,
+                    destination,
+                    p.hostname,
+                    item["id"],
+                ),
             )
         task = one(
             c,
             "INSERT INTO lead.tasks(tenant_id,agent_id,plan_id,type,state,workflow_id,input,scheduled_at) VALUES(%s,%s,%s,%s,'queued',%s,%s,now()) RETURNING id",
             (
-                TENANT,
+                current_tenant(),
                 aid,
                 plan["id"],
                 platform + ".publish",
