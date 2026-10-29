@@ -18,11 +18,13 @@ export default function BrowserHistory({
     if (loaded) return;
     try {
       const values = await Promise.all(
-        Array.from(new Set(sources.map((s) => s.run_id))).map(async (id) => {
-          const r = await fetch(`/api/agents/${aid}/browser-runs/${id}`);
-          if (!r.ok) throw Error("浏览记录暂不可用");
-          return r.json();
-        }),
+        Array.from(new Set(sources.map((s) => s.run_id).filter(Boolean))).map(
+          async (id) => {
+            const r = await fetch(`/api/agents/${aid}/browser-runs/${id}`);
+            if (!r.ok) throw Error("浏览记录暂不可用");
+            return r.json();
+          },
+        ),
       );
       setRuns(values);
       setLoaded(true);
@@ -44,58 +46,60 @@ export default function BrowserHistory({
           </a>
         ))}
       </div>
-      <details
-        onToggle={(e) => {
-          if (e.currentTarget.open) load();
-        }}
-      >
-        <summary>
-          浏览记录
-          <ChevronRight size={12} />
-        </summary>
-        {error ? (
-          <p className="muted small">{error}</p>
-        ) : loaded ? (
-          <div className="browser-history">
-            <div className="browser-step-list">
-              {runs
-                .flatMap((r) => r.steps)
-                .map((s) => (
-                  <button
-                    key={s.id}
-                    onClick={() => setSelected(s)}
-                    className={selected?.id === s.id ? "chosen" : ""}
-                  >
-                    <span>
-                      {(
-                        {
-                          open: "打开网页",
-                          click: "点击",
-                          read: "阅读",
-                          scroll: "滚动",
-                          back: "返回",
-                          fill: "输入搜索",
-                          search_submit: "搜索",
-                        } as Row
-                      )[s.operation] || s.operation}
-                    </span>
-                    <strong>
-                      {s.page?.title || s.error_code || "操作未完成"}
-                    </strong>
-                  </button>
-                ))}
+      {sources.some((s) => s.run_id) && (
+        <details
+          onToggle={(e) => {
+            if (e.currentTarget.open) load();
+          }}
+        >
+          <summary>
+            浏览记录
+            <ChevronRight size={12} />
+          </summary>
+          {error ? (
+            <p className="muted small">{error}</p>
+          ) : loaded ? (
+            <div className="browser-history">
+              <div className="browser-step-list">
+                {runs
+                  .flatMap((r) => r.steps)
+                  .map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => setSelected(s)}
+                      className={selected?.id === s.id ? "chosen" : ""}
+                    >
+                      <span>
+                        {(
+                          {
+                            open: "打开网页",
+                            click: "点击",
+                            read: "阅读",
+                            scroll: "滚动",
+                            back: "返回",
+                            fill: "输入搜索",
+                            search_submit: "搜索",
+                          } as Row
+                        )[s.operation] || s.operation}
+                      </span>
+                      <strong>
+                        {s.page?.title || s.error_code || "操作未完成"}
+                      </strong>
+                    </button>
+                  ))}
+              </div>
+              {selected?.screenshot_url && (
+                <img
+                  src={selected.screenshot_url}
+                  alt={selected.page?.title || "浏览器实际页面"}
+                />
+              )}
             </div>
-            {selected?.screenshot_url && (
-              <img
-                src={selected.screenshot_url}
-                alt={selected.page?.title || "浏览器实际页面"}
-              />
-            )}
-          </div>
-        ) : (
-          <p className="muted small">正在读取…</p>
-        )}
-      </details>
+          ) : (
+            <p className="muted small">正在读取…</p>
+          )}
+        </details>
+      )}
     </div>
   );
 }

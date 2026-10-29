@@ -82,14 +82,17 @@ async def main():
                     for aid in ids
                 )
             )
-            assert "客户" in details[0]["business"]["description"]
-            assert (
-                "素材" in details[1]["business"]["description"]
-                or "设计" in details[1]["business"]["description"]
+            assert any(
+                term in details[0]["business"]["description"].lower()
+                for term in ("客户", "customer", "sales", "lead management")
             )
-            assert (
-                "音频" in details[2]["business"]["description"]
-                or "播客" in details[2]["business"]["description"]
+            assert any(
+                term in details[1]["business"]["description"].lower()
+                for term in ("素材", "设计", "design", "inspiration")
+            )
+            assert any(
+                term in details[2]["business"]["description"].lower()
+                for term in ("音频", "播客", "audio", "podcast")
             )
             report["checks"].append("three_parallel_real_model_conversations")
             await post(

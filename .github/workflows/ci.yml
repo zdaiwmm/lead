@@ -30,7 +30,7 @@ jobs:
       - run: .venv/bin/python scripts/check_repository.py
       - name: Database, media and authorization tests
         run: .venv/bin/pytest -q --junitxml=.state/ci-tests.xml
-      - if: always()
+      - if: always() && hashFiles('.state/infra.env') != ''
         run: docker compose --env-file .state/infra.env -f infra/compose.yaml down
   frontend:
     runs-on: ubuntu-24.04
