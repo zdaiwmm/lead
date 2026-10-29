@@ -240,6 +240,24 @@ def submit_message(aid, text, client_id, asset_ids=None):
                 "UPDATE lead.conversation_messages SET content=content || %s WHERE id=%s RETURNING *",
                 (j({"asset_ids": asset_ids}), msg["id"]),
             )
+            # Preserve the owner's actual words, never an invented visual caption.
+            if text.strip():
+                c.execute(
+                    "UPDATE lead.assets SET metadata=metadata || %s WHERE id=ANY(%s::uuid[])",
+                    (
+                        j(
+                            {
+                                "owner_context": {
+                                    "text": text[:6000],
+                                    "message_id": str(msg["id"]),
+                                    "source": "owner_message",
+                                }
+                            }
+                        ),
+                        asset_ids,
+                    ),
+                )
+                snapshot_preferences(c, aid)
         job = one(
             c,
             "INSERT INTO lead.chat_jobs(tenant_id,agent_id,message_id) VALUES(%s,%s,%s) RETURNING id",
@@ -304,6 +322,7 @@ def set_control(aid, action):
             "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending')"
         )
         if state == "archived":
+            c.execute("SELECT lead.release_proxy(%s)", (aid,))
             c.execute(
                 "UPDATE lead.social_accounts SET state='disconnected' WHERE state<>'disconnected'"
             )

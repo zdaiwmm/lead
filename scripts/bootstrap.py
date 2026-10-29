@@ -6,7 +6,7 @@ import secrets
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-state = ROOT / ".state"
+state = Path(os.environ.get("LEAD_STATE_DIR") or ROOT / ".state").resolve()
 state.mkdir(exist_ok=True, mode=0o700)
 config = state / "config.json"
 if not config.exists():

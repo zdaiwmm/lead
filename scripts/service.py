@@ -27,6 +27,10 @@ def preflight():
         raise ValueError("备份密钥需要独立托管")
     if os.geteuid() == 0:
         raise ValueError("正式服务需要独立的普通系统用户")
+    from lead_app.installation import storage_encryption
+
+    if storage_encryption() is not True:
+        raise ValueError("正式环境的活动登录资料需要位于已核验的加密卷")
 
 
 def main():

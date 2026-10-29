@@ -82,6 +82,12 @@ async def test_concurrent_profiles_restart_and_uncertain_submit(tmp_path, monkey
         ]
         actions = [prepare_action(aid, str(t["id"])) for aid, t in zip(ids, tasks)]
         actors = await asyncio.gather(*(g.get(aid) for aid in ids))
+        if os.environ.get("LEAD_NETWORK_NAMESPACE") == "1":
+            assert all(
+                a.forward_proxy.boundary
+                and a.forward_proxy.boundary["state"] == "verified"
+                for a in actors
+            )
         assert actors[0].context is not actors[1].context
         assert len(g.actors) == 3
         await asyncio.gather(

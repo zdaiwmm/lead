@@ -399,6 +399,8 @@ async def test_deepseek_wire_format(monkeypatch, agent):
                     "prompt_tokens": 10,
                     "completion_tokens": 10,
                     "total_tokens": 20,
+                    "prompt_cache_hit_tokens": 7,
+                    "prompt_cache_miss_tokens": 3,
                 },
             },
         )
@@ -430,6 +432,11 @@ async def test_deepseek_wire_format(monkeypatch, agent):
             assert one(
                 c, "SELECT reserved_units,spent_units FROM lead.budget_periods"
             ) == {"reserved_units": 0, "spent_units": 20}
+            details = one(c, "SELECT details FROM lead.usage_events")["details"]
+            assert (
+                details["cache_read_tokens"] == 7
+                and details["cache_breakdown_verified"]
+            )
 
 
 def test_analytics_attribution_is_separate_from_clicks(agent):

@@ -41,3 +41,44 @@ def test_tls_requires_paired_credentials_and_reads_certificates(tmp_path, monkey
     assert result["tls"].client_cert == cert.read_bytes()
     assert result["tls"].client_private_key == key.read_bytes()
     assert result["tls"].server_root_ca_cert == ca.read_bytes()
+
+
+def test_storage_encryption_requires_actual_device_evidence(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from lead_app import installation
+
+    monkeypatch.setattr(installation.platform, "system", lambda: "Linux")
+
+    def probe(args, **kwargs):
+        if args[0] == "findmnt":
+            value = {"filesystems": [{"source": "/dev/mapper/lead-private"}]}
+        else:
+            value = {
+                "blockdevices": [
+                    {
+                        "name": "lead-private",
+                        "type": "crypt",
+                        "children": [{"type": "part"}],
+                    }
+                ]
+            }
+        return SimpleNamespace(stdout=json.dumps(value))
+
+    monkeypatch.setattr(installation.subprocess, "run", probe)
+    assert installation.storage_encryption() is True
+    monkeypatch.setattr(
+        installation.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(
+            stdout='{"filesystems":[{"source":"overlay"}]}'
+        ),
+    )
+    assert installation.storage_encryption() is None
+    monkeypatch.setattr(
+        installation.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(stdout="not valid host evidence"),
+    )
+    assert installation.storage_encryption() is None

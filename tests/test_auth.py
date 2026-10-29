@@ -404,3 +404,16 @@ def test_public_attribution_uses_correct_workspace_without_owner_cookie(
     assert bob.get(f"/api/agents/{b}").json()["metrics"]["conversions"] == 1
     assert alice.get(f"/api/agents/{a}").json()["metrics"]["conversions"] is None
     assert public.get("/api/agents/" + b).status_code == 401
+
+
+def test_operator_owner_binding_requires_verified_active_session(provider):
+    from lead_app.installation import bind_owner
+
+    first = provider.login("binding-owner")
+    second = provider.login("binding-new-owner")
+    workspace = first.get("/api/auth/me").json()["tenant_id"]
+    with pytest.raises(ValueError, match="有效"):
+        bind_owner(workspace, provider.issuer, "unknown-person")
+    result = bind_owner(workspace, provider.issuer, "binding-new-owner")
+    assert result["owner_bound"]
+    assert any(w["id"] == workspace for w in second.get("/api/workspaces").json())

@@ -44,7 +44,11 @@ def read():
 
 def reclaim_profiles(report):
     """Only profiles created by this completed verification run are eligible."""
-    if report.get("state") != "passed":
+    if (
+        report.get("state")
+        not in ("passed", "stopped", "completed_not_accepted", "failed")
+        or report.get("real_social_verified") is not False
+    ):
         return 0
     count = 0
     with psycopg.connect(**database_kwargs(True)) as c:
@@ -106,12 +110,24 @@ def initialize(hours, interval):
         return
     FOLDER.mkdir(parents=True, exist_ok=True, mode=0o700)
     if old:
+        old["profiles_reclaimed"] = reclaim_profiles(old)
         atomic_json(FOLDER / (old["run_id"] + ".json"), old)
     identifier = str(uuid4())
     atomic_json(
         REPORT,
         {
             "run_id": identifier,
+            "workload_version": "mixed-v2",
+            "thresholds": __import__("soak_assessment").THRESHOLDS,
+            "browser_build": __import__(
+                "lead_app.config", fromlist=["BROWSER_BUILD"]
+            ).BROWSER_BUILD,
+            "hardware": {
+                "cpu_count": psutil.cpu_count(),
+                "ram_bytes": psutil.virtual_memory().total,
+                "platform": sys.platform,
+            },
+            "source_hash_start": __import__("soak_sampling").source_hash(),
             "tenant_id": str(uuid4()),
             "agent_ids": [],
             "state": "starting",
@@ -129,6 +145,11 @@ def initialize(hours, interval):
                 "task_deduplication",
                 "profile_reopen",
                 "resource_measurements",
+                "21_native_media_contracts",
+                "takeover_while_other_agents_run",
+                "controlled_response_wait",
+                "lost_ack_after_restart",
+                "isolated_database_transport_and_process_failure",
             ],
             "real_social_verified": False,
             "model_load_included": False,
@@ -156,6 +177,11 @@ async def run():
         report["state"] = "running"
         last = time.monotonic()
         next_round = last
+        sampling_stop = asyncio.Event()
+        sampling_file = FOLDER / (report["run_id"] + "-resources.jsonl")
+        from soak_sampling import sample, source_hash
+
+        sampler = asyncio.create_task(sample(report, sampling_stop, sampling_file))
         asset_ids = report.setdefault("asset_ids", {})
         try:
             with psycopg.connect(**database_kwargs(True)) as c:
@@ -202,6 +228,7 @@ async def run():
                         now = time.monotonic()
                         round_observed = 0
                         if now >= next_round:
+                            report["phase"] = "temporal"
                             started = now
                             number = report["rounds"] + 1
                             tasks = []
@@ -273,8 +300,13 @@ async def run():
                                     "/agents/" + report["agent_ids"][0] + "/close"
                                 )
                                 response.raise_for_status()
+                            report["phase"] = "native_media_and_takeover"
+                            from soak_mixed import run as mixed_run
+
+                            await mixed_run(client, report, number)
+                            report["phase"] = "idle"
                             duration = time.monotonic() - started
-                            assert duration <= 180, "round_deadline"
+                            assert duration <= 360, "round_deadline"
                             round_observed = duration
                             if number > 1 and (number - 1) % 12 == 0:
                                 report["profile_reopens"] = (
@@ -326,11 +358,34 @@ async def run():
                             )
                         except asyncio.TimeoutError:
                             pass
-                    report["state"] = "stopped" if stopping.is_set() else "passed"
+                    report["state"] = (
+                        "stopped" if stopping.is_set() else "completed_not_accepted"
+                    )
         except BaseException as error:
+            import traceback
+
+            (FOLDER / (report["run_id"] + "-error.txt")).write_text(
+                traceback.format_exc()
+            )
             report["state"] = "failed"
             report["error_type"] = type(error).__name__
         finally:
+            sampling_stop.set()
+            await sampler
+            report["source_hash_end"] = source_hash()
+            from soak_assessment import assess
+
+            samples = (
+                [json.loads(line) for line in sampling_file.read_text().splitlines()]
+                if sampling_file.exists()
+                else []
+            )
+            report["assessment"] = assess(report, samples)
+            if (
+                report["state"] == "completed_not_accepted"
+                and report["assessment"]["accepted"]
+            ):
+                report["state"] = "passed"
             with tenant_scope(report["tenant_id"], None), service_scope():
                 for aid in report["agent_ids"]:
                     try:
@@ -363,6 +418,8 @@ def main():
     if args.hours <= 0 or args.interval < 1:
         raise SystemExit("positive duration and interval required")
     if args.action == "run":
+        if read().get("workload_version") != "mixed-v2":
+            raise SystemExit("Legacy workload cannot be resumed as mixed-v2")
         asyncio.run(run())
     elif args.action == "status":
         report = read()

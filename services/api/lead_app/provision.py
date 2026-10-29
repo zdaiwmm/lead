@@ -109,9 +109,40 @@ def provision_security(conn):
         "REVOKE INSERT,UPDATE,DELETE ON lead.platform_capabilities FROM lead_runtime"
     )
     conn.execute("REVOKE UPDATE,DELETE ON lead.audit_events FROM lead_runtime")
+    conn.execute(
+        "REVOKE INSERT,UPDATE,DELETE ON lead.recovery_observations FROM lead_runtime"
+    )
     conn.execute("REVOKE DELETE ON ALL TABLES IN SCHEMA lead FROM lead_runtime")
     conn.execute(
         "REVOKE UPDATE ON lead.agent_revisions,lead.business_profiles,lead.content_items FROM lead_runtime"
+    )
+
+    # Managed endpoint credentials are readable only through the service resolver.
+    conn.execute(
+        "GRANT SELECT,INSERT,UPDATE ON lead.proxy_pool,lead.proxy_assignments TO lead_identity_owner"
+    )
+    conn.execute("GRANT UPDATE(id) ON lead.agents TO lead_identity_owner")
+    conn.execute("GRANT UPDATE ON lead.network_identities TO lead_identity_owner")
+    conn.execute("GRANT SELECT ON lead.network_identities TO lead_identity_owner")
+    if not conn.execute(
+        "SELECT 1 FROM pg_policies WHERE schemaname='lead' AND tablename='network_identities' AND policyname='identity_resolver'"
+    ).fetchone():
+        conn.execute(
+            "CREATE POLICY identity_resolver ON lead.network_identities TO lead_identity_owner USING(true) WITH CHECK(true)"
+        )
+    for function in ("claim_proxy(uuid)", "resolve_proxy(uuid)", "release_proxy(uuid)"):
+        conn.execute(
+            sql.SQL("ALTER FUNCTION lead." + function + " OWNER TO lead_identity_owner")
+        )
+        conn.execute(
+            sql.SQL("REVOKE EXECUTE ON FUNCTION lead." + function + " FROM PUBLIC")
+        )
+    conn.execute(
+        "GRANT EXECUTE ON FUNCTION lead.claim_proxy(uuid),lead.release_proxy(uuid) TO lead_runtime"
+    )
+    conn.execute("GRANT EXECUTE ON FUNCTION lead.resolve_proxy(uuid) TO lead_auth")
+    conn.execute(
+        "REVOKE ALL ON lead.proxy_pool,lead.proxy_assignments,lead.recovery_cases FROM lead_runtime,lead_auth"
     )
 
 

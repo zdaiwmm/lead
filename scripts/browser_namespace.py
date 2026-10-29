@@ -5,6 +5,9 @@ No network interfaces beyond loopback. The sole egress bridge connects to the
 profile-specific authenticated host proxy through one mounted Unix socket.
 """
 
+import hashlib
+import hmac
+import json
 import os
 import select
 import shutil
@@ -34,6 +37,34 @@ def relay(connection, path):
 
 
 def inside(binary, args):
+    nonce = os.environ.get("LEAD_BOUNDARY_NONCE")
+    if nonce:
+        blocked = False
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            try:
+                probe.sendto(b"lead-boundary-probe", ("8.8.8.8", 53))
+            except OSError:
+                blocked = True
+        proof = {
+            "netns": os.readlink("/proc/self/ns/net"),
+            "only_loopback": all(name == "lo" for _, name in socket.if_nameindex()),
+            "direct_udp_blocked": blocked,
+        }
+        if not proof["only_loopback"] or not blocked:
+            raise ValueError("Namespace has an unexpected direct route")
+        payload = json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()
+        signature = hmac.new(bytes.fromhex(nonce), payload, hashlib.sha256).hexdigest()
+        with socket.socket(socket.AF_UNIX) as channel:
+            channel.settimeout(10)
+            channel.connect("/lead/forward.sock")
+            channel.sendall(
+                (
+                    f"POST /__lead/attest HTTP/1.1\r\nContent-Length: {len(payload)}\r\nX-Lead-Proof: {signature}\r\n\r\n"
+                ).encode()
+                + payload
+            )
+            if b" 200 " not in channel.recv(512):
+                raise ValueError("Namespace verification rejected")
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", int(os.environ["LEAD_BROWSER_PROXY_PORT"])))
     listener.listen(64)

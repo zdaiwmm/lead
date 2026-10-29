@@ -54,7 +54,11 @@ async def check(actor):
             "probes": {},
             "device": None,
             "errors": [],
-            "os_egress_enforced": False,
+            "os_egress_enforced": bool(
+                actor.forward_proxy.boundary
+                and actor.forward_proxy.boundary.get("state") == "verified"
+            ),
+            "os_boundary": actor.forward_proxy.boundary or {"state": "not_enforced"},
         }
         sample = await actor.context.new_page()
         try:
@@ -100,8 +104,62 @@ async def check(actor):
             expected and len(ips) == 1 and expected in ips
         )
         result["probe_agreement"] = len(result["probes"]) == 2 and len(ips) == 1
+        from .managed_network import policy
+
+        network_policy = policy(aid) or {}
+        wanted_region = network_policy.get("region") or network.get("expected_region")
+        wanted_timezone = network_policy.get("timezone")
+        wanted_locale = network_policy.get("locale")
+        result["region_matches"] = bool(
+            wanted_region
+            and result["probes"].get("cloudflare", {}).get("region") == wanted_region
+        )
+        device = result["device"] or {}
+        result["timezone_matches"] = bool(
+            wanted_timezone and device.get("timezone") == wanted_timezone
+        )
+        result["locale_matches"] = bool(
+            wanted_locale
+            and device.get("language", "").lower() == wanted_locale.lower()
+        )
+        baseline_path = STATE / "profiles" / aid / "observed-device.json"
+        stable = {
+            k: device.get(k)
+            for k in (
+                "ua",
+                "platform",
+                "timezone",
+                "language",
+                "screen",
+                "hardwareConcurrency",
+                "canvasPixels",
+                "audioHash",
+                "webglVendor",
+                "webglRenderer",
+            )
+        }
+        if baseline_path.exists():
+            baseline = json.loads(baseline_path.read_text())
+            changed = [k for k, v in baseline.items() if stable.get(k) != v]
+        else:
+            changed = []
+            if device and not device.get("error"):
+                from .ops import atomic_json
+
+                atomic_json(baseline_path, stable)
+        result["device_drift"] = changed
+        production = env().get("LEAD_DEPLOYMENT_MODE") == "production"
+        result["production_policy_complete"] = bool(
+            result["os_egress_enforced"]
+            and result["region_matches"]
+            and result["timezone_matches"]
+            and result["locale_matches"]
+            and not changed
+        )
         passed = bool(
-            result["fixed_proxy"]
+            not changed
+            and (not production or result["production_policy_complete"])
+            and result["fixed_proxy"]
             and result["expected_ip_matches"]
             and result["probe_agreement"]
             and result["device"]

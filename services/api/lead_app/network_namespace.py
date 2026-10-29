@@ -34,6 +34,7 @@ def apply(options, aid, proxy):
         "executable_path": str(wrapper),
         "env": {
             **options["env"],
+            "LEAD_BOUNDARY_NONCE": proxy.boundary_nonce,
             "LEAD_REAL_BROWSER": str(Path(options["executable_path"]).resolve()),
             "LEAD_BROWSER_PROFILE": str(STATE / "profiles" / aid / "storage"),
             "LEAD_BROWSER_ASSETS": str(STATE / "assets" / aid),

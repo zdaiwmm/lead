@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from .config import env
-from .db import one, tx
+from .db import j, one, tx
 from .scope import current_tenant
 
 
@@ -47,7 +47,7 @@ def reserve(aid, operation_key, estimate):
         return str(reservation["id"])
 
 
-def settle(aid, reservation_id, actual=None, known_unbilled=False):
+def settle(aid, reservation_id, actual=None, known_unbilled=False, details=None):
     with tx(aid) as c:
         r = one(
             c,
@@ -72,9 +72,20 @@ def settle(aid, reservation_id, actual=None, known_unbilled=False):
             (r["units"], actual or 0, r["period_id"]),
         )
         if actual is not None:
+            from .metering import priced
+
+            measured = priced(details or {})
             c.execute(
-                "INSERT INTO lead.usage_events(tenant_id,agent_id,reservation_id,event_key,category,units,rate_version,occurred_at) VALUES(%s,%s,%s,%s,'model_tokens',%s,'provider_usage_v1',now()) ON CONFLICT DO NOTHING",
-                (current_tenant(), aid, reservation_id, reservation_id, actual),
+                "INSERT INTO lead.usage_events(tenant_id,agent_id,reservation_id,event_key,category,units,rate_version,occurred_at,details) VALUES(%s,%s,%s,%s,'model_tokens',%s,%s,now(),%s) ON CONFLICT DO NOTHING",
+                (
+                    current_tenant(),
+                    aid,
+                    reservation_id,
+                    reservation_id,
+                    actual,
+                    measured.get("rate_version") or "unpriced",
+                    j(measured),
+                ),
             )
         if period["spent_units"] > period["limit_units"]:
             c.execute(

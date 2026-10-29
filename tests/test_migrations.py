@@ -37,7 +37,7 @@ def test_fresh_upgrade_and_repeat_keep_data_and_runtime_permissions(isolated_dat
     with psycopg.connect(**isolated_database) as c:
         assert (
             c.execute("SELECT version_num FROM lead_migration_version").fetchone()[0]
-            == "0007_operations"
+            == "0010_browser_metering"
         )
         c.execute(
             "UPDATE lead.tenants SET name='migration-preserved' WHERE id=%s", (TENANT,)

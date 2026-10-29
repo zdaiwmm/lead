@@ -189,6 +189,27 @@ def list_assets(aid: UUID):
     return listing(str(aid))
 
 
+@app.get("/api/agents/{aid}/usage")
+def agent_usage(aid: UUID):
+    from .metering import summary
+
+    return summary(str(aid))
+
+
+@app.get("/api/agents/{aid}/export")
+def export_agent(aid: UUID):
+    from .lifecycle import export_archive
+
+    return Response(
+        export_archive(str(aid)),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="lead-{aid}.zip"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @app.get("/api/agents/{aid}/assets/{asset_id}")
 def get_asset(aid: UUID, asset_id: UUID):
     from .assets import resolve
@@ -513,7 +534,17 @@ def platforms():
                 and c["permission_state"] == "approved"
                 for c in caps
             ),
-            "status": "待实号验证",
+            "status": "暂不开放"
+            if any(
+                c["platform"] == p[0] and c["permission_state"] == "restricted"
+                for c in caps
+            )
+            else "待实号验证"
+            if any(
+                c["platform"] == p[0] and c["permission_state"] == "approved"
+                for c in caps
+            )
+            else "待确认适用权限",
         }
         for p in domain.PLATFORMS
     ]

@@ -7,7 +7,7 @@ from dotenv import dotenv_values
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 
 ROOT = Path(__file__).resolve().parents[3]
-STATE = ROOT / ".state"
+STATE = Path(os.environ.get("LEAD_STATE_DIR") or ROOT / ".state").resolve()
 CONFIG = json.loads((STATE / "config.json").read_text())
 TENANT = str(__import__("uuid").UUID(CONFIG["owner_id"]))
 BROWSER_BUILD = "official/156.0.1-beta.36"
@@ -57,7 +57,9 @@ def database_kwargs(owner=False, auth=False):
 def proxy_for(agent_id):
     value = env().get("LEAD_PROXY_" + str(agent_id).replace("-", "").upper())
     if not value:
-        return None
+        from .managed_network import resolve
+
+        return resolve(str(agent_id))
     from urllib.parse import unquote, urlsplit
 
     parsed = urlsplit(value)

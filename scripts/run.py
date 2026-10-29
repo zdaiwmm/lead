@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STATE = ROOT / ".state"
+STATE = Path(os.environ.get("LEAD_STATE_DIR") or ROOT / ".state").resolve()
 PYTHON = ROOT / ".venv/bin/python"
 PID = STATE / "supervisor.pid"
 
@@ -174,7 +174,7 @@ def start():
             "docker",
             "compose",
             "--env-file",
-            ".state/infra.env",
+            str(STATE / "infra.env"),
             "-f",
             "infra/compose.yaml",
             "up",

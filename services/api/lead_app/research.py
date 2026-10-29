@@ -342,7 +342,12 @@ class ResearchPage:
 
 def begin_run(aid, goal, message_id=None, task_id=None, mode="research"):
     with tx(aid) as c:
-        a = require_agent(c, aid)
+        a = require_agent(c, aid, True)
+        if one(
+            c,
+            "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
+        ):
+            raise ResearchStopped("环境正在备份，浏览任务稍后重试")
         rid = uid()
         c.execute(
             "INSERT INTO lead.browser_runs(id,tenant_id,agent_id,message_id,task_id,goal,mode,control_version,config_revision) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",

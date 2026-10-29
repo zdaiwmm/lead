@@ -257,10 +257,14 @@ def claim_profile_backup(aid, allow_running=False):
             "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('active','requested','ending') AND expires_at>now()",
         ):
             raise ValueError("环境仍在工作或接管中，未开始备份")
-        if one(
-            c,
-            "SELECT 1 FROM lead.tasks WHERE state IN ('running','queued','reconciling')",
-        ) or one(c, "SELECT 1 FROM lead.chat_jobs WHERE status='processing'"):
+        if (
+            one(
+                c,
+                "SELECT 1 FROM lead.tasks WHERE state IN ('running','queued','reconciling')",
+            )
+            or one(c, "SELECT 1 FROM lead.chat_jobs WHERE status='processing'")
+            or one(c, "SELECT 1 FROM lead.browser_runs WHERE state='running'")
+        ):
             raise ValueError("环境尚未到达可备份的安全点")
         c.execute(
             "UPDATE lead.profile_maintenance SET state='complete' WHERE state='active' AND expires_at<=now()"
@@ -448,6 +452,11 @@ def restore_database(source, key, name):
                     "UPDATE lead.oauth_transactions SET used_at=now() WHERE used_at IS NULL"
                 )
                 c.commit()
+                # Upgrade the fenced copy before granting the current runtime.
+                # This never seeds business state or touches the source ledger.
+                from .migrations import upgrade
+
+                upgrade({**kwargs, "dbname": name}, roles=False)
                 from .provision import provision_security
 
                 provision_security(c)

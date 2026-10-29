@@ -278,3 +278,25 @@ def test_database_and_file_list_share_one_snapshot(tmp_path, monkeypatch):
                     "DELETE FROM lead.backup_records WHERE id=ANY(%s::uuid[])",
                     ([record["id"], record["files_snapshot_id"]],),
                 )
+
+
+def test_active_research_defers_backup_without_fencing_it(monkeypatch):
+    from lead_app.research import ResearchStopped, begin_run, finish_run
+
+    monkeypatch.setattr(domain, "emit", lambda *a, **k: None)
+    aid = domain.create_agent()
+    rid = begin_run(aid, "active public research")
+    with tx(aid) as c:
+        version = one(c, "SELECT control_version FROM lead.agents")["control_version"]
+    with pytest.raises(ValueError, match="安全点"):
+        backups.claim_profile_backup(aid, allow_running=True)
+    with tx(aid) as c:
+        assert (
+            one(c, "SELECT control_version FROM lead.agents")["control_version"]
+            == version
+        )
+    finish_run(aid, rid)
+    guard = backups.claim_profile_backup(aid, allow_running=True)
+    assert guard
+    with pytest.raises(ResearchStopped, match="正在备份"):
+        begin_run(aid, "must wait for backup")

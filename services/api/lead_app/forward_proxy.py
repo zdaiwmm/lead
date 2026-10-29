@@ -9,7 +9,9 @@ import base64
 import hashlib
 import hmac
 import ipaddress
+import json
 import os
+import socket
 import ssl
 import time
 from urllib.parse import quote, urlsplit
@@ -27,6 +29,8 @@ class BrowserForwardProxy:
         self.unix_server = None
         self.socket_path = STATE / "sockets" / (aid + ".sock")
         self.port = None
+        self.boundary_nonce = os.urandom(32).hex()
+        self.boundary = None
         self.password = hmac.new(
             CONFIG["session_secret"].encode(),
             ("forward:" + aid).encode(),
@@ -258,6 +262,35 @@ class BrowserForwardProxy:
                 if ":" in line
                 for k, v in [line.split(":", 1)]
             }
+            if method == "POST" and target == "/__lead/attest":
+                length = int(headers.get("content-length", "0"))
+                if (
+                    not 0 < length <= 4096
+                    or writer.get_extra_info("socket").family != socket.AF_UNIX
+                ):
+                    raise ValueError("Invalid attestation transport")
+                payload = await asyncio.wait_for(reader.readexactly(length), 5)
+                signature = hmac.new(
+                    bytes.fromhex(self.boundary_nonce), payload, hashlib.sha256
+                ).hexdigest()
+                if not hmac.compare_digest(headers.get("x-lead-proof", ""), signature):
+                    raise ValueError("Invalid namespace proof")
+                proof = json.loads(payload)
+                host = os.readlink("/proc/self/ns/net")
+                if (
+                    proof.get("netns") == host
+                    or not proof.get("only_loopback")
+                    or not proof.get("direct_udp_blocked")
+                ):
+                    raise ValueError("Namespace boundary incomplete")
+                self.boundary = {
+                    **proof,
+                    "state": "verified",
+                    "proof_digest": hashlib.sha256(payload).hexdigest(),
+                }
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                await writer.drain()
+                return
             if not hmac.compare_digest(
                 headers.get("proxy-authorization", ""), self.auth
             ):

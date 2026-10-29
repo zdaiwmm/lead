@@ -1,6 +1,7 @@
 """Test-only profile lifecycle; never garbage-collect user browser profiles."""
 
 import fcntl
+import os
 import shutil
 
 import pytest
@@ -10,7 +11,18 @@ from lead_app.db import one, tx
 
 
 @pytest.fixture(autouse=True)
-def reclaim_test_profiles(monkeypatch):
+def verification_scope():
+    from lead_app.scope import tenant_scope
+
+    if tenant := os.environ.get("LEAD_VERIFICATION_TENANT"):
+        with tenant_scope(tenant):
+            yield
+    else:
+        yield
+
+
+@pytest.fixture(autouse=True)
+def reclaim_test_profiles(monkeypatch, verification_scope):
     original = domain.create_agent
     created = set()
 

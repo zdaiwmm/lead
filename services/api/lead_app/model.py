@@ -18,6 +18,22 @@ class ModelUnavailable(Exception):
     pass
 
 
+class DeepSeekChatModel(OpenAIChatModel):
+    def _map_usage(self, response):
+        measured = super()._map_usage(response)
+        raw = response.usage
+        hit = getattr(raw, "prompt_cache_hit_tokens", None)
+        standard = getattr(
+            getattr(raw, "prompt_tokens_details", None), "cached_tokens", None
+        )
+        reported = hit if hit is not None else standard
+        valid = isinstance(reported, int) and 0 <= reported <= measured.input_tokens
+        if valid:
+            measured.cache_read_tokens = reported
+        measured.details["cache_breakdown_reported"] = int(valid)
+        return measured
+
+
 class Decision(BaseModel):
     reply: str = Field(max_length=6000)
     intent: Literal[
@@ -91,7 +107,7 @@ untrusted_cached_knowledge 是此前真实浏览保存的资料，有来源和�
 用户明确要求暂停/恢复/启动时才返回相应 intent；不要假称已执行，服务器会处理。
 资料不足先问产品或受众。只有尚无已连接账号或需要新增授权时才返回 connect，不要对已连接目标反复要求连接。不声称已连接、发布或带来访问。
 用户上传视频时，如果拟用平台需要 AI 生成声明且仍未知，每次只问一个必要问题。用户明确说素材是实拍或 AI 生成时，在 asset_annotations 中引用已有素材 ID 记录声明，不能从画面、网址或猜测推断。对于首次启用尚未验证的图片/视频格式，可返回 media_verification_target_id 与 media_verification_format；此举只创建验证卡，不发布。已验证的格式不应要求用户逐条审批。
-已经接入十一个平台的浏览器适配代码及图片/视频素材服务；这不等于当前账号已验证可发布。只有 server_context 的目标、权限与发布格式真实验证通过后，才能说该目标可自主执行。其余可讨论、起草并引导连接验证。正常运营无需逐条确认；登录、身份验证和扩大授权仍需用户处理。素材上下文只含类型、尺寸和时长，没有图像语义识别，不能声称看过图片或视频画面。
+已经接入十一个平台的浏览器适配代码及图片/视频素材服务；这不等于当前账号已验证可发布。只有 server_context 的目标、权限与发布格式真实验证通过后，才能说该目标可自主执行。其余可讨论、起草并引导连接验证。正常运营无需逐条确认；登录、身份验证和扩大授权仍需用户处理。素材元数据的 owner_context 是用户原话及其消息来源，只能作为用户描述，不能称为识别结果。没有图像语义识别，不能声称看过画面；需要画面细节时只问一个必要问题。
 所有运行状态和指标仅使用 server_context 提供的事实；没有数据就说明尚未接入。
 不要索取 API 密钥、账号密码、验证码到聊天中。账号授权只能通过浏览器连接入口完成。
 business intent 只写用户提供或明确从产品网页提取的事实。禁止编造客户、价格、效果和已完成任务。
@@ -104,7 +120,7 @@ async def run_model(output, prompt, system=SYSTEM, agent_id=None, tools=()):
     if not config["key"]:
         raise ModelUnavailable("model_not_configured")
     provider = OpenAIProvider(base_url=config["base_url"], api_key=config["key"])
-    model = OpenAIChatModel(config["model"], provider=provider)
+    model = DeepSeekChatModel(config["model"], provider=provider)
     agent = Agent(
         model,
         output_type=PromptedOutput(output),
@@ -131,7 +147,29 @@ async def run_model(output, prompt, system=SYSTEM, agent_id=None, tools=()):
             timeout=180,
         )
         if reservation:
-            settle(agent_id, reservation, actual=result.usage.total_tokens)
+            settle(
+                agent_id,
+                reservation,
+                actual=result.usage.total_tokens,
+                details={
+                    "model": config["model"],
+                    "cache_breakdown_verified": result.usage.details.get(
+                        "cache_breakdown_reported", 0
+                    )
+                    == result.usage.requests,
+                    **{
+                        name: getattr(result.usage, name, None)
+                        for name in (
+                            "input_tokens",
+                            "output_tokens",
+                            "cache_read_tokens",
+                            "cache_write_tokens",
+                            "requests",
+                            "unmeasured_requests",
+                        )
+                    },
+                },
+            )
         return result.output
     except Exception as e:
         if reservation:

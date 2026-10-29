@@ -71,3 +71,46 @@ async def test_actual_browser_never_falls_back_after_bound_proxy_failure(monkeyp
     finally:
         await gateway.close(aid)
         domain.set_control(aid, "archive")
+
+
+@pytest.mark.asyncio
+async def test_namespace_proof_requires_private_transport_and_matching_nonce():
+    import hashlib
+    import hmac
+    import json
+
+    proxy = await BrowserForwardProxy(uid()).start()
+    payload = json.dumps(
+        {
+            "netns": "fixture-namespace",
+            "only_loopback": True,
+            "direct_udp_blocked": True,
+        }
+    ).encode()
+    signature = hmac.new(
+        bytes.fromhex(proxy.boundary_nonce), payload, hashlib.sha256
+    ).hexdigest()
+    try:
+        # Even the correct nonce cannot attest through a browser-accessible TCP port.
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+        writer.write(
+            f"POST /__lead/attest HTTP/1.1\r\nContent-Length: {len(payload)}\r\nX-Lead-Proof: {signature}\r\n\r\n".encode()
+            + payload
+        )
+        await writer.drain()
+        assert not (await reader.read(1024)).startswith(b"HTTP/1.1 200")
+        writer.close()
+        await writer.wait_closed()
+        # A private connection with a forged signature also cannot set the status.
+        reader, writer = await asyncio.open_unix_connection(str(proxy.socket_path))
+        writer.write(
+            f"POST /__lead/attest HTTP/1.1\r\nContent-Length: {len(payload)}\r\nX-Lead-Proof: wrong\r\n\r\n".encode()
+            + payload
+        )
+        await writer.drain()
+        assert not (await reader.read(1024)).startswith(b"HTTP/1.1 200")
+        writer.close()
+        await writer.wait_closed()
+        assert proxy.boundary is None
+    finally:
+        await proxy.close()

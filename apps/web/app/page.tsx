@@ -22,6 +22,7 @@ import ChannelCards from "./channel-cards";
 import { MediaUpload, AssetPreview } from "./media-upload";
 import { api, setWorkspace, getWorkspace } from "./api-client";
 import WorkspaceSettings from "./workspace-settings";
+import UsagePanel from "./usage-panel";
 
 type Row = Record<string, any>;
 type View = "home" | "agent" | "settings";
@@ -183,6 +184,7 @@ export default function Lead() {
     }
   }
   async function create(initial?: string) {
+    setText("");
     createKey.current = createKey.current || crypto.randomUUID();
     const a = await api("/agents", { client_id: createKey.current });
     createKey.current = null;
@@ -200,7 +202,6 @@ export default function Lead() {
       });
       sendKey.current = null;
     }
-    setText("");
     setDetail(await api("/agents/" + a.id));
   }
   async function send() {
@@ -971,6 +972,7 @@ export default function Lead() {
                     <ChevronRight size={14} />
                   </summary>
                   <div className="advanced-content">
+                    <UsagePanel key={current} agent={current!} />
                     <div className="setting-row">
                       <span>浏览器</span>
                       <code>{detail.profile.provider}</code>

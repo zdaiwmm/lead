@@ -59,18 +59,21 @@ def process_usage():
             rss = 0
             cpu = 0.0
             live = 0
+            fds = 0
             for process in processes:
                 try:
                     rss += process.memory_info().rss
                     timing = process.cpu_times()
                     cpu += timing.user + timing.system
                     live += 1
+                    fds += process.num_fds()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
             result[name] = {
                 "rss_bytes": rss,
                 "cpu_seconds": round(cpu, 3),
                 "process_count": live,
+                "file_descriptors": fds,
             }
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             result[name] = {"unavailable": True}

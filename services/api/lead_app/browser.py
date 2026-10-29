@@ -52,6 +52,9 @@ class Actor:
         self.research_pages = {}
         self.forward_proxy = None
         self.disconnected = False
+        from .browser_metering import Counter
+
+        self.counter = Counter(STATE / "profiles" / aid / "storage")
 
     def browser_closed(self, *_):
         self.disconnected = True
@@ -98,6 +101,22 @@ class Actor:
         native_config = saved.get("config", {}) if saved.get("version") == 2 else {}
         digest = hashlib.sha256(identity.read_bytes()).hexdigest()
         proxy = proxy_for(self.aid)
+        from .managed_network import policy
+
+        network_policy = policy(self.aid) or {}
+        if network_policy.get("timezone"):
+            native_config = {**native_config, "timezone": network_policy["timezone"]}
+        digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "identity": digest,
+                    "timezone": network_policy.get("timezone"),
+                    "locale": network_policy.get("locale"),
+                    "build": BROWSER_BUILD,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
         self.forward_proxy = await BrowserForwardProxy(self.aid, proxy).start()
         launch_settings = dict(
             browser=BROWSER_BUILD,
@@ -106,7 +125,7 @@ class Actor:
             config=native_config,
             headless=True,
             window=(1280, 800),
-            locale="en-US",
+            locale=network_policy.get("locale") or "en-US",
             block_webrtc=True,
             env={
                 name: value
@@ -230,6 +249,7 @@ class Actor:
                 c.execute(
                     "UPDATE lead.actions SET state='unknown' WHERE state='dispatching'"
                 )
+            self.measure()
         except BaseException:
             await self.close()
             raise
@@ -259,7 +279,19 @@ class Actor:
             return await route.abort()
         await route.continue_()
 
+    def measure(self):
+        if self.session:
+            with tx(self.aid) as c:
+                c.execute(
+                    "UPDATE lead.browser_sessions SET usage=%s WHERE id=%s",
+                    (j(self.counter.sample(self.forward_proxy)), self.session),
+                )
+
     async def close(self):
+        try:
+            self.measure()
+        except Exception:
+            logging.warning("Browser final usage sample unavailable")
         if self.manager:
             try:
                 await self.manager.__aexit__(None, None, None)
@@ -290,9 +322,13 @@ class Actor:
         self.used = time.monotonic()
 
     def gate(self, c, action):
+        from .managed_network import policy
         from .resources import ensure_capacity
 
         ensure_capacity(64)
+        endpoint = policy(self.aid)
+        if endpoint and not endpoint["usable"]:
+            raise ValueError("此环境的出口已停用，已停止新的发布")
         recovery = one(c, "SELECT state FROM lead.recovery_control WHERE singleton")
         if not recovery or recovery["state"] != "normal":
             raise ValueError("恢复数据库尚待核对外部动作，已停止发布")
@@ -771,6 +807,7 @@ class Gateway:
                         if actor.disconnected and not actor.lock.locked():
                             await self.close(aid)
                         elif actor.lock.locked() or time.monotonic() - actor.used < 300:
+                            actor.measure()
                             with tx(aid) as c:
                                 c.execute(
                                     "UPDATE lead.profile_leases SET expires_at=now()+interval '90 seconds' WHERE epoch=%s AND state='held'",
