@@ -99,6 +99,10 @@ class SupervisorWorkflow:
                 start_to_close_timeout=timedelta(minutes=4),
                 retry_policy=RETRY,
             )
+            if workflow.patched("stop-archived-supervisor-v1") and result.get(
+                "archived"
+            ):
+                return
             try:
                 await workflow.wait_condition(
                     lambda: self.changed, timeout=timedelta(seconds=result["delay"])

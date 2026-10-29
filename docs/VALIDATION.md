@@ -1,5 +1,7 @@
 # 本地验收记录 · 2026-10-29
 
+最新完整本地回归 **65 项通过**；随后新增的归档排期退出测试与偏好/素材测试合计 **7 项通过**。真实 DeepSeek 三 Agent 并发与自主发布闭环再次通过（16.28 秒），并确认三个归档监督工作流均已结束。前端类型检查和生产构建通过。GitHub Linux 后端与前端检查已通过；macOS 专属依赖已增加平台条件。
+
 ## 自动验证的范围
 
 完整自动测试使用真实 PostgreSQL 和原生 Camoufox，覆盖：
@@ -20,6 +22,7 @@
 - `.state/runtime-verification.json`：三 Agent 并行模型对话、偏好保存与隔离、自主规划到真实浏览器本地发布、测试成果不计获客。
 - `.state/concurrency-verification.json`：三环境公网浏览时间区间实际重叠，单环境暂停不影响其他环境。
 - `.state/environment-verification.json`：真实浏览器两探针出口测量；没有固定独立代理的环境仍保持未验证。
+- `.state/events-verification.json`：真实前端代理上的 SSE 鉴权、即时传输和变化通知；已修复压缩缓冲造成的延迟。
 - `.state/test-results.xml`：最新完整自动测试结果；执行命令与前端构建方法见 README。
 
 运行报告、截图、账号资料及业务数据仅保存在本机 `.state/`，不上传公开仓库。

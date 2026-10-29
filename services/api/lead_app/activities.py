@@ -626,7 +626,9 @@ async def autonomous_cycle(args: dict):
 
     aid, cycle_id = args["agent_id"], args["cycle_id"]
     with tx(aid) as c:
-        a = require_agent(c, aid)
+        a = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
+        if not a or a["desired_state"] == "archived":
+            return {"delay": 86400, "idle": True, "archived": True}
         if a["desired_state"] != "running":
             return {"delay": 86400, "idle": True}
         previous = one(c, "SELECT body FROM lead.plans WHERE cycle_key=%s", (cycle_id,))

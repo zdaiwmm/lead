@@ -175,3 +175,23 @@ def test_low_disk_stops_new_writes_and_releases_reservations(monkeypatch):
         assert resources._reserved == 256 * 1024**2
         raise RuntimeError("aborted upload")
     assert resources._reserved == 0
+
+
+@pytest.mark.asyncio
+async def test_archived_agent_finishes_supervisor_without_model_work(
+    agent, monkeypatch
+):
+    from lead_app import workflows
+    from lead_app.activities import autonomous_cycle
+
+    domain.set_control(agent, "archive")
+    result = await autonomous_cycle({"agent_id": agent, "cycle_id": uid()})
+    assert result["archived"]
+    monkeypatch.setattr(workflows.workflow, "uuid4", uid)
+    monkeypatch.setattr(workflows.workflow, "patched", lambda name: True)
+
+    async def archived(*a, **k):
+        return result
+
+    monkeypatch.setattr(workflows.workflow, "execute_activity", archived)
+    assert await workflows.SupervisorWorkflow().run(agent) is None

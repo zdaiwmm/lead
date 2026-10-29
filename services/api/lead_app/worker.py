@@ -5,6 +5,7 @@ import time
 from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
 from .activities import autonomous_cycle, chat_job, execute_task, mark_task_failed
@@ -54,6 +55,14 @@ async def publish_outbox(client):
                         c, "SELECT desired_state FROM lead.agents WHERE id=%s", (aid,)
                     )
                 if not agent or agent["desired_state"] == "archived":
+                    if agent and e["event_type"] == "supervisor.wake":
+                        try:
+                            await client.get_workflow_handle(
+                                "supervisor:" + aid
+                            ).signal("wake")
+                        except RPCError as error:
+                            if error.status != RPCStatusCode.NOT_FOUND:
+                                raise
                     with tx(aid) as c:
                         c.execute(
                             "UPDATE lead.outbox_events SET published_at=now() WHERE id=%s",

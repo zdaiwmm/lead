@@ -29,7 +29,7 @@
 
 ## Agent 调度
 
-每个 Agent 有自己的长期 ChatWorkflow 和 SupervisorWorkflow。聊天按 Agent 串行处理，避免同一会话乱序；不同 Agent 的模型请求和任务并行。SupervisorWorkflow 使用持久化计时器安排下一轮，在启动、恢复或暂停时接收 wake 信号。历史达到阈值后 continue-as-new。
+每个 Agent 有自己的长期 ChatWorkflow 和 SupervisorWorkflow。聊天按 Agent 串行处理，避免同一会话乱序；不同 Agent 的模型请求和任务并行。SupervisorWorkflow 使用持久化计时器安排下一轮，在启动、恢复或暂停时接收 wake 信号。历史达到阈值后 continue-as-new。归档会通知已存在的 Supervisor，下一次活动返回归档状态并结束工作流；不会为归档业务重新创建监督排期。
 
 发布使用独立 PublishWorkflow，任务 UUID 是工作流标识，重复投递不会再次新建发布工作流。当前 Worker 有 12 个 Activity 并发位，浏览器网关另有限制，默认 3 个活动浏览器。
 

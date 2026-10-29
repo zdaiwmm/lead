@@ -11,7 +11,8 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "services/api"))
 import httpx
-from lead_app.config import STATE
+from lead_app.config import CONFIG, STATE
+from temporalio.client import Client, WorkflowExecutionStatus
 
 
 async def main():
@@ -150,16 +151,37 @@ async def main():
             report["checks"].append("test_activity_excluded_from_acquisition_metrics")
             report["ok"] = True
             report["elapsed_seconds"] = round(time.monotonic() - started, 2)
-            print(json.dumps(report, ensure_ascii=False), flush=True)
         finally:
             for aid in ids:
                 try:
                     await post("/agents/" + aid + "/control", {"action": "archive"})
                 except Exception:
                     pass
+            if report["ok"]:
+                temporal = await Client.connect(CONFIG["temporal_address"])
+                for _ in range(20):
+                    states = await asyncio.gather(
+                        *(
+                            temporal.get_workflow_handle("supervisor:" + aid).describe()
+                            for aid in ids
+                        )
+                    )
+                    if all(
+                        state.status == WorkflowExecutionStatus.COMPLETED
+                        for state in states
+                    ):
+                        report["checks"].append(
+                            "archived_supervisors_finish_without_further_work"
+                        )
+                        break
+                    await asyncio.sleep(0.5)
+                else:
+                    report["ok"] = False
             (STATE / "runtime-verification.json").write_text(
                 json.dumps(report, ensure_ascii=False, indent=2)
             )
+    assert report["ok"], report
+    print(json.dumps(report, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":
