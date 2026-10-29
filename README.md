@@ -107,6 +107,8 @@ npm run build
 
 ## 工程结构与后续工作
 
+剩余任务、优先级、依赖与交付标准见 [开发执行计划](docs/DEVELOPMENT_PLAN.md)。当前不是原方案全量交付状态。
+
 详细数据流、边界和发布前要求见 [ARCHITECTURE.md](docs/ARCHITECTURE.md)。前一阶段完整实施规划保留在[IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)，它描述目标架构，不代表本版本已全部实现。
 
 首次重建环境需 Python 3.12+、Node 20.9+、Docker，以及兼容主机的 Camoufox 浏览器。本机已验证 Python 3.14.2 / Node 24.20.0 / macOS ARM64。Python 版本锁定于 `requirements.lock.txt`，前端锁定于 `apps/web/package-lock.json`，基础服务使用镜像摘要固定。
