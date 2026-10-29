@@ -18,6 +18,7 @@ from lead_app.adapters import get_adapter
 from lead_app.browser import Gateway
 from lead_app.config import ROOT, STATE
 from lead_app.db import one, tx
+from lead_app.research import begin_run, finish_run
 from PIL import Image
 from starlette.datastructures import UploadFile
 
@@ -35,7 +36,27 @@ async def run(client, report, number):
     intervals = []
     counts = {}
     media = report.setdefault("mixed_assets", {})
+    active_runs = []
+    native_complete = False
     try:
+        for aid in ids:
+            for attempt in range(60):
+                try:
+                    active_runs.append(
+                        (
+                            aid,
+                            begin_run(
+                                aid,
+                                "Controlled native upload verification",
+                                mode="verification",
+                            ),
+                        )
+                    )
+                    break
+                except ValueError:
+                    if attempt == 59:
+                        raise
+                    await asyncio.sleep(1)
         with tempfile.TemporaryDirectory(prefix="lead-mixed-") as temporary:
             for aid in ids:
                 if aid not in media:
@@ -195,8 +216,11 @@ async def run(client, report, number):
         report["lost_ack_reconciliations"] = (
             report.get("lost_ack_reconciliations", 0) + 1
         )
+        native_complete = True
     finally:
         await asyncio.gather(*(gateway.close(aid) for aid in ids))
+        for aid, rid in active_runs:
+            finish_run(aid, rid, "succeeded" if native_complete else "failed")
     if number == 1 or number % 12 == 0:
         log = STATE / "endurance" / (report["run_id"] + "-faults.log")
         with log.open("a") as stream:
