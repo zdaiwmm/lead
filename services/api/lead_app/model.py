@@ -88,6 +88,7 @@ class ContentDecision(BaseModel):
     asset_ids: list[str] = Field(default_factory=list, max_length=10)
     rationale: str = Field(max_length=2000)
     next_delay_seconds: int = Field(default=14400, ge=3600, le=86400)
+    owner_question: str | None = Field(default=None, max_length=300)
 
 
 SYSTEM = """你是 lead 的 AI 社媒运营人员，直接与运营新手用中文沟通，简洁自然。

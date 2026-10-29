@@ -165,7 +165,7 @@ Linux 启动器经专属 Unix socket 提交带随机认证的网络命名空间�
 
 用量按调用保存输入/输出、DeepSeek 实际缓存命中、总 token、请求数；会话保存采样 CPU 下界、RSS 合计峰值、文件句柄和转发字节，不记录访问正文。历史未细分的会话保留未计量状态。私有 `STATE/operator-rates.json` 格式为 `version`、`effective_at`、`currency`、`models[MODEL]` 下的 `input_per_million`、`cached_input_per_million`、`output_per_million`。只有供应商确实报告缓存拆分、价格齐全时才按该版本计价；缺价格/未知用量不填零，不据此宣称免费额度已具有经济可持续性。
 
-用户通过高级入口导出业务、对话、偏好、发布记录和素材 ZIP；不导出浏览器 Cookie、凭据或代理身份。维护端同样可用 `scripts/lifecycle.py export --tenant UUID --agent UUID --output NEW_FILE.zip`。在线导出上限 256 MB，较大资料从维护端分批处理。
+用户通过高级入口导出业务、对话、偏好、发布记录和素材 ZIP；不导出浏览器 Cookie、凭据或代理身份。维护端同样可用 `scripts/lifecycle.py export --tenant UUID --agent UUID --output NEW_FILE.zip`。在线导出上限 256 MB，较大资料用维护端同一 export 命令加 `--part 1`、`--part 2` 等分卷；各卷的 lead.json 记录分卷序号、总数及完整素材清单，导出期间应避免继续修改素材。
 
 `purge-preview --tenant UUID --agent UUID` 仅预览。只有明确归属、已归档七天以上、无未核对外部提交且控制权已释放的数据，才可 `purge ... --confirm-agent SAME_UUID`；不遍历删除历史环境。检查点先于数据库提交落盘；文件清理中断后可 `finish-purge --tenant UUID --agent UUID`，它再次确认数据库删除已提交。既有加密备份按独立保留策略过期，当前数据清除不声称已立即抹除所有恢复点。本轮只用新建测试数据验证清除路径。
 
@@ -174,3 +174,5 @@ Linux 启动器经专属 Unix socket 提交带随机认证的网络命名空间�
 `soak.py start --hours 72 --interval 300` 使用新的 mixed-v2 起点，不承接旧部分负载时长。每轮实际运行三 Agent Temporal 文字任务、21 种原生上传、确认丢失后的重开核对、接管时 B/C 继续。首次和每十二轮另跑独立 TCP 数据库中断、原生浏览器崩溃、持久重试/历史重放测试，不停止用户数据库。受控响应等待用于隔离性验证；真实 DeepSeek 另由有调用上限的 `evaluate_agent.py`、`verify_runtime.py`、`verify_ui.py` 验证，不进行无界付费模型循环。
 
 5 秒采样资源与私有状态接口耗时，报告记录执行源码哈希、硬件、构建和事先固定的阈值。72 小时、至少十二轮、预热后足量样本、无观测缺口、资源增长与 API P95 均满足才标 passed。短跑输出 completed_not_accepted 是预期结果，不能当长期验收。主机睡眠、代码改动或缺场景时不会凑够时间自动通过；`status` 读取私有报告。暂停测试用 `stop`，它只归档和回收本次 Verification 工作室创建的确切环境，保留报告/账本/证据。
+
+维护唤醒与重启只重新核对持久计划，不跳过其下次工作时间。业务事实纠正与偏好变更一样会形成配置版本并使旧排队内容失效；缺少必要信息的等待计划将问题发到对话，未收到新信息时不重复追问。

@@ -188,3 +188,71 @@ async def test_large_export_has_explicit_scoped_parts(monkeypatch):
             assert manifest["export_part"] == part and manifest["export_parts"] == 3
     with pytest.raises(ValueError, match="不存在"):
         lifecycle.export_archive(aid, 4)
+
+
+@pytest.mark.asyncio
+async def test_maintenance_wake_respects_schedule_and_missing_facts_ask_once(
+    monkeypatch,
+):
+    from lead_app import activities
+    from lead_app.config import TENANT
+    from lead_app.model import ContentDecision
+
+    monkeypatch.setattr(domain, "emit", lambda *a, **k: None)
+    aid = domain.create_agent()
+    domain.connect_lab(aid)
+    with tx(aid) as c:
+        c.execute(
+            "INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,description) VALUES(%s,%s,1,'Known business')",
+            (TENANT, aid),
+        )
+        c.execute("UPDATE lead.agents SET desired_state='running' WHERE id=%s", (aid,))
+    calls = []
+
+    async def ask(*a, **k):
+        calls.append(1)
+        return ContentDecision(
+            action="wait",
+            rationale="Audience is required",
+            owner_question="主要面向哪类客户？",
+            next_delay_seconds=3600,
+        )
+
+    monkeypatch.setattr(activities, "run_model", ask)
+    await activities.autonomous_cycle({"agent_id": aid, "cycle_id": str(uuid4())})
+    again = await activities.autonomous_cycle(
+        {"agent_id": aid, "cycle_id": str(uuid4())}
+    )
+    assert again["reason"] == "awaiting_business_information" and len(calls) == 1
+    assert (
+        sum(
+            m["content"]["text"] == "主要面向哪类客户？"
+            for m in domain.agent_detail(aid)["messages"]
+        )
+        == 1
+    )
+    with tx(aid) as c:
+        c.execute(
+            "INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,description) VALUES(%s,%s,2,'Known product for publishers')",
+            (TENANT, aid),
+        )
+        domain.snapshot_preferences(c, aid)
+
+    async def review(*a, **k):
+        calls.append(1)
+        return ContentDecision(
+            action="review",
+            rationale="Review complete; observe results later",
+            next_delay_seconds=3600,
+        )
+
+    monkeypatch.setattr(activities, "run_model", review)
+    await activities.autonomous_cycle({"agent_id": aid, "cycle_id": str(uuid4())})
+    woke = await activities.autonomous_cycle(
+        {"agent_id": aid, "cycle_id": str(uuid4())}
+    )
+    assert (
+        woke["reason"] == "scheduled"
+        and 3500 < woke["delay"] <= 3600
+        and len(calls) == 2
+    )
