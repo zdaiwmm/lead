@@ -124,3 +124,67 @@ def test_export_and_explicit_purge_never_select_other_agents(monkeypatch):
         domain.agent_detail(other)["messages"][-1]["content"]["text"]
         == "must remain private"
     )
+
+
+@pytest.mark.asyncio
+async def test_platform_environment_wait_does_not_require_user_authorization(
+    monkeypatch,
+):
+    import httpx
+    from lead_app import activities
+
+    monkeypatch.setattr(domain, "emit", lambda *a, **k: None)
+    aid = domain.create_agent()
+    domain.connect_lab(aid)
+    task = domain.queue_lab_publish(
+        aid, "Infrastructure recovery fixture", str(uuid4())
+    )
+
+    async def unavailable(*a, **k):
+        request = httpx.Request("POST", "http://127.0.0.1:8089/fixture")
+        response = httpx.Response(
+            409, request=request, json={"code": "browser_busy", "detail": "出口维护中"}
+        )
+        response.raise_for_status()
+
+    monkeypatch.setattr(activities, "browser_rpc", unavailable)
+    with pytest.raises(RuntimeError, match="browser_not_dispatched"):
+        await activities.execute_task({"agent_id": aid, "task_id": str(task["id"])})
+    with tx(aid) as c:
+        assert one(c, "SELECT state FROM lead.tasks")["state"] == "running"
+        assert (
+            one(c, "SELECT health_state FROM lead.agents")["health_state"] == "queued"
+        )
+        assert one(c, "SELECT state FROM lead.actions")["state"] == "prepared"
+        assert one(c, "SELECT count(*) AS n FROM lead.lab_posts")["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_large_export_has_explicit_scoped_parts(monkeypatch):
+    import json
+    import zipfile
+
+    from lead_app import lifecycle
+
+    monkeypatch.setattr(domain, "emit", lambda *a, **k: None)
+    aid = domain.create_agent()
+    sizes = []
+    for color in ("red", "green", "blue"):
+        data = io.BytesIO()
+        Image.new("RGB", (32, 32), color).save(data, "PNG")
+        item = await assets.upload(
+            aid, UploadFile(file=io.BytesIO(data.getvalue()), filename=color + ".png")
+        )
+        sizes.append(item["size_bytes"])
+    monkeypatch.setattr(lifecycle, "MAX_EXPORT_BYTES", max(sizes))
+    with pytest.raises(ValueError, match="分批"):
+        lifecycle.export_archive(aid)
+    for part in (1, 2, 3):
+        with zipfile.ZipFile(
+            io.BytesIO(lifecycle.export_archive(aid, part))
+        ) as archive:
+            assert len(archive.namelist()) == 2
+            manifest = json.loads(archive.read("lead.json"))
+            assert manifest["export_part"] == part and manifest["export_parts"] == 3
+    with pytest.raises(ValueError, match="不存在"):
+        lifecycle.export_archive(aid, 4)

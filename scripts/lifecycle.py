@@ -19,12 +19,13 @@ def main():
     p.add_argument("--agent", required=True)
     p.add_argument("--output")
     p.add_argument("--confirm-agent")
+    p.add_argument("--part", type=int)
     a = p.parse_args()
     if a.action == "export":
         if not a.output:
             raise ValueError("需要指定新的导出文件")
         with tenant_scope(a.tenant):
-            data = lifecycle.export_archive(a.agent)
+            data = lifecycle.export_archive(a.agent, a.part)
         with Path(a.output).open("xb") as f:
             import os
 

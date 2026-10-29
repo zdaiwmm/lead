@@ -130,3 +130,47 @@ Temporal 支持 `LEAD_TEMPORAL_ADDRESS`、`LEAD_TEMPORAL_NAMESPACE`、`LEAD_TEMP
 参考：[bubblewrap 参数与边界](https://github.com/containers/bubblewrap/blob/main/bwrap.xml)、[Camoufox 原生启动配置](https://camoufox.com/python/usage/)。
 
 例行 Profile 维护返回可恢复的 `browser_busy`，不会转成每日需要用户核对的授权任务。发布 Activity 对临时故障持续退避重试，单次调度总窗口为 24 小时；无效内容、越权和缺失资源等确定性错误不按临时网络故障无限重试。进入提交后的恢复始终经过原动作账本核对。
+
+## 本轮本地收尾工具（2026-10-29）
+
+这些命令供维护者使用，不放进用户创建 Agent 的表单。先执行 `.venv/bin/python scripts/install.py check`；`schema-preview` 只报告数据库版本、浏览器构建分布、适配版本与回退要求，不修改数据。新增迁移截至 `0010_browser_metering`，恢复旧备份时会在隔离的新库中升级结构并重新收紧权限，不回滚在线账本。
+
+### 固定出口由平台分配
+
+用 `.venv/bin/python scripts/network.py add < .state/private-exit.json` 从权限为 0600 的私有文件导入。字段为 `label`、`url`、`expected_ip`，可附 `region`（两位国家代码）、`timezone`、`locale`、`expires`。必须是真实可核验的固定公网 IP；文档中的保留地址不能用于通过检测。凭据不放在命令参数、模型上下文或页面，数据库只存认证加密密文，密钥位于私有 `STATE/keys/network.key`。
+
+`list` 只输出维护元数据；`disable --id UUID`、`quarantine --id UUID` 停止新操作；`enable --id UUID` 恢复同一绑定。一个 Agent 仅有一个有效绑定，一个出口仅分给一个 Agent；容量不足自动等待，故障/到期不借用其他出口，也不静默换 IP。归档才释放分配。没有配置出口池的本地环境保留 shared_development，不能标独立出口通过。原逐 Agent 环境变量仅为兼容路径，新增配置用池。
+
+Linux 启动器经专属 Unix socket 提交带随机认证的网络命名空间实测证明；TCP 和伪造证明不能提升状态。身份检查核对双出口、国家、时区、语言、稳定设备观测及漂移。生产提交前重新检查；本机 Mac 未提供 Linux 系统边界。三组实际独立出口及完整泄漏矩阵仍需外部环境，不能以证明交换本身替代。
+
+### 恢复切换，原节点与恢复节点不能同时写
+
+先按已有备份命令恢复到新的 `lead_restore_*` 数据库，Profile 保持在 `restore-quarantine`。然后显式执行：
+
+```sh
+.venv/bin/python scripts/recovery.py prepare --target NEW_DATABASE --source OLD_DATABASE --node-root "$PWD/.state/recovered-nodes/NEW_NODE"
+.venv/bin/python scripts/recovery.py isolate-source --target NEW_DATABASE --case CASE_UUID
+.venv/bin/python scripts/recovery.py install-profile --target NEW_DATABASE --case CASE_UUID --quarantine PROFILE_QUARANTINE
+.venv/bin/python scripts/recovery.py review --target NEW_DATABASE --case CASE_UUID --target-id TARGET_UUID --note '实际外部动作窗口核对记录'
+.venv/bin/python scripts/recovery.py release --target NEW_DATABASE --case CASE_UUID
+```
+
+`isolate-source` 会隔离显式指定的源库并暂停其中的 Agent，因此只在真实切换时执行。不能联系并确认旧控制者已被数据库屏障隔离时，拒绝激活。每个恢复目标均须核对；Profile 不覆盖在线目录，构建/SDK/归属/文件哈希不匹配即停止。配对素材复制到新节点后重定位；恢复窗口的内容标识单独保留用于去重。
+
+释放后 Agent **保持暂停**，旧社媒授权和身份有效期失效；旧会话/租约关闭。使用新的 Temporal 命名空间，旧任务历史不重放到新账本。新节点私有 `launch.json` 只给出 `LEAD_STATE_DIR`、`LEAD_DB_NAME`、`LEAD_TEMPORAL_NAMESPACE`，仍需维护者停止旧服务、用这些环境启动新服务，再完成必要的新授权。回退不解除旧库屏障，不覆盖任何在线 Profile。实测使用的是新建测试库，未对用户业务库切换；异地完整规模 RPO/RTO 仍需目标环境演练。
+
+### 身份绑定、用量与数据生命周期
+
+启用真实 OIDC 后，先让将成为所有者的用户完成一次验证登录，再用 `scripts/install.py bind-owner --tenant UUID --issuer ISSUER --subject SUBJECT` 显式绑定。它只接受仍有效且成员未撤销的已验证身份，不把第一个登录者自动设为本地数据所有者。正式服务拒绝未经核验的活动 Profile 存储；当前检查支持 Linux 挂载链中实际的 dm-crypt 加密卷。云厂商透明卷加密等无法由此证明的方式保持未知，需补充对应主机集成，不能设置一个布尔值假装通过。
+
+用量按调用保存输入/输出、DeepSeek 实际缓存命中、总 token、请求数；会话保存采样 CPU 下界、RSS 合计峰值、文件句柄和转发字节，不记录访问正文。历史未细分的会话保留未计量状态。私有 `STATE/operator-rates.json` 格式为 `version`、`effective_at`、`currency`、`models[MODEL]` 下的 `input_per_million`、`cached_input_per_million`、`output_per_million`。只有供应商确实报告缓存拆分、价格齐全时才按该版本计价；缺价格/未知用量不填零，不据此宣称免费额度已具有经济可持续性。
+
+用户通过高级入口导出业务、对话、偏好、发布记录和素材 ZIP；不导出浏览器 Cookie、凭据或代理身份。维护端同样可用 `scripts/lifecycle.py export --tenant UUID --agent UUID --output NEW_FILE.zip`。在线导出上限 256 MB，较大资料从维护端分批处理。
+
+`purge-preview --tenant UUID --agent UUID` 仅预览。只有明确归属、已归档七天以上、无未核对外部提交且控制权已释放的数据，才可 `purge ... --confirm-agent SAME_UUID`；不遍历删除历史环境。检查点先于数据库提交落盘；文件清理中断后可 `finish-purge --tenant UUID --agent UUID`，它再次确认数据库删除已提交。既有加密备份按独立保留策略过期，当前数据清除不声称已立即抹除所有恢复点。本轮只用新建测试数据验证清除路径。
+
+### 完整混合运行器
+
+`soak.py start --hours 72 --interval 300` 使用新的 mixed-v2 起点，不承接旧部分负载时长。每轮实际运行三 Agent Temporal 文字任务、21 种原生上传、确认丢失后的重开核对、接管时 B/C 继续。首次和每十二轮另跑独立 TCP 数据库中断、原生浏览器崩溃、持久重试/历史重放测试，不停止用户数据库。受控响应等待用于隔离性验证；真实 DeepSeek 另由有调用上限的 `evaluate_agent.py`、`verify_runtime.py`、`verify_ui.py` 验证，不进行无界付费模型循环。
+
+5 秒采样资源与私有状态接口耗时，报告记录执行源码哈希、硬件、构建和事先固定的阈值。72 小时、至少十二轮、预热后足量样本、无观测缺口、资源增长与 API P95 均满足才标 passed。短跑输出 completed_not_accepted 是预期结果，不能当长期验收。主机睡眠、代码改动或缺场景时不会凑够时间自动通过；`status` 读取私有报告。暂停测试用 `stop`，它只归档和回收本次 Verification 工作室创建的确切环境，保留报告/账本/证据。

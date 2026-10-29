@@ -328,7 +328,7 @@ class Actor:
         ensure_capacity(64)
         endpoint = policy(self.aid)
         if endpoint and not endpoint["usable"]:
-            raise ValueError("此环境的出口已停用，已停止新的发布")
+            raise BrowserBusy("此环境的出口已停用，已停止新的发布")
         recovery = one(c, "SELECT state FROM lead.recovery_control WHERE singleton")
         if not recovery or recovery["state"] != "normal":
             raise ValueError("恢复数据库尚待核对外部动作，已停止发布")
@@ -974,7 +974,7 @@ async def publish_action(aid: UUID, body: PublishRequest):
 
         measured = await check(actor)
         if not measured["verified"]:
-            return {"state": "blocked", "reason": "固定独立出口核验未通过"}
+            raise BrowserBusy("运营环境核验未通过，平台会自动复查")
     if action["intent"].get("platform") == "telegram":
         if action["intent"].get("media"):
             from .social_publish import execute

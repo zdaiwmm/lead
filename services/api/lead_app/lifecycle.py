@@ -15,6 +15,8 @@ from .config import STATE, database_kwargs
 from .db import all_rows, require_agent, tx
 from .ops import atomic_json
 
+MAX_EXPORT_BYTES = 256 * 1024**2
+
 EXPORTS = {
     "agent": "SELECT id,name,desired_state,created_at FROM lead.agents WHERE id=%s",
     "business": "SELECT revision,product_url,description,facts FROM lead.business_profiles WHERE agent_id=%s ORDER BY revision",
@@ -32,24 +34,37 @@ def export(aid):
         data = {name: all_rows(c, query, (aid,)) for name, query in EXPORTS.items()}
         items = all_rows(
             c,
-            "SELECT id,media_type,size_bytes,sha256,metadata,rights FROM lead.assets WHERE state='ready'",
+            "SELECT id,media_type,size_bytes,sha256,metadata,rights FROM lead.assets WHERE state='ready' ORDER BY created_at,id",
         )
     # Credentials, browser cookies, private network data and host paths are omitted.
     return {"format": "lead-export-v1", "agent_id": aid, "data": data, "assets": items}
 
 
-def export_archive(aid):
+def export_archive(aid, part=None):
     from .assets import resolve
 
     payload = export(aid)
-    if sum(x["size_bytes"] for x in payload["assets"]) > 256 * 1024**2:
+    groups = [[]]
+    size = 0
+    for item in payload["assets"]:
+        if size + item["size_bytes"] > MAX_EXPORT_BYTES and groups[-1]:
+            groups.append([])
+            size = 0
+        groups[-1].append(item)
+        size += item["size_bytes"]
+    if part is None and len(groups) > 1:
         raise ValueError("素材较多，请使用维护端分批导出")
+    if part is not None and not 1 <= part <= len(groups):
+        raise ValueError("导出分卷不存在")
+    selected = groups[(part or 1) - 1]
+    payload["export_part"] = part or 1
+    payload["export_parts"] = len(groups)
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
             "lead.json", json.dumps(payload, ensure_ascii=False, default=str)
         )
-        for item in payload["assets"]:
+        for item in selected:
             _, path = resolve(aid, str(item["id"]), item["sha256"])
             archive.write(path, "assets/" + str(item["id"]) + path.suffix)
     return output.getvalue()

@@ -494,6 +494,7 @@ async def execute_task(args: dict):
         )
     except Exception as error:
         # RPC timeout can mean the submit succeeded. Never retry an uncertain click.
+        retry_prepared = False
         with tx(aid) as c:
             current = one(
                 c, "SELECT state FROM lead.actions WHERE id=%s", (action["id"],)
@@ -512,18 +513,29 @@ async def execute_task(args: dict):
                     and error.response.status_code == 409
                 ):
                     if error.response.json().get("code") == "browser_busy":
-                        raise RuntimeError("browser_not_dispatched") from None
-                    result = {
-                        "state": "blocked",
-                        "reason": error.response.json().get(
-                            "detail", "需要核对当前操作状态"
-                        ),
-                    }
+                        retry_prepared = True
+                    else:
+                        result = {
+                            "state": "blocked",
+                            "reason": error.response.json().get(
+                                "detail", "需要核对当前操作状态"
+                            ),
+                        }
                 else:
                     # Safe to retry: the gateway has not crossed the durable barrier.
-                    raise RuntimeError("browser_not_dispatched") from None
+                    retry_prepared = True
             else:
                 result = {"state": current["state"]}
+        if retry_prepared:
+            with tx(aid) as c:
+                changed = one(
+                    c,
+                    "UPDATE lead.agents SET health_state='queued',heartbeat_at=now() WHERE id=%s AND desired_state NOT IN ('paused','archived') AND health_state<>'queued' RETURNING id",
+                    (aid,),
+                )
+                if changed:
+                    record(c, aid, "等待运营环境恢复", "平台会自动重试。")
+            raise RuntimeError("browser_not_dispatched") from None
     with tx(aid) as c:
         previous = one(c, "SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE", (task_id,))
         if previous["state"] == "succeeded":

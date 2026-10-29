@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "services/api"))
@@ -13,12 +14,34 @@ from lead_app.config import BROWSER_BUILD, STATE
 from lead_app.ops import atomic_json
 
 
+@asynccontextmanager
+async def engine():
+    if os.environ.get("LEAD_UI_BROWSER") == "chrome":
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(channel="chrome", headless=True)
+            try:
+                yield browser
+            finally:
+                await browser.close()
+    else:
+        async with AsyncCamoufox(
+            browser=BROWSER_BUILD, headless=True, window=(1440, 1000)
+        ) as browser:
+            yield browser
+
+
 async def main():
-    report = {"ok": False, "checks": [], "browser_build": BROWSER_BUILD}
+    report = {
+        "ok": False,
+        "checks": [],
+        "browser_build": "installed-chrome"
+        if os.environ.get("LEAD_UI_BROWSER") == "chrome"
+        else BROWSER_BUILD,
+    }
     aid = None
-    async with AsyncCamoufox(
-        browser=BROWSER_BUILD, headless=True, window=(1440, 1000)
-    ) as browser:
+    async with engine() as browser:
         page = await browser.new_page(viewport={"width": 1440, "height": 1000})
         page.set_default_timeout(15000)
         page.set_default_navigation_timeout(20000)
