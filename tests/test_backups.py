@@ -88,7 +88,7 @@ def test_live_database_backup_restores_into_new_fenced_database(tmp_path, monkey
             result["external_writes"] == "blocked" and result["counts"]["actions"] >= 1
         )
         with psycopg.connect(
-            **{**database_kwargs(True), "dbname": name}, row_factory=dict_row
+            **{**database_kwargs(), "dbname": name}, row_factory=dict_row
         ) as c:
             c.execute(
                 "SELECT set_config('app.tenant_id',%s,true),set_config('app.agent_id',%s,true)",
@@ -98,6 +98,9 @@ def test_live_database_backup_restores_into_new_fenced_database(tmp_path, monkey
                 c, "SELECT intent,state FROM lead.actions WHERE id=%s", (action["id"],)
             )
             assert copy["intent"] == action["intent"] and copy["state"] == "prepared"
+            assert not c.execute(
+                "SELECT has_function_privilege(current_user,'lead.auth_enroll(text,text)','EXECUTE')"
+            ).fetchone()["has_function_privilege"]
             with pytest.raises(ValueError, match="恢复数据库"):
                 Actor(aid).gate(c, action)
         with pytest.raises(ValueError, match="已存在"):

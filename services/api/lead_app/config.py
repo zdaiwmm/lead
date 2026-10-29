@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[3]
 STATE = ROOT / ".state"
 CONFIG = json.loads((STATE / "config.json").read_text())
 TENANT = str(__import__("uuid").UUID(CONFIG["owner_id"]))
+BROWSER_BUILD = "official/156.0.1-beta.36"
+BROWSER_SDK = "0.5.8"
 
 
 def env():

@@ -5,7 +5,7 @@ from psycopg import sql
 from .config import CONFIG, TENANT
 
 
-def provision(conn):
+def provision_security(conn):
     if not conn.execute(
         "SELECT 1 FROM pg_roles WHERE rolname='lead_identity_owner'"
     ).fetchone():
@@ -60,6 +60,9 @@ def provision(conn):
     ]
     for function in functions:
         conn.execute(
+            sql.SQL("REVOKE EXECUTE ON FUNCTION lead." + function + " FROM PUBLIC")
+        )
+        conn.execute(
             sql.SQL("ALTER FUNCTION lead." + function + " OWNER TO lead_identity_owner")
         )
     if not conn.execute("SELECT 1 FROM pg_roles WHERE rolname='lead_auth'").fetchone():
@@ -87,7 +90,10 @@ def provision(conn):
     conn.execute("REVOKE ALL ON lead.schema_versions FROM lead_runtime")
     conn.execute("REVOKE ALL ON lead.ops_alerts FROM lead_runtime")
     conn.execute(
-        "GRANT EXECUTE ON FUNCTION lead.backup_ready(),lead.offsite_backup_ready() TO lead_runtime"
+        "REVOKE EXECUTE ON FUNCTION lead.backup_ready(),lead.offsite_backup_ready(),lead.confirm_channel_probe(uuid),lead.confirm_telegram_probe(uuid) FROM PUBLIC"
+    )
+    conn.execute(
+        "GRANT EXECUTE ON FUNCTION lead.backup_ready(),lead.offsite_backup_ready(),lead.confirm_channel_probe(uuid),lead.confirm_telegram_probe(uuid) TO lead_runtime"
     )
     conn.execute(
         "REVOKE ALL ON lead.auth_sessions,lead.oauth_transactions FROM lead_runtime"
@@ -107,6 +113,10 @@ def provision(conn):
     conn.execute(
         "REVOKE UPDATE ON lead.agent_revisions,lead.business_profiles,lead.content_items FROM lead_runtime"
     )
+
+
+def provision(conn):
+    provision_security(conn)
     conn.execute(
         "INSERT INTO lead.tenants(id,name) VALUES(%s,%s) ON CONFLICT DO NOTHING",
         (TENANT, "lead 本地工作区"),

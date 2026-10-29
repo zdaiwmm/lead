@@ -6,7 +6,7 @@
 
 `scripts/run.py start` 启动 Next.js、API、浏览器网关、Temporal Worker 和独立的维护进程。维护进程每 10 秒采样，每 10 分钟备份业务数据库与关联文件，每天尝试在浏览器安全关闭点备份 Profile。浏览器忙、用户正在接管或任务正在执行时延后备份。普通用户无需逐条审批或每日启动。
 
-只有一个浏览器网关控制本机 Profile。每个 Agent 独占一个原生进程与文件锁，各自串行，不同 Agent 并行。浏览器崩溃后，下次任务重建同一 Profile；数据库将未确认提交保留为待核对。Firefox 崩溃前尚未落盘的最新页面存储不能视为已持久保存；业务记录和动作账本写入 PostgreSQL。
+只有一个浏览器网关控制本机 Profile。每个 Agent 独占一个原生进程与文件锁，各自串行，不同 Agent 并行。浏览器固定使用已验证的 `official/156.0.1-beta.36` 构建，不跟随全局 active 变化。浏览器崩溃后，下次任务重建同一 Profile；数据库将未确认提交保留为待核对。Firefox 崩溃前尚未落盘的最新页面存储不能视为已持久保存；业务记录和动作账本写入 PostgreSQL。
 
 电脑关机或休眠期间不能执行任务。重启本地服务后 Temporal 恢复排期；长期无人值守应部署到持续在线节点。
 
@@ -74,7 +74,7 @@ Profile 备份先封住新的控制请求、提升控制版本、关闭原浏览
   --source /备份目录/PROFILE_BACKUP_ID.leadbackup --key-file /安全位置/lead-backup.key
 ```
 
-数据库包与配对文件包保存在同一目录。只允许新建 `lead_restore_*` 数据库，拒绝覆盖既有业务库。恢复后立即提交 `recovery_required` 保护，并撤销旧会话；后续文件恢复失败也不会撤销这层保护。文件安装不覆盖内容不同的已有文件。Profile 只进入恢复隔离目录，不替换在线环境，也不回滚动作账本。
+数据库包与配对文件包保存在同一目录。只允许新建 `lead_restore_*` 数据库，拒绝覆盖既有业务库。恢复后立即提交 `recovery_required` 保护，并撤销旧会话；重新登记运行角色、恢复身份函数的非登录所有者和最小调用权限，防止无 ACL 的导入扩大权限；后续文件恢复失败也不会撤销这层保护。文件安装不覆盖内容不同的已有文件。Profile 只进入恢复隔离目录，不替换在线环境，也不回滚动作账本。
 
 切换到恢复库之前，需确认旧写节点已经隔离，核对备份窗口内的真实账号内容、动作证据及未知提交；身份/登录状态和所有受影响目标复核后才能解封。当前没有一键解除恢复保护的入口，不能只恢复文件就自动继续发布。跨节点在线 Profile 安装、账本缺失窗口的自动核对仍待实现和真实账户验证。
 
@@ -128,3 +128,5 @@ Linux 构建时 CA 路径通常为 `/etc/ssl/certs/ca-certificates.crt`，macOS 
 Temporal 支持 `LEAD_TEMPORAL_ADDRESS`、`LEAD_TEMPORAL_NAMESPACE`、`LEAD_TEMPORAL_TLS=1` 与证书/私钥或 API key；正式模式拒绝明文连接。数据库需要 `LEAD_DB_SSLMODE=verify-full` 和可信 CA。正式入口还要求 OIDC、HTTPS、异地备份与独立密钥；未配置会拒绝启动。
 
 参考：[bubblewrap 参数与边界](https://github.com/containers/bubblewrap/blob/main/bwrap.xml)、[Camoufox 原生启动配置](https://camoufox.com/python/usage/)。
+
+例行 Profile 维护返回可恢复的 `browser_busy`，不会转成每日需要用户核对的授权任务。发布 Activity 对临时故障持续退避重试，单次调度总窗口为 24 小时；无效内容、越权和缺失资源等确定性错误不按临时网络故障无限重试。进入提交后的恢复始终经过原动作账本核对。

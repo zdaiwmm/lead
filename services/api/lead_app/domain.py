@@ -1,6 +1,6 @@
 import hashlib
 
-from .config import STATE, model_config
+from .config import BROWSER_BUILD, BROWSER_SDK, STATE, model_config
 from .db import (
     all_rows,
     append_message,
@@ -64,11 +64,13 @@ def create_agent(request_key=None):
             (nid, current_tenant(), aid),
         )
         c.execute(
-            "INSERT INTO lead.browser_profiles(id,tenant_id,agent_id,provider,engine_version,sdk_version,config_ref,config_hash,storage_ref,key_material_ref,network_identity_id) VALUES(%s,%s,%s,'camoufox','pinned-install','0.5.8',%s,%s,%s,'local-os-permissions',%s)",
+            "INSERT INTO lead.browser_profiles(id,tenant_id,agent_id,provider,engine_version,sdk_version,config_ref,config_hash,storage_ref,key_material_ref,network_identity_id) VALUES(%s,%s,%s,'camoufox',%s,%s,%s,%s,%s,'local-os-permissions',%s)",
             (
                 pid,
                 current_tenant(),
                 aid,
+                BROWSER_BUILD,
+                BROWSER_SDK,
                 str(STATE / "profiles" / aid / "identity.json"),
                 hashlib.sha256(aid.encode()).hexdigest(),
                 str(STATE / "profiles" / aid / "storage"),

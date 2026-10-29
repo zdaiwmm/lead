@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from .adapters.catalog import SPECS
-from .config import STATE, env, proxy_for
+from .config import BROWSER_BUILD, BROWSER_SDK, STATE, env, proxy_for
 from .db import j, one, require_agent, tx, uid
 from .domain import PLATFORMS
 from .forward_proxy import BrowserForwardProxy
@@ -100,6 +100,7 @@ class Actor:
         proxy = proxy_for(self.aid)
         self.forward_proxy = await BrowserForwardProxy(self.aid, proxy).start()
         launch_settings = dict(
+            browser=BROWSER_BUILD,
             user_data_dir=str(folder / "storage"),
             fingerprint=fingerprint,
             config=native_config,
@@ -214,8 +215,8 @@ class Actor:
                     ),
                 )
                 c.execute(
-                    "UPDATE lead.browser_profiles SET state='ready',config_hash=%s WHERE id=%s",
-                    (digest, profile["id"]),
+                    "UPDATE lead.browser_profiles SET state='ready',config_hash=%s,engine_version=%s,sdk_version=%s WHERE id=%s",
+                    (digest, BROWSER_BUILD, BROWSER_SDK, profile["id"]),
                 )
                 c.execute(
                     "UPDATE lead.network_identities SET mode=%s,state=%s WHERE id=%s",

@@ -448,6 +448,10 @@ def restore_database(source, key, name):
                     "UPDATE lead.oauth_transactions SET used_at=now() WHERE used_at IS NULL"
                 )
                 c.commit()
+                from .provision import provision_security
+
+                provision_security(c)
+                c.commit()
                 if files_manifest:
                     from .backup_files import install
 
