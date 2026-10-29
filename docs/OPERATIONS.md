@@ -97,14 +97,14 @@ API、工作流活动、模型请求及内部浏览器 RPC 使用 OpenTelemetry 
 一次性 OS 通道测试：
 
 ```sh
-docker build -f infra/namespace-test.Dockerfile -t lead-namespace-test:local .
+docker build --secret id=lead_ca,src=/etc/ssl/cert.pem -f infra/namespace-test.Dockerfile -t lead-namespace-test:local .
 docker run --rm --network none --cap-drop ALL \
   --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
   --security-opt systempaths=unconfined \
   lead-namespace-test:local
 ```
 
-这些选项只用于一次性测试容器内部创建嵌套命名空间；不修改宿主网络、不开启特权容器。测试包含三命名空间、UDP/DNS/IPv6/宿主环回直连、专属通道与文件边界；不包括 Linux 原生浏览器上传与真实代理故障的完整矩阵。实际浏览器节点还需完成端到端验收。当前本机 macOS 仍使用原生 Profile 及应用层受控代理。
+Linux 构建时 CA 路径通常为 `/etc/ssl/certs/ca-certificates.crt`，macOS 示例为 `/etc/ssl/cert.pem`；公开 CA 只通过构建 secret 临时提供，不写入镜像。这些选项只用于一次性测试容器内部创建嵌套命名空间；不修改宿主网络、不开启特权容器。测试包含三命名空间、UDP/DNS/IPv6/宿主环回直连、专属通道与文件边界；不包括 Linux 原生浏览器上传与真实代理故障的完整矩阵。实际浏览器节点还需完成端到端验收。当前本机 macOS 仍使用原生 Profile 及应用层受控代理。
 
 ## 长期验证
 

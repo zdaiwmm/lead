@@ -1,6 +1,7 @@
 """Stdlib-only OS-boundary probe, executed inside a disposable Linux container."""
 
 import json
+import os
 import socket
 import subprocess
 import tempfile
@@ -11,6 +12,8 @@ CLIENT = r"""
 import json, os, socket, sys
 from pathlib import Path
 port, token, index = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+assert os.read(3,64) == b"pipe-three"
+os.write(4,b"pipe-four")
 def blocked(family, kind, destination):
     try:
         with socket.socket(family, kind) as client:
@@ -25,6 +28,7 @@ with socket.create_connection(("127.0.0.1",port),timeout=2) as client:
 assert response == "profile:" + index
 results = {
     "proxy_bridge":True,
+    "control_pipes":True,
     "direct_https_blocked":blocked(socket.AF_INET,socket.SOCK_STREAM,("1.1.1.1",443)),
     "direct_dns_blocked":blocked(socket.AF_INET,socket.SOCK_DGRAM,("8.8.8.8",53)),
     "direct_ipv6_blocked":blocked(socket.AF_INET6,socket.SOCK_DGRAM,("2606:4700:4700::1111",53)),
@@ -84,27 +88,38 @@ def main():
                 "LEAD_BROWSER_SOCKET": str(uds),
                 "LEAD_BROWSER_PROXY_PORT": "31415",
             }
-            processes.append(
-                subprocess.Popen(
-                    [
-                        "/usr/bin/python3",
-                        "/opt/lead/browser_namespace.py",
-                        str(probe),
-                        "31415",
-                        token,
-                        str(index),
-                        str(host.getsockname()[1]),
-                        str(secret),
-                        str(assets / "write-test"),
-                    ],
-                    env=values,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
+            read_three, write_three = os.pipe()
+            read_four, write_four = os.pipe()
+            os.write(write_three, b"pipe-three")
+            os.close(write_three)
+            helper = "import os,sys;os.dup2(int(sys.argv[1]),3);os.dup2(int(sys.argv[2]),4);os.execv('/usr/bin/python3',['/usr/bin/python3',*sys.argv[3:]])"
+            process = subprocess.Popen(
+                [
+                    "/usr/bin/python3",
+                    "-c",
+                    helper,
+                    str(read_three),
+                    str(write_four),
+                    "/opt/lead/browser_namespace.py",
+                    str(probe),
+                    "31415",
+                    token,
+                    str(index),
+                    str(host.getsockname()[1]),
+                    str(secret),
+                    str(assets / "write-test"),
+                ],
+                env=values,
+                pass_fds=(read_three, write_four),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
             )
+            os.close(read_three)
+            os.close(write_four)
+            processes.append((process, read_four))
         reports = []
-        for process in processes:
+        for process, read_four in processes:
             output, errors = process.communicate(timeout=30)
             if process.returncode:
                 print(
@@ -117,6 +132,8 @@ def main():
                     )
                 )
                 return 1
+            assert os.read(read_four, 64) == b"pipe-four"
+            os.close(read_four)
             reports.append(json.loads(output))
         assert len({r["network_namespace"] for r in reports}) == 3
         print(

@@ -69,6 +69,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: docker build -f infra/namespace-test.Dockerfile -t lead-namespace-test:ci .
+      - run: docker build --secret id=lead_ca,src=/etc/ssl/certs/ca-certificates.crt -f infra/namespace-test.Dockerfile -t lead-namespace-test:ci .
       - name: Rootless isolated transport contract
         run: docker run --rm --network none --cap-drop ALL --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined lead-namespace-test:ci

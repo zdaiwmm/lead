@@ -335,7 +335,11 @@ async def gateway(path, method="POST", body=None, timeout=100):
     matched = re.match(r"^/agents/([0-9a-fA-F-]{36})(?:/|$)", path)
     if matched:
         with tx(matched[1]) as c:
-            require_agent(c, matched[1])
+            if path == "/agents/" + matched[1] + "/close":
+                if not one(c, "SELECT id FROM lead.agents WHERE id=%s", (matched[1],)):
+                    raise LookupError("Agent 不存在")
+            else:
+                require_agent(c, matched[1])
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         try:
             r = await client.request(

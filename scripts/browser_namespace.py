@@ -5,7 +5,6 @@ No network interfaces beyond loopback. The sole egress bridge connects to the
 profile-specific authenticated host proxy through one mounted Unix socket.
 """
 
-import fcntl
 import os
 import select
 import shutil
@@ -130,16 +129,8 @@ def command(binary, profile, assets, proxy_socket, args):
         "--chdir",
         str(profile),
     ]
-    # Node's Firefox transport uses FD 3/4. Never inherit unrelated descriptors.
-    highest = 2
-    for descriptor in (3, 4):
-        try:
-            if not fcntl.fcntl(descriptor, fcntl.F_GETFD) & fcntl.FD_CLOEXEC:
-                highest = descriptor
-        except OSError:
-            pass
-    if highest > 2:
-        result += ["--preserve-fds", str(highest - 2)]
+    # Bubblewrap forwards inherited descriptors to the executable. Its monitor
+    # and PID 1 close their copies, allowing native transport EOF to propagate.
     return result + [
         "--",
         "/usr/bin/python3",
@@ -161,6 +152,13 @@ def main():
         values["LEAD_BROWSER_SOCKET"],
         sys.argv[1:],
     )
+    for entry in os.listdir("/proc/self/fd"):
+        descriptor = int(entry)
+        if descriptor > 4:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     os.execv(args[0], args)
 
 

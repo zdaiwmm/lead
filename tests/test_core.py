@@ -133,6 +133,34 @@ def test_local_api_auth_and_csrf(agent):
         assert c.get("/lab/" + agent + "/").status_code == 403
 
 
+def test_archive_api_can_close_its_archived_environment_and_repeat(agent, monkeypatch):
+    from lead_app import api as api_module
+
+    requests = []
+
+    def close(request):
+        requests.append(request.url.path)
+        return httpx.Response(200, json={"ok": True})
+
+    factory = httpx.AsyncClient
+    monkeypatch.setattr(
+        api_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: factory(**kwargs, transport=httpx.MockTransport(close)),
+    )
+    with TestClient(app) as client:
+        client.cookies.set("lead_session", token("owner"))
+        for _ in range(2):
+            result = client.post(
+                "/api/agents/" + agent + "/control",
+                json={"action": "archive"},
+                headers={"Origin": "http://localhost:3100", "X-Lead-Request": "1"},
+            )
+            assert result.status_code == 200
+        assert requests == ["/agents/" + agent + "/close"] * 2
+        assert client.get("/api/agents/" + agent).status_code == 404
+
+
 def test_metrics_do_not_count_lab_as_acquisition(agent):
     domain.connect_lab(agent)
     with tx(agent) as c:
