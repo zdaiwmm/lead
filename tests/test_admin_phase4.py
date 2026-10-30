@@ -22,7 +22,7 @@ from lead_app import (
 )
 from lead_app import api as api_module
 from lead_app.config import database_kwargs
-from lead_app.db import one, tx, uid
+from lead_app.db import all_rows, one, tx, uid
 from lead_app.scope import tenant_scope
 from test_admin_phase3 import HEADERS, web
 
@@ -588,3 +588,111 @@ def test_email_transport_uses_tls_pinned_host_and_reports_partial_recipients(
         "<event-id@lead.notifications>",
         "receiver@example.com",
     ) in events
+
+
+@pytest.mark.asyncio
+async def test_openai_cache_writes_use_reported_lifetimes_without_double_billing(
+    workspace, monkeypatch
+):
+    from lead_app import metering, model
+    from openai import AsyncOpenAI
+    from pydantic import BaseModel
+
+    class Answer(BaseModel):
+        reply: str
+
+    aid = domain.create_agent()
+    monkeypatch.setenv("OPENAI_API_KEY", "cache-usage-fixture")
+    with tx() as c:
+        publish(c, "model-catalog/default", {"openai_models": ["gpt-6-luna"]})
+        settings = admin_settings.defaults("models")
+        settings["default_model"] = "openai:gpt-6-luna"
+        publish(c, "models/" + aid, settings)
+        prices = rates()
+        prices["models"][0].update(
+            cache_write_30m_per_million="1.25", cache_write_12h_per_million="2.5"
+        )
+        publish(c, "pricing/default", prices)
+    calls = []
+
+    def respond(request):
+        calls.append(json.loads(request.content))
+        details = {"cached_tokens": 4000, "cache_write_tokens": 7000}
+        if len(calls) == 1:
+            details["cache_write_tokens_details"] = {
+                "ttl_30m_tokens": 3000,
+                "ttl_12h_tokens": 4000,
+            }
+        if len(calls) == 3:
+            details.pop("cache_write_tokens")
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_fixture",
+                "object": "response",
+                "created_at": 1793318400,
+                "status": "completed",
+                "model": "gpt-6-luna",
+                "output": [
+                    {
+                        "id": "msg_fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"reply":"ok"}',
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 12000,
+                    "input_tokens_details": details,
+                    "output_tokens": 20,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 12020,
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        model,
+        "AsyncOpenAI",
+        lambda **kwargs: AsyncOpenAI(
+            **kwargs,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        ),
+    )
+    for _ in range(3):
+        assert (
+            await model.run_model(Answer, "Return ok", agent_id=aid, purpose="chat")
+        ).reply == "ok"
+    with tx(aid) as c:
+        rows = all_rows(
+            c, "SELECT details FROM lead.usage_events ORDER BY occurred_at,id"
+        )
+        first, second, missing = [row["details"] for row in rows]
+        assert Decimal(first["cost"]) == Decimal("0.01519")
+        assert (
+            first["cache_write_30m_tokens"] == 3000
+            and first["cache_write_12h_tokens"] == 4000
+        )
+        assert Decimal(second["cost"]) == Decimal("0.01019")
+        assert (
+            second["cache_write_30m_tokens"] == 7000
+            and second["cache_write_12h_tokens"] == 0
+        )
+        assert (
+            missing["cost"] is None and missing["unmeasured_cache_write_requests"] == 1
+        )
+        assert missing["rate_version"] == "pricing/default@1"
+    summary = metering.summary(aid)["by_model"][0]
+    assert summary["tokens"] == 36060 and summary["cache_write_tokens"] == 14000
+    assert (
+        summary["cache_write_30m_tokens"] == 10000
+        and summary["cache_write_12h_tokens"] == 4000
+    )
+    assert summary["unpriced_calls"] == 1

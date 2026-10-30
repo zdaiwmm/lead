@@ -43,6 +43,10 @@ def model_usage(c, aid=None, active_only=False):
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "cached_input_tokens": 0,
+                "cache_write_tokens": 0,
+                "cache_write_30m_tokens": 0,
+                "cache_write_12h_tokens": 0,
+                "unverified_cache_write_calls": 0,
                 "invocations": 0,
                 "requests": 0,
                 "unpriced_calls": 0,
@@ -68,6 +72,16 @@ def model_usage(c, aid=None, active_only=False):
         row["input_tokens"] += details.get("input_tokens") or 0
         row["output_tokens"] += details.get("output_tokens") or 0
         row["cached_input_tokens"] += details.get("cache_read_tokens") or 0
+        for name in (
+            "cache_write_tokens",
+            "cache_write_30m_tokens",
+            "cache_write_12h_tokens",
+        ):
+            row[name] += details.get(name) or 0
+        row["unverified_cache_write_calls"] += int(
+            bool(details.get("cache_write_tokens"))
+            and not details.get("cache_write_breakdown_verified")
+        )
         row["missing_breakdown_calls"] += int(
             details.get("input_tokens") is None or details.get("output_tokens") is None
         )
@@ -107,6 +121,10 @@ def priced(details, snapshot=None):
             "output_tokens",
             "cache_read_tokens",
             "cache_write_tokens",
+            "cache_write_30m_tokens",
+            "cache_write_12h_tokens",
+            "cache_write_breakdown_verified",
+            "unmeasured_cache_write_requests",
             "requests",
             "unmeasured_requests",
             "cache_breakdown_verified",
@@ -122,7 +140,8 @@ def priced(details, snapshot=None):
     result["cost"] = None
     if snapshot is not None:
         from .admin_pricing import calculate
-        return {**result,**calculate(result,snapshot)}
+
+        return {**result, **calculate(result, snapshot)}
     try:
         rates = json.loads((STATE / "operator-rates.json").read_text())
         model = rates["models"][result["model"]]

@@ -13,7 +13,8 @@ export default function ModelUsage({ rows = [] }: { rows?: Row[] }) {
     <div className="model-usage">
       <p className="muted small">
         近 30 天按实际调用模型统计。今日用量按北京时间 08:00
-        重置；缓存命中已包含在输入 token 中，预留是估算，不计入已用量。
+        重置；缓存命中和写入已包含在输入 token
+        中，费用分别计价，预留不计入已用量。
       </p>
       {!rows.length ? (
         <p className="muted">此范围尚无模型用量记录。</p>
@@ -31,7 +32,7 @@ export default function ModelUsage({ rows = [] }: { rows?: Row[] }) {
                 <th>近 30 天已用</th>
                 <th>今日已用</th>
                 <th>输入 / 输出</th>
-                <th>缓存命中</th>
+                <th>缓存命中 / 写入</th>
                 <th>预估模型费用</th>
                 <th>调用中 / 待核对预留</th>
               </tr>
@@ -63,7 +64,14 @@ export default function ModelUsage({ rows = [] }: { rows?: Row[] }) {
                     {row.unverified_cache_calls === row.invocations &&
                     row.invocations > 0
                       ? "未完整记录"
-                      : amount(row.cached_input_tokens)}
+                      : `${amount(row.cached_input_tokens)} / ${amount(row.cache_write_tokens || 0)}`}
+                    {row.cache_write_tokens > 0 && (
+                      <small>
+                        {row.unverified_cache_write_calls > 0
+                          ? "部分写入时长未记录"
+                          : `30 分钟 ${amount(row.cache_write_30m_tokens || 0)} · 12 小时 ${amount(row.cache_write_12h_tokens || 0)}`}
+                      </small>
+                    )}
                   </td>
                   <td>
                     {Object.keys(row.costs || {}).length

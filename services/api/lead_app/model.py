@@ -47,6 +47,50 @@ class MeteredOpenAIModel(OpenAIResponsesModel):
         )
         valid = isinstance(cached, int) and 0 <= cached <= result.usage.input_tokens
         result.usage.details["cache_breakdown_reported"] = int(valid)
+        writes = result.usage.cache_write_tokens
+        from pydantic_ai.profiles.openai import openai_model_profile
+
+        supports_writes = openai_model_profile(self.model_name).get(
+            "openai_supports_prompt_cache_breakpoints"
+        )
+        raw_write_count = getattr(
+            response.usage.input_tokens_details, "cache_write_tokens", None
+        )
+        result.usage.details["cache_write_usage_reported"] = int(
+            not supports_writes
+            or (
+                isinstance(raw_write_count, int)
+                and not isinstance(raw_write_count, bool)
+                and raw_write_count >= 0
+            )
+        )
+        raw = getattr(
+            response.usage.input_tokens_details, "cache_write_tokens_details", None
+        )
+        raw = raw.model_dump() if hasattr(raw, "model_dump") else raw
+        parts = (
+            [raw.get("ttl_30m_tokens"), raw.get("ttl_12h_tokens")]
+            if isinstance(raw, dict)
+            else [None, None]
+        )
+        reported = (
+            all(
+                isinstance(n, int) and not isinstance(n, bool) and n >= 0 for n in parts
+            )
+            and sum(parts) == writes
+        )
+        if not reported and writes == 0:
+            parts, reported = [0, 0], True
+        if not reported and raw is None:
+            options = (model_settings or {}).get("openai_prompt_cache_options") or {}
+            ttl = options.get("ttl", "30m") if isinstance(options, dict) else None
+            if supports_writes and ttl in ("30m", "12h"):
+                parts, reported = ([writes, 0] if ttl == "30m" else [0, writes]), True
+        result.usage.details.update(
+            cache_write_30m_tokens=parts[0] if reported else 0,
+            cache_write_12h_tokens=parts[1] if reported else 0,
+            cache_write_breakdown_reported=int(reported),
+        )
         result.usage.details["unpriced_service_tier_requests"] = int(
             getattr(response, "service_tier", None) not in (None, "default", "standard")
         )
@@ -298,6 +342,23 @@ async def run_model(
                         "cache_breakdown_reported", 0
                     )
                     == result.usage.requests,
+                    "cache_write_breakdown_verified": result.usage.details.get(
+                        "cache_write_breakdown_reported", 0
+                    )
+                    == result.usage.requests,
+                    "unmeasured_cache_write_requests": max(
+                        0,
+                        result.usage.requests
+                        - result.usage.details.get("cache_write_usage_reported", 0),
+                    )
+                    if is_openai
+                    else 0,
+                    "cache_write_30m_tokens": result.usage.details.get(
+                        "cache_write_30m_tokens", 0
+                    ),
+                    "cache_write_12h_tokens": result.usage.details.get(
+                        "cache_write_12h_tokens", 0
+                    ),
                     **{
                         name: getattr(result.usage, name, None)
                         for name in (
@@ -347,6 +408,25 @@ async def run_model(
                         "cache_breakdown_reported", 0
                     )
                     == accumulated_usage.requests,
+                    "cache_write_breakdown_verified": accumulated_usage.details.get(
+                        "cache_write_breakdown_reported", 0
+                    )
+                    == accumulated_usage.requests,
+                    "unmeasured_cache_write_requests": max(
+                        0,
+                        accumulated_usage.requests
+                        - accumulated_usage.details.get(
+                            "cache_write_usage_reported", 0
+                        ),
+                    )
+                    if is_openai
+                    else 0,
+                    "cache_write_30m_tokens": accumulated_usage.details.get(
+                        "cache_write_30m_tokens", 0
+                    ),
+                    "cache_write_12h_tokens": accumulated_usage.details.get(
+                        "cache_write_12h_tokens", 0
+                    ),
                     **{
                         name: getattr(accumulated_usage, name, None)
                         for name in (

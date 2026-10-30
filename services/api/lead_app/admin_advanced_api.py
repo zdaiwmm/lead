@@ -1,6 +1,7 @@
 """Owner membership controls, sourced pricing reference and safe delivery metadata."""
 
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -48,6 +49,14 @@ def reference_rates():
                 "model": "openai:" + name,
                 "input_per_million": input_rate,
                 "cached_input_per_million": cache,
+                "cache_write_30m_per_million": str(
+                    Decimal(input_rate) * Decimal("1.25")
+                )
+                if name.startswith("gpt-6")
+                else None,
+                "cache_write_12h_per_million": str(Decimal(input_rate) * Decimal("2.5"))
+                if name.startswith("gpt-6")
+                else None,
                 "output_per_million": output,
                 "max_request_input_tokens": 272000
                 if name.startswith("gpt-6")

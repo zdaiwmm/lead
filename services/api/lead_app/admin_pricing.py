@@ -17,6 +17,12 @@ class ModelRate(BaseModel):
     cached_input_per_million: Decimal | None = Field(
         default=None, ge=0, le=100000, max_digits=16, decimal_places=8
     )
+    cache_write_30m_per_million: Decimal | None = Field(
+        default=None, ge=0, le=100000, max_digits=16, decimal_places=8
+    )
+    cache_write_12h_per_million: Decimal | None = Field(
+        default=None, ge=0, le=100000, max_digits=16, decimal_places=8
+    )
     output_per_million: Decimal = Field(
         ge=0, le=100000, max_digits=16, decimal_places=8
     )
@@ -157,22 +163,29 @@ def calculate(details, snapshot):
     if snapshot.get("status") != "priced":
         return {**result, "pricing_status": snapshot.get("reason", "unpriced")}
     rate = snapshot["rate"]
+    result.update(
+        currency=snapshot["currency"],
+        rate_version=snapshot["version"],
+        rate_effective_at=snapshot["effective_at"],
+        rate_snapshot=rate,
+    )
     if (
         details.get("unmeasured_requests")
-        or details.get("cache_write_tokens")
         or details.get("unpriced_service_tier_requests")
+        or details.get("unmeasured_cache_write_requests")
     ):
-        return {**result, "pricing_status": "unmeasured_or_cache_write"}
+        return {**result, "pricing_status": "unmeasured_or_service_tier"}
     input_tokens = details.get("input_tokens")
     output = details.get("output_tokens")
     hit = details.get("cache_read_tokens", 0)
+    write = details.get("cache_write_tokens") or 0
     if (
         not details.get("cache_breakdown_verified")
         or any(
             not isinstance(n, int) or isinstance(n, bool) or n < 0
-            for n in [input_tokens, output, hit]
+            for n in [input_tokens, output, hit, write]
         )
-        or hit > input_tokens
+        or hit + write > input_tokens
     ):
         return {**result, "pricing_status": "missing_verified_breakdown"}
     # SDK reports totals across requests. For a long-context tariff, only price
@@ -182,6 +195,21 @@ def calculate(details, snapshot):
         return {**result, "pricing_status": "request_context_breakdown_required"}
     if hit and rate["cached_input_per_million"] is None:
         return {**result, "pricing_status": "cache_rate_unknown"}
+    write_30m = details.get("cache_write_30m_tokens") or 0
+    write_12h = details.get("cache_write_12h_tokens") or 0
+    if (
+        (write and not details.get("cache_write_breakdown_verified"))
+        or any(
+            not isinstance(n, int) or isinstance(n, bool) or n < 0
+            for n in [write_30m, write_12h]
+        )
+        or write_30m + write_12h != write
+    ):
+        return {**result, "pricing_status": "cache_write_lifetime_unknown"}
+    if (write_30m and rate.get("cache_write_30m_per_million") is None) or (
+        write_12h and rate.get("cache_write_12h_per_million") is None
+    ):
+        return {**result, "pricing_status": "cache_write_rate_unknown"}
     if details.get("service_tier") not in (None, "default", "standard", "auto"):
         return {**result, "pricing_status": "service_tier_not_priced"}
     long = bool(threshold and input_tokens > threshold)
@@ -192,11 +220,20 @@ def calculate(details, snapshot):
         Decimal(str(rate["long_output_multiplier"])) if long else Decimal(1)
     )
     amount = (
-        (input_tokens - hit) * Decimal(rate["input_per_million"]) * input_multiplier
+        (input_tokens - hit - write)
+        * Decimal(rate["input_per_million"])
+        * input_multiplier
         + hit * Decimal(rate["cached_input_per_million"] or "0") * input_multiplier
+        + write_30m
+        * Decimal(rate.get("cache_write_30m_per_million") or "0")
+        * input_multiplier
+        + write_12h
+        * Decimal(rate.get("cache_write_12h_per_million") or "0")
+        * input_multiplier
         + output * Decimal(rate["output_per_million"]) * output_multiplier
     ) / Decimal(1000000)
     return {
+        **result,
         "cost": str(amount),
         "currency": snapshot["currency"],
         "rate_version": snapshot["version"],

@@ -413,11 +413,31 @@ function PricingFields({
         <div className="admin-toolbar">
           <button
             type="button"
+            disabled={body.currency !== reference.currency}
             onClick={() =>
               change({
                 ...body,
                 models: [
-                  ...body.models,
+                  ...body.models.map((row: Row) => {
+                    const source = reference.models.find(
+                      (r: Row) => r.model === row.model,
+                    );
+                    return source &&
+                      reference.currency === body.currency &&
+                      source.source_url === row.source_url &&
+                      Number(source.input_per_million) ===
+                        Number(row.input_per_million)
+                      ? {
+                          ...row,
+                          cache_write_30m_per_million:
+                            row.cache_write_30m_per_million ??
+                            source.cache_write_30m_per_million,
+                          cache_write_12h_per_million:
+                            row.cache_write_12h_per_million ??
+                            source.cache_write_12h_per_million,
+                        }
+                      : row;
+                  }),
                   ...reference.models.filter(
                     (row: Row) =>
                       !body.models.some(
@@ -432,7 +452,9 @@ function PricingFields({
           </button>
           <span className="admin-help">
             核对于 {displayTime(reference.verified_at)}
-            ，只补充未登记模型，保留现有单价。
+            {body.currency !== reference.currency
+              ? `，参考价以 ${reference.currency} 计价，请先切换计价币种。`
+              : "，补充未登记模型和缺失的缓存写入价，保留已填写单价。"}
           </span>
         </div>
       )}
@@ -458,6 +480,14 @@ function PricingFields({
                 {[
                   ["input_per_million", "未缓存输入单价"],
                   ["cached_input_per_million", "缓存命中输入单价（可留空）"],
+                  [
+                    "cache_write_30m_per_million",
+                    "30 分钟缓存写入单价（可留空）",
+                  ],
+                  [
+                    "cache_write_12h_per_million",
+                    "12 小时缓存写入单价（可留空）",
+                  ],
                   ["output_per_million", "输出单价"],
                 ].map(([key, label]) => (
                   <label key={key}>
@@ -467,7 +497,10 @@ function PricingFields({
                       min={0}
                       max={100000}
                       step="any"
-                      required={key !== "cached_input_per_million"}
+                      required={[
+                        "input_per_million",
+                        "output_per_million",
+                      ].includes(key)}
                       value={rate[key] ?? ""}
                       onChange={(e) =>
                         update(
@@ -594,6 +627,8 @@ function PricingFields({
                 model: "",
                 input_per_million: "0",
                 cached_input_per_million: null,
+                cache_write_30m_per_million: null,
+                cache_write_12h_per_million: null,
                 output_per_million: "0",
                 source_url: "",
                 verified_at: new Date().toISOString(),

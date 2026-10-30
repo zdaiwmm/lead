@@ -59,6 +59,8 @@ const fieldNames: Row = {
   model: "模型引用",
   input_per_million: "未缓存输入单价",
   cached_input_per_million: "缓存命中单价",
+  cache_write_30m_per_million: "30 分钟缓存写入单价",
+  cache_write_12h_per_million: "12 小时缓存写入单价",
   output_per_million: "输出单价",
   max_request_input_tokens: "单次输入阈值",
   long_input_multiplier: "长上下文输入倍率",
