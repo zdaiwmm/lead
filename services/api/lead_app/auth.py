@@ -339,6 +339,8 @@ def me(request: Request):
         "role": who["role"],
         "tenant_id": who["tenant_id"],
         "subject": who["subject"] if auth_mode() == "oidc" else None,
+        "capabilities": who.get("capabilities", []),
+        "agent_ids": who.get("agent_ids"),
     }
 
 

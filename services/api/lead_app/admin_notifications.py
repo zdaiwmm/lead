@@ -66,9 +66,10 @@ def condition(
                 old["last_notified_at"]
                 + timedelta(minutes=settings["recurrence_cooldown_minutes"]),
             )
-        c.execute(
+        notification = one(
+            c,
             """INSERT INTO lead.admin_notifications(tenant_id,agent_id,condition_key,episode,category,severity,title,message,recipient_roles,recipient_subjects,created_at,available_at)
-            VALUES(lead.ctx_tenant(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            VALUES(lead.ctx_tenant(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
             (
                 aid,
                 key,
@@ -83,6 +84,9 @@ def condition(
                 due,
             ),
         )
+        from .admin_delivery import enqueue
+
+        enqueue(c, notification)
         c.execute(
             "UPDATE lead.admin_notification_conditions SET active=true,episode=%s,last_notified_at=%s WHERE condition_key=%s",
             (episode, due, key),

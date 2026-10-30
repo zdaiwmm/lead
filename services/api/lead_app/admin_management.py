@@ -31,6 +31,9 @@ def directory(c, query="", state="active", platform=None, before=None, before_id
 
 
 def control_agents(c, agents, action, expected_control_versions, note=""):
+    from .admin_permissions import require
+
+    require("admin.agents")
     from .domain import control_in_tx
 
     ids = sorted(set(str(a) for a in agents))

@@ -1,5 +1,9 @@
 type Row = Record<string, any>;
 let workspace: string | null = null;
+let access: Row | null = null;
+export function getAccess() {
+  return access;
+}
 export function setWorkspace(value: string | null) {
   workspace = value;
 }
@@ -38,5 +42,7 @@ export async function api(path: string, body?: Row) {
       typeof failure.detail === "string" ? failure.detail : "操作未完成",
     );
   }
-  return response.json();
+  const data = await response.json();
+  if (path === "/auth/me") access = data;
+  return data;
 }

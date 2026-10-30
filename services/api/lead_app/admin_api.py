@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from . import admin_config as configs
+from .admin_permissions import require as require_capability
 from .budget import configuration
 from .db import all_rows, tx
 from .scope import principal
@@ -19,6 +20,13 @@ def require_owner():
     who = principal()
     if not who or who.get("role") != "owner":
         raise HTTPException(403, "仅工作室所有者可以修改管理配置")
+
+
+def permitted(capability):
+    def check():
+        require_capability(capability)
+
+    return check
 
 
 @router.get("/admin/content-library")
@@ -83,7 +91,7 @@ def config(key: str):
         return configs.read(c, key)
 
 
-@router.post("/admin/config", dependencies=[Depends(require_owner)])
+@router.post("/admin/config")
 def change_config(body: ConfigChange):
     with tx() as c:
         return configs.write(c, **body.model_dump())
@@ -150,7 +158,7 @@ class AgentControl(BaseModel):
     note: str = Field(default="", max_length=1000)
 
 
-@router.post("/admin/agents/control", dependencies=[Depends(require_owner)])
+@router.post("/admin/agents/control", dependencies=[Depends(permitted("admin.agents"))])
 def control_selected_agents(body: AgentControl):
     from .admin_management import control_agents
 
@@ -227,7 +235,8 @@ class ExperienceCapture(BaseModel):
 
 
 @router.post(
-    "/admin/strategy-experiences/capture", dependencies=[Depends(require_owner)]
+    "/admin/strategy-experiences/capture",
+    dependencies=[Depends(permitted("admin.experiences"))],
 )
 def capture_experience(body: ExperienceCapture):
     from .admin_experiences import capture
@@ -247,7 +256,8 @@ class ExperiencePromotion(BaseModel):
 
 
 @router.post(
-    "/admin/strategy-experiences/promote", dependencies=[Depends(require_owner)]
+    "/admin/strategy-experiences/promote",
+    dependencies=[Depends(permitted("admin.experiences"))],
 )
 def promote_experience(body: ExperiencePromotion):
     from .admin_experiences import promote
@@ -273,7 +283,7 @@ class BulkBudget(BaseModel):
     note: str = Field(default="", max_length=1000)
 
 
-@router.post("/admin/budgets/bulk", dependencies=[Depends(require_owner)])
+@router.post("/admin/budgets/bulk", dependencies=[Depends(permitted("admin.budgets"))])
 def bulk_budget(body: BulkBudget):
     ids = sorted({str(a) for a in body.agents})
     if set(ids) != set(body.expected_versions):
@@ -354,7 +364,7 @@ class ModelCheck(BaseModel):
     models: list[str] = Field(default_factory=list, max_length=4)
 
 
-@router.get("/admin/openai-models", dependencies=[Depends(require_owner)])
+@router.get("/admin/openai-models", dependencies=[Depends(permitted("admin.models"))])
 async def discover_openai_models():
     import httpx
     from pydantic_ai.profiles.openai import openai_model_profile
@@ -406,7 +416,7 @@ async def discover_openai_models():
         }
 
 
-@router.post("/admin/model-check", dependencies=[Depends(require_owner)])
+@router.post("/admin/model-check", dependencies=[Depends(permitted("admin.models"))])
 async def model_check(
     body: ModelCheck | None = None,
     provider: Literal["deepseek", "openai"] | None = None,
@@ -504,7 +514,10 @@ def runtime_status(aid: UUID | None = None):
     }
 
 
-@router.get("/admin/notification-recipients", dependencies=[Depends(require_owner)])
+@router.get(
+    "/admin/notification-recipients",
+    dependencies=[Depends(permitted("admin.notifications"))],
+)
 def notification_recipients():
     from .auth import auth_mode
 

@@ -12,9 +12,8 @@ from lead_app.scope import current_tenant
 def agent(monkeypatch):
     monkeypatch.setattr(domain, "emit", lambda *a, **kw: None)
     monkeypatch.setattr(account_setup, "emit", lambda *a, **kw: None)
-    monkeypatch.setattr(
-        domain, "model_config", lambda: {"key": "fixture-only", "model": "fixture"}
-    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-only")
+    monkeypatch.setenv("LEAD_MODEL_PROVIDER", "deepseek")
     aid = domain.create_agent()
     with tx(aid) as c:
         profile = one(c, "SELECT id FROM lead.browser_profiles")["id"]
@@ -58,8 +57,9 @@ def test_channel_pause_does_not_pause_other_platform_or_global_agent(agent):
 
 def test_start_channel_is_atomic_if_model_missing(agent, monkeypatch):
     domain.channel_control(agent, "telegram", False)
-    monkeypatch.setattr(domain, "model_config", lambda: {"key": ""})
-    with pytest.raises(ValueError, match="DEEPSEEK"):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    with pytest.raises(ValueError, match="模型.*凭据"):
         domain.channel_control(agent, "telegram", True)
     with tx(agent) as c:
         assert (

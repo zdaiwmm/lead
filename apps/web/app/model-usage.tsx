@@ -32,6 +32,7 @@ export default function ModelUsage({ rows = [] }: { rows?: Row[] }) {
                 <th>今日已用</th>
                 <th>输入 / 输出</th>
                 <th>缓存命中</th>
+                <th>预估模型费用</th>
                 <th>调用中 / 待核对预留</th>
               </tr>
             </thead>
@@ -63,6 +64,21 @@ export default function ModelUsage({ rows = [] }: { rows?: Row[] }) {
                     row.invocations > 0
                       ? "未完整记录"
                       : amount(row.cached_input_tokens)}
+                  </td>
+                  <td>
+                    {Object.keys(row.costs || {}).length
+                      ? Object.entries(row.costs).map(([currency, value]) => (
+                          <div key={currency}>
+                            {currency}{" "}
+                            {Number(value).toLocaleString("zh-CN", {
+                              maximumFractionDigits: 8,
+                            })}
+                          </div>
+                        ))
+                      : "暂无法估算"}
+                    {row.unpriced_calls > 0 && (
+                      <small>{row.unpriced_calls} 次调用未计价</small>
+                    )}
                   </td>
                   <td>
                     {amount(row.reserved_tokens)} /{" "}

@@ -813,7 +813,11 @@
   line-height: 22px;
   font-weight: 500;
 }
-.admin-usage-archive { display: flex; align-items: center; gap: 10px; }
+.admin-usage-archive {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .admin-content-heading > span,
 .admin-library-actions > button {
   flex-shrink: 0;
@@ -885,6 +889,30 @@
 }
 .admin-model-services {
   margin-bottom: 32px;
+}
+.admin-advanced-fields {
+  padding: 20px 0;
+  display: grid;
+  gap: 24px;
+}
+.admin-rate-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+}
+.admin-secret-fields {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 16px 0;
+}
+.admin-secret-fields > label,
+.admin-secret-fields > .admin-field-pair {
+  margin: 20px 0;
+}
+@media (max-width: 767px) {
+  .admin-rate-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .admin-model-candidates {
   max-height: 360px;

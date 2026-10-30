@@ -8,6 +8,8 @@
 
 无会话返回 401，无权限返回 403，版本/状态失效返回 409，创建返回 201，已持久化的异步任务返回 202。SSE 只发送刷新摘要，完整资源接口是实际状态来源，撤销会话或切换工作室后旧流终止。
 
+`/api/auth/me` 返回当前 `capabilities` 和 `agent_ids`（null 为全部、空数组为无 Agent 访问）。已发布成员策略每次请求重新读取；实时流也重新核对。Agent 范围通过数据库限制应用于列表、详情、记录与用量。后台写入按模块授权，影响整个工作室的配置还要求不限制 Agent 范围；成员权限及外部通知凭据始终仅所有者维护。成员权限配置和其历史不向非所有者返回。
+
 ## 主要接口
 
 | 资源 | 当前接口与契约 |
@@ -56,6 +58,13 @@
 | 通知成员 | GET `/api/admin/notification-recipients` 仅所有者，列出当前工作室的有效接收成员 |
 | 站内通知 | GET `/api/admin/notifications` 只返回发给当前成员且已到展示时间的通知；`before`、`before_id` 联合分页 |
 | 通知已读 | POST `/api/admin/notifications/{id}/read`；包括查看成员在内可标记自己的通知，保持来源校验；不能标记未发送给自己的通知 |
+| 成员权限 | GET `/api/admin/member-access` 仅所有者，返回工作室成员、功能权限目录和角色默认值。配置键 `member-access/default`，每项包含 `issuer,subject,capabilities,agent_ids`；只允许本工作室有效且非所有者成员，查看成员不能获得写入权限 |
+| 模型单价 | 配置键 `pricing/default`；`currency,effective_at,models`，每模型保留单价、来源、核对时间及长上下文规则。GET `/api/admin/pricing-reference` 返回带核对日期的 OpenAI Standard 参考价，不会自动覆盖已发布价格 |
+| 计价快照 | `budget_reservations.pricing_snapshot` 在预留时固定，结算写入 `usage_events.details.rate_snapshot/rate_version/rate_effective_at`。未覆盖明细标记 `pricing_status`，不估造费用；历史不重算 |
+| 外部渠道 | 配置键 `external-notifications/default`，包含总开关和每渠道的接收方式、启用、类别、级别、Agent 范围及重试上限，只有所有者可修改。所有外部渠道默认关闭 |
+| 渠道凭据 | GET `/api/admin/external-notifications/secrets` 仅返回标识、配置版本和时间；POST `/secrets/{destination_uuid}` 仅所有者，携带 `expected_version` 和完整替换的 Webhook/SMTP 凭据，单独加密，不进入配置历史，无原文读取接口 |
+| 发送记录 | GET `/api/admin/external-notifications/deliveries?before=&before_id=` 每页 40，返回已授权范围内的状态、尝试次数和安全错误码，不包含接收地址或凭据 |
+| 人工重试 | POST `/api/admin/external-notifications/deliveries/{id}/retry` 仅所有者，携带 `expected_attempts`；未知结果还须 `acknowledge_duplicate_risk=true`。重试保留原通知编号和累计尝试次数，增加一轮有限重试 |
 
 品牌资料发布增加受影响 Agent 的配置版本，用现有控制边界撤回陈旧排队内容；已确认与结果未知的动作账本不改写。调度规则在接纳新自动工作时读取，正在执行的发布工作流保留重试策略快照。运行名额有过期时间并在活动期间续期，进程故障不会永久占用名额。站内通知按异常发生次数去重，接收范围及可展示时间随通知保存；通知已读与配置权限分开。
 

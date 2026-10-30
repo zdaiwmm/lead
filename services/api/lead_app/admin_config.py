@@ -126,6 +126,16 @@ def parse_key(key):
         kind = "onboarding"
     elif key == "model-catalog/default":
         kind = "model_catalog"
+    elif key in {
+        "member-access/default",
+        "pricing/default",
+        "external-notifications/default",
+    }:
+        kind = {
+            "member-access/default": "member_access",
+            "pricing/default": "pricing",
+            "external-notifications/default": "external_notifications",
+        }[key]
     elif (
         parts[0] in {"models", "brand", "runtime", "notifications", "attribution"}
         and len(parts) == 2
@@ -176,7 +186,13 @@ def published(c, key):
 
 def default_body(c, key):
     kind, aid, platform, target = parse_key(key)
-    if kind in {"experience", "model_catalog"}:
+    if kind in {
+        "experience",
+        "model_catalog",
+        "member_access",
+        "pricing",
+        "external_notifications",
+    }:
         from .admin_settings import defaults
 
         return defaults(kind)
@@ -233,6 +249,10 @@ def default_body(c, key):
 
 def read(c, key):
     kind, aid, _, _ = check_scope(c, key)
+    if kind == "member_access" and principal() and principal()["role"] != "owner":
+        from fastapi import HTTPException
+
+        raise HTTPException(403, "只有所有者可以查看成员权限配置")
     row = head(c, key)
     return {
         "key": key,
@@ -333,8 +353,9 @@ def write(
 ):
     """Compare-and-swap, runtime effects and immutable history share one commit."""
     who = principal()
-    if who and who["role"] != "owner":
-        raise PermissionError("仅所有者可以修改管理配置")
+    from .admin_permissions import require_config
+
+    require_config(key)
     kind, aid, platform, target = check_scope(c, key, lock=True)
     if kind in {"models", "model_catalog"}:
         c.execute(
@@ -385,6 +406,14 @@ def write(
         from .admin_controls import validate_experience
 
         data = validate_experience(c, aid, data)
+    if kind == "member_access":
+        from .admin_permissions import validate_members
+
+        validate_members(c, data)
+    if kind == "external_notifications":
+        from .admin_delivery import validate as validate_delivery
+
+        validate_delivery(c, data)
     if kind == "model_catalog" and action != "draft":
         from .config import model_config
 
@@ -503,6 +532,7 @@ def history(c, key=None, before=None, limit=40, before_id=None):
         SELECT id,config_key,version,action,before_state,after_state,actor_ref,note,created_at
         FROM lead.admin_config_versions WHERE (%s::text IS NULL OR config_key=%s)
         AND (%s::timestamptz IS NULL OR (created_at,id)<(%s,%s::uuid))
+        AND (%s OR config_key<>'member-access/default')
         ORDER BY created_at DESC,id DESC LIMIT %s
     """,
         (
@@ -511,6 +541,7 @@ def history(c, key=None, before=None, limit=40, before_id=None):
             before,
             before,
             before_id or "00000000-0000-0000-0000-000000000000",
+            not principal() or principal()["role"] == "owner",
             limit,
         ),
     )

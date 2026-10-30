@@ -345,7 +345,8 @@ def test_workspace_parallel_limit_and_failure_stop_are_durable(workspace, monkey
             "health_state": "needs_attention",
         }
     domain.connect_lab(first)
-    monkeypatch.setattr(domain, "model_config", lambda: {"key": "verification-only"})
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "verification-only")
+    monkeypatch.setenv("LEAD_MODEL_PROVIDER", "deepseek")
     domain.set_control(first, "resume")
     with tx(first) as c:
         assert one(c, "SELECT failures FROM lead.admin_runtime_state")["failures"] == 0

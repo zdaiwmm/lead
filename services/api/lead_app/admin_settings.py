@@ -15,6 +15,9 @@ from .admin_controls import (
     ExperienceSettings,
     ModelCatalogSettings,
 )
+from .admin_delivery import ExternalNotificationSettings
+from .admin_permissions import MemberAccessSettings
+from .admin_pricing import PricingSettings
 from .config import env, model_config, model_reference, resolve_model
 
 
@@ -173,6 +176,9 @@ class NotificationSettings(SettingsModel):
 
 
 SCHEMAS = {
+    "member_access": MemberAccessSettings,
+    "pricing": PricingSettings,
+    "external_notifications": ExternalNotificationSettings,
     "model_catalog": ModelCatalogSettings,
     "channel_rule": ChannelRule,
     "attribution": AttributionSettings,

@@ -130,7 +130,9 @@ def collect():
 
 def promote(c, key, expected_version, target_key, target_version, practice, conditions):
     configs.check_scope(c, key, lock=True)
-    c.execute("SELECT id FROM lead.admin_configs WHERE config_key=%s FOR UPDATE", (key,))
+    c.execute(
+        "SELECT id FROM lead.admin_configs WHERE config_key=%s FOR UPDATE", (key,)
+    )
     source = configs.read(c, key)
     if source["kind"] != "experience" or source["version"] != expected_version:
         raise ValueError("经验已有更新，请刷新后核对")

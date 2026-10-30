@@ -22,7 +22,7 @@ from fastapi.responses import (
 from pydantic import BaseModel, Field
 
 from . import domain
-from .admin_api import require_owner
+from .admin_advanced_api import router as advanced_admin_router
 from .admin_api import router as admin_router
 from .analytics import router as analytics_router
 from .auth import auth_mode, public_origin
@@ -36,6 +36,7 @@ from .events import router as event_router
 from .operating_playbooks import router as playbook_router
 from .operating_workspace import router as operations_router
 from .ops import router as ops_router
+from .promotion import CODE_PATTERN
 from .scope import current_tenant, tenant_scope
 from .security import internal_token, token, valid
 from .telemetry import TelemetryMiddleware, trace_headers
@@ -63,6 +64,7 @@ app.include_router(playbook_router)
 app.include_router(creative_router)
 app.include_router(operations_router)
 app.include_router(admin_router)
+app.include_router(advanced_admin_router)
 
 
 @app.middleware("http")
@@ -115,7 +117,9 @@ async def local_auth(request, call_next):
                 )
             sensitive = path.endswith("/browser/screenshot")
             viewer_exception = path in ("/api/auth/logout", "/api/workspace/switch")
-            viewer_exception = viewer_exception or bool(re.fullmatch(r"/api/admin/notifications/[0-9a-fA-F-]{36}/read", path))
+            viewer_exception = viewer_exception or bool(
+                re.fullmatch(r"/api/admin/notifications/[0-9a-fA-F-]{36}/read", path)
+            )
             if identity["role"] == "viewer" and (
                 (
                     request.method not in ("GET", "HEAD", "OPTIONS")
@@ -124,7 +128,37 @@ async def local_auth(request, call_next):
                 or sensitive
             ):
                 return JSONResponse({"detail": "当前成员仅有查看权限"}, status_code=403)
-    elif re.fullmatch(r"/r/[A-Za-z0-9_-]{16}", path) or re.fullmatch(
+            from .admin_permissions import require as require_capability
+            from .admin_permissions import resolve, workbench_permission
+
+            with tenant_scope(identity["tenant_id"], identity):
+                identity.update(await asyncio.to_thread(resolve, identity))
+                agent_path = re.match(r"^/api/agents/([0-9a-fA-F-]{36})(?:/|$)", path)
+                requested_agent = (
+                    agent_path.group(1)
+                    if agent_path
+                    else request.query_params.get("aid")
+                )
+                if identity.get("agent_ids") is not None and requested_agent:
+                    try:
+                        scoped_agent = str(UUID(requested_agent))
+                    except ValueError:
+                        return JSONResponse(
+                            {"detail": "Agent 标识无效"}, status_code=422
+                        )
+                    if scoped_agent not in identity["agent_ids"]:
+                        return JSONResponse({"detail": "Agent 不存在"}, status_code=404)
+                capability = workbench_permission(request.method, path)
+                if capability:
+                    try:
+                        require_capability(
+                            capability, workspace=capability == "agents.create"
+                        )
+                    except HTTPException as error:
+                        return JSONResponse(
+                            {"detail": error.detail}, status_code=error.status_code
+                        )
+    elif re.fullmatch("/r/" + CODE_PATTERN, path) or re.fullmatch(
         r"/collect/[0-9a-fA-F-]{36}", path
     ):
         from .identity_store import public_tenant
@@ -297,9 +331,10 @@ def agent_budget(aid: UUID):
 
 @app.post("/api/agents/{aid}/budget")
 def set_agent_budget(aid: UUID, body: TokenBudget):
+    from .admin_permissions import require
     from .budget import set_daily_limit
 
-    require_owner()
+    require("admin.budgets")
     return set_daily_limit(str(aid), body.daily_token_limit, body.expected_version)
 
 

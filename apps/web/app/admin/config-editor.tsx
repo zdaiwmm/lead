@@ -1,7 +1,7 @@
 "use client";
 
 import { ReactNode, useEffect, useState } from "react";
-import { api, getWorkspace } from "../api-client";
+import { api, getWorkspace, getAccess } from "../api-client";
 
 export type Row = Record<string, any>;
 export const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
@@ -48,6 +48,29 @@ function differences(
 }
 
 const fieldNames: Row = {
+  members: "成员权限",
+  issuer: "登录服务",
+  subject: "成员身份",
+  capabilities: "可操作功能",
+  agent_ids: "Agent 范围",
+  currency: "计价币种",
+  effective_at: "生效时间",
+  models: "模型单价",
+  model: "模型引用",
+  input_per_million: "未缓存输入单价",
+  cached_input_per_million: "缓存命中单价",
+  output_per_million: "输出单价",
+  max_request_input_tokens: "单次输入阈值",
+  long_input_multiplier: "长上下文输入倍率",
+  long_output_multiplier: "长上下文输出倍率",
+  source_url: "计价来源",
+  verified_at: "最近核对时间",
+  notes: "单价说明",
+  destinations: "外部接收渠道",
+  kind: "接收方式",
+  severities: "提醒级别",
+  max_attempts: "每轮最多尝试次数",
+  retry_seconds: "重试等待秒数",
   openai_models: "OpenAI 可选模型",
   allow_publishing: "允许发布",
   allow_community_growth: "允许社群运营",
@@ -168,6 +191,9 @@ function display(value: any): string {
 function configTitle(key: string) {
   const parts = key.split("/");
   const title: Row = {
+    "member-access": "成员权限",
+    pricing: "模型定价",
+    "external-notifications": "外部通知",
     "model-catalog": "可选模型",
     attribution: "数据与归因",
     experiences: "渠道经验",
@@ -291,6 +317,9 @@ export default function ConfigEditor({
   const [config, setConfig] = useState<Row | null>(null),
     [body, setBody] = useState<Row>({}),
     [rows, setRows] = useState<Row[]>([]);
+  readOnly =
+    readOnly ||
+    Boolean(config && !config.agent_id && getAccess()?.agent_ids != null);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [message, setMessage] = useState(""),

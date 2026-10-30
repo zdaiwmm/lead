@@ -25,6 +25,7 @@ import OperationalSettings from "./operational-settings";
 import { ContentLibrary, Readiness } from "./preparation";
 import ModelUsagePage from "./model-usage-page";
 import ModelCatalog from "./model-catalog";
+import { MemberAccess, Pricing, ExternalNotifications } from "./advanced";
 import {
   AgentDirectory,
   Attribution,
@@ -50,6 +51,9 @@ const sections = [
   { id: "brand", label: "品牌与知识", icon: BookOpen },
   { id: "runtime", label: "调度与异常", icon: Clock3 },
   { id: "notifications", label: "通知配置", icon: Bell },
+  { id: "external-notifications", label: "外部通知", icon: Bell },
+  { id: "pricing", label: "模型定价", icon: Gauge },
+  { id: "members", label: "成员权限", icon: Bot },
   { id: "history", label: "变更记录", icon: HistoryIcon },
 ];
 const format = (value: number) => new Intl.NumberFormat("zh-CN").format(value);
@@ -625,7 +629,24 @@ export default function AdminPage() {
         <a href="/">返回工作台</a>
       </main>
     );
-  const readOnly = user?.role !== "owner";
+  const sectionCapabilities: Row = {
+    budgets: "admin.budgets",
+    agents: "admin.agents",
+    strategies: "admin.strategies",
+    "channel-rules": "admin.channels",
+    experiences: "admin.experiences",
+    attribution: "admin.attribution",
+    onboarding: "admin.onboarding",
+    models: "admin.models",
+    "model-catalog": "admin.models",
+    brand: "admin.brand",
+    runtime: "admin.runtime",
+    notifications: "admin.notifications",
+    pricing: "admin.pricing",
+  };
+  const readOnly =
+    user?.role !== "owner" &&
+    !(user?.capabilities || []).includes(sectionCapabilities[section]);
   const needsAttention = agents.filter(
     (a) => a.health_state === "needs_attention" || a.remaining === 0,
   );
@@ -657,7 +678,11 @@ export default function AdminPage() {
         </nav>
         <div className="admin-sidebar-bottom">
           <span className="muted small">
-            {readOnly ? "只读访问" : "所有者权限"}
+            {user?.role === "owner"
+              ? "所有者权限"
+              : (user?.capabilities || []).length
+                ? "按授权访问"
+                : "只读访问"}
           </span>
           <a href="/">
             <ArrowLeft size={15} />
@@ -671,39 +696,45 @@ export default function AdminPage() {
             <span className="admin-eyebrow">工作室管理</span>
             <h1>{sections.find((s) => s.id === section)?.label}</h1>
             <p>
-              {section === "agents"
-                ? "集中查找 Agent，核对状态后批量暂停或归档。"
-                : section === "channel-rules"
-                  ? "维护渠道、Agent 与目标层级的运行限制。"
-                  : section === "attribution"
-                    ? "维护转化目标、归因窗口和数据新鲜度。"
-                    : section === "experiences"
-                      ? "审核渠道观察，将适用的做法纳入后续规划。"
-                      : section === "model-catalog"
-                        ? "维护共用同一 OpenAI 凭据的可选模型，并保留配置版本。"
-                        : section === "overview"
-                          ? "维护 Agent 的运行规则、运营策略和创建流程。"
-                          : section === "readiness"
-                            ? "核对配置、业务资料、账号授权和真实数据接入的缺口。"
-                            : section === "content"
-                              ? "把已有研究填充到配置，保留来源、版本和人工编辑。"
-                              : section === "usage"
-                                ? "按实际模型区分 token 消耗、输入输出、缓存和待核对预留。"
-                                : section === "budgets"
-                                  ? "集中分配每日额度，查看消耗与待核对预留。"
-                                  : section === "strategies"
-                                    ? "把渠道方法和实际经验沉淀为可追溯的运营策略。"
-                                    : section === "onboarding"
-                                      ? "维护三个创建步骤，发布前可直接预览填写体验。"
-                                      : section === "models"
-                                        ? "按任务选择模型，管理 Agent 实际可用的工具。"
-                                        : section === "brand"
-                                          ? "维护品牌表达、业务事实和有来源的知识资料。"
-                                          : section === "runtime"
-                                            ? "安排自动运营时段，控制并发、重试和失败暂停。"
-                                            : section === "notifications"
-                                              ? "选择真实异常的提醒方式、接收范围与免打扰时段。"
-                                              : "查看配置何时改变、由谁修改，以及具体差异。"}
+              {section === "members"
+                ? "维护成员角色、可操作功能与 Agent 数据范围。"
+                : section === "pricing"
+                  ? "维护有来源的模型单价，保留历史调用的计价版本。"
+                  : section === "external-notifications"
+                    ? "管理 Webhook、邮件接收渠道与真实发送结果。"
+                    : section === "agents"
+                      ? "集中查找 Agent，核对状态后批量暂停或归档。"
+                      : section === "channel-rules"
+                        ? "维护渠道、Agent 与目标层级的运行限制。"
+                        : section === "attribution"
+                          ? "维护转化目标、归因窗口和数据新鲜度。"
+                          : section === "experiences"
+                            ? "审核渠道观察，将适用的做法纳入后续规划。"
+                            : section === "model-catalog"
+                              ? "维护共用同一 OpenAI 凭据的可选模型，并保留配置版本。"
+                              : section === "overview"
+                                ? "维护 Agent 的运行规则、运营策略和创建流程。"
+                                : section === "readiness"
+                                  ? "核对配置、业务资料、账号授权和真实数据接入的缺口。"
+                                  : section === "content"
+                                    ? "把已有研究填充到配置，保留来源、版本和人工编辑。"
+                                    : section === "usage"
+                                      ? "按实际模型区分 token 消耗、输入输出、缓存和待核对预留。"
+                                      : section === "budgets"
+                                        ? "集中分配每日额度，查看消耗与待核对预留。"
+                                        : section === "strategies"
+                                          ? "把渠道方法和实际经验沉淀为可追溯的运营策略。"
+                                          : section === "onboarding"
+                                            ? "维护三个创建步骤，发布前可直接预览填写体验。"
+                                            : section === "models"
+                                              ? "按任务选择模型，管理 Agent 实际可用的工具。"
+                                              : section === "brand"
+                                                ? "维护品牌表达、业务事实和有来源的知识资料。"
+                                                : section === "runtime"
+                                                  ? "安排自动运营时段，控制并发、重试和失败暂停。"
+                                                  : section === "notifications"
+                                                    ? "选择真实异常的提醒方式、接收范围与免打扰时段。"
+                                                    : "查看配置何时改变、由谁修改，以及具体差异。"}
             </p>
           </div>
           <button
@@ -722,7 +753,7 @@ export default function AdminPage() {
         )}
         {readOnly && (
           <p className="admin-readonly">
-            你可以查看本工作室的配置和记录。修改、发布及回滚需要所有者权限。
+            你可以查看已授权范围内的配置和记录。修改、发布及回滚需要所有者授予对应权限。
           </p>
         )}
         {loaded && section === "overview" && (
@@ -820,6 +851,13 @@ export default function AdminPage() {
         )}
         {loaded && section === "history" && <ChangeLog />}
         {loaded && section === "usage" && <ModelUsagePage agents={agents} />}
+        {loaded && section === "members" && (
+          <MemberAccess readOnly={readOnly} agents={agents} />
+        )}
+        {loaded && section === "pricing" && <Pricing readOnly={readOnly} />}
+        {loaded && section === "external-notifications" && (
+          <ExternalNotifications readOnly={readOnly} agents={agents} />
+        )}
         {loaded && section === "model-catalog" && (
           <ModelCatalog readOnly={readOnly} />
         )}

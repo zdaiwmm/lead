@@ -125,6 +125,16 @@ async def publish_outbox(client):
     configured_workspaces = set()
     notification_ticks = {}
     experience_ticks = {}
+    external_delivery_tasks = {}
+    notification_slots = asyncio.Semaphore(3)
+
+    async def deliver_external(tenant):
+        from .admin_delivery import dispatch
+
+        with tenant_scope(tenant, None):
+            async with notification_slots:
+                await dispatch(limit=5)
+
     credential_state = None
     while True:
         try:
@@ -146,6 +156,13 @@ async def publish_outbox(client):
 
                         with tenant_scope(tenant, None):
                             await asyncio.to_thread(collect)
+                            previous = external_delivery_tasks.get(tenant)
+                            if previous is None or previous.done():
+                                if previous is not None:
+                                    previous.exception()
+                                external_delivery_tasks[tenant] = asyncio.create_task(
+                                    deliver_external(tenant)
+                                )
                         notification_ticks[tenant] = time.monotonic()
                     if time.monotonic() - experience_ticks.get(tenant, 0) >= 600:
                         from .admin_experiences import collect as collect_experiences

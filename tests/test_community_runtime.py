@@ -39,9 +39,8 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
 ):
     for module in (domain, channels, community_growth):
         monkeypatch.setattr(module, "emit", lambda *a, **k: None)
-    monkeypatch.setattr(
-        domain, "model_config", lambda: {"key": "fixture", "model": "fixture"}
-    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-only")
+    monkeypatch.setenv("LEAD_MODEL_PROVIDER", "deepseek")
     aid = domain.create_agent()
     identity = str(int(uid().replace("-", "")[:12], 16))
     with tx(aid) as c:

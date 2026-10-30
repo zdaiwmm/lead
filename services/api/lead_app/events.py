@@ -8,7 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from .db import all_rows, one, tx
-from .scope import current_tenant
+from .scope import current_tenant, tenant_scope
 
 router = APIRouter()
 
@@ -74,7 +74,13 @@ async def stream(request):
             if not identity or identity["tenant_id"] != current_tenant():
                 yield 'data: {"refresh":true}\n\n'
                 return
-        current = await asyncio.to_thread(revision)
+            from .admin_permissions import resolve
+
+            with tenant_scope(identity["tenant_id"], identity):
+                identity.update(await asyncio.to_thread(resolve, identity))
+                current = await asyncio.to_thread(revision)
+        else:
+            current = await asyncio.to_thread(revision)
         if current != previous:
             previous = current
             yield "id: " + current + '\ndata: {"refresh":true}\n\n'

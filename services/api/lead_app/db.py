@@ -1,3 +1,4 @@
+import json
 from contextlib import contextmanager
 from uuid import UUID, uuid4
 
@@ -36,6 +37,14 @@ def tx(agent_id=None, tenant_id=None):
         conn.execute(
             "SELECT set_config('app.tenant_id',%s,true), set_config('app.agent_id',%s,true)",
             (tenant_id, agent_id or ""),
+        )
+        from .scope import principal
+
+        who = principal()
+        allowed = who.get("agent_ids") if who else None
+        conn.execute(
+            "SELECT set_config('app.allowed_agent_ids',%s,true)",
+            (json.dumps(allowed) if allowed is not None else "*",),
         )
         yield conn
 

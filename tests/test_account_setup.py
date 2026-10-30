@@ -15,9 +15,8 @@ from lead_app.scope import current_tenant
 def connected(monkeypatch):
     for module in (domain, channels, account_setup):
         monkeypatch.setattr(module, "emit", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        domain, "model_config", lambda: {"key": "test-only", "model": "fixture"}
-    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only")
+    monkeypatch.setenv("LEAD_MODEL_PROVIDER", "deepseek")
     aid = domain.create_agent()
     with tx(aid) as c:
         profile = one(c, "SELECT id FROM lead.browser_profiles")

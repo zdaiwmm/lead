@@ -117,9 +117,11 @@ def reserve(aid, operation_key, estimate, model_ref=None, provider=None):
             > period["limit_units"]
         ):
             raise BudgetExceeded("daily_token_limit")
+        from .admin_pricing import quote
+
         reservation = one(
             c,
-            "INSERT INTO lead.budget_reservations(tenant_id,agent_id,period_id,operation_key,units,state,expires_at,model_ref,provider) VALUES(%s,%s,%s,%s,%s,'reserved',%s,%s,%s) RETURNING id",
+            "INSERT INTO lead.budget_reservations(tenant_id,agent_id,period_id,operation_key,units,state,expires_at,model_ref,provider,pricing_snapshot) VALUES(%s,%s,%s,%s,%s,'reserved',%s,%s,%s,%s) RETURNING id",
             (
                 current_tenant(),
                 aid,
@@ -129,6 +131,7 @@ def reserve(aid, operation_key, estimate, model_ref=None, provider=None):
                 start + timedelta(days=1),
                 model_ref,
                 provider,
+                j(quote(c, model_ref)),
             ),
         )
         c.execute(
@@ -182,7 +185,7 @@ def settle(
         if actual is not None:
             from .metering import priced
 
-            measured = priced(details or {})
+            measured = priced(details or {}, snapshot=r["pricing_snapshot"])
             c.execute(
                 "INSERT INTO lead.usage_events(tenant_id,agent_id,reservation_id,event_key,category,units,rate_version,occurred_at,details) VALUES(%s,%s,%s,%s,'model_tokens',%s,%s,now(),%s) ON CONFLICT DO NOTHING",
                 (

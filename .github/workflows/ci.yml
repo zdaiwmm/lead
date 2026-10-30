@@ -32,7 +32,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap fonts-noto-cjk
-          .venv/bin/playwright install-deps firefox
+          .venv/bin/playwright install-deps firefox chromium
+          .venv/bin/playwright install chromium
           .venv/bin/camoufox fetch official/156.0.1-beta.36
           .venv/bin/camoufox set official/156.0.1-beta.36
           # This ephemeral runner permits user namespaces for the bwrap boundary.

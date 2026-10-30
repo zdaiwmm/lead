@@ -47,6 +47,9 @@ class MeteredOpenAIModel(OpenAIResponsesModel):
         )
         valid = isinstance(cached, int) and 0 <= cached <= result.usage.input_tokens
         result.usage.details["cache_breakdown_reported"] = int(valid)
+        result.usage.details["unpriced_service_tier_requests"] = int(
+            getattr(response, "service_tier", None) not in (None, "default", "standard")
+        )
         return result
 
 
@@ -286,6 +289,9 @@ async def run_model(
                     "configuration_version": settings_version,
                     "brand_configuration_version": brand["version"],
                     "purpose": purpose or "default",
+                    "unpriced_service_tier_requests": result.usage.details.get(
+                        "unpriced_service_tier_requests", 0
+                    ),
                     "elapsed_seconds": round(time.monotonic() - started, 3),
                     "request_profile": "short" if short_request else "standard",
                     "cache_breakdown_verified": result.usage.details.get(
@@ -334,6 +340,9 @@ async def run_model(
                     "elapsed_seconds": round(time.monotonic() - started, 3),
                     "request_profile": "short" if short_request else "standard",
                     "purpose": purpose or "default",
+                    "unpriced_service_tier_requests": accumulated_usage.details.get(
+                        "unpriced_service_tier_requests", 0
+                    ),
                     "cache_breakdown_verified": accumulated_usage.details.get(
                         "cache_breakdown_reported", 0
                     )

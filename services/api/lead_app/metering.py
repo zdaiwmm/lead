@@ -94,7 +94,7 @@ def model_usage(c, aid=None, active_only=False):
     )
 
 
-def priced(details):
+def priced(details, snapshot=None):
     result = {
         k: v
         for k, v in details.items()
@@ -116,9 +116,13 @@ def priced(details):
             "brand_configuration_version",
             "purpose",
             "error_type",
+            "unpriced_service_tier_requests",
         )
     }
     result["cost"] = None
+    if snapshot is not None:
+        from .admin_pricing import calculate
+        return {**result,**calculate(result,snapshot)}
     try:
         rates = json.loads((STATE / "operator-rates.json").read_text())
         model = rates["models"][result["model"]]
