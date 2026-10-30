@@ -136,7 +136,7 @@ def receive(body: Conversion, request: Request):
             return {"ok": True, "duplicate": True, "id": existing["id"]}
         visit = one(
             c,
-            "SELECT v.id FROM lead.visit_sessions v JOIN lead.tracking_links l ON l.id=v.tracking_link_id JOIN lead.analytics_connections n ON n.id=%s WHERE v.source_session_id=%s AND v.source=%s AND v.trust_level='client_observed' AND l.public_code=%s AND l.state='active' AND v.started_at>=now()-interval '30 days'",
+            "SELECT v.id,v.started_at,v.attribution_policy,v.attribution_version FROM lead.visit_sessions v JOIN lead.tracking_links l ON l.id=v.tracking_link_id JOIN lead.analytics_connections n ON n.id=%s WHERE v.source_session_id=%s AND v.source=%s AND v.trust_level='client_observed' AND l.public_code=%s AND l.state='active' AND v.started_at>=now()-interval '30 days'",
             (
                 body.connection_id,
                 str(body.session_id),
@@ -146,9 +146,16 @@ def receive(body: Conversion, request: Request):
         )
         if not visit:
             raise HTTPException(409, "未找到此网站连接下可归因的访问")
+        from .admin_controls import legacy_attribution
+
+        policy = legacy_attribution(visit["attribution_policy"])
+        if occurred < visit["started_at"] or occurred > visit["started_at"] + timedelta(
+            days=policy["attribution_window_days"]
+        ):
+            raise HTTPException(422, "事件时间超出此访问开始时确定的归因窗口")
         event = one(
             c,
-            "INSERT INTO lead.conversion_events(tenant_id,agent_id,connection_id,visit_session_id,source_event_id,type,trust_level,rule_version,occurred_at,payload_sha256) VALUES(%s,%s,%s,%s,%s,%s,'server_verified','server-attributed-v1',%s,%s) ON CONFLICT(tenant_id,connection_id,source_event_id) DO NOTHING RETURNING id",
+            "INSERT INTO lead.conversion_events(tenant_id,agent_id,connection_id,visit_session_id,source_event_id,type,trust_level,rule_version,occurred_at,payload_sha256,attribution_version) VALUES(%s,%s,%s,%s,%s,%s,'server_verified','server-attributed-v1',%s,%s,%s) ON CONFLICT(tenant_id,connection_id,source_event_id) DO NOTHING RETURNING id",
             (
                 current_tenant(),
                 aid,
@@ -158,6 +165,7 @@ def receive(body: Conversion, request: Request):
                 body.type,
                 occurred,
                 fingerprint,
+                visit["attribution_version"],
             ),
         )
         if not event:

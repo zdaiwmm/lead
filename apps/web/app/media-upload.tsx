@@ -80,7 +80,7 @@ export function AssetPreview({
   return kind === "video" ? (
     <video src={src} controls preload="metadata" className="asset-preview" />
   ) : (
-    <img src={src} alt="已上传素材" className="asset-preview" loading="lazy" />
+    <img src={src} alt="运营素材" className="asset-preview" loading="lazy" />
   );
 }
 export function MediaVerification({

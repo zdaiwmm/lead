@@ -1,10 +1,97 @@
 """Measured units with operator-versioned prices; missing prices remain unknown."""
 
 import json
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from .config import STATE
 from .db import all_rows, one, require_agent, tx
+
+
+def model_identity(details):
+    reference = details.get("model") or "unrecorded"
+    provider = details.get("provider")
+    if reference.startswith(("openai:", "deepseek:")):
+        provider = reference.split(":", 1)[0]
+    if not provider and reference.startswith("deepseek"):
+        provider = "deepseek"
+    return provider or "unrecorded", reference
+
+
+def model_usage(c, aid=None, active_only=False):
+    """Actual billing stays with its recorded model; unlabelled history stays unknown."""
+    events = all_rows(
+        c,
+        "SELECT units,details,occurred_at FROM lead.usage_events WHERE category='model_tokens' AND occurred_at>now()-interval '30 days' AND (%s::uuid IS NULL OR agent_id=%s) AND (NOT %s OR agent_id IN(SELECT id FROM lead.agents WHERE desired_state<>'archived'))",
+        (aid, aid, active_only),
+    )
+    reservations = all_rows(
+        c,
+        "SELECT model_ref,provider,state,units FROM lead.budget_reservations WHERE state IN ('reserved','unknown') AND (%s::uuid IS NULL OR agent_id=%s) AND (NOT %s OR agent_id IN(SELECT id FROM lead.agents WHERE desired_state<>'archived'))",
+        (aid, aid, active_only),
+    )
+    rows = {}
+
+    def bucket(details):
+        provider, reference = model_identity(details)
+        if (provider, reference) not in rows:
+            rows[(provider, reference)] = {
+                "provider": provider,
+                "model": reference,
+                "tokens": 0,
+                "today_tokens": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_input_tokens": 0,
+                "invocations": 0,
+                "requests": 0,
+                "unpriced_calls": 0,
+                "missing_breakdown_calls": 0,
+                "unverified_cache_calls": 0,
+                "reserved_tokens": 0,
+                "unknown_reserved_tokens": 0,
+                "costs": {},
+            }
+        return rows[(provider, reference)]
+
+    start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    for event in events:
+        details = event["details"]
+        row = bucket(details)
+        row["tokens"] += event["units"]
+        if event["occurred_at"] >= start:
+            row["today_tokens"] += event["units"]
+        row["invocations"] += 1
+        row["requests"] += details.get("requests") or 0
+        row["input_tokens"] += details.get("input_tokens") or 0
+        row["output_tokens"] += details.get("output_tokens") or 0
+        row["cached_input_tokens"] += details.get("cache_read_tokens") or 0
+        row["missing_breakdown_calls"] += int(
+            details.get("input_tokens") is None or details.get("output_tokens") is None
+        )
+        row["unverified_cache_calls"] += int(
+            not details.get("cache_breakdown_verified")
+        )
+        row["unpriced_calls"] += int(details.get("cost") is None)
+        if details.get("cost") is not None:
+            currency = details["currency"]
+            row["costs"][currency] = str(
+                Decimal(row["costs"].get(currency, "0")) + Decimal(details["cost"])
+            )
+    for reservation in reservations:
+        row = bucket(
+            {"model": reservation["model_ref"], "provider": reservation["provider"]}
+        )
+        row[
+            "reserved_tokens"
+            if reservation["state"] == "reserved"
+            else "unknown_reserved_tokens"
+        ] += reservation["units"]
+    return sorted(
+        rows.values(), key=lambda row: (-row["tokens"], row["provider"], row["model"])
+    )
 
 
 def priced(details):
@@ -14,6 +101,8 @@ def priced(details):
         if k
         in (
             "model",
+            "provider",
+            "api",
             "input_tokens",
             "output_tokens",
             "cache_read_tokens",
@@ -21,6 +110,12 @@ def priced(details):
             "requests",
             "unmeasured_requests",
             "cache_breakdown_verified",
+            "elapsed_seconds",
+            "request_profile",
+            "configuration_version",
+            "brand_configuration_version",
+            "purpose",
+            "error_type",
         )
     }
     result["cost"] = None
@@ -73,7 +168,7 @@ def summary(aid):
         )
         events = all_rows(
             c,
-            "SELECT units,details FROM lead.usage_events WHERE occurred_at>now()-interval '30 days'",
+            "SELECT units,details FROM lead.usage_events WHERE category='model_tokens' AND occurred_at>now()-interval '30 days'",
         )
         browser = one(
             c,
@@ -83,6 +178,7 @@ def summary(aid):
             c,
             "SELECT coalesce(sum(size_bytes),0) AS bytes FROM lead.assets WHERE state='ready'",
         )
+        by_model = model_usage(c, aid)
     costs = {}
     for event in events:
         d = event["details"]
@@ -93,6 +189,7 @@ def summary(aid):
             )
     return {
         "period": "30d",
+        "by_model": by_model,
         "model_tokens": sum(e["units"] for e in events),
         "input_tokens": sum(e["details"].get("input_tokens") or 0 for e in events),
         "output_tokens": sum(e["details"].get("output_tokens") or 0 for e in events),
@@ -104,6 +201,18 @@ def summary(aid):
             not e["details"].get("cache_breakdown_verified") for e in events
         ),
         "model_costs": costs,
+        "pricing_versions": list(
+            {
+                (
+                    d.get("model"),
+                    d.get("currency"),
+                    d.get("rate_version"),
+                    d.get("rate_effective_at"),
+                )
+                for e in events
+                if (d := e["details"]).get("cost") is not None
+            }
+        ),
         "browser_seconds": float(browser["seconds"]),
         "network_bytes": browser["network_bytes"],
         "cpu_sampled_seconds": float(browser["cpu_sampled_seconds"]),

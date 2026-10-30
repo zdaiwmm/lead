@@ -109,6 +109,7 @@ def provision_security(conn):
         "REVOKE INSERT,UPDATE,DELETE ON lead.platform_capabilities FROM lead_runtime"
     )
     conn.execute("REVOKE UPDATE,DELETE ON lead.audit_events FROM lead_runtime")
+    conn.execute("REVOKE UPDATE,DELETE ON lead.admin_config_versions FROM lead_runtime")
     conn.execute(
         "REVOKE INSERT,UPDATE,DELETE ON lead.recovery_observations FROM lead_runtime"
     )

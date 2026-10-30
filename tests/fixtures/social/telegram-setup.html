@@ -1,0 +1,22 @@
+<!doctype html><meta charset="utf-8">
+<style>[hidden]{display:none!important}.chatlist{width:180px;min-height:70px}.input-field-input,[contenteditable]{min-width:230px;min-height:40px;border:1px solid}button{padding:8px}</style>
+<div class="chatlist"></div><button id="new-menu" class="btn-new-menu">New chat</button>
+<button class="btn-menu-item" id="new-channel" hidden><span class="tgico btn-menu-item-icon">&#xe9e1;</span><span class="i18n btn-menu-item-text">New Channel</span></button>
+<div class="new-channel-container" hidden><div class="input-field-input" contenteditable="true"></div><div class="input-field-input" contenteditable="true"></div><button class="btn-corner is-visible" id="create">Next</button></div>
+<div class="add-members-container" hidden><button class="btn-corner is-visible" id="skip">Skip</button></div>
+<div class="chat-info" hidden><span class="peer-title" data-peer-id="-54321"></span> 1 subscriber</div>
+<div class="input-message-input" contenteditable="true" data-placeholder="Broadcast" hidden></div>
+<div class="profile-container" hidden><p id="about"></p><div class="row row-grid"><div class="row-title" id="public-link"></div><div class="row-subtitle">Link</div></div><button class="btn-icon" id="edit" aria-label="Edit"><span class="tgico">&#xe900;</span></button></div>
+<div class="edit-group-container" hidden><button class="row" id="type"><span class="tgico">&#xe901;</span>Channel type</button></div>
+<div class="group-type-container" hidden><label><input type="radio" value="public" name="privacy">Public channel</label><input type="text" name="group-public-link"><button class="btn-corner is-visible" id="save">Save</button></div>
+<script>
+// First-run overlay uses the same accessible control as current Web K.
+const intro=document.createElement('div');intro.style.cssText='position:fixed;inset:0;background:#4449;z-index:20';const tips=document.createElement('button');tips.setAttribute('aria-label','Tips');tips.setAttribute('aria-expanded','true');tips.textContent='Close tips';tips.onclick=()=>intro.remove();intro.append(tips);document.body.append(intro);
+localStorage.setItem('account1',JSON.stringify({userId:'11111'}));localStorage.setItem('account2',JSON.stringify({userId:'__IDENTITY__'}));
+const q=s=>document.querySelector(s), channel=()=>JSON.parse(localStorage.getItem('setup_channel')||'null');
+function render(){const c=channel();if(!c)return;q('.chatlist').innerHTML='';const row=document.createElement('div');row.dataset.peerId='-54321';const title=document.createElement('span');title.className='peer-title';title.textContent=c.title;row.append(title);q('.chatlist').append(row);q('.chat-info').hidden=false;q('.chat-info .peer-title').textContent=c.title;q('.input-message-input').hidden=false;q('#about').textContent=c.about;q('#public-link').textContent=c.handle?'t.me/'+c.handle:'';if(c.handle){const a=document.createElement('a');a.href='https://t.me/'+c.handle;a.textContent=a.href;q('.chat-info').append(a)}}
+render();q('#new-menu').onclick=()=>q('#new-channel').hidden=false;q('#new-channel').onclick=()=>{q('.new-channel-container').hidden=false;q('#new-channel').hidden=true};
+q('#create').onclick=()=>{const f=document.querySelectorAll('.new-channel-container .input-field-input');localStorage.setItem('setup_channel',JSON.stringify({title:f[0].textContent,about:f[1].textContent}));localStorage.setItem('create_count',String(Number(localStorage.getItem('create_count')||0)+1));q('.new-channel-container').hidden=true;q('.add-members-container').hidden=false;location.hash='-54321';render()};
+q('#skip').onclick=()=>q('.add-members-container').hidden=true;q('.chat-info').onclick=()=>q('.profile-container').hidden=false;q('#edit').onclick=()=>{q('.profile-container').hidden=true;q('.edit-group-container').hidden=false};q('#type').onclick=()=>{q('.edit-group-container').hidden=true;q('.group-type-container').hidden=false;q('[name=group-public-link]').value='t.me/'+(channel().handle||'')};q('[name=group-public-link]').oninput=e=>e.target.classList.add('valid');
+q('#save').onclick=()=>{const c=channel();c.handle=q('[name=group-public-link]').value.replace('t.me/','');localStorage.setItem('setup_channel',JSON.stringify(c));q('.group-type-container').hidden=true;render()};
+</script>

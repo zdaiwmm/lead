@@ -1,0 +1,45 @@
+/* lead Visual System 1.1, normative reference: docs/DESIGN.md */
+:root {
+  color-scheme: dark;
+  --canvas: oklch(15% 0.008 270);
+  --surface: oklch(18.5% 0.009 270);
+  --raised: oklch(22% 0.01 270);
+  --module: oklch(21.5% 0.009 270);
+  --module-primary: oklch(24% 0.01 270);
+  --line: oklch(30% 0.01 270);
+  --text: oklch(94% 0.007 270);
+  --text-secondary: oklch(73% 0.012 270);
+  --text-muted: oklch(64% 0.012 270);
+  --action: oklch(72% 0.17 28);
+  --action-hover: oklch(75% 0.145 28);
+  --action-ink: oklch(18% 0.008 270);
+  --data: oklch(76% 0.11 285);
+  --focus: oklch(80% 0.08 285);
+  --success: oklch(76% 0.1 165);
+  --warning: oklch(82% 0.12 80);
+  --danger: oklch(70% 0.18 25);
+  --font-sans:
+    "Inter Variable", Inter, "PingFang SC", "Microsoft YaHei", system-ui,
+    sans-serif;
+  --radius-control: 8px;
+  --radius-module: 12px;
+  --space-unit: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --module-gap: 32px;
+  --section-gap: 48px;
+  --canvas-padding: 40px;
+  --nav-width: 184px;
+  --chat-width: 38.196601125%;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --bg: var(--canvas);
+  --side: var(--surface);
+  --paper: var(--module);
+  --ink: var(--text);
+  --muted: var(--text-muted);
+  --green: var(--success);
+  --red: var(--danger);
+}

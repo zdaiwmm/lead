@@ -25,7 +25,7 @@ if env.exists():
     secrets += [
         v
         for k, v in dotenv_values(env).items()
-        if v and any(s in k for s in ("KEY", "PASSWORD", "TOKEN", "SECRET"))
+        if v and re.search(r"(?:^|_)(?:KEY|PASSWORD|TOKEN|SECRET|ACCESS_KEY_ID)$", k)
     ]
 files = (
     subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")

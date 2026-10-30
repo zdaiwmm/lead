@@ -363,8 +363,15 @@ async def test_structured_chat_applies_once(agent, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_deepseek_wire_format(monkeypatch, agent):
+@pytest.mark.parametrize(
+    "settings_version",
+    ["models/builtin@0", "models/default@1"],
+    ids=["builtin-settings", "managed-settings"],
+)
+async def test_deepseek_wire_format(monkeypatch, agent, settings_version):
     import lead_app.model as model
+    from lead_app import admin_settings
+    from openai import AsyncOpenAI
     from pydantic_ai.providers.openai import OpenAIProvider
 
     captured = []
@@ -406,6 +413,17 @@ async def test_deepseek_wire_format(monkeypatch, agent):
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        # Wire-format checks must not inherit the owner's published model policy.
+        monkeypatch.setattr(
+            admin_settings,
+            "for_agent",
+            lambda aid, kind: (
+                admin_settings.ModelSettings(
+                    default_model="deepseek-flash"
+                ).model_dump(mode="json"),
+                settings_version,
+            ),
+        )
         monkeypatch.setattr(
             model,
             "model_config",
@@ -417,8 +435,15 @@ async def test_deepseek_wire_format(monkeypatch, agent):
         )
         monkeypatch.setattr(
             model,
+            "AsyncOpenAI",
+            lambda **kwargs: AsyncOpenAI(**kwargs, http_client=client),
+        )
+        monkeypatch.setattr(
+            model,
             "OpenAIProvider",
-            lambda **kwargs: OpenAIProvider(**kwargs, http_client=client),
+            lambda **kwargs: OpenAIProvider(**kwargs)
+            if "openai_client" in kwargs
+            else OpenAIProvider(**kwargs, http_client=client),
         )
         result = await model.run_model(
             model.Decision,

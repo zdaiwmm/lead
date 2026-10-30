@@ -22,13 +22,19 @@ from fastapi.responses import (
 from pydantic import BaseModel, Field
 
 from . import domain
+from .admin_api import require_owner
+from .admin_api import router as admin_router
 from .analytics import router as analytics_router
 from .auth import auth_mode, public_origin
 from .auth import router as auth_router
+from .community_growth import GrowthConfig
 from .config import STATE, env, model_config
 from .conversions import router as conversion_router
+from .creative_pipeline import router as creative_router
 from .db import all_rows, audit, one, record, require_agent, tx
 from .events import router as event_router
+from .operating_playbooks import router as playbook_router
+from .operating_workspace import router as operations_router
 from .ops import router as ops_router
 from .scope import current_tenant, tenant_scope
 from .security import internal_token, token, valid
@@ -53,6 +59,10 @@ app.include_router(event_router)
 app.include_router(conversion_router)
 app.include_router(auth_router)
 app.include_router(ops_router)
+app.include_router(playbook_router)
+app.include_router(creative_router)
+app.include_router(operations_router)
+app.include_router(admin_router)
 
 
 @app.middleware("http")
@@ -105,6 +115,7 @@ async def local_auth(request, call_next):
                 )
             sensitive = path.endswith("/browser/screenshot")
             viewer_exception = path in ("/api/auth/logout", "/api/workspace/switch")
+            viewer_exception = viewer_exception or bool(re.fullmatch(r"/api/admin/notifications/[0-9a-fA-F-]{36}/read", path))
             if identity["role"] == "viewer" and (
                 (
                     request.method not in ("GET", "HEAD", "OPTIONS")
@@ -169,6 +180,82 @@ class CreateAgent(BaseModel):
     client_id: UUID | None = None
 
 
+class AgentSetupProfile(BaseModel):
+    product_name: str = Field(min_length=1, max_length=80)
+    product_url: str = Field(default="", max_length=2000)
+    description: str = Field(min_length=1, max_length=10000)
+    audience: str = Field(default="", max_length=2000)
+    goal: str = Field(min_length=1, max_length=2000)
+    content_expectations: str = Field(default="", max_length=2000)
+    strategy: str = Field(min_length=1, max_length=2000)
+    platform: str
+
+    def profile(self):
+        data = {
+            k: v.strip()
+            for k, v in self.model_dump().items()
+            if k in AgentSetupProfile.model_fields
+        }
+        if (
+            not data["product_name"]
+            or not data["description"]
+            or not data["goal"]
+            or not data["strategy"]
+        ):
+            raise ValueError("请补充产品信息和运营方向")
+        if data["product_url"] and (
+            urlsplit(data["product_url"]).scheme not in ("http", "https")
+            or not urlsplit(data["product_url"]).hostname
+        ):
+            raise ValueError("请输入完整的网站地址")
+        return data
+
+
+class AgentSetupCreate(AgentSetupProfile):
+    client_id: UUID
+    template_version: int | None = Field(default=None, ge=0)
+
+
+class AgentSetupEdit(AgentSetupProfile):
+    expected_revision: int = Field(ge=1)
+
+
+@app.post("/api/agents/setup", status_code=201)
+def create_setup(body: AgentSetupCreate):
+    aid = domain.create_agent(
+        str(body.client_id),
+        setup=body.profile(),
+        setup_template_version=body.template_version,
+    )
+    a = domain.agent_detail(aid)
+    return {"id": aid, "config_revision": a["config_revision"]}
+
+
+@app.post("/api/agents/{aid}/setup")
+def edit_setup(aid: UUID, body: AgentSetupEdit):
+    return domain.update_setup(str(aid), body.profile(), body.expected_revision)
+
+
+@app.post("/api/agents/{aid}/setup/complete")
+def complete_setup(aid: UUID):
+    return domain.complete_setup(str(aid))
+
+
+@app.post("/api/agents/{aid}/setup/cancel")
+async def cancel_setup(aid: UUID):
+    changed = await asyncio.to_thread(
+        domain.set_control, str(aid), "archive", only_setup=True
+    )
+    if changed:
+        await gateway(f"/agents/{aid}/close", body={})
+    return {"ok": True}
+
+
+@app.get("/api/agents/{aid}/activity")
+def activity(aid: UUID, platform: str | None = None, limit: int = 50, offset: int = 0):
+    return domain.agent_activity(str(aid), platform, limit, offset)
+
+
 class Message(BaseModel):
     text: str = Field(min_length=1, max_length=10000)
     client_message_id: UUID
@@ -194,6 +281,26 @@ def agent_usage(aid: UUID):
     from .metering import summary
 
     return summary(str(aid))
+
+
+class TokenBudget(BaseModel):
+    daily_token_limit: int | None = Field(strict=True, ge=0, le=9_007_199_254_740_991)
+    expected_version: int = Field(ge=0)
+
+
+@app.get("/api/agents/{aid}/budget")
+def agent_budget(aid: UUID):
+    from .budget import get_configuration
+
+    return get_configuration(str(aid))
+
+
+@app.post("/api/agents/{aid}/budget")
+def set_agent_budget(aid: UUID, body: TokenBudget):
+    from .budget import set_daily_limit
+
+    require_owner()
+    return set_daily_limit(str(aid), body.daily_token_limit, body.expected_version)
 
 
 @app.get("/api/agents/{aid}/export")
@@ -229,6 +336,69 @@ def get_asset(aid: UUID, asset_id: UUID):
 
 class Control(BaseModel):
     action: Literal["pause", "resume", "start", "archive"]
+    platform: str | None = None
+
+
+class ChannelControl(BaseModel):
+    enabled: bool
+
+
+class AgentIdentity(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    avatar_seed: int = Field(ge=0, le=15)
+    avatar_asset_id: UUID | None = None
+
+
+class BusinessEdit(BaseModel):
+    expected_revision: int = Field(ge=1)
+    product_url: str = Field(default="", max_length=2000)
+    description: str = Field(max_length=10000)
+    audience: str = Field(default="", max_length=2000)
+
+
+class PreferencesEdit(BaseModel):
+    expected_revision: int = Field(ge=1)
+    entries: list[str] = Field(max_length=100)
+
+
+@app.post("/api/agents/{aid}/identity")
+def edit_identity(aid: UUID, body: AgentIdentity):
+    if not body.name.strip():
+        raise ValueError("名称不能为空")
+    return domain.update_identity(
+        str(aid),
+        body.name.strip(),
+        body.avatar_seed,
+        str(body.avatar_asset_id) if body.avatar_asset_id else None,
+    )
+
+
+@app.post("/api/agents/{aid}/business")
+def edit_business(aid: UUID, body: BusinessEdit):
+    if body.product_url and (
+        urlsplit(body.product_url).scheme not in ("http", "https")
+        or not urlsplit(body.product_url).hostname
+    ):
+        raise ValueError("请输入完整的网站地址")
+    return domain.update_business(
+        str(aid),
+        body.expected_revision,
+        body.product_url,
+        body.description.strip(),
+        body.audience.strip(),
+    )
+
+
+@app.post("/api/agents/{aid}/preferences")
+def edit_preferences(aid: UUID, body: PreferencesEdit):
+    if any(len(text) > 4000 for text in body.entries):
+        raise ValueError("每条偏好最多 4000 字")
+    return domain.update_preferences(str(aid), body.expected_revision, body.entries)
+
+
+@app.post("/api/agents/{aid}/channels/{platform}/control")
+def edit_channel_control(aid: UUID, platform: str, body: ChannelControl):
+    return domain.channel_control(str(aid), platform, body.enabled)
 
 
 class RevisionRequest(BaseModel):
@@ -250,7 +420,7 @@ class LabPublish(BaseModel):
 
 
 class BrowserInput(BaseModel):
-    kind: Literal["click", "text", "key", "scroll"]
+    kind: Literal["click", "text", "key", "scroll", "back", "forward", "reload"]
     x: float = 0
     y: float = 0
     text: str = Field(default="", max_length=4000)
@@ -511,13 +681,63 @@ def retry(aid: UUID):
 
 @app.post("/api/agents/{aid}/control")
 async def control(aid: UUID, body: Control):
-    await asyncio.to_thread(domain.set_control, str(aid), body.action)
+    await asyncio.to_thread(domain.set_control, str(aid), body.action, body.platform)
     if body.action in ("pause", "archive"):
         try:
             await gateway("/agents/" + str(aid) + "/close", timeout=20)
         except HTTPException:
             pass
     return {"ok": True}
+
+
+@app.get("/api/agents/{aid}/community-growth")
+def community_strategy(aid: UUID):
+    from .community_growth import get_strategy
+
+    return get_strategy(str(aid))
+
+
+@app.put("/api/agents/{aid}/community-growth")
+def community_strategy_update(aid: UUID, body: GrowthConfig):
+    from .community_growth import set_strategy
+
+    return set_strategy(str(aid), body.model_dump())
+
+
+class CommunityResearchRequest(BaseModel):
+    client_request_id: UUID
+
+
+@app.post("/api/agents/{aid}/community-growth/research")
+def community_research_request(aid: UUID, body: CommunityResearchRequest):
+    from .community_growth import request_research
+
+    return request_research(str(aid), str(body.client_request_id))
+
+
+class TelegramLaunch(BaseModel):
+    client_request_id: UUID
+
+
+@app.post("/api/agents/{aid}/telegram/bootstrap")
+def telegram_launch(aid: UUID, body: TelegramLaunch):
+    from .account_setup import request_fresh_channel
+
+    return request_fresh_channel(str(aid), str(body.client_request_id))
+
+
+@app.get("/api/agents/{aid}/telegram/bootstrap/{task_id}")
+def telegram_launch_status(aid: UUID, task_id: UUID):
+    from .account_setup import launch_status
+
+    return launch_status(str(aid), str(task_id))
+
+
+@app.post("/api/agents/{aid}/telegram/bootstrap/{task_id}/recheck")
+def telegram_launch_recheck(aid: UUID, task_id: UUID):
+    from .account_setup import recheck_launch
+
+    return recheck_launch(str(aid), str(task_id))
 
 
 @app.get("/api/platforms")
@@ -613,11 +833,15 @@ def end_takeover(aid: UUID):
 
 
 @app.get("/api/agents/{aid}/browser/screenshot")
-async def screenshot(aid: UUID):
+async def screenshot(aid: UUID, format: Literal["png", "jpeg"] = "png"):
     with tx(str(aid)) as c:
         require_agent(c, str(aid))
-    result = await gateway("/agents/" + str(aid) + "/screenshot", "GET")
-    return Response(result.content, media_type="image/png")
+    result = await gateway(
+        "/agents/" + str(aid) + "/screenshot?format=" + format, "GET"
+    )
+    return Response(
+        result.content, media_type="image/jpeg" if format == "jpeg" else "image/png"
+    )
 
 
 @app.post("/api/agents/{aid}/browser/input")

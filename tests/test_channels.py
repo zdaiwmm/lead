@@ -8,7 +8,7 @@ from lead_app import channels, domain, telegram
 from lead_app.activities import prepare_action
 from lead_app.browser import Gateway
 from lead_app.config import TENANT
-from lead_app.db import one, tx, uid
+from lead_app.db import j, one, tx, uid
 from lead_app.telegram import channel_url
 
 
@@ -131,8 +131,9 @@ def test_telegram_target_urls_are_narrow():
     os.environ.get("LEAD_BROWSER_TESTS") != "1",
     reason="real browser adapter contract, no external Telegram post",
 )
+@pytest.mark.parametrize("failure", ["lost_receipt", "not_submitted"])
 async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_resubmit(
-    channel, monkeypatch
+    channel, monkeypatch, failure
 ):
     aid, account_id, target = channel
     channels.accept_card(aid, str(target["card_id"]), 1, True)
@@ -157,12 +158,35 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
     channels.accept_card(aid, str(probe["id"]), 1, True)
     with tx(aid) as c:
         task = one(c, "SELECT id FROM lead.tasks")
+    if failure == "not_submitted":
+        with tx(aid) as c:
+            parent = one(
+                c,
+                "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,input,result,scheduled_at,workflow_id) VALUES(%s,%s,'account.prepare','succeeded',%s,%s,now(),%s) RETURNING id",
+                (
+                    TENANT,
+                    aid,
+                    j({"fresh_channel": True}),
+                    j(
+                        {
+                            "target_id": str(target["target_id"]),
+                            "awaiting_first_publish": True,
+                        }
+                    ),
+                    "fixture-fresh:" + uid(),
+                ),
+            )
+            c.execute(
+                "UPDATE lead.tasks SET input=input || %s,created_at=now()-interval '2 minutes' WHERE id=%s",
+                (j({"bootstrap_run_id": str(parent["id"])}), task["id"]),
+            )
     action = prepare_action(aid, str(task["id"]))
     gateway = Gateway()
     # Official Web K DOM contract fixture, not live-channel acceptance evidence.
     html = """<!doctype html><div class="chatlist" style="width:100px;height:100px">Chats</div>
     <div class="chat-info"><span class="peer-title" data-peer-id="PEER">自有验收频道</span><span>2 subscribers</span></div>
-    <div class="input-message-input" contenteditable="true" data-placeholder="Broadcast"></div><button class="btn-send">Send</button><div id="bubbles"></div>
+    <div class="input-message-input" contenteditable="true" data-placeholder="Broadcast"></div><button class="btn-send send">Send</button><div id="bubbles"></div>
+    <div class="bubble service" data-mid="99">Channel created</div><div style="display:none"><div class="bubble" data-mid="99999999"><div class="message">Hidden other channel</div></div></div>
     <script>
     localStorage.setItem('account1',JSON.stringify({userId:'11111'}));
     localStorage.setItem('account2',JSON.stringify({userId:'ACCOUNT'}));
@@ -185,14 +209,26 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
             and own["slot"] == "2"
         )
         original = telegram.receipt
+        # A rebuilt actor starts on about:blank even though the login is stored.
+        # Publishing must restore the known slot without asking the owner to log in.
+        await actor.page.goto("about:blank")
 
         async def lose_receipt(*a, **k):
             raise ConnectionError("lost acknowledgement after submit")
 
-        monkeypatch.setattr(telegram, "receipt", lose_receipt)
+        submit = telegram.submit
+
+        async def not_submitted(page):
+            raise ConnectionError("send control was never activated")
+
+        if failure == "lost_receipt":
+            monkeypatch.setattr(telegram, "receipt", lose_receipt)
+        else:
+            monkeypatch.setattr(telegram, "submit", not_submitted)
         first = await actor.publish_telegram(str(action["id"]))
         assert first["state"] == "unknown"
         monkeypatch.setattr(telegram, "receipt", original)
+        monkeypatch.setattr(telegram, "submit", submit)
         second = await actor.publish_telegram(str(action["id"]))
         assert second["state"] == "confirmed"
         assert "?account=2" in actor.page.url
@@ -201,7 +237,9 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
         )
         assert posts == [probe["payload"]["body"]]
         with tx(aid) as c:
-            assert one(c, "SELECT count(*) AS n FROM lead.action_attempts")["n"] == 1
+            assert one(c, "SELECT count(*) AS n FROM lead.action_attempts")["n"] == (
+                2 if failure == "not_submitted" else 1
+            )
             assert domain.metrics(c)["published"] == 0
             before = one(
                 c,

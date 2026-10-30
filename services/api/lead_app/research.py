@@ -28,6 +28,32 @@ class ResearchStopped(ValueError):
     pass
 
 
+def community_entry(link):
+    """Follow community evidence, excluding search UI and site-account actions."""
+    name = link.get("name", "")
+    parsed = urlsplit(link.get("href", ""))
+    return bool(
+        name
+        and parsed.scheme == "https"
+        and parsed.hostname not in ("t.me", "telegram.me")
+        and not (
+            parsed.hostname in ("www.google.com", "google.com")
+            and parsed.path == "/search"
+        )
+        and not re.search(
+            r"/contact/report-content|/(?:login|logout|register|signup|report)(?:[/?#]|$)",
+            parsed.path,
+            re.I,
+        )
+        and not re.search(r"https?://translations\.telegram\.org\b", name, re.I)
+        and re.search(
+            r"community|contact|telegram|discussion|forum|社群|讨论|交流|联系我们",
+            name + " " + parsed.path,
+            re.I,
+        )
+    )
+
+
 def public_url(value, base=None):
     value = value.strip()
     if not re.match(r"^https?://", value, re.I) and re.match(
@@ -55,19 +81,34 @@ class ResearchPage:
         self.refs = {}
         self.snapshot = 0
         self.last_search = None
+        self.community_redirects = []
+        self.redirect_source_url = None
+        self.redirect_metadata_only = False
+        self.redirect_observation = {}
 
     def gate(self):
+        from .admin_settings import effective
+
         with tx(self.actor.aid) as c:
             a = require_agent(c, self.actor.aid)
             run = one(c, "SELECT * FROM lead.browser_runs WHERE id=%s", (self.run_id,))
             if not run or run["state"] != "running":
                 raise ResearchStopped("浏览任务已经结束")
+            tools, _ = effective(c, "models", self.actor.aid)
+            if not tools["tools"]["public_web"] or (
+                run["mode"] == "community_discovery"
+                and not tools["tools"]["community_research"]
+            ):
+                raise ResearchStopped("此研究工具已在后台关闭")
             if (
                 a["control_version"] != run["control_version"]
                 or a["config_revision"] != run["config_revision"]
             ):
                 raise ResearchStopped("控制权或运营配置已改变，浏览操作已停止")
-            if run["mode"] == "autonomous" and a["desired_state"] != "running":
+            if (
+                run["mode"] in ("autonomous", "community_discovery")
+                and a["desired_state"] != "running"
+            ):
                 raise ResearchStopped("Agent 已暂停")
             if one(
                 c,
@@ -83,7 +124,7 @@ class ResearchPage:
             return run
 
     async def ensure(self):
-        self.gate()
+        self.community_discovery = self.gate()["mode"] == "community_discovery"
         if self.page and not self.page.is_closed():
             return
         browser = self.actor.context.browser
@@ -105,10 +146,16 @@ class ResearchPage:
         with tx(self.actor.aid) as c:
             last = one(
                 c,
-                "SELECT output->>'url' AS url FROM lead.browser_steps WHERE run_id=%s AND state='completed' ORDER BY seq DESC LIMIT 1",
+                "SELECT output->>'url' AS url,output->>'redirect_metadata_only' AS metadata_only,output->'community_links' AS links,output->'redirect_observation' AS redirect_observation FROM lead.browser_steps WHERE run_id=%s AND state='completed' ORDER BY seq DESC LIMIT 1",
                 (self.run_id,),
             )
         if last and last["url"]:
+            if last["metadata_only"] == "true":
+                self.redirect_source_url = last["url"]
+                self.community_redirects = last["links"] or []
+                self.redirect_metadata_only = True
+                self.redirect_observation = last["redirect_observation"] or {}
+                return
             url = public_url(last["url"])
             await self.actor.forward_proxy.validate_url(url)
             await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -118,12 +165,110 @@ class ResearchPage:
     async def read_only_route(self, route):
         # Even a malicious page or accidental submit cannot issue writes while
         # the Agent is researching. No bypass for the model or page instructions.
-        if route.request.method not in ("GET", "HEAD", "OPTIONS"):
+        host = (urlsplit(route.request.url).hostname or "").lower()
+        if getattr(self, "community_discovery", False) and any(
+            host == d or host.endswith("." + d)
+            for d in (
+                "t.me",
+                "telegram.me",
+                "telegram.org",
+                "telegram.dog",
+                "tgstat.com",
+                "telemetr.io",
+                "reddit.com",
+                "facebook.com",
+                "x.com",
+                "twitter.com",
+                "discord.com",
+            )
+        ):
+            # Capture a search engine's actual redirect destination as link
+            # evidence, then block the destination before loading any content.
+            # Subresources, message URLs and direct Telegram browsing do not
+            # create this evidence.
+            from .community_links import telegram_link
+
+            link = telegram_link(route.request.url)
+            if (
+                link
+                and self.redirect_source_url
+                and self.page
+                and route.request.method == "GET"
+                and route.request.is_navigation_request()
+                and route.request.frame == self.page.main_frame
+            ):
+                item = {"href": link, "name": "Telegram 公开入口（搜索跳转核对）"}
+                if item not in self.community_redirects:
+                    self.community_redirects.append(item)
+                self.redirect_metadata_only = True
             return await route.abort()
+        if route.request.method not in ("GET", "HEAD", "OPTIONS"):
+            if host in ("www.google.com", "www.bing.com", "html.duckduckgo.com"):
+                requests = getattr(self, "blocked_search_requests", [])
+                item = {
+                    "method": route.request.method,
+                    "host": host,
+                    "path": urlsplit(route.request.url).path,
+                }
+                if item not in requests and len(requests) < 8:
+                    requests.append(item)
+                self.blocked_search_requests = requests
+            return await route.abort()
+        if (
+            getattr(self, "community_discovery", False)
+            and self.redirect_source_url == route.request.url
+            and route.request.method == "GET"
+            and route.request.is_navigation_request()
+        ):
+            # Browser route handlers are not re-run for every HTTP redirect.
+            # Fetch only the search redirect response, never its Telegram body.
+            response = await route.fetch(max_redirects=0, timeout=15000)
+            if response.status in (301, 302, 303, 307, 308):
+                from .community_links import telegram_link
+
+                destination = urljoin(
+                    route.request.url, response.headers.get("location", "")
+                )
+                link = telegram_link(destination)
+                target = urlsplit(destination)
+                self.redirect_observation = {
+                    "status": response.status,
+                    "destination_host": target.hostname,
+                    "kind": "public_handle"
+                    if link
+                    else "invite"
+                    if target.hostname in ("t.me", "telegram.me")
+                    and target.path.startswith(("/+", "/joinchat/"))
+                    else "interface_translation_project"
+                    if target.hostname == "translations.telegram.org"
+                    else "unsupported_destination",
+                    "destination_content_loaded": False,
+                }
+                self.community_redirects = (
+                    [{"href": link, "name": "Telegram 公开入口（搜索跳转核对）"}]
+                    if link
+                    else []
+                )
+                self.redirect_metadata_only = True
+                return await route.fulfill(
+                    status=200,
+                    content_type="text/html",
+                    body="<!doctype html><title>Public link observed</title><p>Redirect metadata recorded.</p>",
+                )
+            return await route.fulfill(response=response)
         await self.actor.route(route)
 
     async def observe(self):
-        data = await self.page.evaluate(OBSERVE)
+        data = (
+            {
+                "title": "已核对搜索跳转目的地址",
+                "text": "",
+                "elements": [],
+                "has_password": False,
+            }
+            if self.redirect_metadata_only
+            else await self.page.evaluate(OBSERVE)
+        )
         self.snapshot += 1
         self.refs = {}
         visible = []
@@ -137,8 +282,42 @@ class ResearchPage:
                     if k not in ("selector", "form")
                 }
             )
+        community_links = list(self.community_redirects)
+        community_entries = []
+        if (
+            getattr(self, "community_discovery", False)
+            and not self.redirect_metadata_only
+        ):
+            # Footer/community links can be after the generic 100-control cap.
+            # This fixed extraction exports links only, never arbitrary scripts.
+            links = await self.page.evaluate(
+                """() => [...document.querySelectorAll('a[href]')].map(a=>({href:a.href,name:(a.innerText||a.getAttribute('aria-label')||'').trim().slice(0,120)}))"""
+            )
+            from .community_links import telegram_link
+
+            community_links = [link for link in links if telegram_link(link["href"])][
+                :30
+            ]
+            community_entries = [link for link in links if community_entry(link)]
+            community_entries.sort(
+                key=lambda link: (
+                    not bool(
+                        re.search(
+                            r"https?://(?:t\.me|telegram\.me)\b", link["name"], re.I
+                        )
+                    )
+                )
+            )
+            community_entries = community_entries[:4]
         return {
-            "url": self.page.url,
+            "community_links": community_links,
+            "redirect_metadata_only": self.redirect_metadata_only,
+            "redirect_observation": self.redirect_observation,
+            "community_entries": community_entries,
+            "blocked_search_requests": getattr(self, "blocked_search_requests", []),
+            "url": self.redirect_source_url
+            if self.redirect_metadata_only
+            else self.page.url,
             "title": data["title"],
             "text": data["text"],
             "elements": visible,
@@ -191,18 +370,55 @@ class ResearchPage:
                 if operation == "open":
                     url = public_url(args["url"])
                     await self.actor.forward_proxy.validate_url(url)
-                    await self.page.goto(
-                        url, wait_until="domcontentloaded", timeout=35000
+                    self.community_redirects = []
+                    self.redirect_metadata_only = False
+                    self.redirect_observation = {}
+                    parsed = urlsplit(url)
+                    self.redirect_source_url = (
+                        url
+                        if self.community_discovery
+                        and parsed.hostname in ("www.google.com", "google.com")
+                        and parsed.path in ("/goto", "/url")
+                        else None
                     )
+                    try:
+                        await self.page.goto(
+                            url, wait_until="domcontentloaded", timeout=35000
+                        )
+                    except Exception:
+                        if not self.community_redirects:
+                            raise
+                        self.redirect_metadata_only = True
+                    if self.community_redirects:
+                        self.redirect_metadata_only = True
                     # Wait for actual visible content, without requiring every
                     # analytics request on the website to become idle.
-                    await self.page.locator("body").wait_for(state="visible")
+                    if not self.redirect_metadata_only:
+                        await self.page.locator("body").wait_for(state="visible")
                     try:
-                        await self.page.wait_for_function(
-                            "document.body.innerText.trim().length>30", timeout=4000
-                        )
+                        if not self.redirect_metadata_only:
+                            await self.page.wait_for_function(
+                                "document.body.innerText.trim().length>30", timeout=4000
+                            )
                     except BrowserTimeout:
                         pass
+                    host = (urlsplit(self.page.url).hostname or "").lower()
+                    search_selector = (
+                        "#search h3"
+                        if host in ("www.google.com", "google.com")
+                        else "#b_results .b_algo"
+                        if host in ("www.bing.com", "bing.com")
+                        else ".result__a"
+                        if host == "html.duckduckgo.com"
+                        else None
+                    )
+                    if search_selector and not self.redirect_metadata_only:
+                        try:
+                            await self.page.locator(search_selector).first.wait_for(
+                                timeout=8000
+                            )
+                        except BrowserTimeout:
+                            pass
                     self.refs = {}
                 elif operation == "read":
                     if self.page.url == "about:blank":

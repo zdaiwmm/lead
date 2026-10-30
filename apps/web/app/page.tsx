@@ -12,21 +12,28 @@ import {
   Globe,
   X,
   RefreshCw,
-  Check,
-  ExternalLink,
   PanelLeftOpen,
 } from "lucide-react";
-import AnalyticsPanel from "./analytics-panel";
 import BrowserHistory from "./browser-history";
 import ChannelCards from "./channel-cards";
 import { MediaUpload, AssetPreview } from "./media-upload";
 import { api, setWorkspace, getWorkspace } from "./api-client";
 import WorkspaceSettings from "./workspace-settings";
 import UsagePanel from "./usage-panel";
+import AgentAvatar from "./agent-avatar";
+import AgentIdentity from "./agent-identity";
+import AgentPreferences from "./agent-preferences";
+import SocialAccounts from "./social-accounts";
+import AgentResults from "./agent-results";
+import ActivityPanel from "./activity-panel";
+import OperatingPanel from "./operating-panel";
+import AccountBrowser from "./account-browser";
+import SocialIcon from "./social-icon";
+import NewAgentDialog from "./new-agent-dialog";
+import NotificationIndicator from "./notification-indicator";
 
 type Row = Record<string, any>;
 type View = "home" | "agent" | "settings";
-type Tab = "chat" | "work" | "results" | "settings";
 const names: Row = {
   draft: "待启动",
   running: "自主运营中",
@@ -50,20 +57,16 @@ const names: Row = {
 };
 function status(a: Row) {
   return a.desired_state === "running"
-    ? names[a.health_state] || names.running
+    ? (["ready", "queued"].includes(a.health_state)
+        ? names.running
+        : names[a.health_state]) || names.running
     : names[a.desired_state] || "待启动";
-}
-function time(s: string) {
-  return new Date(s).toLocaleString("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 }
 export default function Lead() {
   const [view, setView] = useState<View>("home");
-  const [tab, setTab] = useState<Tab>("chat");
+  const [chatOpen, setChatOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createInitial, setCreateInitial] = useState("");
   const [agents, setAgents] = useState<Row[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
   const [detail, setDetail] = useState<Row | null>(null);
@@ -79,13 +82,11 @@ export default function Lead() {
   const [channels, setChannels] = useState(false);
   const [platforms, setPlatforms] = useState<Row[]>([]);
   const [browser, setBrowser] = useState<Row | null>(null);
-  const [image, setImage] = useState("");
-  const [input, setInput] = useState("");
   const [side, setSide] = useState(false);
   const end = useRef<HTMLDivElement>(null);
-  const objectUrl = useRef("");
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const followMessages = useRef(true);
   const sendKey = useRef<string | null>(null);
-  const createKey = useRef<string | null>(null);
   const selected = useRef<string | null>(null);
   selected.current = current;
   const refresh = useCallback(async () => {
@@ -115,7 +116,13 @@ export default function Lead() {
           return;
         }
         await refresh();
-        if (active) setReady(true);
+        if (active) {
+          setReady(true);
+          const saved = new URLSearchParams(window.location.search).get(
+            "agent",
+          );
+          if (saved && /^[a-f0-9-]{36}$/.test(saved)) select(saved);
+        }
       })
       .catch((e) => setError(e.message));
     return () => {
@@ -142,14 +149,97 @@ export default function Lead() {
     };
   }, [ready, refresh]);
   useEffect(() => {
-    end.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const box = messagesRef.current;
+    if (box && followMessages.current) box.scrollTop = box.scrollHeight;
   }, [detail?.messages?.length]);
   useEffect(() => {
-    if (!channels) return;
+    if (!ready) return;
     api("/platforms")
       .then(setPlatforms)
       .catch((e) => setError(e.message));
+  }, [ready]);
+  useEffect(() => {
+    if (!channels) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const drawer = document.querySelector<HTMLElement>(".drawer");
+    drawer?.querySelector<HTMLElement>("button")?.focus();
+    function key(e: KeyboardEvent) {
+      if (e.key === "Escape") setChannels(false);
+      if (e.key !== "Tab") return;
+      const items = drawer?.querySelectorAll<HTMLElement>(
+        "button:not(:disabled)",
+      );
+      if (!items?.length) return;
+      if (e.shiftKey && document.activeElement === items[0]) {
+        e.preventDefault();
+        items[items.length - 1].focus();
+      } else if (
+        !e.shiftKey &&
+        document.activeElement === items[items.length - 1]
+      ) {
+        e.preventDefault();
+        items[0].focus();
+      }
+    }
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("keydown", key);
+      previous?.focus();
+    };
   }, [channels]);
+  useEffect(() => {
+    if (!chatOpen || !window.matchMedia("(max-width:1279px)").matches) return;
+    const panel = document.querySelector<HTMLElement>(".chat-panel");
+    const previous = document.activeElement as HTMLElement | null;
+    const background = [".agent-canvas", ".sidebar", ".topbar", ".chat-launch"]
+      .map((s) => document.querySelector<HTMLElement>(s))
+      .filter((e): e is HTMLElement => !!e);
+    background.forEach((e) => {
+      e.inert = true;
+    });
+    panel?.setAttribute("role", "dialog");
+    panel?.setAttribute("aria-modal", "true");
+    panel?.querySelector<HTMLElement>(".close-chat")?.focus();
+    function key(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setChatOpen(false);
+      }
+      if (e.key !== "Tab") return;
+      const items = panel?.querySelectorAll<HTMLElement>(
+        "button:not(:disabled),textarea:not(:disabled),a[href],summary",
+      );
+      if (!items?.length) return;
+      if (e.shiftKey && document.activeElement === items[0]) {
+        e.preventDefault();
+        items[items.length - 1].focus();
+      } else if (
+        !e.shiftKey &&
+        document.activeElement === items[items.length - 1]
+      ) {
+        e.preventDefault();
+        items[0].focus();
+      }
+    }
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("keydown", key);
+      background.forEach((e) => {
+        e.inert = false;
+      });
+      panel?.removeAttribute("role");
+      panel?.removeAttribute("aria-modal");
+      previous?.focus();
+    };
+  }, [chatOpen, current, !!detail]);
+  function actionError(message: string) {
+    const dialog = document.querySelector("dialog[open]");
+    if (dialog)
+      dialog.dispatchEvent(
+        new CustomEvent("lead:dialog-error", { detail: message }),
+      );
+    else setError(message);
+  }
   async function run(action: () => Promise<void>) {
     if (readOnly) {
       setError("当前成员仅有查看权限");
@@ -161,7 +251,7 @@ export default function Lead() {
       await action();
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "操作未完成");
+      actionError(e instanceof Error ? e.message : "操作未完成");
     } finally {
       setBusy(false);
     }
@@ -169,9 +259,11 @@ export default function Lead() {
   async function select(id: string) {
     selected.current = id;
     setCurrent(id);
+    window.history.replaceState(null, "", "?agent=" + id);
     setDetail(null);
     setView("agent");
-    setTab("chat");
+    setChatOpen(false);
+    followMessages.current = true;
     setSide(false);
     setText("");
     setAttachments([]);
@@ -183,35 +275,18 @@ export default function Lead() {
       setError((e as Error).message);
     }
   }
-  async function create(initial?: string) {
-    setText("");
-    createKey.current = createKey.current || crypto.randomUUID();
-    const a = await api("/agents", { client_id: createKey.current });
-    createKey.current = null;
-    selected.current = a.id;
-    setAttachments([]);
-    setCurrent(a.id);
-    setView("agent");
-    setTab("chat");
-    setSide(false);
-    if (initial) {
-      sendKey.current = sendKey.current || crypto.randomUUID();
-      await api("/agents/" + a.id + "/messages", {
-        text: initial,
-        client_message_id: sendKey.current,
-      });
-      sendKey.current = null;
-    }
-    setDetail(await api("/agents/" + a.id));
+  function beginCreate(initial = "") {
+    setCreateInitial(initial);
+    setCreateOpen(true);
   }
   async function send() {
     if ((!text.trim() && !attachments.length) || busy) return;
     const value = text.trim() || "我上传了素材，供后续运营使用。";
+    if (!current) {
+      beginCreate(value);
+      return;
+    }
     await run(async () => {
-      if (!current) {
-        await create(value);
-        return;
-      }
       sendKey.current = sendKey.current || crypto.randomUUID();
       await api("/agents/" + current + "/messages", {
         text: value,
@@ -231,38 +306,12 @@ export default function Lead() {
       await api("/agents/" + current + "/control", { action });
     });
   }
-  async function shot() {
-    if (!current) return;
-    const r = await fetch("/api/agents/" + current + "/browser/screenshot", {
-      cache: "no-store",
-    });
-    if (!r.ok) throw Error("浏览器画面暂不可用");
-    const url = URL.createObjectURL(await r.blob());
-    if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
-    objectUrl.current = url;
-    setImage(url);
-  }
   async function connect(p: Row) {
-    if (!current) return;
-    await run(async () => {
-      const b = await api("/agents/" + current + "/connect", {
-        platform: p.id,
-      });
-      setBrowser({ ...b, name: p.name });
-      setChannels(false);
-      await shot();
-    });
+    if (!current || readOnly) return;
+    window.dispatchEvent(new Event("lead:close-dialogs"));
+    setBrowser({ platform: p.id, name: p.name });
+    setChannels(false);
   }
-  async function browserInput(body: Row) {
-    if (!current) return;
-    await api("/agents/" + current + "/browser/input", body);
-    await shot();
-  }
-  useEffect(() => {
-    if (!browser) return;
-    const timer = setInterval(() => shot().catch(() => {}), 3000);
-    return () => clearInterval(timer);
-  }, [browser, current]); // eslint-disable-line react-hooks/exhaustive-deps
   const running = agents.filter((a) => a.desired_state === "running").length;
   const measured = agents.filter((a) => a.metrics?.qualified_visits != null);
   const needs = agents.filter((a) =>
@@ -351,34 +400,6 @@ export default function Lead() {
       </div>
     );
   }
-  function connections() {
-    return (
-      <section className="connections">
-        <div className="section-head">
-          <h2>运营账号</h2>
-          <button onClick={() => setChannels(true)} disabled={readOnly}>
-            <Plus size={14} />
-            连接账号
-          </button>
-        </div>
-        {detail?.accounts?.filter((a: Row) => a.platform !== "lab").length ? (
-          detail.accounts
-            .filter((a: Row) => a.platform !== "lab")
-            .map((a: Row) => (
-              <div className="simple-row" key={a.id}>
-                <span>
-                  {platforms.find((p) => p.id === a.platform)?.name ||
-                    a.platform}
-                </span>
-                <span className="muted">{names[a.state] || a.state}</span>
-              </div>
-            ))
-        ) : (
-          <p className="muted small">尚未连接账号</p>
-        )}
-      </section>
-    );
-  }
   if (loginUrl)
     return (
       <main className="login-page">
@@ -404,7 +425,7 @@ export default function Lead() {
         </button>
         <button
           className="new"
-          onClick={() => run(() => create())}
+          onClick={() => beginCreate()}
           disabled={busy || !ready || readOnly}
         >
           <Plus size={16} />
@@ -415,6 +436,7 @@ export default function Lead() {
             className={view === "home" ? "active" : ""}
             onClick={() => {
               setView("home");
+              window.history.replaceState(null, "", "/");
               setCurrent(null);
               setDetail(null);
               setText("");
@@ -437,16 +459,28 @@ export default function Lead() {
               }
               onClick={() => select(a.id)}
             >
-              <span
-                className={
-                  "dot " + (a.desired_state === "running" ? "green" : "")
-                }
-              />
+              <AgentAvatar agent={a} size={22} />
               <span className="ellipsis">{a.name}</span>
             </button>
           ))}
         </nav>
         <div className="sidebar-bottom">
+          <NotificationIndicator />
+          <a
+            href="/admin"
+            className="admin-entry"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "8px 12px",
+              color: "var(--text-secondary)",
+              textDecoration: "none",
+            }}
+          >
+            <Settings size={16} />
+            管理后台
+          </a>
           <button
             className={view === "settings" ? "active" : ""}
             onClick={() => {
@@ -467,6 +501,13 @@ export default function Lead() {
           </div>
         </div>
       </aside>
+      {side && (
+        <button
+          className="nav-dismiss"
+          aria-label="关闭导航"
+          onClick={() => setSide(false)}
+        />
+      )}
       <div className="main">
         <header className="topbar">
           <button
@@ -520,7 +561,7 @@ export default function Lead() {
                 </div>
                 <div className="eyebrow">YOUR AI SOCIAL TEAM</div>
                 <h1>你想推广什么？</h1>
-                <p>把业务告诉我，剩下的我们一起开始。</p>
+                <p>介绍你的业务，Agent 将持续为你运营社媒。</p>
                 {composer(true)}
               </div>
             ) : (
@@ -532,10 +573,11 @@ export default function Lead() {
                   </div>
                   <button
                     className="primary"
-                    onClick={() => run(() => create())}
+                    disabled={readOnly || busy}
+                    onClick={() => beginCreate()}
                   >
                     <Plus size={16} />
-                    雇用 Agent
+                    新建 Agent
                   </button>
                 </div>
                 <div className="overview-line">
@@ -571,7 +613,7 @@ export default function Lead() {
                       key={a.id}
                     >
                       <span className="agent-identity">
-                        <span className="avatar">{a.name.slice(0, 1)}</span>
+                        <AgentAvatar agent={a} size={36} />
                         <span>
                           <strong>{a.name}</strong>
                           <small>
@@ -655,405 +697,229 @@ export default function Lead() {
               </div>
             </details>
           </main>
+        ) : !detail ? (
+          <div className="loading">
+            <div />
+            <div />
+          </div>
         ) : (
-          <>
-            <div className="agent-header">
-              <div>
-                <h1>{detail?.name || "Agent"}</h1>
-                <span className="status">
-                  <i
-                    className={
-                      "dot " +
-                      (detail?.desired_state === "running" ? "green" : "")
-                    }
+          <div className="agent-layout">
+            <main
+              className="agent-canvas"
+              id="main-content"
+              tabIndex={0}
+              aria-label="Agent 运营工作台"
+            >
+              <div className="workspace-content">
+                <header className="agent-header">
+                  <AgentIdentity
+                    key={current}
+                    agent={detail}
+                    readOnly={readOnly}
+                    onComplete={refresh}
+                    onError={setError}
                   />
-                  {detail ? status(detail) : "正在读取"}
-                </span>
-              </div>
-              <div className="agent-actions">
-                <button
-                  onClick={() => setChannels(true)}
-                  disabled={!detail || busy || readOnly}
-                >
-                  <Plus size={15} />
-                  连接账号
-                </button>
-                {detail?.desired_state === "running" ? (
-                  <button
-                    onClick={() => control("pause")}
-                    disabled={busy || readOnly}
-                  >
-                    <Pause size={14} />
-                    暂停
-                  </button>
-                ) : (
-                  <button
-                    className="primary"
-                    onClick={() =>
-                      control(
-                        detail?.desired_state === "paused" ? "resume" : "start",
-                      )
-                    }
-                    disabled={busy || !detail || readOnly}
-                  >
-                    <Play size={14} />
-                    {detail?.desired_state === "paused" ? "恢复" : "免费启动"}
-                  </button>
-                )}
-              </div>
-            </div>
-            <div className="tabs" role="tablist" aria-label="Agent 页面">
-              {(
-                [
-                  ["chat", "对话"],
-                  ["work", "工作记录"],
-                  ["results", "获客效果"],
-                  ["settings", "更多"],
-                ] as [Tab, string][]
-              ).map(([key, label]) => (
-                <button
-                  role="tab"
-                  aria-selected={tab === key}
-                  key={key}
-                  onClick={() => setTab(key)}
-                  className={tab === key ? "selected" : ""}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            {!detail ? (
-              <div className="loading">
-                <div />
-                <div />
-              </div>
-            ) : tab === "chat" ? (
-              <main className="chat">
-                <div className="messages">
-                  {detail.messages.map((m: Row) => (
-                    <div className={"message " + m.role} key={m.id}>
-                      {m.role === "assistant" && (
-                        <div className="assistant-mark">
-                          l<span>·</span>
-                        </div>
-                      )}
-                      <div className="message-content">
-                        <div className="bubble">{m.content.text}</div>
-                        {!!m.content.asset_ids?.length && (
-                          <div className="attachment-list">
-                            {m.content.asset_ids.map((id: string) => (
-                              <AssetPreview
-                                key={id}
-                                aid={current!}
-                                assetId={id}
-                                kind={
-                                  detail.assets?.find((a: Row) => a.id === id)
-                                    ?.metadata.kind
-                                }
-                              />
-                            ))}
-                          </div>
-                        )}
-                        {!!m.source_refs?.length && (
-                          <BrowserHistory
-                            aid={current!}
-                            sources={m.source_refs}
-                          />
-                        )}
-                        {m.content.cards?.includes("connect") && (
-                          <button
-                            className="inline-action"
-                            onClick={() => setChannels(true)}
-                          >
-                            <Globe size={17} />
-                            连接运营账号
-                            <ChevronRight size={15} />
-                          </button>
-                        )}
-                        <ChannelCards
-                          aid={current!}
-                          onComplete={refresh}
-                          cards={m.content.cards || []}
-                          states={detail.cards || []}
-                          busy={busy || readOnly}
-                          start={() => control("start")}
-                          respond={(card, accepted) =>
-                            run(async () => {
-                              await api(
-                                "/agents/" +
-                                  current +
-                                  "/cards/" +
-                                  card.id +
-                                  "/respond",
-                                { version: card.version, accepted },
-                              );
-                            })
-                          }
-                        />
-                        {m.error_code && (
-                          <div className="message-error">
-                            {(
-                              {
-                                MODEL_NOT_CONFIGURED: "等待配置 DeepSeek 密钥",
-                                MODEL_AUTH_FAILED: "DeepSeek 密钥验证失败",
-                                MODEL_CREDITS_REQUIRED: "DeepSeek 账户余额不足",
-                                MODEL_RATE_LIMITED: "DeepSeek 请求过于频繁",
-                                BUDGET_EXCEEDED: "今日模型用量已达上限",
-                              } as Row
-                            )[m.error_code] || "模型请求未完成"}
-                            <button
-                              disabled={busy || readOnly}
-                              onClick={() =>
-                                run(async () => {
-                                  await api(
-                                    "/agents/" + current + "/retry",
-                                    {},
-                                  );
-                                })
-                              }
-                            >
-                              <RefreshCw size={12} />
-                              重试
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                  {pending && (
-                    <div className="thinking">
-                      <span />
-                      {detail.browser_runs?.some(
-                        (r: Row) => r.state === "running",
-                      ) && <small>正在浏览网页</small>}
-                      <span />
-                      <span />
-                    </div>
-                  )}
-                  <div ref={end} />
-                </div>
-                <div className="chat-input">{composer()}</div>
-              </main>
-            ) : tab === "work" ? (
-              <main className="content-page">
-                <div className="section-head">
-                  <h2>近期工作</h2>
-                  <span className="muted small">
-                    {detail.activity.length} 条
-                  </span>
-                </div>
-                {detail.activity.length ? (
-                  detail.activity.map((a: Row) => (
-                    <div className="activity-row" key={a.id}>
-                      <span className="activity-check">
-                        <Check size={14} />
-                      </span>
-                      <div>
-                        <strong>{a.title}</strong>
-                        {a.detail && <p>{a.detail}</p>}
-                      </div>
-                      <time>{time(a.created_at)}</time>
-                    </div>
-                  ))
-                ) : (
-                  <div className="empty-section">
-                    <MessageSquare size={24} />
-                    <p>开始运营后，工作会记录在这里。</p>
+                  <div className="agent-actions">
+                    <span className="status">
+                      <i
+                        className={
+                          "dot " +
+                          (detail.desired_state === "running" ? "green" : "")
+                        }
+                      />
+                      {status(detail)}
+                    </span>
+                    {detail.desired_state === "running" ? (
+                      <button
+                        onClick={() => control("pause")}
+                        disabled={busy || readOnly}
+                      >
+                        <Pause size={13} />
+                        暂停全部
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() =>
+                          control(
+                            detail.desired_state === "paused"
+                              ? "resume"
+                              : "start",
+                          )
+                        }
+                        disabled={busy || readOnly}
+                      >
+                        <Play size={13} />
+                        {detail.desired_state === "paused"
+                          ? "恢复运营"
+                          : "启动运营"}
+                      </button>
+                    )}
                   </div>
-                )}
-                {detail.tasks.length > 0 && (
-                  <section>
-                    <h2>任务</h2>
-                    {detail.tasks.map((t: Row) => (
-                      <div className="simple-row" key={t.id}>
-                        <span>
-                          {t.type === "lab.publish" ? "本地测试发布" : t.type}
-                        </span>
-                        <span className="muted">
-                          {names[t.state] || t.state}
-                        </span>
-                      </div>
-                    ))}
+                </header>
+                <SocialAccounts
+                  key={current}
+                  agent={detail}
+                  platforms={platforms}
+                  readOnly={readOnly}
+                  onConnect={connect}
+                  onComplete={refresh}
+                />
+                <AgentResults
+                  key={"results" + current}
+                  agent={detail}
+                  readOnly={readOnly}
+                />
+                {detail.cards?.some(
+                  (c: Row) => c.state === "pending" && c.valid,
+                ) && (
+                  <section className="workspace-section attention-section">
+                    <div className="section-head">
+                      <h2>需要你确认</h2>
+                    </div>
+                    <ChannelCards
+                      aid={current!}
+                      cards={detail.cards
+                        .filter((c: Row) => c.state === "pending" && c.valid)
+                        .map((c: Row) => ({
+                          ...c.payload,
+                          id: c.id,
+                          type: c.type,
+                          version: c.version,
+                        }))}
+                      states={detail.cards}
+                      busy={busy || readOnly}
+                      onComplete={refresh}
+                      start={() => control("start")}
+                      respond={(card, accepted) =>
+                        run(async () => {
+                          await api(
+                            `/agents/${current}/cards/${card.id}/respond`,
+                            { version: card.version, accepted },
+                          );
+                        })
+                      }
+                    />
                   </section>
                 )}
-              </main>
-            ) : tab === "results" ? (
-              <main className="content-page">
-                <div className="section-head">
-                  <h2>带来的访问</h2>
-                  <span className="muted small">近 30 天</span>
-                </div>
-                <div className="metrics">
-                  {[
-                    ["有效访问", "qualified_visits"],
-                    ["访问人数", "visits"],
-                    ["转化", "conversions"],
-                  ].map(([label, key]) => (
-                    <div key={key}>
-                      <span>{label}</span>
-                      <strong>{detail.metrics[key] ?? "—"}</strong>
-                    </div>
-                  ))}
-                </div>
-                {detail.metrics.coverage === "not_connected" && (
-                  <p className="muted">尚未接入访问统计</p>
-                )}
-                <div className="simple-row">
-                  <span>推广链接点击</span>
-                  <strong>{detail.metrics.clicks}</strong>
-                </div>
-                <div className="simple-row">
-                  <span>已确认的社媒发布</span>
-                  <strong>{detail.metrics.published}</strong>
-                </div>
-                <AnalyticsPanel
+                <AgentPreferences
+                  key={"prefs" + current}
+                  agent={detail}
                   readOnly={readOnly}
-                  aid={current!}
-                  url={detail.business?.product_url}
-                  request={api}
-                  onError={(message) => {
-                    if (selected.current === current) setError(message);
-                  }}
+                  onComplete={refresh}
+                  onError={setError}
                 />
-              </main>
-            ) : (
-              <main className="content-page">
-                {connections()}
-                <section>
-                  <h2>业务资料</h2>
-                  {detail.business ? (
-                    <>
-                      <p>{detail.business.description}</p>
-                      {detail.business.product_url && (
-                        <a
-                          href={detail.business.product_url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {detail.business.product_url}
-                          <ExternalLink size={12} />
-                        </a>
-                      )}
-                    </>
-                  ) : (
-                    <p className="muted">在对话中介绍你的业务</p>
-                  )}
-                </section>
-                <section>
-                  <h2>运营偏好</h2>
-                  {detail.memory.length ? (
-                    detail.memory.map((m: Row) => (
-                      <div className="simple-row" key={m.id}>
-                        {m.body.text}
-                        <button
-                          className="icon"
-                          aria-label="移除此偏好"
-                          disabled={busy || readOnly}
-                          onClick={() =>
-                            run(async () => {
-                              await api(
-                                `/agents/${current}/memory/${m.id}/remove`,
-                                { expected_revision: detail.config_revision },
-                              );
-                            })
-                          }
-                        >
-                          <X size={14} />
-                        </button>
+                <ActivityPanel key={"activity" + current} agent={detail} />
+                <OperatingPanel key={"operations" + current} aid={current!} />
+                <UsagePanel
+                  canManageBudget={user?.role === "owner"}
+                  key={"usage" + current}
+                  agent={current!}
+                  readOnly={readOnly}
+                >
+                  <section className="settings-group">
+                    <div className="settings-group-heading">
+                      <h3>浏览器环境</h3>
+                      <p>此 Agent 使用独立的浏览器环境保存账号登录状态。</p>
+                    </div>
+                    <dl className="environment-details">
+                      <div>
+                        <dt>浏览器</dt>
+                        <dd>{detail.profile.provider}</dd>
                       </div>
-                    ))
-                  ) : (
-                    <p className="muted">直接在对话中告诉我</p>
-                  )}
-                </section>
-                <details className="advanced">
-                  <summary>
-                    高级设置
-                    <ChevronRight size={14} />
-                  </summary>
-                  <div className="advanced-content">
-                    <UsagePanel key={current} agent={current!} />
-                    <div className="setting-row">
-                      <span>浏览器</span>
-                      <code>{detail.profile.provider}</code>
-                    </div>
-                    <div className="setting-row">
-                      <span>环境</span>
-                      <span>{detail.profile.id.slice(0, 8)}</span>
-                    </div>
-                    <div className="setting-row">
-                      <span>网络出口</span>
-                      <span>
-                        {detail.network.state === "verified"
-                          ? "已验证"
-                          : "未验证独立 IP"}
-                      </span>
-                    </div>
+                      <div>
+                        <dt>环境标识</dt>
+                        <dd>
+                          <code>{detail.profile.id.slice(0, 8)}</code>
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>网络出口</dt>
+                        <dd>
+                          {detail.network.state === "verified"
+                            ? "已验证"
+                            : "未验证独立 IP"}
+                        </dd>
+                      </div>
+                    </dl>
                     <button
                       disabled={busy || readOnly}
                       onClick={() =>
                         run(async () => {
                           const checked = await api(
-                            "/agents/" + current + "/identity/check",
+                            `/agents/${current}/identity/check`,
                             {},
                           );
                           if (!checked.verified)
-                            setError("当前环境尚未通过固定独立出口验证");
+                            actionError("当前环境尚未通过固定独立出口验证");
                         })
                       }
                     >
                       检查环境
                     </button>
-                    <details className="lab">
-                      <summary>本地浏览器测试</summary>
+                  </section>
+                  <details className="settings-disclosure">
+                    <summary>
+                      <span>本地浏览器测试</span>
+                      <ChevronRight size={14} />
+                    </summary>
+                    <div className="disclosure-content">
                       <p className="muted small">
                         测试站使用真实浏览器，不计入运营和获客数据。
                       </p>
-                      <button
-                        disabled={busy || readOnly}
-                        onClick={() =>
-                          run(async () => {
-                            await api(
-                              "/agents/" + current + "/lab/connect",
-                              {},
-                            );
-                          })
-                        }
-                      >
-                        授权测试站
-                      </button>
-                      <button
-                        disabled={busy || readOnly}
-                        onClick={() =>
-                          run(async () => {
-                            await api("/agents/" + current + "/lab/publish", {
-                              body:
-                                "lead 浏览器验证 " +
-                                new Date().toLocaleTimeString(),
-                              key: crypto.randomUUID(),
-                            });
-                          })
-                        }
-                      >
-                        执行测试发布
-                      </button>
-                      <button
-                        disabled={busy || readOnly}
-                        onClick={() =>
-                          connect({ id: "lab", name: "本地测试站" })
-                        }
-                      >
-                        打开测试浏览器
-                      </button>
-                    </details>
+                      <div className="settings-button-row">
+                        <button
+                          disabled={busy || readOnly}
+                          onClick={() =>
+                            run(async () => {
+                              await api(`/agents/${current}/lab/connect`, {});
+                            })
+                          }
+                        >
+                          授权测试站
+                        </button>
+                        <button
+                          disabled={busy || readOnly}
+                          onClick={() =>
+                            run(async () => {
+                              await api(`/agents/${current}/lab/publish`, {
+                                body:
+                                  "lead 浏览器验证 " +
+                                  new Date().toLocaleTimeString(),
+                                key: crypto.randomUUID(),
+                              });
+                            })
+                          }
+                        >
+                          执行测试发布
+                        </button>
+                        <button
+                          disabled={busy || readOnly}
+                          onClick={() =>
+                            connect({ id: "lab", name: "本地测试站" })
+                          }
+                        >
+                          打开测试浏览器
+                        </button>
+                      </div>
+                    </div>
+                  </details>
+                  <div className="archive-setting settings-action-row">
+                    <div>
+                      <p>归档 Agent</p>
+                      <span className="muted small">
+                        停止运营，并从当前列表中收起。
+                      </span>
+                    </div>
                     <button
                       className="danger"
                       disabled={busy || readOnly}
                       onClick={() =>
                         run(async () => {
-                          await api("/agents/" + current + "/control", {
+                          await api(`/agents/${current}/control`, {
                             action: "archive",
                           });
+                          window.history.replaceState(null, "", "/");
+                          selected.current = null;
                           setCurrent(null);
                           setDetail(null);
                           setView("home");
@@ -1063,10 +929,160 @@ export default function Lead() {
                       归档 Agent
                     </button>
                   </div>
-                </details>
-              </main>
-            )}
-          </>
+                </UsagePanel>
+              </div>
+            </main>
+            <button
+              className="chat-launch"
+              aria-label="打开 Agent 对话"
+              onClick={() => setChatOpen(true)}
+            >
+              <MessageSquare size={18} />与 {detail.name} 对话
+            </button>
+            <aside
+              className={"chat-panel " + (chatOpen ? "is-open" : "")}
+              aria-label="Agent 辅助对话"
+            >
+              <header className="chat-heading">
+                <AgentAvatar agent={detail} size={28} />
+                <div>
+                  <h2>与 {detail.name} 对话</h2>
+                  <p className="muted small">补充想法，调整方向</p>
+                </div>
+                <button
+                  className="icon close-chat"
+                  aria-label="关闭对话"
+                  onClick={() => setChatOpen(false)}
+                >
+                  <X size={16} />
+                </button>
+              </header>
+              <div
+                className="messages"
+                role="log"
+                aria-label="Agent 对话记录"
+                tabIndex={0}
+                ref={messagesRef}
+                onScroll={(e) => {
+                  const box = e.currentTarget;
+                  followMessages.current =
+                    box.scrollHeight - box.scrollTop - box.clientHeight < 100;
+                }}
+              >
+                {detail.messages.map((m: Row) => (
+                  <div className={"message " + m.role} key={m.id}>
+                    {m.role === "assistant" && (
+                      <AgentAvatar agent={detail} size={24} />
+                    )}
+                    <div className="message-content">
+                      <div className="bubble">{m.content.text}</div>
+                      <time className="message-time" dateTime={m.created_at}>
+                        {new Date(m.created_at).toLocaleString("zh-CN", {
+                          month: "numeric",
+                          day: "numeric",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </time>
+                      {!!m.content.asset_ids?.length && (
+                        <div className="attachment-list">
+                          {m.content.asset_ids.map((id: string) => (
+                            <AssetPreview
+                              key={id}
+                              aid={current!}
+                              assetId={id}
+                              kind={
+                                detail.assets?.find((a: Row) => a.id === id)
+                                  ?.metadata.kind
+                              }
+                            />
+                          ))}
+                        </div>
+                      )}
+                      {!!m.source_refs?.length && (
+                        <BrowserHistory
+                          aid={current!}
+                          sources={m.source_refs}
+                        />
+                      )}
+                      {m.content.cards?.includes("connect") && (
+                        <button
+                          className="inline-action"
+                          onClick={() => setChannels(true)}
+                        >
+                          <Globe size={17} />
+                          连接运营账号
+                          <ChevronRight size={15} />
+                        </button>
+                      )}
+                      <ChannelCards
+                        aid={current!}
+                        onComplete={refresh}
+                        cards={m.content.cards || []}
+                        states={detail.cards || []}
+                        busy={busy || readOnly}
+                        start={() => control("start")}
+                        respond={(card, accepted) =>
+                          run(async () => {
+                            await api(
+                              "/agents/" +
+                                current +
+                                "/cards/" +
+                                card.id +
+                                "/respond",
+                              { version: card.version, accepted },
+                            );
+                          })
+                        }
+                      />
+                      {m.error_code && (
+                        <div className="message-error">
+                          {(
+                            {
+                              MODEL_NOT_CONFIGURED: "所选模型尚未配置服务端凭据",
+                              MODEL_AUTH_FAILED: "所选模型的凭据验证失败",
+                              MODEL_CREDITS_REQUIRED: "所选模型账户余额不足",
+                              MODEL_RATE_LIMITED: "所选模型请求过于频繁，请稍后重试",
+                              MODEL_NOT_FOUND: "所选模型不存在或当前凭据无权使用，请在后台核对模型名称",
+                              BUDGET_EXCEEDED: "今日模型用量已达上限",
+                            } as Row
+                          )[m.error_code] || "模型请求未完成"}
+                          {m.request_model && <span className="muted small"> · {m.request_model.replace("openai:", "OpenAI · ")}</span>}
+                          <button
+                            disabled={busy || readOnly}
+                            onClick={() =>
+                              run(async () => {
+                                await api("/agents/" + current + "/retry", {});
+                              })
+                            }
+                          >
+                            <RefreshCw size={12} />
+                            重试
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {pending && (
+                  <div className="thinking">
+                    <span />
+                    {detail.browser_runs?.some(
+                      (r: Row) => r.state === "running",
+                    ) && <small>正在浏览网页</small>}
+                    <span />
+                    <span />
+                  </div>
+                )}
+                <div ref={end} />
+              </div>
+              <div className="chat-input">{composer()}</div>
+
+              <p className="chat-caption muted small">
+                无需保持对话，Agent 会持续工作
+              </p>
+            </aside>
+          </div>
         )}
       </div>
       {channels && (
@@ -1099,7 +1115,9 @@ export default function Lead() {
                   onClick={() => connect(p)}
                   disabled={busy || readOnly}
                 >
-                  <span className="platform-symbol">{p.name[0]}</span>
+                  <span className="platform-symbol">
+                    <SocialIcon platform={p.id} />
+                  </span>
                   <span>
                     {p.name}
                     <small>
@@ -1113,127 +1131,30 @@ export default function Lead() {
           </aside>
         </div>
       )}
-      {browser && (
-        <div
-          className="browser-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-label="账号浏览器"
-        >
-          <div className="browser-panel">
-            <header>
-              <span>
-                <Globe size={16} />
-                {browser.name}
-              </span>
-              <div>
-                {browser.platform !== "lab" && (
-                  <button
-                    className="primary"
-                    disabled={busy || readOnly}
-                    onClick={() =>
-                      run(async () => {
-                        await api(
-                          "/agents/" + current + "/accounts/verify-login",
-                          { platform: browser.platform },
-                        );
-                        setBrowser(null);
-                        setImage("");
-                      })
-                    }
-                  >
-                    登录完成
-                  </button>
-                )}
-                <button onClick={() => run(shot)} disabled={busy || readOnly}>
-                  <RefreshCw size={14} />
-                  刷新画面
-                </button>
-                <button
-                  className="primary"
-                  disabled={busy || readOnly}
-                  onClick={() =>
-                    run(async () => {
-                      await api("/agents/" + current + "/takeover/end", {});
-                      setBrowser(null);
-                      setImage("");
-                    })
-                  }
-                >
-                  结束接管
-                </button>
-              </div>
-            </header>
-            <div className="browser-image">
-              {image ? (
-                <img
-                  src={image}
-                  alt="Agent 浏览器当前画面，点击可操作"
-                  onClick={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const x =
-                      ((e.clientX - rect.left) * e.currentTarget.naturalWidth) /
-                      rect.width;
-                    const y =
-                      ((e.clientY - rect.top) * e.currentTarget.naturalHeight) /
-                      rect.height;
-                    run(() => browserInput({ kind: "click", x, y }));
-                  }}
-                />
-              ) : (
-                <p>正在读取浏览器…</p>
-              )}
-            </div>
-            <footer>
-              <input
-                aria-label="在浏览器中输入"
-                value={input}
-                placeholder="输入文字"
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && input)
-                    run(async () => {
-                      await browserInput({ kind: "text", text: input });
-                      setInput("");
-                    });
-                }}
-              />
-              <button
-                disabled={busy || !input}
-                onClick={() =>
-                  run(async () => {
-                    await browserInput({ kind: "text", text: input });
-                    setInput("");
-                  })
-                }
-              >
-                输入
-              </button>
-              {["Enter", "Tab", "Backspace"].map((k) => (
-                <button
-                  key={k}
-                  disabled={busy || readOnly}
-                  onClick={() =>
-                    run(() => browserInput({ kind: "key", text: k }))
-                  }
-                >
-                  {k === "Backspace" ? "删除" : k === "Enter" ? "回车" : "Tab"}
-                </button>
-              ))}
-              <button
-                disabled={busy || readOnly}
-                onClick={() =>
-                  run(() => browserInput({ kind: "scroll", y: 600 }))
-                }
-              >
-                向下滚动
-              </button>
-            </footer>
-            <p className="browser-note">
-              接管期间 Agent 已暂停。登录不会自动开启发布权限。
-            </p>
-          </div>
-        </div>
+      {createOpen && (
+        <NewAgentDialog
+          initial={createInitial}
+          platforms={platforms}
+          onClose={() => setCreateOpen(false)}
+          onCreated={async (id) => {
+            setCreateOpen(false);
+            setText("");
+            await select(id);
+            await refresh();
+          }}
+        />
+      )}
+      {browser && current && (
+        <AccountBrowser
+          key={current + browser.platform}
+          aid={current}
+          platform={browser.platform}
+          name={browser.name}
+          onClose={() => {
+            setBrowser(null);
+            refresh().catch((e) => setError(e.message));
+          }}
+        />
       )}
     </div>
   );

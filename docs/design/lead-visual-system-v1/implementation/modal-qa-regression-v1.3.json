@@ -1,0 +1,418 @@
+{
+  "tenant_id": "551af589-33ea-4e0d-a933-06531e17a3f9",
+  "real_agent_before_sha256": "64c01860dcda340816c61559a57bfdb5827dda4b91759312558e7bebd89d8d59",
+  "initial_exit_code": 0,
+  "initial_output": "..                                                                       [100%]\n=============================== warnings summary ===============================\ntests/test_core.py::test_deepseek_wire_format\n  /Users/achilles/lead agent/lead/tests/test_core.py:421: PydanticAIDeprecationWarning: `httpx.AsyncClient` support for OpenAI-compatible providers is deprecated and will be removed in v3; use `httpx2.AsyncClient` instead.\n    lambda **kwargs: OpenAIProvider(**kwargs, http_client=client),\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n2 passed, 1 warning in 1.45s\n",
+  "real_agent_after_sha256": "64c01860dcda340816c61559a57bfdb5827dda4b91759312558e7bebd89d8d59",
+  "test_agents": [
+    {
+      "id": "29d72b7b-ef15-4087-87e7-92b0c06b6ebf",
+      "desired_state": "archived"
+    },
+    {
+      "id": "e2f241dc-22e0-4e92-a972-fce9bfd5cacf",
+      "desired_state": "archived"
+    },
+    {
+      "id": "f4f8aa6d-024b-453d-a003-10f3dc80b38f",
+      "desired_state": "archived"
+    },
+    {
+      "id": "9600a5ee-7a66-4f66-8d93-09bb9db2bc3f",
+      "desired_state": "archived"
+    },
+    {
+      "id": "426a33ac-da32-42ee-819b-c6e2805b21c1",
+      "desired_state": "archived"
+    },
+    {
+      "id": "6d75caa5-5fde-4b72-8478-2b25f704a24e",
+      "desired_state": "archived"
+    },
+    {
+      "id": "c7df8366-e78a-47e9-9f71-1ac7be17a6d9",
+      "desired_state": "archived"
+    },
+    {
+      "id": "ba66ed68-fbb2-4832-b8ba-7ea2b1b4bd45",
+      "desired_state": "archived"
+    },
+    {
+      "id": "875ac317-a959-44bf-b511-91f4497e252a",
+      "desired_state": "archived"
+    },
+    {
+      "id": "8674fee0-4463-4c83-a6c0-a940573c127c",
+      "desired_state": "archived"
+    },
+    {
+      "id": "217b0583-4efb-488f-8991-fa502ed5347b",
+      "desired_state": "archived"
+    },
+    {
+      "id": "b8f35636-cc62-4161-a176-d0a84b8f9122",
+      "desired_state": "archived"
+    },
+    {
+      "id": "b3b3b18e-82fe-46af-a756-70ac842fcf2a",
+      "desired_state": "archived"
+    },
+    {
+      "id": "66854212-2666-4162-bf5b-b163c6b62257",
+      "desired_state": "archived"
+    },
+    {
+      "id": "c5ff77d2-8ea1-425a-85b8-098267fe0027",
+      "desired_state": "archived"
+    },
+    {
+      "id": "b2096826-f053-4309-b51c-d1820df183bf",
+      "desired_state": "archived"
+    },
+    {
+      "id": "dc6cc449-12e3-41bc-9d61-d9cd869084f8",
+      "desired_state": "archived"
+    },
+    {
+      "id": "6b8037a9-f059-400a-b793-8ae8d3da4e1a",
+      "desired_state": "archived"
+    },
+    {
+      "id": "663d14f5-3c2a-4e25-8720-4ed723090a73",
+      "desired_state": "archived"
+    },
+    {
+      "id": "a8d84052-c44c-42f1-a0e0-1a83c1cb6eef",
+      "desired_state": "archived"
+    },
+    {
+      "id": "19597351-c895-4d87-ba7b-c21e8cb9dbce",
+      "desired_state": "archived"
+    },
+    {
+      "id": "1ef5a8eb-fb9f-4998-91c6-4d89d1687173",
+      "desired_state": "archived"
+    },
+    {
+      "id": "785c86e1-8c79-4a46-ae16-374d3982f56c",
+      "desired_state": "archived"
+    },
+    {
+      "id": "2a902a0a-b9aa-4187-bce6-a7752c61539a",
+      "desired_state": "archived"
+    },
+    {
+      "id": "a6f8ca86-06c0-4eae-aac9-3ceef1be4205",
+      "desired_state": "archived"
+    },
+    {
+      "id": "c486ec72-ef2b-4207-9148-a916b77fb737",
+      "desired_state": "archived"
+    },
+    {
+      "id": "5eea0e96-9458-406f-b489-6563511b0de2",
+      "desired_state": "archived"
+    },
+    {
+      "id": "b0ea45e8-0277-40f7-ad30-52c178e42c40",
+      "desired_state": "archived"
+    },
+    {
+      "id": "f02b8c46-37be-4dda-b2db-6f639df6c73d",
+      "desired_state": "archived"
+    },
+    {
+      "id": "5624d33f-26c8-4abb-8f02-1752eda2d451",
+      "desired_state": "archived"
+    },
+    {
+      "id": "f6b4d547-868f-4409-b1e8-0a978986e681",
+      "desired_state": "archived"
+    },
+    {
+      "id": "d9f93967-9ce7-4612-b8ab-a04da1a2d228",
+      "desired_state": "archived"
+    },
+    {
+      "id": "983b8d26-a765-4368-af46-ef56ce01d555",
+      "desired_state": "archived"
+    },
+    {
+      "id": "fa719109-7203-4d42-a448-57f1325539bf",
+      "desired_state": "archived"
+    },
+    {
+      "id": "8aa34bc9-e7d9-4596-a2d3-69a48a68efcc",
+      "desired_state": "archived"
+    },
+    {
+      "id": "a7d4c307-00c7-4f14-bfce-cea341b8b760",
+      "desired_state": "archived"
+    },
+    {
+      "id": "0a53f6dd-9064-4005-9f4a-e8cc5861f16f",
+      "desired_state": "archived"
+    },
+    {
+      "id": "a706ec24-07cf-4599-8de2-4fd04f4ce68c",
+      "desired_state": "archived"
+    },
+    {
+      "id": "475e978b-a5eb-42c1-989e-a8341f6d405e",
+      "desired_state": "archived"
+    },
+    {
+      "id": "7e582145-cc02-49b7-85d1-a70446387b9d",
+      "desired_state": "archived"
+    },
+    {
+      "id": "1abb5f38-4ca1-4617-b143-76509620937b",
+      "desired_state": "archived"
+    },
+    {
+      "id": "8bbf19bd-1196-4c66-9c9a-0bb33e3a0ca5",
+      "desired_state": "archived"
+    },
+    {
+      "id": "fb767e5e-b504-4e34-8f8d-92b60caccb1e",
+      "desired_state": "archived"
+    },
+    {
+      "id": "782f8810-58d7-41ae-b9b4-a6687f9849af",
+      "desired_state": "archived"
+    },
+    {
+      "id": "464382a7-8fe2-473b-8990-b3cac4533a1e",
+      "desired_state": "archived"
+    },
+    {
+      "id": "34f8170f-f654-4866-adce-b219d4bd7d1e",
+      "desired_state": "archived"
+    },
+    {
+      "id": "662bdfcf-2e83-4185-992d-c2e9199940d7",
+      "desired_state": "archived"
+    },
+    {
+      "id": "396839cb-8808-4077-95d2-a3f7bacac824",
+      "desired_state": "archived"
+    },
+    {
+      "id": "377ec6fc-818e-481a-8840-4bb5c8ba61d7",
+      "desired_state": "archived"
+    },
+    {
+      "id": "b5d2f3f6-0fc6-47a6-ace9-5e75098359e2",
+      "desired_state": "archived"
+    },
+    {
+      "id": "944caf54-1ee1-4539-bf83-31f1a43a7a4e",
+      "desired_state": "archived"
+    },
+    {
+      "id": "af3a739d-8bfc-40cd-be86-c9dd530124dc",
+      "desired_state": "archived"
+    },
+    {
+      "id": "2a337c9b-aec6-43e5-a1a5-2c9dc2bc2132",
+      "desired_state": "archived"
+    },
+    {
+      "id": "1215e352-3eb2-4522-a252-29e96d4427ff",
+      "desired_state": "archived"
+    },
+    {
+      "id": "55ad9a7f-2849-4ad9-9548-f01372201431",
+      "desired_state": "archived"
+    },
+    {
+      "id": "2d282536-f57a-498e-910e-14848449d5b7",
+      "desired_state": "archived"
+    },
+    {
+      "id": "5fe0ad67-6b04-4cf3-9528-6d75f6655b96",
+      "desired_state": "archived"
+    },
+    {
+      "id": "440efdf1-2c39-42e0-9d0b-407ca64becfe",
+      "desired_state": "archived"
+    },
+    {
+      "id": "377aff9e-48a3-46d8-ae65-5ad84077dd68",
+      "desired_state": "archived"
+    },
+    {
+      "id": "347a9acf-8012-4270-948b-d00763a6b10c",
+      "desired_state": "archived"
+    },
+    {
+      "id": "4d4dffd6-d3c7-4e08-b9c2-e1915d9c14b1",
+      "desired_state": "archived"
+    },
+    {
+      "id": "738507ae-3388-4122-974f-e4be6bff13da",
+      "desired_state": "archived"
+    },
+    {
+      "id": "49ff0d05-3bff-4e64-a69a-0cba78bf0fac",
+      "desired_state": "archived"
+    },
+    {
+      "id": "6bcf1636-5138-4de0-827f-d1dbf550010a",
+      "desired_state": "archived"
+    },
+    {
+      "id": "2824c703-ae2f-4c79-9d13-6509d7b4fcf2",
+      "desired_state": "archived"
+    },
+    {
+      "id": "79077c0e-5d2b-4865-a2e8-1373bc14edec",
+      "desired_state": "archived"
+    },
+    {
+      "id": "275201b1-9b35-4084-8008-16fa1eaf927b",
+      "desired_state": "archived"
+    },
+    {
+      "id": "91be7df6-0b77-4874-9d6d-e63aee652ec4",
+      "desired_state": "archived"
+    },
+    {
+      "id": "af3ecb40-4f2e-48cb-9893-68547f8aaca3",
+      "desired_state": "archived"
+    },
+    {
+      "id": "b4dc166c-304e-4c4c-a7ee-dd69876bd56a",
+      "desired_state": "archived"
+    },
+    {
+      "id": "56c4d020-7591-4dfd-aff4-b5910757a825",
+      "desired_state": "archived"
+    },
+    {
+      "id": "b41f31da-d1d3-42d2-ae6d-d5e0d2cec4b5",
+      "desired_state": "archived"
+    },
+    {
+      "id": "964ae21b-4a0d-4ca1-a267-901aed592162",
+      "desired_state": "archived"
+    },
+    {
+      "id": "49d8f1a1-21f1-41d3-af41-4d389b995507",
+      "desired_state": "archived"
+    },
+    {
+      "id": "fc5cde7a-7602-4ffd-9268-723f60dc5117",
+      "desired_state": "archived"
+    },
+    {
+      "id": "22b106de-a4f3-4842-bda7-1500849d14b2",
+      "desired_state": "archived"
+    },
+    {
+      "id": "8d9b69e4-efcc-4e00-b70b-4a07e910a2a3",
+      "desired_state": "archived"
+    },
+    {
+      "id": "ca3155f5-6143-492e-b4bf-bfa8356d0166",
+      "desired_state": "archived"
+    },
+    {
+      "id": "6c4efb7d-9aa1-4f2a-b384-f4dfe7c0b6a1",
+      "desired_state": "archived"
+    },
+    {
+      "id": "1968111f-033c-4d12-bd57-9550aae766f4",
+      "desired_state": "archived"
+    },
+    {
+      "id": "53081884-9a49-437d-a169-6a7730b34492",
+      "desired_state": "archived"
+    },
+    {
+      "id": "6da2017e-8386-4076-8f35-cd1be62a87a5",
+      "desired_state": "archived"
+    },
+    {
+      "id": "18950b69-bef9-4f91-92e4-bcc5733445be",
+      "desired_state": "archived"
+    },
+    {
+      "id": "c9960f05-fd69-4211-af88-2e4c02a28dc5",
+      "desired_state": "archived"
+    },
+    {
+      "id": "4fe65519-4499-4dcd-8a33-643f49dc1f83",
+      "desired_state": "archived"
+    },
+    {
+      "id": "eb459a4f-e472-4eb5-9fd7-866533d37fc9",
+      "desired_state": "archived"
+    },
+    {
+      "id": "d1860fcf-0399-4c21-96ea-931c91579f8e",
+      "desired_state": "archived"
+    },
+    {
+      "id": "35a5c08b-becb-4037-8e0c-28e057936baa",
+      "desired_state": "archived"
+    },
+    {
+      "id": "f074d3bd-eed5-4b38-bc28-113da8000c3f",
+      "desired_state": "archived"
+    },
+    {
+      "id": "9df0ffe4-1f41-4660-9fa8-463f747467ff",
+      "desired_state": "archived"
+    },
+    {
+      "id": "35651c9c-48a4-4875-b6f1-b21cf5e8759b",
+      "desired_state": "archived"
+    },
+    {
+      "id": "c07b43e0-a2db-42ce-8934-57b08b7afff0",
+      "desired_state": "archived"
+    }
+  ],
+  "active_test_agents": 0,
+  "suite_command": [
+    ".venv/bin/pytest",
+    "-q",
+    "--tb=short",
+    "tests/test_core.py",
+    "tests/test_migrations.py",
+    "tests/test_agent_setup.py",
+    "tests/test_agent_workspace.py",
+    "tests/test_channels.py",
+    "tests/test_budget_settings.py",
+    "--junitxml=docs/design/lead-visual-system-v1/implementation/modal-qa-regression-v1.3.xml"
+  ],
+  "isolation": "Dedicated tenant and temporary LEAD_STATE_DIR with matching owner_id; configuration credentials omitted from evidence; temporary config removed after run.",
+  "suite_exit_code": 0,
+  "suite_output": ".........................................ss....                          [100%]\n=============================== warnings summary ===============================\ntests/test_core.py::test_deepseek_wire_format[builtin-settings]\n  /Users/achilles/lead agent/lead/tests/test_core.py:446: PydanticAIDeprecationWarning: `httpx.AsyncClient` support for OpenAI-compatible providers is deprecated and will be removed in v3; use `httpx2.AsyncClient` instead.\n    else OpenAIProvider(**kwargs, http_client=client),\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n45 passed, 2 skipped, 1 warning in 6.14s\n",
+  "real_agent_unchanged": true,
+  "test_agent_count": 92,
+  "focused_after_fix": {
+    "passed": 3,
+    "failed": 0
+  },
+  "wire_mock_reproduction": {
+    "builtin_passed": true,
+    "managed_failed_before_fix": "Cannot provide both `openai_client` and `http_client`",
+    "same_assertions_preserved": true
+  },
+  "suite_result": {
+    "passed": 45,
+    "failed": 0,
+    "skipped": 2,
+    "warnings": 1
+  },
+  "first_suite_harness_issue": {
+    "passed": 40,
+    "failed": 3,
+    "errors": 2,
+    "skipped": 2,
+    "cause": "LEAD_VERIFICATION_TENANT alone does not change imported TENANT constants or thread fallback context; temporary LEAD_STATE_DIR with matching owner_id fixes harness isolation without modifying production settings."
+  },
+  "checked_at": "2026-10-30T05:10:43.817612+08:00"
+}

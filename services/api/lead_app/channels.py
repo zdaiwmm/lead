@@ -19,6 +19,26 @@ def store_account(aid, platform, observed, prompt_target=True):
         )
         if not account:
             raise ValueError("请先打开此账号的连接窗口")
+        if (
+            account["external_account_id"]
+            and account["external_account_id"] != observed["external_account_id"]
+        ):
+            c.execute(
+                "UPDATE lead.authorization_grants SET revoked_at=now() WHERE target_id IN (SELECT id FROM lead.account_targets WHERE account_id=%s) AND revoked_at IS NULL",
+                (account["id"],),
+            )
+            c.execute(
+                "UPDATE lead.account_targets SET state='disabled' WHERE account_id=%s",
+                (account["id"],),
+            )
+            c.execute(
+                "UPDATE lead.interaction_cards SET state='canceled' WHERE type='manage_account' AND payload->>'account_id'=%s AND state='accepted'",
+                (str(account["id"]),),
+            )
+            c.execute(
+                "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+1 WHERE id=%s",
+                (aid,),
+            )
         try:
             c.execute(
                 "UPDATE lead.social_accounts SET external_account_id=%s,display_name=%s,state='connected',verified_at=now() WHERE id=%s",
@@ -42,7 +62,9 @@ def store_account(aid, platform, observed, prompt_target=True):
                 c,
                 aid,
                 "assistant",
-                platform + " 已登录。把你有运营权限的频道、页面或画板链接发给我。",
+                "Telegram 已登录。启动后我会自动准备运营频道、验证连接并开始运营。"
+                if platform == "telegram"
+                else platform + " 已登录。把你有运营权限的频道、页面或画板链接发给我。",
                 cards=[
                     {
                         "type": "channel_target",
@@ -54,7 +76,7 @@ def store_account(aid, platform, observed, prompt_target=True):
         return str(account["id"])
 
 
-def store_target(aid, account_id, observed):
+def store_target(aid, account_id, observed, *, notify=True):
     with tx(aid) as c:
         a = require_agent(c, aid, True)
         account = one(
@@ -85,6 +107,12 @@ def store_target(aid, account_id, observed):
                 ),
             ),
         )
+        if not notify and one(
+            c,
+            "SELECT id FROM lead.authorization_grants WHERE target_id=%s AND revoked_at IS NULL",
+            (target["id"],),
+        ):
+            return {"target_id": target["id"], "card_id": None}
         existing = one(
             c,
             "SELECT id FROM lead.interaction_cards WHERE type='authorize_target' AND state='pending' AND expires_at>now() AND payload->>'target_id'=%s AND (payload->>'expected_authorization_version')::bigint=%s",
@@ -110,6 +138,8 @@ def store_target(aid, account_id, observed):
                 ),
             ),
         )
+        if not notify:
+            return {"target_id": target["id"], "card_id": card["id"]}
         append_message(
             c,
             aid,
@@ -138,6 +168,7 @@ def probe_in_tx(
     asset_ids=(),
     made_for_kids=None,
     ai_generated=None,
+    notify=True,
 ):
     media = []
     records = []
@@ -184,6 +215,8 @@ def probe_in_tx(
         "INSERT INTO lead.interaction_cards(tenant_id,agent_id,type,payload,expires_at) VALUES(%s,%s,'verify_publish',%s,now()+interval '1 day') RETURNING *",
         (current_tenant(), aid, j(payload)),
     )
+    if not notify:
+        return {"card_id": card["id"], "version": card["version"]}
     append_message(
         c,
         aid,
@@ -235,7 +268,9 @@ def create_verification(
         )
 
 
-def accept_card(aid, card_id, version, accepted):
+def accept_card(
+    aid, card_id, version, accepted, *, delegation_id=None, bootstrap_run_id=None
+):
     with tx(aid) as c:
         a = require_agent(c, aid, True)
         card = one(
@@ -265,6 +300,15 @@ def accept_card(aid, card_id, version, accepted):
         )
         if not target or target["account_state"] != "connected":
             raise ValueError("账号或目标状态已改变")
+        if delegation_id:
+            from .account_setup import require_delegation
+
+            account = one(
+                c,
+                "SELECT * FROM lead.social_accounts WHERE id=%s",
+                (target["account_id"],),
+            )
+            require_delegation(c, a, account, delegation_id)
         if card["type"] == "authorize_target":
             if a["authorization_version"] != payload["expected_authorization_version"]:
                 raise ValueError("授权范围已更新，请重新核对目标")
@@ -291,7 +335,7 @@ def accept_card(aid, card_id, version, accepted):
             )
             spec = SPECS[target["platform"]]
             if "text" in spec.formats:
-                probe_in_tx(c, aid, target, grant["id"], ver)
+                probe_in_tx(c, aid, target, grant["id"], ver, notify=not delegation_id)
             else:
                 append_message(
                     c,
@@ -333,8 +377,8 @@ def accept_card(aid, card_id, version, accepted):
                 records.append(row)
             validate(target["platform"], payload, records)
             c.execute(
-                "UPDATE lead.agents SET desired_state='draft',health_state='queued',control_version=control_version+1 WHERE id=%s",
-                (aid,),
+                "UPDATE lead.agents SET desired_state=%s,health_state='queued',control_version=control_version+1 WHERE id=%s",
+                (a["desired_state"] if delegation_id else "draft", aid),
             )
             task = one(
                 c,
@@ -348,7 +392,11 @@ def accept_card(aid, card_id, version, accepted):
                             **payload,
                             "key": str(card_id),
                             "bootstrap_verification": True,
+                            "bootstrap_run_id": bootstrap_run_id,
                             "control_version": a["control_version"] + 1,
+                            "delegation_id": str(delegation_id)
+                            if delegation_id
+                            else None,
                         }
                     ),
                 ),

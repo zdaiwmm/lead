@@ -1,0 +1,125 @@
+{
+  "checked_at": "2026-10-30T08:15:38.292009+08:00",
+  "new_agents_created_for_chrome_qa": 0,
+  "active_regression_agents": 0,
+  "historical_test_agents": [
+    {
+      "id": "4f44c1bf-08e0-442e-a464-3c0cc0b754e5",
+      "desired_state": "archived"
+    },
+    {
+      "id": "b0b1e563-b0c8-44c4-9568-6c7f5a723f2e",
+      "desired_state": "archived"
+    }
+  ],
+  "services": {
+    "/": 200,
+    "/api/auth/me": 200,
+    "/api/agents": 200,
+    "/api/health": 200,
+    "healthy": {
+      "database": true,
+      "worker": true,
+      "browser": true,
+      "active_profiles": 1,
+      "model_configured": true,
+      "model": "deepseek-flash",
+      "browser_capacity": 3,
+      "mode": "local_owner"
+    },
+    "/api/agents/64d96f33-03a3-4527-b2f2-7a864587fa25": 200,
+    "/api/agents/64d96f33-03a3-4527-b2f2-7a864587fa25/operations": 200
+  },
+  "services_left_running": true,
+  "viewport_override_reset": true,
+  "final_result": "passed",
+  "agent_audit_since_chrome_qa_start": [
+    {
+      "type": "community.research_requested",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:01:33.823346+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    },
+    {
+      "type": "admin.config.publish",
+      "actor_type": "local_owner",
+      "occurred_at": "2026-10-30 00:12:07.104426+00:00"
+    }
+  ],
+  "memory_inventory": [],
+  "real_agent_user_edits_performed_by_this_task": false,
+  "real_agent_messages_or_publications_triggered_by_this_task": false,
+  "historical_snapshot_comparison": {
+    "baseline_at": "2026-10-30T05:10:43+08:00",
+    "matches": false,
+    "scope": "Includes all memory kinds and the full onboarding_state; older baseline is from 05:10, not the start of Chrome QA. A mismatch does not identify a user-editable configuration change.",
+    "note": "Concurrent research and management configuration publication is present in the audit. This task did not issue those writes and did not roll them back."
+  },
+  "current_broad_snapshot_sha256": "5d29a5e6e8bba82f3b588a9a7ad39d54b5d8995757406bfd944810f0e80472db",
+  "chrome_final_checks": {
+    "unique_final_checks": 37,
+    "modal_geometry_cases": 27,
+    "failed_checks": [],
+    "network_errors": 0,
+    "network_truncated": false,
+    "final_build_reverse_tab_passed": true,
+    "final_build_nested_escape_passed": true,
+    "typecheck": "passed",
+    "production_build": "passed"
+  },
+  "completed_at": "2026-10-30T08:22:26.850818+08:00"
+}

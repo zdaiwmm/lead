@@ -15,6 +15,7 @@ docs/screenshots/
 *.leadbackup
 node_modules/
 .next/
+.next-*/
 __pycache__/
 .pytest_cache/
 *.pyc

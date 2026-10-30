@@ -14,6 +14,7 @@ import os
 import platform
 import time
 from contextlib import asynccontextmanager, nullcontext
+from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -26,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from .adapters.catalog import SPECS
 from .config import BROWSER_BUILD, BROWSER_SDK, STATE, env, proxy_for
-from .db import j, one, require_agent, tx, uid
+from .db import j, one, record, require_agent, tx, uid
 from .domain import PLATFORMS
 from .forward_proxy import BrowserForwardProxy
 from .scope import current_tenant, scoped_agent_method, service_scope
@@ -288,6 +289,10 @@ class Actor:
                 )
 
     async def close(self):
+        for controller in list(self.research_pages.values()):
+            if hasattr(controller, "close"):
+                await controller.close()
+        self.research_pages.clear()
         try:
             self.measure()
         except Exception:
@@ -321,7 +326,7 @@ class Actor:
     def touch(self):
         self.used = time.monotonic()
 
-    def gate(self, c, action):
+    def gate(self, c, action, *, account_setup=False):
         from .managed_network import policy
         from .resources import ensure_capacity
 
@@ -368,6 +373,16 @@ class Actor:
         )
         if not lease:
             raise ValueError("浏览器控制租约已失效")
+        if platform != "lab" and not one(
+            c,
+            "SELECT 1 FROM lead.social_accounts WHERE platform=%s AND state='connected' AND automation_enabled",
+            (platform,),
+        ):
+            raise ValueError("此社媒运营已暂停或账号已断开")
+        if account_setup:
+            from .admin_controls import enforce_channel
+            enforce_channel(c, self.aid, platform, operation="setup")
+            return
         grant = one(
             c,
             "SELECT * FROM lead.authorization_grants WHERE id=%s AND target_id=%s AND revoked_at IS NULL",
@@ -375,6 +390,9 @@ class Actor:
         )
         if not grant or "publish" not in grant["allowed_actions"]:
             raise ValueError("授权已失效")
+        from .admin_controls import enforce_channel
+        content_format = action["intent"].get("format") or next((item.get("kind") for item in action["intent"].get("media", []) if item.get("kind")), "text")
+        enforce_channel(c, self.aid, platform, action.get("target_id"), content_format=content_format, action_id=action.get("id"))
         if platform in SPECS:
             from .social_publish import gate
 
@@ -481,6 +499,7 @@ class Actor:
                     (action_id,),
                 )
             try:
+                await telegram.open_account(self.page, target["external_account_id"])
                 await telegram.inspect_target(
                     self.page, target["canonical_url"], target["external_account_id"]
                 )
@@ -512,18 +531,79 @@ class Actor:
                         "state": "unknown",
                         "reason": "缺少提交前观察，禁止自动重发",
                     }
-                observed = await telegram.receipt(
-                    self.page,
-                    action["intent"]["body"],
-                    prior["observation"]["baseline_mid"],
-                    action["intent"]["marker"],
-                )
+                observed = None
+                for _ in range(20):
+                    observed = await telegram.receipt(
+                        self.page,
+                        action["intent"]["body"],
+                        prior["observation"]["baseline_mid"]
+                        if prior["observation"].get("baseline_scope")
+                        == "visible_target_v1"
+                        else "0",
+                        action["intent"]["marker"],
+                    )
+                    if observed:
+                        break
+                    await asyncio.sleep(0.5)
                 if not observed:
-                    return {
-                        "state": "unknown",
-                        "reason": "尚未找到唯一的服务器消息，禁止重发",
-                    }
-            elif action["state"] == "prepared":
+                    diagnostic = await telegram.receipt_diagnostic(
+                        self.page, action["intent"]["body"], action["intent"]["marker"]
+                    )
+                    with tx(self.aid) as c:
+                        fresh_probe = one(
+                            c,
+                            "SELECT 1 FROM lead.tasks t JOIN lead.tasks parent ON parent.id::text=t.input->>'bootstrap_run_id' WHERE t.id=%s AND t.input->>'bootstrap_verification'='true' AND parent.input->>'fresh_channel'='true' AND parent.result->>'target_id'=%s AND parent.result->>'awaiting_first_publish'='true' AND t.created_at<now()-interval '60 seconds'",
+                            (action["task_id"], str(action["target_id"])),
+                        )
+                    # Narrow negative proof for the very first write in a newly
+                    # created channel: its entire visible history is the creation
+                    # service event and the exact original text is still a draft.
+                    if (
+                        fresh_probe
+                        and diagnostic.get("creationServiceOnly")
+                        and diagnostic["draftMatches"]
+                        and not diagnostic["markerMatches"]
+                        and not diagnostic["pending"]
+                        and not diagnostic["systemDialogs"]
+                    ):
+                        folder = STATE / "evidence" / self.aid
+                        folder.mkdir(exist_ok=True, parents=True, mode=0o700)
+                        proof = folder / (str(action_id) + "-not-applied.png")
+                        await self.page.screenshot(path=str(proof))
+                        proof.chmod(0o600)
+                        with tx(self.aid) as c:
+                            self.gate(c, action)
+                            c.execute(
+                                "UPDATE lead.actions SET state='not_applied' WHERE id=%s AND state='unknown'",
+                                (action_id,),
+                            )
+                            c.execute(
+                                "UPDATE lead.action_attempts SET outcome='not_applied',error_code='CREATION_ONLY_WITH_EXACT_DRAFT',evidence_ref=%s,observation=observation || %s,ended_at=now() WHERE id=%s",
+                                (
+                                    str(proof),
+                                    j({"nonapplication_proof": diagnostic}),
+                                    prior["id"],
+                                ),
+                            )
+                            c.execute(
+                                "UPDATE lead.actions SET state='prepared' WHERE id=%s AND state='not_applied'",
+                                (action_id,),
+                            )
+                            record(
+                                c,
+                                self.aid,
+                                "已确认首次验证仍为草稿，恢复提交",
+                                "新频道仅有创建服务消息；保留未生效证据和原任务。",
+                                task_id=action["task_id"],
+                            )
+                        action["state"] = "prepared"
+                    else:
+                        return {
+                            "state": "unknown",
+                            "reason": "尚未找到唯一的服务器消息，禁止重发",
+                            "diagnostic": diagnostic,
+                        }
+            if action["state"] == "prepared":
                 baseline = await telegram.baseline(self.page)
                 await telegram.fill(self.page, action["intent"]["body"])
                 # Re-inspect identity immediately before the commit barrier.
@@ -555,6 +635,7 @@ class Actor:
                             j(
                                 {
                                     "baseline_mid": baseline,
+                                    "baseline_scope": "visible_target_v1",
                                     "marker": action["intent"]["marker"],
                                 }
                             ),
@@ -589,7 +670,7 @@ class Actor:
                             (attempt["id"],),
                         )
                     return {"state": "unknown", "reason": "发布结果需核对，未再次点击"}
-            else:
+            elif action["state"] != "unknown":
                 return {"state": action["state"]}
             folder = STATE / "evidence" / self.aid
             folder.mkdir(exist_ok=True, parents=True, mode=0o700)
@@ -894,7 +975,75 @@ async def inspect_account(aid: UUID, body: OpenRequest):
 
     actor = await gateway.get(str(aid))
     async with actor.lock:
+        if body.platform == "telegram":
+            from . import telegram
+
+            with tx(str(aid)) as c:
+                known = one(
+                    c,
+                    "SELECT external_account_id FROM lead.social_accounts WHERE platform='telegram' AND external_account_id IS NOT NULL ORDER BY verified_at DESC LIMIT 1",
+                )
+            if known:
+                await telegram.open_account(actor.page, known["external_account_id"])
         return await get_adapter(body.platform).account(actor.page)
+
+
+class CommunitySearchRequest(BaseModel):
+    task_id: UUID
+    query: str = Field(max_length=60)
+
+
+@app.post("/agents/{aid}/community/search")
+async def community_search(aid: UUID, body: CommunitySearchRequest):
+    from .community_search import native_search
+
+    actor = await gateway.get(str(aid))
+    return await native_search(actor, str(body.task_id), body.query)
+
+
+class CommunityStepRequest(BaseModel):
+    task_id: UUID
+    operation: Literal["observe", "join", "reply"]
+
+
+@app.post("/agents/{aid}/community/step")
+async def community_step(aid: UUID, body: CommunityStepRequest):
+    from playwright.async_api import TimeoutError as BrowserTimeout
+
+    from .community_runtime import browser_step
+
+    actor = await gateway.get(str(aid))
+    try:
+        return await browser_step(actor, str(body.task_id), body.operation)
+    except (BrowserTimeout, ValueError) as error:
+        diagnostic = await actor.page.evaluate(
+            """() => {const visible=e=>!!(e.getBoundingClientRect().width&&e.getBoundingClientRect().height);return {bodyClass:document.body.className,rightInert:document.querySelector('#column-right')?.inert,menuLabels:[...document.querySelectorAll('.btn-menu-item')].filter(visible).map(e=>e.innerText.slice(0,120)).slice(0,20),forumPanels:[...document.querySelectorAll('.topics-container')].map(e=>({cls:e.className,visible:visible(e),peer:e.querySelector('.sidebar-header .peer-title[data-peer-id]')?.dataset.peerId,buttons:[...e.querySelectorAll('.sidebar-header button')].map(b=>({cls:b.className,label:b.getAttribute('aria-label')}))})),chats:[...document.querySelectorAll('.chat[data-type=chat]')].map(e=>{const h=e.querySelector('.chat-info');const r=h?.getBoundingClientRect();return {cls:e.className,peer:h?.querySelector('[data-peer-id]')?.dataset.peerId,visible:visible(e),headerParent:h?.parentElement?.className,headerHit:r?document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.className:null}}),profiles:[...document.querySelectorAll('.profile-container')].map(e=>({cls:e.className,parent:e.parentElement?.className,tab:e.closest('.tabs-tab')?.className,visible:visible(e),handles:[...e.querySelectorAll('.row-title')].map(x=>x.textContent).filter(t=>/^t.me\\//.test(t))})),topbarSearch:[...document.querySelectorAll('.topbar-search-input')].map(e=>({visible:visible(e),chat:e.closest('.chat')?.className}))}}"""
+        )
+        with tx(str(aid)) as c:
+            c.execute(
+                "UPDATE lead.tasks SET result=coalesce(result,'{}') || %s WHERE id=%s",
+                (j({"browser_diagnostic": diagnostic}), body.task_id),
+            )
+        raise HTTPException(
+            409, detail=type(error).__name__ + ": " + str(error)[:1500]
+        ) from None
+
+
+class AccountPrepareRequest(BaseModel):
+    task_id: UUID
+
+
+@app.post("/agents/{aid}/account/prepare")
+async def prepare_account(aid: UUID, body: AccountPrepareRequest):
+    from .account_setup import prepare_in_browser
+
+    actor = await gateway.get(str(aid))
+    if env().get("LEAD_DEPLOYMENT_MODE") == "production":
+        from .identity import check
+
+        if not (await check(actor))["verified"]:
+            raise BrowserBusy("运营环境核验未通过，平台会自动复查")
+    return await prepare_in_browser(actor, str(body.task_id))
 
 
 @app.post("/agents/{aid}/target/inspect")
@@ -1011,9 +1160,26 @@ async def close_research(aid: UUID, rid: UUID):
     if actor:
         async with actor.lock:
             controller = actor.research_pages.pop(str(rid), None)
-            if controller and controller.context:
+            if controller and hasattr(controller, "close"):
+                await controller.close()
+            elif controller and controller.context:
                 await controller.context.close()
     return {"ok": True}
+
+
+@app.post("/agents/{aid}/research/{rid}/hybrid")
+async def start_hybrid_research(aid: UUID, rid: UUID):
+    from .hybrid_research import HybridResearchPage
+
+    actor = await gateway.get(str(aid))
+    async with actor.lock:
+        controller = actor.research_pages.setdefault(
+            str(rid), HybridResearchPage(actor, str(rid))
+        )
+        if not isinstance(controller, HybridResearchPage):
+            raise ValueError("此浏览任务已使用其他执行环境")
+        await controller.ensure()
+        return {"cdp_url": controller.cdp_url}
 
 
 @app.get("/health")
@@ -1055,12 +1221,14 @@ async def publish(aid: str, body: PublishRequest):
 
 
 @app.get("/agents/{aid}/screenshot")
-async def screenshot(aid: str):
+async def screenshot(aid: str, format: str = "png"):
     actor = await gateway.get(aid)
     async with actor.lock:
         return Response(
-            await actor.page.screenshot(),
-            media_type="image/png",
+            await actor.page.screenshot(type="jpeg", quality=72)
+            if format == "jpeg"
+            else await actor.page.screenshot(),
+            media_type="image/jpeg" if format == "jpeg" else "image/png",
             headers={"Cache-Control": "no-store"},
         )
 
@@ -1090,9 +1258,23 @@ async def user_input(aid: str, body: InputRequest):
             "Escape",
             "ArrowDown",
             "ArrowUp",
+            "ArrowLeft",
+            "ArrowRight",
+            "Delete",
+            "Home",
+            "End",
             "ControlOrMeta+A",
         ):
             await actor.page.keyboard.press(body.text)
+        elif body.kind in ("back", "forward", "reload"):
+            if body.kind == "reload":
+                await actor.page.reload(wait_until="domcontentloaded", timeout=30000)
+            elif body.kind == "back":
+                await actor.page.go_back(wait_until="domcontentloaded", timeout=30000)
+            else:
+                await actor.page.go_forward(
+                    wait_until="domcontentloaded", timeout=30000
+                )
         elif body.kind == "scroll":
             await actor.page.mouse.wheel(0, max(-800, min(body.y, 800)))
         else:

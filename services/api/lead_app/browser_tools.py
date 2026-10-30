@@ -47,14 +47,20 @@ class BrowserTools:
         self.sources = []
         self.steps = 0
         self.last = None
+        self.extra_sources = []
 
     async def command(self, operation, args=None):
+        from .admin_settings import for_agent
+
+        settings, _ = for_agent(self.aid, "models")
+        if not settings["tools"]["public_web"]:
+            return {"error": "TOOL_DISABLED", "message": "公开网页读取已在后台关闭，请根据已有资料作答。"}
         if not self.run_id:
             self.run_id = begin_run(
                 self.aid, self.goal, self.message_id, self.task_id, self.mode
             )
         self.steps += 1
-        if self.steps > 12:
+        if self.steps > settings["max_tool_calls"]:
             return {
                 "error": "BROWSER_STEP_LIMIT",
                 "message": "本轮已达到浏览步数上限，请根据已获取的网页作答",
@@ -90,8 +96,13 @@ class BrowserTools:
                 }
 
     def tools(self):
+        from .admin_settings import for_agent
+
+        settings, _ = for_agent(self.aid, "models")
+        if not settings["tools"]["public_web"] or not settings["max_tool_calls"]:
+            return []
         async def prepare_browser_tool(ctx, definition):
-            return definition if self.steps < 7 else None
+            return definition if self.steps < min(7, settings["max_tool_calls"]) else None
 
         async def browser_open(url: str) -> dict:
             """用真实浏览器打开公开网址，返回渲染后的正文和当前可操作元素。支持 JavaScript 网站。"""
@@ -121,6 +132,25 @@ class BrowserTools:
             """在真实浏览器中返回上一页，并取得新观察。"""
             return await self.command("back")
 
+        async def browser_explore(url: str, goal: str) -> dict:
+            """使用 browser-use 自主探索复杂公开页面。已有简单浏览不足时使用；只读，不登录或发布，保留来源与证据。"""
+            from .hybrid_research import explore
+
+            self.steps += 1
+            try:
+                result = await explore(
+                    self.aid, url, goal, mode=self.mode, message_id=self.message_id
+                )
+                self.extra_sources.extend(result.get("sources", []))
+                return result
+            except Exception:
+                return {
+                    "error": "BROWSER_USE_EXPLORATION_FAILED",
+                    "message": "自主探索未完成，使用已有真实观察，不能声称已完成此步骤。",
+                }
+
+        from .hybrid_research import available
+
         return [
             Tool(
                 fn,
@@ -138,11 +168,12 @@ class BrowserTools:
                 browser_scroll,
                 browser_back,
             )
+            + ((browser_explore,) if available() and settings["tools"]["advanced_research"] else ())
         ]
 
     async def finish(self, state="succeeded"):
         if not self.run_id:
-            return []
+            return self.extra_sources
         self.sources = finish_run(self.aid, self.run_id, state)
         async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
             try:
@@ -155,4 +186,4 @@ class BrowserTools:
                 )
             except httpx.HTTPError:
                 pass
-        return self.sources
+        return self.sources + self.extra_sources

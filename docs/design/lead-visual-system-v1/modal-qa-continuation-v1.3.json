@@ -1,0 +1,83 @@
+{
+  "checked_at": "2026-10-30T05:10:43.817612+08:00",
+  "browser": {
+    "selector": "chrome",
+    "initial_result": "Browser is not available: chrome",
+    "inventory": [],
+    "chrome_running": true,
+    "installed": true,
+    "extension_installed": true,
+    "extension_enabled": true,
+    "native_host_manifest_correct": true,
+    "window_open_authorized": true,
+    "official_window_open_result": "opened",
+    "official_window_profile": "Default",
+    "retry_result": "Browser is not available: chrome",
+    "new_browser_screenshots": 0,
+    "console_checked": false,
+    "fallback_used": false
+  },
+  "services": {
+    "/": 200,
+    "/api/auth/me": 200,
+    "/api/agents": 200,
+    "/api/health": 200,
+    "healthy": {
+      "database": true,
+      "worker": true,
+      "browser": true,
+      "active_profiles": 0,
+      "model_configured": true,
+      "model": "deepseek-flash",
+      "browser_capacity": 3,
+      "mode": "local_owner"
+    },
+    "/api/agents/64d96f33-03a3-4527-b2f2-7a864587fa25": 200,
+    "/api/agents/64d96f33-03a3-4527-b2f2-7a864587fa25/operations": 200
+  },
+  "cleanup": {
+    "previous_test_agents": [
+      {
+        "id": "4f44c1bf-08e0-442e-a464-3c0cc0b754e5",
+        "desired_state": "archived"
+      },
+      {
+        "id": "b0b1e563-b0c8-44c4-9568-6c7f5a723f2e",
+        "desired_state": "archived"
+      }
+    ],
+    "current_tenant_id": "551af589-33ea-4e0d-a933-06531e17a3f9",
+    "new_test_agents": 92,
+    "active_test_agents": 0,
+    "real_agent_unchanged": true
+  },
+  "regression_evidence": "implementation/modal-qa-regression-v1.3.json",
+  "final_result": "blocked",
+  "connection_rechecks": [
+    {
+      "checked_at": "2026-10-30T07:54:43.048463+08:00",
+      "user_request": "@Chrome read-only open http://127.0.0.1:3100; resume modal QA only after connection recovers; do not modify real Seka",
+      "user_attachment_observation": "Screenshot shows Chrome extension installed, default browsing allowed, http://127.0.0.1 browsing allowed, and full CDP toggle enabled. This is a user-provided settings screenshot, not live Chrome session evidence.",
+      "chrome_selector_result": "Browser is not available: chrome",
+      "inventory": [
+        {
+          "id": "2",
+          "name": "ChatGPT in-app browser",
+          "type": "iab"
+        },
+        {
+          "id": "1",
+          "name": "Codex MCP Apps",
+          "type": "mcpapps"
+        }
+      ],
+      "chrome_page_opened": false,
+      "new_modal_screenshots": 0,
+      "real_agent_actions": [],
+      "fallback_used": false,
+      "result": "blocked"
+    }
+  ],
+  "superseded_by": "modal-qa-final-v1.3.json",
+  "current_result": "passed"
+}

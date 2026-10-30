@@ -1,0 +1,202 @@
+{
+  "date": "2026-10-30",
+  "scope": "Design token validation; not rendered application or generated-image accessibility certification",
+  "canonicalColorSpace": "OKLCH",
+  "colors": {
+    "canvas": [
+      0.15,
+      0.008,
+      270.0
+    ],
+    "surface": [
+      0.185,
+      0.009,
+      270.0
+    ],
+    "raised": [
+      0.22,
+      0.01,
+      270.0
+    ],
+    "module": [
+      0.215,
+      0.009,
+      270.0
+    ],
+    "module-primary": [
+      0.24,
+      0.01,
+      270.0
+    ],
+    "line": [
+      0.3,
+      0.01,
+      270.0
+    ],
+    "text": [
+      0.94,
+      0.007,
+      270.0
+    ],
+    "text-secondary": [
+      0.73,
+      0.012,
+      270.0
+    ],
+    "text-muted": [
+      0.64,
+      0.012,
+      270.0
+    ],
+    "action": [
+      0.72,
+      0.17,
+      28.0
+    ],
+    "action-hover": [
+      0.75,
+      0.145,
+      28.0
+    ],
+    "ink": [
+      0.18,
+      0.008,
+      270.0
+    ],
+    "data": [
+      0.76,
+      0.11,
+      285.0
+    ],
+    "focus": [
+      0.8,
+      0.08,
+      285.0
+    ],
+    "success": [
+      0.76,
+      0.1,
+      165.0
+    ],
+    "warning": [
+      0.82,
+      0.12,
+      80.0
+    ],
+    "danger": [
+      0.7,
+      0.18,
+      25.0
+    ]
+  },
+  "allColorsInSrgbGamut": true,
+  "contrastPairs": [
+    {
+      "foreground": "text",
+      "background": "surface",
+      "ratio": 15.63
+    },
+    {
+      "foreground": "text-secondary",
+      "background": "surface",
+      "ratio": 7.79
+    },
+    {
+      "foreground": "text-muted",
+      "background": "surface",
+      "ratio": 5.54
+    },
+    {
+      "foreground": "text-muted",
+      "background": "raised",
+      "ratio": 5.15
+    },
+    {
+      "foreground": "text-muted",
+      "background": "module",
+      "ratio": 5.21
+    },
+    {
+      "foreground": "text-muted",
+      "background": "module-primary",
+      "ratio": 4.89
+    },
+    {
+      "foreground": "ink",
+      "background": "action",
+      "ratio": 7.05
+    },
+    {
+      "foreground": "data",
+      "background": "module-primary",
+      "ratio": 7.48
+    },
+    {
+      "foreground": "focus",
+      "background": "module-primary",
+      "ratio": 8.67
+    },
+    {
+      "foreground": "success",
+      "background": "module",
+      "ratio": 8.53
+    }
+  ],
+  "minimumBodyContrast": 4.5,
+  "minimumFocusContrast": 3,
+  "disallowedPair": {
+    "foreground": "text",
+    "background": "action",
+    "ratio": 2.24,
+    "reason": "Use ink on coral for filled controls."
+  },
+  "artifacts": {
+    "design-foundations.png": {
+      "width": 1448,
+      "height": 1086,
+      "bytes": 1576413
+    },
+    "design-foundations-v1.1.png": {
+      "width": 1448,
+      "height": 1086,
+      "bytes": 1621843
+    },
+    "agent-workspace-v1.1.png": {
+      "width": 1024,
+      "height": 1536,
+      "bytes": 1541747
+    },
+    "agent-workspace.png": {
+      "width": 1330,
+      "height": 1182,
+      "bytes": 1713994
+    }
+  },
+  "documentationChecks": {
+    "yaml": "passed",
+    "sectionOrder": "passed",
+    "tokenReferences": "passed",
+    "localLinks": "passed",
+    "imageFiles": "passed"
+  },
+  "version": "1.1",
+  "layoutRules": {
+    "canvasPadding": 40,
+    "modulePadding": [
+      28,
+      32
+    ],
+    "moduleGap": [
+      32,
+      40
+    ],
+    "majorGroupGap": [
+      48,
+      56
+    ],
+    "preferenceColumnGap": 24,
+    "moduleBorder": 1,
+    "moduleRadius": 12,
+    "verification": "Normative rules; image composition visually reviewed, not pixel-measured."
+  }
+}

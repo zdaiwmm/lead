@@ -2,7 +2,9 @@ import uuid
 
 import psycopg
 import pytest
-from lead_app.config import TENANT, database_kwargs
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from lead_app.config import ROOT, TENANT, database_kwargs
 from psycopg import sql
 
 from scripts.migrate import upgrade
@@ -37,7 +39,9 @@ def test_fresh_upgrade_and_repeat_keep_data_and_runtime_permissions(isolated_dat
     with psycopg.connect(**isolated_database) as c:
         assert (
             c.execute("SELECT version_num FROM lead_migration_version").fetchone()[0]
-            == "0010_browser_metering"
+            == ScriptDirectory.from_config(
+                Config(str(ROOT / "infra/alembic.ini"))
+            ).get_current_head()
         )
         c.execute(
             "UPDATE lead.tenants SET name='migration-preserved' WHERE id=%s", (TENANT,)

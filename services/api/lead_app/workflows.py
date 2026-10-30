@@ -50,6 +50,62 @@ class ChatWorkflow:
 class PublishWorkflow:
     @workflow.run
     async def run(self, args: dict):
+        if "agent_id" in args and workflow.patched("admin-bounded-runtime-v1"):
+            settings = await workflow.execute_activity(
+                "execution_policy",
+                args,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RETRY,
+            )
+            policy = RetryPolicy(
+                initial_interval=timedelta(seconds=settings["retry_interval_seconds"]),
+                maximum_interval=timedelta(
+                    seconds=settings["retry_interval_seconds"] * 4
+                ),
+                maximum_attempts=settings["retry_attempts"],
+                non_retryable_error_types=[
+                    "ValueError",
+                    "LookupError",
+                    "TypeError",
+                    "KeyError",
+                    "PermissionError",
+                ],
+            )
+            for _ in range(100):
+                try:
+                    result = await workflow.execute_activity(
+                        "execute_task",
+                        args,
+                        start_to_close_timeout=timedelta(minutes=4),
+                        retry_policy=policy,
+                    )
+                except ActivityError:
+                    stopped = await workflow.execute_activity(
+                        "mark_task_failed",
+                        args,
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RETRY,
+                    )
+                    if stopped and stopped.get("state") == "unknown":
+                        result = stopped
+                        break
+                    return {"state": "failed"}
+                if result.get("state") != "deferred":
+                    break
+                await workflow.sleep(result["delay"])
+            else:
+                workflow.continue_as_new(args)
+            for delay in (5, 30, 120, 300, 900, 1800, 3600):
+                if result.get("state") != "unknown":
+                    break
+                await workflow.sleep(delay)
+                result = await workflow.execute_activity(
+                    "execute_task",
+                    args,
+                    start_to_close_timeout=timedelta(minutes=4),
+                    retry_policy=policy,
+                )
+            return result
         resilient = workflow.patched("publish-transient-retry-v1")
         policy = (
             RetryPolicy(
