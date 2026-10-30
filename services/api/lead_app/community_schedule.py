@@ -58,10 +58,15 @@ def deadlines(c, agent, now=None):
         c,
         "SELECT min((result->>'retry_after')::timestamptz) AS due FROM lead.tasks WHERE type='community.engage' AND state='failed' AND result ? 'retry_after' AND result->>'reply_state' IS NULL AND (result->>'join_submitted' IS NULL OR result->>'join_state'='confirmed')",
     )["due"]
+    pending_join = one(
+        c,
+        "SELECT min((result->>'join_checked_at')::timestamptz+interval '15 minutes') AS due FROM lead.tasks WHERE type='community.engage' AND state IN ('succeeded','failed') AND (result->>'join_state'='pending_approval' OR (result->>'join_mode'='approval_request' AND result->>'join_state' IN ('dispatching','unknown')))",
+    )["due"]
     return {
         "next_discovery_at": discovery,
         "next_review_at": review,
         "next_retry_at": retry,
+        "next_join_approval_check_at": pending_join,
     }
 
 
@@ -73,7 +78,7 @@ def started(aid):
         )
 
 
-def completed(aid, result, now=None):
+def completed(aid, result, now=None, *, respect_delay=False):
     now = now or datetime.now(timezone.utc)
     with tx(aid) as c:
         agent = require_agent(c, aid, True)
@@ -81,7 +86,9 @@ def completed(aid, result, now=None):
         delay = result["delay"]
         if due:
             # Community steps retain their retry/reconciliation backoff.
-            if not result.get("reason", "").startswith("community_"):
+            if not respect_delay and not result.get("reason", "").startswith(
+                "community_"
+            ):
                 pending = [time for time in due.values() if time]
                 delay = min(
                     delay, max(5, math.ceil((min(pending) - now).total_seconds()))
@@ -98,6 +105,7 @@ def completed(aid, result, now=None):
                     agent["onboarding_state"].get("community_growth", {})
                 ).discovery_interval_hours,
                 "review_interval_seconds": REVIEW_SECONDS,
+                **({"deferred_reason": result.get("reason")} if respect_delay else {}),
             }
             prior = agent["onboarding_state"].get("community_schedule", {})
             if any(

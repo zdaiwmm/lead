@@ -8,6 +8,47 @@ from lead_app.db import j, one, tx, uid
 from lead_app.scope import current_tenant
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message,closed,settles",
+    [
+        ("NS_BINDING_ABORTED; frame changed", False, True),
+        ("NS_BINDING_ABORTED", True, False),
+        ("network failure", False, False),
+    ],
+)
+async def test_reload_settles_only_known_navigation_abort_then_rechecks_identity(
+    monkeypatch, message, closed, settles
+):
+    from playwright.async_api import Error as BrowserError
+
+    calls = []
+
+    class Page:
+        async def reload(self, **kwargs):
+            calls.append("reload")
+            raise BrowserError(message)
+
+        def is_closed(self):
+            return closed
+
+        async def wait_for_load_state(self, *args, **kwargs):
+            calls.append("settle")
+
+    async def identity(page, expected):
+        assert expected == "fixture-account"
+        calls.append("identity")
+
+    monkeypatch.setattr(telegram, "open_account", identity)
+    if settles:
+        await community_runtime.reload_telegram(Page(), "fixture-account")
+        assert calls == ["reload", "settle", "identity"]
+    else:
+        with pytest.raises(BrowserError):
+            await community_runtime.reload_telegram(Page(), "fixture-account")
+        assert calls == ["reload"]
+
+
 def test_membership_requires_join_control_to_disappear_and_no_pending_request():
     preview = {
         "join_button_count": 1,
@@ -26,6 +67,13 @@ def test_membership_requires_join_control_to_disappear_and_no_pending_request():
     )
     assert not community_runtime.native_membership(
         {**joined_muted, "controls": ["SUBSCRIBE"]}
+    )
+    assert not community_runtime.native_membership(
+        {**joined_muted, "apply_button_count": 1}
+    )
+    assert community_runtime.pending_join_request({"controls": ["CANCEL REQUEST"]})
+    assert not community_runtime.pending_join_request(
+        {"controls": ["APPLY TO JOIN GROUP"]}
     )
 
 
@@ -373,6 +421,17 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
         )
         later = await native_search(actor, str(search_task["id"]), QUERIES[0])
         assert found["source"]["url"] == later["source"]["url"]
+        # Public channels can rank before discussions. Apply the bounded
+        # export after prioritizing member-based groups, without people.
+        await actor.page.locator(".search-group-contacts").evaluate(
+            """root=>{root.innerHTML=Array.from({length:15},(_,i)=>`<a data-peer-id="-${900000+i}"><span class="peer-title">Channel ${i}</span><span>@broadcast_fixture_${i}, 100 subscribers</span></a>`).join('')+'<a data-peer-id="-777777"><span class="peer-title">Translation Readers</span><span>@readers_fixture, 50 members</span></a><a data-peer-id="42"><span class="peer-title">Person</span><span>@person_fixture</span></a>'}"""
+        )
+        discussions = await native_search(actor, str(search_task["id"]), QUERIES[0])
+        assert (
+            discussions["groups"][0]["telegram_url"] == "https://t.me/readers_fixture"
+        )
+        assert len(discussions["groups"]) == 12
+        assert all(int(group["peer_id"]) < 0 for group in discussions["groups"])
         with tx(aid) as c:
             candidates = community_growth.verified_candidates(
                 c,
@@ -433,6 +492,29 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
         assert resolved["redirect_metadata_only"] and resolved["text"] == ""
         assert resolved["community_links"][0]["href"] == "https://t.me/readers_fixture"
         assert destination_loaded == []
+        await research.context.route(
+            "https://example.org/maintainer-fixture",
+            lambda route: route.fulfill(
+                body='<p>Telegram Group (Chinese): <a href="https://t.me/readers_fixture">Readers</a></p><p>Telegram Contact: <a href="https://t.me/person_fixture">Person</a></p>',
+                content_type="text/html",
+            ),
+        )
+        public = await research.command(
+            "open", {"url": "https://example.org/maintainer-fixture"}, uid()
+        )
+        group = next(
+            link
+            for link in public["community_links"]
+            if link["href"] == "https://t.me/readers_fixture"
+        )
+        contact = next(
+            link
+            for link in public["community_links"]
+            if link["href"] == "https://t.me/person_fixture"
+        )
+        assert "Telegram Group (Chinese)" in group["context"]
+        assert "Telegram Contact" in contact["context"]
+        assert "Telegram Group" not in contact["context"]
         finish_run(aid, rid)
         await research.context.close()
         # Reassessment under a new policy inherits the confirmed membership
@@ -546,6 +628,223 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
         assert json.loads(
             await actor.page.evaluate("localStorage.getItem('posts')")
         ) == [body, continuation_body]
+        # Native approval requests are a distinct durable result, never a
+        # confirmed membership or a reason to block the remaining research.
+        await actor.page.goto(
+            "https://web.telegram.org/k/?fixture=approval#@readers_fixture"
+        )
+        await actor.page.evaluate(
+            """() => {const q=s=>document.querySelector(s);q('#join').remove();q('.input-message-input').hidden=false;const b=document.createElement('div');b.className='chat-input-control-button';b.textContent='APPLY TO JOIN GROUP';b.onclick=()=>{localStorage.setItem('apply_count',String(Number(localStorage.getItem('apply_count')||0)+1));b.textContent='CANCEL REQUEST';b.onclick=()=>{throw new Error('must not cancel')}};document.body.append(b)}"""
+        )
+        with tx(aid) as c:
+            c.execute(
+                "UPDATE lead.tasks SET state='succeeded',completed_at=now() WHERE state='running'"
+            )
+            approval = one(
+                c,
+                "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,input,result,scheduled_at,workflow_id) VALUES(%s,%s,'community.engage','running',%s,%s,now(),%s) RETURNING id",
+                (
+                    current_tenant(),
+                    aid,
+                    j(
+                        {
+                            **{
+                                k: v
+                                for k, v in original_input.items()
+                                if k not in ("reply", "membership_task_id")
+                            },
+                            "join_approved": True,
+                        }
+                    ),
+                    j({"target_id": "-777777"}),
+                    "fixture:" + uid(),
+                ),
+            )
+        preview = await community_runtime.browser_step(
+            actor, str(approval["id"]), "observe"
+        )
+        assert not preview["joined"] and preview["apply_button_count"] == 1
+        outcome = await community_runtime.browser_step(
+            actor, str(approval["id"]), "join"
+        )
+        assert outcome["state"] == "pending_approval"
+        assert (
+            await community_runtime.browser_step(actor, str(approval["id"]), "join")
+        )["state"] == "pending_approval"
+        assert await actor.page.evaluate("localStorage.getItem('apply_count')") == "1"
+        with tx(aid) as c:
+            saved = one(
+                c, "SELECT result FROM lead.tasks WHERE id=%s", (approval["id"],)
+            )["result"]
+            assert saved["join_submitted"] and saved["join_state"] == "pending_approval"
+            c.execute(
+                "UPDATE lead.tasks SET result=result || %s WHERE id=%s",
+                (j({"join_state": "unknown"}), approval["id"]),
+            )
+        reconciled = []
+
+        async def reconcile_rpc(path, data):
+            reconciled.append(data["operation"])
+            if data["operation"] == "join":
+                return {"state": "unknown", "reason": "fixture delayed acknowledgement"}
+            return await community_runtime.browser_step(
+                actor, data["task_id"], data["operation"]
+            )
+
+        assert (await community_runtime.community_cycle(aid, reconcile_rpc))[
+            "delay"
+        ] == 1
+        assert reconciled == ["observe", "join"]
+        with tx(aid) as c:
+            result = one(
+                c, "SELECT state,result FROM lead.tasks WHERE id=%s", (approval["id"],)
+            )
+            assert (
+                result["state"] == "succeeded"
+                and result["result"]["join_state"] == "unknown"
+            )
+            assert result["result"]["outcome"]["state"] == "pending_verification"
+            assert result["result"]["join_reconciliation"]["controls"] == [
+                "CANCEL REQUEST"
+            ]
+            c.execute(
+                "UPDATE lead.tasks SET state='succeeded',completed_at=now(),result=result || %s WHERE id=%s",
+                (j({"join_checked_at": "2000-01-01T00:00:00+00:00"}), approval["id"]),
+            )
+
+        async def confirmed_request_rpc(path, data):
+            assert data["operation"] == "join"
+            return await community_runtime.browser_step(
+                actor, data["task_id"], data["operation"]
+            )
+
+        assert (await community_runtime.community_cycle(aid, confirmed_request_rpc))[
+            "delay"
+        ] == 1
+        with tx(aid) as c:
+            assert (
+                one(
+                    c,
+                    "SELECT result->>'join_state' AS state FROM lead.tasks WHERE id=%s",
+                    (approval["id"],),
+                )["state"]
+                == "pending_approval"
+            )
+            c.execute(
+                "UPDATE lead.tasks SET result=result || %s WHERE id=%s",
+                (j({"join_checked_at": "2000-01-01T00:00:00+00:00"}), approval["id"]),
+            )
+        # A timer-driven read of the same request notices the later approval.
+        await actor.page.evaluate(
+            "document.querySelector('.chat-input-control-button').remove()"
+        )
+
+        async def approval_rpc(path, data):
+            assert (
+                data["task_id"] == str(approval["id"]) and data["operation"] == "join"
+            )
+            return await community_runtime.browser_step(
+                actor, data["task_id"], data["operation"]
+            )
+
+        assert (await community_runtime.community_cycle(aid, approval_rpc))[
+            "reason"
+        ] == "community_joined"
+        with tx(aid) as c:
+            assert (
+                one(
+                    c,
+                    "SELECT result->>'join_state' AS state FROM lead.tasks WHERE id=%s",
+                    (approval["id"],),
+                )["state"]
+                == "confirmed"
+            )
+        assert await actor.page.evaluate("localStorage.getItem('apply_count')") == "1"
+        # A click with no accepted native request may continue once only after
+        # reloading the server-backed group state under the same identity.
+        retry_html = html.replace(
+            '<button id="join">Join Group</button>',
+            '<div class="chat-input-control-button"><button id="join">Apply to Join Group</button></div>',
+        )
+        retry_html = retry_html.replace(
+            "q('#join').hidden=true;q('.input-message-input').hidden=false;localStorage.setItem('join_count',String(Number(localStorage.getItem('join_count')||0)+1))",
+            "localStorage.setItem('application_continuation_count',String(Number(localStorage.getItem('application_continuation_count')||0)+1));q('.chat-input-control-button').textContent='CANCEL REQUEST';q('.input-message-input').hidden=false",
+        )
+        await actor.page.route(
+            "https://web.telegram.org/k/?fixture=join-continuation",
+            lambda route: route.fulfill(body=retry_html, content_type="text/html"),
+        )
+        await actor.page.goto(
+            "https://web.telegram.org/k/?fixture=join-continuation#@readers_fixture"
+        )
+        with tx(aid) as c:
+            retry = one(
+                c,
+                "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,input,result,scheduled_at,workflow_id) VALUES(%s,%s,'community.engage','running',%s,%s,now(),%s) RETURNING id",
+                (
+                    current_tenant(),
+                    aid,
+                    j(
+                        {
+                            **{
+                                k: v
+                                for k, v in original_input.items()
+                                if k not in ("reply", "membership_task_id")
+                            },
+                            "join_approved": True,
+                        }
+                    ),
+                    j(
+                        {
+                            "target_id": "-777777",
+                            "join_mode": "approval_request",
+                            "join_submitted": True,
+                            "join_state": "unknown",
+                            "join_reconciliation": {
+                                "at": "2000-01-01T00:00:00+00:00",
+                                "joined": False,
+                                "apply_button_count": 1,
+                            },
+                        }
+                    ),
+                    "fixture:" + uid(),
+                ),
+            )
+        assert (await community_runtime.browser_step(actor, str(retry["id"]), "join"))[
+            "state"
+        ] == "pending_approval"
+        assert (await community_runtime.browser_step(actor, str(retry["id"]), "join"))[
+            "state"
+        ] == "pending_approval"
+        assert (
+            await actor.page.evaluate(
+                "localStorage.getItem('application_continuation_count')"
+            )
+            == "1"
+        )
+        with tx(aid) as c:
+            assert (
+                one(c, "SELECT result FROM lead.tasks WHERE id=%s", (retry["id"],))[
+                    "result"
+                ]["join_ui_continuation"]["server_state_refreshed"]
+                is True
+            )
+            c.execute(
+                "UPDATE lead.tasks SET result=result || %s WHERE id=%s",
+                (j({"join_state": "unknown"}), retry["id"]),
+            )
+        await actor.page.evaluate(
+            "document.querySelector('.chat-input-control-button').textContent='APPLY TO JOIN GROUP'"
+        )
+        assert (await community_runtime.browser_step(actor, str(retry["id"]), "join"))[
+            "state"
+        ] == "unknown"
+        assert (
+            await actor.page.evaluate(
+                "localStorage.getItem('application_continuation_count')"
+            )
+            == "1"
+        )
         domain.set_control(aid, "pause")
         with pytest.raises(ValueError):
             await community_runtime.browser_step(actor, str(task["id"]), "reply")

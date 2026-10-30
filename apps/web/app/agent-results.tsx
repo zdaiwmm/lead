@@ -4,6 +4,8 @@ import { Code2, ArrowUpRight } from "lucide-react";
 import AnalyticsPanel from "./analytics-panel";
 import DialogPanel from "./dialog-panel";
 import { api } from "./api-client";
+import PromotionLink from "./promotion-link";
+import SocialIcon, { socialNames } from "./social-icon";
 type Row = Record<string, any>;
 export default function AgentResults({
   agent,
@@ -16,6 +18,18 @@ export default function AgentResults({
     [trend, setTrend] = useState<Row | null>(null),
     [error, setError] = useState("");
   const gradient = useId().replaceAll(":", "");
+  const connectedPlatforms = [
+    ...new Set<string>(
+      (agent.accounts || [])
+        .filter(
+          (account: Row) =>
+            account.state === "connected" && socialNames[account.platform],
+        )
+        .map((account: Row) => account.platform),
+    ),
+  ]
+    .sort()
+    .join(",");
   useEffect(() => {
     let active = true;
     const load = () =>
@@ -35,10 +49,28 @@ export default function AgentResults({
       active = false;
       clearInterval(timer);
     };
-  }, [agent.id]);
+  }, [agent.id, connectedPlatforms]);
   const m = agent.metrics,
     covered = m.coverage === "connected";
   const series: Row[] = trend?.days || [];
+  const channels: Row[] = (trend?.channels || []).filter(
+    (channel: Row) =>
+      socialNames[channel.platform] &&
+      agent.accounts?.some(
+        (account: Row) =>
+          account.platform === channel.platform &&
+          account.state === "connected",
+      ),
+  );
+  const conversionLabel =
+    (
+      {
+        signup: "注册",
+        lead: "客户咨询",
+        trial: "开始试用",
+        purchase: "付费购买",
+      } as Row
+    )[m.conversion_objective] || "转化";
   const max = Math.max(2, ...series.map((d) => d.qualified_visits));
   const top = Math.ceil(max / 2) * 2;
   const points = series
@@ -67,6 +99,25 @@ export default function AgentResults({
           <ArrowUpRight size={13} />
         </button>
       </div>
+      <PromotionLink
+        aid={agent.id}
+        config={
+          trend?.promotion || {
+            destination_url:
+              agent.onboarding_state?.promotion?.destination_url ||
+              agent.business?.product_url ||
+              "",
+            configured: !!agent.onboarding_state?.promotion?.destination_url,
+            revision: agent.onboarding_state?.promotion?.revision || 0,
+          }
+        }
+        readOnly={readOnly}
+        onSaved={(promotion) =>
+          setTrend((previous) =>
+            previous ? { ...previous, promotion } : { promotion },
+          )
+        }
+      />
       <dl className="results-metrics">
         {[
           ["有效访问", "qualified_visits"],
@@ -186,6 +237,72 @@ export default function AgentResults({
               : "像素未接入"}
         </span>
       </div>
+      {channels.length > 0 && (
+        <div className="channel-results">
+          <div className="channel-results-heading">
+            <h3>社媒明细</h3>
+            <span className="muted small">{channels.length} 个已连接</span>
+          </div>
+          <div
+            className="channel-results-scroll"
+            role="region"
+            aria-label="已连接社媒的获客明细，可滚动查看"
+            tabIndex={0}
+          >
+            <table className="channel-results-table">
+              <thead>
+                <tr>
+                  <th scope="col">社媒</th>
+                  <th scope="col">有效访问</th>
+                  <th scope="col">访问会话</th>
+                  <th scope="col" title="仅统计经过推广跳转链接的点击">
+                    推广点击
+                  </th>
+                  <th scope="col">累计发布</th>
+                  <th scope="col">{conversionLabel}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {channels.map((channel) => (
+                  <tr key={channel.platform}>
+                    <th scope="row">
+                      <span className="channel-result-name">
+                        <SocialIcon platform={channel.platform} size={15} />
+                        {socialNames[channel.platform]}
+                      </span>
+                    </th>
+                    {[
+                      "qualified_visits",
+                      "visits",
+                      "clicks",
+                      "published",
+                      "conversions",
+                    ].map((key) => (
+                      <td
+                        key={key}
+                        title={
+                          channel[key] == null
+                            ? key === "conversions"
+                              ? "转化回传未接入或已过期"
+                              : "网站回传未接入或已过期"
+                            : undefined
+                        }
+                      >
+                        {channel[key]?.toLocaleString() ?? "—"}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      {!!connectedPlatforms && !channels.length && (
+        <p className="muted small promotion-hint" role="status">
+          {error ? "社媒明细暂时无法读取，稍后自动重试。" : "正在读取社媒明细…"}
+        </p>
+      )}
       {setup && (
         <DialogPanel
           title="网站像素"

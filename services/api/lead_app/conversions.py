@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .db import audit, one, require_agent, tx
+from .promotion import CODE_PATTERN
 from .scope import current_tenant
 
 router = APIRouter()
@@ -29,7 +30,7 @@ class Conversion(Ping):
     event_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9:_.-]+$")
     type: Literal["lead", "signup", "trial", "purchase"]
     session_id: UUID
-    ref: str = Field(pattern=r"^[A-Za-z0-9_-]{16}$")
+    ref: str = Field(pattern="^" + CODE_PATTERN + "$")
     occurred_at: datetime | None = None
 
 

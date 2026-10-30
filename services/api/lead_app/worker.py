@@ -123,6 +123,8 @@ async def deliver_workspace(client, tenant, configured, key_was_configured):
 
 async def publish_outbox(client):
     configured_workspaces = set()
+    workspace_failures = {}
+    workspace_retry_at = {}
     notification_ticks = {}
     experience_ticks = {}
     external_delivery_tasks = {}
@@ -145,12 +147,19 @@ async def publish_outbox(client):
             )
             if not configured or current_credentials != credential_state:
                 configured_workspaces.clear()
+            if current_credentials != credential_state:
+                workspace_failures.clear()
+                workspace_retry_at.clear()
             credential_state = current_credentials
             for tenant in execution_tenants():
+                if time.monotonic() < workspace_retry_at.get(tenant, 0):
+                    continue
                 try:
                     await deliver_workspace(
                         client, tenant, configured, tenant in configured_workspaces
                     )
+                    if configured:
+                        configured_workspaces.add(tenant)
                     if time.monotonic() - notification_ticks.get(tenant, 0) >= 30:
                         from .admin_notifications import collect
 
@@ -170,11 +179,16 @@ async def publish_outbox(client):
                         with tenant_scope(tenant, None):
                             await asyncio.to_thread(collect_experiences)
                         experience_ticks[tenant] = time.monotonic()
-                    if configured:
-                        configured_workspaces.add(tenant)
+                    workspace_failures.pop(tenant, None)
+                    workspace_retry_at.pop(tenant, None)
                 except Exception:
+                    failures = workspace_failures.get(tenant, 0) + 1
+                    workspace_failures[tenant] = failures
+                    delay = min(60, 2 ** min(failures, 6))
+                    workspace_retry_at[tenant] = time.monotonic() + delay
                     logging.warning(
-                        "Workspace delivery unavailable; other workspaces continue."
+                        "Workspace delivery unavailable; retry in %s seconds; other workspaces continue.",
+                        delay,
                     )
             (STATE / "worker-heartbeat").write_text(str(time.time()))
         except Exception:

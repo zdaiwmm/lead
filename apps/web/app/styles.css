@@ -672,6 +672,107 @@ code {
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
 }
+.results-promotion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: -8px 0 28px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 20px;
+}
+.results-promotion > svg,
+.results-promotion > span:first-of-type,
+.results-promotion > button {
+  flex-shrink: 0;
+}
+.promotion-destination {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+.results-promotion > button {
+  font-size: 12px;
+}
+.promotion-input {
+  width: 100%;
+  min-width: 0;
+}
+.promotion-hint {
+  margin-top: 12px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+.promotion-loading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.channel-results {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.channel-results-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.channel-results-heading h3 {
+  font-size: 12px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.channel-results-scroll {
+  max-height: 208px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.channel-results-table {
+  width: 100%;
+  min-width: 496px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.channel-results-table th,
+.channel-results-table td {
+  padding: 10px 8px;
+  text-align: right;
+  white-space: nowrap;
+  font-weight: 400;
+}
+.channel-results-table th:first-child {
+  padding-left: 0;
+  text-align: left;
+}
+.channel-results-table th:last-child,
+.channel-results-table td:last-child {
+  padding-right: 0;
+}
+.channel-results-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--module-primary);
+  color: var(--text-muted);
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.channel-result-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+}
 .results-metrics dt {
   color: var(--text-secondary);
   font-size: 12px;

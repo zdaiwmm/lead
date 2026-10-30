@@ -241,11 +241,16 @@ def managed_execution(category):
                     return await fn(args)
             gate = admission(aid, category)
             if not gate["allowed"]:
-                return {
+                deferred = {
                     "delay": gate["delay"],
                     "reason": gate["reason"],
                     **({"state": "deferred"} if category == "publish" else {}),
                 }
+                if category == "autonomous":
+                    from .community_schedule import completed
+
+                    return completed(aid, deferred, respect_delay=True)
+                return deferred
 
             async def renew_lease():
                 while True:

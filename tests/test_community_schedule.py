@@ -115,6 +115,42 @@ def test_channel_wait_cannot_delay_review_and_heartbeat(agent):
     )
 
 
+@pytest.mark.parametrize("join_state", ["pending_approval", "unknown"])
+def test_pending_join_has_own_deadline_without_blocking_discovery(agent, join_state):
+    now = datetime.now(timezone.utc)
+    with tx(agent) as c:
+        discovery(c, agent, now)
+        one(
+            c,
+            "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at,completed_at) VALUES(%s,%s,'community.engage','succeeded',%s,'{}',%s,now(),now()) RETURNING id",
+            (
+                current_tenant(),
+                agent,
+                "fixture:" + uid(),
+                j(
+                    {
+                        "join_state": join_state,
+                        "join_mode": "approval_request",
+                        "join_checked_at": (
+                            now - timedelta(minutes=14, seconds=40)
+                        ).isoformat(),
+                    }
+                ),
+            ),
+        )
+    result = community_schedule.completed(
+        agent, {"delay": 30434, "reason": "scheduled"}, now
+    )
+    assert result["delay"] == 20
+    with tx(agent) as c:
+        schedule = one(c, "SELECT onboarding_state FROM lead.agents")[
+            "onboarding_state"
+        ]["community_schedule"]
+        assert datetime.fromisoformat(
+            schedule["next_join_approval_check_at"]
+        ) == now + timedelta(seconds=20)
+
+
 @pytest.mark.asyncio
 async def test_discovery_repeats_daily_without_new_research_request(agent, monkeypatch):
     from lead_app.community_search import QUERIES
@@ -218,3 +254,30 @@ async def test_product_supervisor_wakes_without_chat_or_new_signal(agent, monkey
         finally:
             if len(calls) < 3:
                 await handle.terminate("isolated cadence verification cleanup")
+
+
+@pytest.mark.parametrize(
+    "reason,delay,expected", [("work_hours", 86400, 300), ("concurrency_limit", 10, 10)]
+)
+def test_deferred_admission_refreshes_heartbeat_without_ignoring_gate(
+    agent, reason, delay, expected
+):
+    now = datetime.now(timezone.utc)
+    result = community_schedule.completed(
+        agent, {"delay": delay, "reason": reason}, now, respect_delay=True
+    )
+    assert result["reason"] == reason
+    assert result["delay"] == expected
+    with tx(agent) as c:
+        row = one(
+            c,
+            "SELECT heartbeat_at,onboarding_state FROM lead.agents WHERE id=%s",
+            (agent,),
+        )
+        assert row["heartbeat_at"] >= now
+        assert (
+            row["onboarding_state"]["community_schedule"]["deferred_reason"] == reason
+        )
+        assert datetime.fromisoformat(
+            row["onboarding_state"]["community_schedule"]["next_check_at"]
+        ) == now + timedelta(seconds=expected)

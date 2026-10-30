@@ -1,10 +1,9 @@
 import asyncio
 import hashlib
 import re
-import secrets
 import traceback
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import httpx
 from temporalio import activity
@@ -24,6 +23,8 @@ from .operating_playbooks import (
     plan_snapshot,
     planning_context,
 )
+from .promotion import configuration as promotion_configuration
+from .promotion import new_marker, promotion_body
 from .scope import current_tenant, scoped_activity
 from .security import internal_token
 from .telemetry import trace_headers
@@ -995,6 +996,7 @@ async def _autonomous_cycle(args: dict):
             {
                 "business": business,
                 "new_channel_launch": bool(launch),
+                "promotion": promotion_configuration(a, business),
                 "preferences": memories,
                 "recent_work": recent,
                 "targets": targets,
@@ -1113,9 +1115,10 @@ async def _autonomous_cycle(args: dict):
             selected = [
                 m for m in media if m["metadata"]["kind"] in target["available_formats"]
             ][:1]
-        marker = secrets.token_urlsafe(12)
+        marker = new_marker(platform)
         destination = (
-            operating_playbooks.get(str(target["target_id"]), {}).get("destination_url")
+            a["onboarding_state"].get("promotion", {}).get("destination_url")
+            or operating_playbooks.get(str(target["target_id"]), {}).get("destination_url")
             or business["product_url"]
             or target["verified_permissions"].get("public_url")
         )
@@ -1128,10 +1131,9 @@ async def _autonomous_cycle(args: dict):
                 or p.password
             ):
                 return {"delay": 3600, "reason": "invalid_destination"}
-            query = dict(parse_qsl(p.query))
-            query["lead_ref"] = marker
-            published_link = urlunsplit(p._replace(query=urlencode(query)))
-            body = body.replace(destination, "").strip() + "\n\n" + published_link
+            body, published_link = promotion_body(
+                body, destination, marker, business["product_url"]
+            )
         else:
             return {"delay": 3600, "reason": "public_business_link_required"}
         manifest = [

@@ -291,7 +291,7 @@ class ResearchPage:
             # Footer/community links can be after the generic 100-control cap.
             # This fixed extraction exports links only, never arbitrary scripts.
             links = await self.page.evaluate(
-                """() => [...document.querySelectorAll('a[href]')].map(a=>({href:a.href,name:(a.innerText||a.getAttribute('aria-label')||'').trim().slice(0,120)}))"""
+                """() => [...document.querySelectorAll('a[href]')].map(a=>({href:a.href,name:(a.innerText||a.getAttribute('aria-label')||'').trim().slice(0,120),context:(a.closest('li,p,td,tr')||a.parentElement)?.innerText?.slice(0,600)||''}))"""
             )
             from .community_links import telegram_link
 

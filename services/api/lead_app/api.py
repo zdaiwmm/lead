@@ -36,6 +36,7 @@ from .events import router as event_router
 from .operating_playbooks import router as playbook_router
 from .operating_workspace import router as operations_router
 from .ops import router as ops_router
+from .promotion import CODE_PATTERN
 from .scope import current_tenant, tenant_scope
 from .security import internal_token, token, valid
 from .telemetry import TelemetryMiddleware, trace_headers
@@ -157,7 +158,7 @@ async def local_auth(request, call_next):
                         return JSONResponse(
                             {"detail": error.detail}, status_code=error.status_code
                         )
-    elif re.fullmatch(r"/r/[A-Za-z0-9_-]{16}", path) or re.fullmatch(
+    elif re.fullmatch("/r/" + CODE_PATTERN, path) or re.fullmatch(
         r"/collect/[0-9a-fA-F-]{36}", path
     ):
         from .identity_store import public_tenant
