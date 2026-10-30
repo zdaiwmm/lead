@@ -63,3 +63,84 @@ SDK 的代理地理位置提示不是泄漏测量结果；仍需按生产要求�
 - `scripts/install.py check` 本地全部通过；正式检查仍要求实际外部环境证据。当前用户原有业务保留暂停，未清除登录资料。
 
 私有报告、Cookie、IP、业务数据和截图不提交公开仓库。版本化数据库迁移截至 `0010_browser_metering`；Camoufox SDK `0.5.8`、原生构建 `official/156.0.1-beta.36`。
+
+## 2026-10-30 自主运营就绪与邀请恢复专项
+
+基线 `db1ceb156edb58c95261c20083390696dd644c7b`，修改位于隔离分支 `codex/autonomy-readiness-20261030`，尚未应用至当前运行服务。`test_health_readiness` 通过模拟工作室发布配置，检查部署默认模型与实际模型不同时的状态、某任务缺少凭据、数据库不可用的回退及凭据不进入响应。`test_telegram_setup_navigation` 使用指定 Camoufox 构建和内存 HTML，检查空/非空邀请选择均只退出、取消遗留确认后核对原频道、重复核对不点击创建/邀请，以及缺少或多重入口时停止、不关闭其他弹窗。
+
+运行方法：设置 `LEAD_STATE_DIR` 为现有本机配置目录、`LEAD_BROWSER_TESTS=1`，执行 `python -m pytest -q tests/test_health_readiness.py tests/test_telegram_setup_navigation.py`。数据库事务、网关健康和模型解析配置由测试替身隔离；不访问真实账号、不使用用户 Profile、不调用付费模型、不创建用户业务数据。报告在隔离工作目录的 `.state/verification/autonomy-20261030.xml`。初版检查因测试跨浏览器脚本隔离域读取全局变量而失败，已改为验证 DOM 状态，未降低产品断言。
+
+最终针对性测试 **13 项通过**，包含真实 Camoufox 的 9 项内存页面检查；Ruff 规则、格式与 Git 补丁空白检查通过。本轮不重复完整后端、前端构建或 72 小时负载；这些检查不能代替实号恢复和长期稳定性验收。
+
+### 后续：隔离数据库上的完整筹备验证
+
+使用独立临时目录、新生成的测试凭据、空白 PostgreSQL 18 集群与新建数据库执行正式迁移。没有连接用户数据库，未复用用户 Profile，也未启动 Temporal/Worker。执行 `test_account_setup`、`test_health_readiness`、`test_telegram_setup_navigation`，合计 **27 项通过（38.59 秒）**。测试日志与 JUnit 报告分别位于隔离工作目录的 `.state/verification/account-setup-isolated-20261030.log`、同目录 `.xml`；临时集群和所有测试 Profile 已在结束后删除。
+
+账号筹备页面新增真实阻塞形态：邀请页 Next 会打开添加成员确认窗。新增丢失创建回执后留下该窗的完整场景，验证同一持久任务恢复、创建次数为一、添加成员次数为零、既有账号槽位保留、筹备成功后只排入本地连接验证任务。四种浏览器场景还涵盖正常流程、单纯回执丢失、提交前暂停。页面路由先阻断其他请求，再对 Telegram 地址返回本地 HTML。
+
+四条 SDK 代理地理位置提示来自本地测试代理，不是固定独立出口或地区验收结果。Ruff 和补丁空白检查通过；当前服务未切换、实号恢复状态未提升。
+
+### 自主推进、故障隔离与本机加载
+
+`test_autonomous_progress` 覆盖频道等待及连接异常时继续十渠道底稿与公开研究、单渠道配置异常不阻止其他九个渠道且不重复提醒、暂停后零新筹备，以及待核对账号写入只允许独立公开研究。`test_account_setup` 新增四种研究负载，只有明确标记为无账号的公开研究允许与频道筹备交替推进；账号绑定研究、旧格式未知任务和互动任务仍等待原写入核对。
+
+在新建的独立 PostgreSQL 18 集群中执行账号、健康、真实 Camoufox 邀请恢复、自主推进、社群排期/发现及素材自主生产回归，结果 **95 项通过、1 项跳过（49.91 秒）**。跳过项是原本由开关启用的本地 Temporal 定时唤醒验证，未降低门槛。首次扩展运行曾在测试清理阶段发现嵌套数据库 fixture 删除了外层数据库环境配置；已改为作用域恢复后重跑通过。报告 `.state/verification/autonomous-progress-20261030.xml`，临时集群与测试 Profile 均已删除。Ruff 与补丁空白检查通过。
+
+本机应用前核对六个后端源文件仍为基线内容并保存逐文件哈希与回退副本，正常关闭旧进程后加载新服务；未重启数据库/Temporal，也未更改当前界面分支或原型。加载后数据库、Worker、浏览器健康通过，模型状态与工作室实际配置一致。原频道筹备任务已为 `succeeded`，公开研究已记录四个真实来源、零读取错误。十渠道准备、三十套方案、一百八十个选题与六份预览已在实际产品中保存，预览均标记 `account_free_preview`，不会被当成正式发布素材。私有运行记录位于本机 `.state/autonomy-delivery-20261030.json` 与 `.state/autonomy-update-20261030/`；不提交账号、业务记录、截图或凭据。
+
+再次独立回读确认原目标已绑定，连接验证任务为 `reconciling`、结果未知；未将其标记为已发布。此时公开研究已增加至九个来源，独立工作继续推进。首发确认仍待同一动作的回执核对，不重建任务、不盲目重发。
+
+### 产品自身计时与首次验证原草稿恢复
+
+Codex 的 `lead` 自动任务已删除，作为职责变更记录；产品自身后台未停止。在单独新建的 PostgreSQL 18 与 Temporal 1.32.0 服务中运行 `test_product_supervisor_wakes_without_chat_or_new_signal` 及 `test_autonomous_progress`，**八项通过（3.63 秒）**。Supervisor 在不发送新聊天/唤醒信号的情况下执行三轮，验证持久计时及历史重放。使用随机独立任务队列与隔离 Agent，不接触用户实例；测试后两个临时服务与数据均已删除。报告 `.state/verification/agent-owned-cadence-20261030.xml`。
+
+首次验证恢复的 `test_channels`、邀请导航与独立工作回归 **二十四项通过（121.97 秒）**。真实 Camoufox 的本地合约覆盖回执丢失后只确认不再发送、首次原稿未消费、自动筹备父任务与验证卡关联、键盘继续也未消费时不再重试，以及范围搜索不可用时保持核对。每次续交前核对原生搜索无正文、最新消息编号未变、原草稿完整、创建事件为唯一历史及账号/目标/授权；次数先写入原动作尝试。报告 `.state/verification/probe-continuation-20261030.xml`，临时数据库和 Profile 已清理。Ruff 与补丁空白检查通过。
+
+加载前确认无接管、维护或 dispatching 动作竞争；旧浏览器网关退出后才由产品管理器启动新网关，Worker 持续运行。没有新建外部任务或手动标记真实发布成功；后续核对由产品持久任务自行执行。
+
+### 全天候业务循环与内容储备
+
+`test_content_backlog` 验证三篇不同具体草稿、储备满后停止新生成、引用来源错误后的原任务冷却恢复、生成中暂停后丢弃、单渠道冷却不阻挡其他渠道、每日新建上限不阻止原任务有限恢复、正常产品循环自行安排下一步、已验证目标消费并绑定一次，以及真实独立 Temporal 无新消息/外部信号自行补齐三篇与历史重放。后者测试用短计时间隔加速，模型作者为测试替身，没有真实模型付费或社媒动作。
+
+使用独立临时 PostgreSQL 18 与 Temporal，执行 `test_autonomous_progress`、`test_content_backlog`、`test_community_schedule`、`test_creative_autonomy`，最终 **三十二项通过**。报告 `.state/verification/content-workflow-20261030.log` 与 `.xml`；初版 fixture 未启用账号运营，以及调用 strategy_for 缺少目标参数的问题分别保留在 initial 和 before-signature-fix 日志，均修正后重跑。临时服务与数据已清理，Ruff 和补丁空白检查通过。
+
+后端通过逐文件哈希核对、保存回退副本后加载本机；保留原浏览器网关及数据库/Temporal，不接管用户 Profile。第一次 API 正常关闭等待现有连接超过二十秒，管理器随后正常恢复服务，健康接口回读为 200。软件更新后产品自己的工作流已生成三篇 Seka 内容，并自行恢复五分钟检查；私有记录 `.state/content-workflow-delivery-20261030.json`。没有逐篇人工代写或由 Codex 连续触发，Codex 定时任务保持删除。原连接验证仍为 reconciling；未确认的发布、真实获客以及连续二十四/七十二小时稳定性不提升为通过。
+
+## 2026-10-30 社媒账号解绑与重新绑定
+
+补齐账号管理中的二次确认解绑入口，覆盖已连接、登录失效和受限状态。解绑事务释放账号唯一占用、关闭自动运营、撤销账号及目标授权卡片、禁用目标、取消未提交动作和相关任务，并保留已提交/未知动作与发布回执。控制版本防止旧浏览器提交继续生效；登录验证的迟到结果、浏览器迟到的登录失效报告不能恢复已释放的占用。重复解绑幂等，连接核验时间变化后拒绝旧确认。浏览器登录状态、目标和授权不跨 Agent 转移。
+
+使用全新临时 PostgreSQL 18 集群、独立测试凭据与 Profile 目录执行正式迁移，未连接用户数据库、未启动 Worker、未访问真实社媒或付费模型。`test_account_disconnect`、`test_channels`、`test_account_setup`、`test_agent_workspace`、`test_agent_setup` 合计 **44 项通过、9 项按条件跳过**；跳过项为另需启用的既有浏览器专项测试。覆盖其他 Agent 重新绑定、失效及受限账号释放、跨 Agent/工作室隔离、账号管理权限、旧授权撤销、历史及未知回执保留、过期确认与迟到检查。记录：`.state/verification/account-disconnect.xml`。
+
+真实 Chrome 连接隔离 API 和数据库，完成桌面取消与 Escape 焦点恢复、过期确认的真实 409 错误、确认解绑后的界面刷新、390px 登录失效账号解绑、320px 受限账号解绑五项检查；已查看截图确认布局与窄屏无横向溢出。记录：`.state/verification/account-disconnect-ui.json`、同目录 `account-disconnect-desktop.png` 和 `account-disconnect-mobile-{390,320}.png`。Python 静态检查、前端类型检查与生产构建通过。此验证不等同于跨 Agent 的真实社媒重新登录验收，未解除任何用户真实账号。
+
+已加载本机前端、API 和空闲浏览器网关，Worker、数据库与 Temporal 持续运行。加载前核对无提交中动作、活跃 Profile 或维护；遗留接管记录对应的浏览器已关闭，未改写该记录。旧 API 和前端的实时连接延迟退出，关闭遗留连接后由原管理器恢复。独立回读数据库/Worker/浏览器均健康，实际提供的前端包含解绑入口，非存在 Agent 的新接口返回预期 404；用户库没有新增 `account.disconnected` 审计。记录：`.state/verification/account-disconnect-delivery.json`。
+
+## 2026-10-30 像素代码复用与本地测试地址
+
+修复像素登记复用公开网页读取校验而拒绝 `http://127.0.0.1:8787` 的问题。非生产环境的像素登记支持本机环回地址与自定义端口；公开网页读取和推广链接的限制继续生效。安装码改为连接范围的固定公开写入码，读取设置、重复保存及刷新不再更换代码；原有时效安装码在其有效期内兼容，Origin、页面地址、连接状态及服务端密钥隔离继续校验。
+
+已有连接再次打开时显示已保存网址及代码，提供查看和复制入口；仅网址变更时出现保存按钮。保存失败保留原代码，未保存的新网站不能直接进入检测。
+
+使用独立临时 PostgreSQL 18 集群、独立凭据与 Profile 目录执行正式迁移后，`test_pixel_setup`、`test_pixel_events`、`test_pixel_sdk`、`test_conversions`、`test_promotion` 和 `test_core` 共 **49 项通过**。覆盖本机 IPv4/IPv6、默认端口归一化、跨年代码稳定、切换网站后复用原连接、旧凭据兼容、断连/错误来源拒收及公开网页私网限制。报告：`.state/verification/pixel-setup-tests.xml`、同目录 `.log`。
+
+Chrome 在隔离 API/数据库中完成八项流程检查：8787 接入、关闭重开不重复提交、复制反馈、已保存网址回显、1440/390/320px 无横向溢出、失败保留代码与检测门槛、整页刷新代码不变，以及真实 SDK PageView 回执自动推进至事件设置。浏览器使用普通 Chrome UA 验证正常访客路径，保留产品的机器人过滤；无页面脚本错误，未向用户业务库注入测试流量。截图已人工查看，记录：`.state/verification/pixel-setup-ui.json`、`pixel-setup-desktop.png` 和 `pixel-setup-mobile-{390,320}.png`。
+
+Ruff、前端类型检查、生产构建与补丁空白检查通过。已仅重载本地前端和 API，Worker 持续运行；独立回读现有网站代码稳定、实际前端包含复用提示，健康接口返回 200。记录：`.state/verification/pixel-setup-delivery.json`。未提交、推送或发布生产。
+
+### 解绑后改绑 Telegram 新账号的核验修复
+
+用户反馈新账号已登录，验证仍提示“Telegram 登录已失效，请重新连接账号”。上一轮覆盖了账号占用释放和界面交互，但遗漏浏览器核验入口会继续选择历史身份。浏览器网关查询没有排除 `disconnected` 记录：旧账号已退出时误报失效；旧账号仍登录时还可能切回旧账号。现仅对 `connected`、`needs_auth`、`restricted` 的有效绑定恢复原账号，已解绑记录不参与选择，直接核验用户当前选中的登录位置。自动恢复仍核对原绑定，未放宽发布身份与授权检查。
+
+先增加回归复现缺陷：普通核验检查 **1 项失败、1 项通过**，真实 Camoufox 从产品验证处理函数经过浏览器网关及实际页面识别，复现出与用户截图完全相同的报错。修复后，在全新临时 PostgreSQL、独立 Profile、被本地 HTML 完全拦截的 Telegram 页面上，`test_account_disconnect` 与 `test_telegram_setup_navigation` **25 项通过（58.77 秒）**，覆盖旧登录保留/移除和新登录在位置 1/2 的四种完整解绑、改绑核验；确认不会跳回旧位置，旧授权仍撤销，旧身份仍可由其他 Agent 绑定。另行运行渠道、账号筹备、工作台与创建回归 **34 项通过、9 项按条件跳过**。报告分别为 `.state/verification/telegram-rebind-{before,native-before,after,related}.xml`。无真实社媒、付费模型或用户数据写入。
+
+仅正常重启本机浏览器网关加载修复，正常关闭持久浏览器保存登录资料，没有清除 Profile。加载前无提交中动作或维护；加载前后用户账号绑定摘要一致，服务健康恢复。当前连接窗口需关闭后重新打开以获得新浏览器接管会话，再选择新账号验证。记录：`.state/verification/telegram-rebind-delivery.json`。真实新账号核验仍由用户在界面确认，未由维护脚本代为绑定。
+
+
+## 2026-10-30 像素会话级完整流程测试
+
+固定业务埋点与网站级测试会话已分离。新增迁移 0018，测试会话快照全部已配置事件的规则版本，支持显式结束、持续事件明细、订单归因快照自动解析测试上下文，并保留 Origin、连接、Agent、服务端密钥与正式／测试范围隔离。
+
+本地浏览器通过产品创建测试会话，在 pixel-test 页面以同一安装代码完成 PageView、ViewContent、Identify、CompleteRegistration、AddToCart、InitiateCheckout、Engagement 与服务端 Purchase。后台核对服务端回执后结束测试，网站自动清理参数与身份；另一个结束前创建的订单在结束后支付被拒绝。独立数据库核对正式业务事件数量为 0。固定注册埋点在测试前后逐字相同，且不含临时测试码。
+
+SDK、真实数据库像素接收与本地接入测试共 30 项通过，旧服务端转化兼容检查 2 项通过。前端类型检查与正式构建通过。支付为本机模拟订单，验收不代表第三方支付平台已接通。证据位于 .state/evidence/pixel-sessions/，脱敏结果位于 .state/pixel-session-verification.json；网站后端密钥仅存在忽略版本控制的本机配置中。

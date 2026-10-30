@@ -187,7 +187,7 @@ async def execute(actor, action_id):
         except (NeedsAuth, ScopeChanged) as error:
             with tx(aid) as c:
                 c.execute(
-                    "UPDATE lead.social_accounts SET state='needs_auth' WHERE id=%s",
+                    "UPDATE lead.social_accounts SET state='needs_auth' WHERE id=%s AND state='connected'",
                     (target["account_id"],),
                 )
             return {

@@ -84,6 +84,11 @@ def completed(aid, result, now=None, *, respect_delay=False):
         agent = require_agent(c, aid, True)
         due = deadlines(c, agent, now)
         delay = result["delay"]
+        from .content_backlog import next_due
+
+        content_due = next_due(c, agent, now)
+        if content_due and not respect_delay:
+            delay = min(delay, max(5, math.ceil((content_due - now).total_seconds())))
         if due:
             # Community steps retain their retry/reconciliation backoff.
             if not respect_delay and not result.get("reason", "").startswith(
@@ -122,6 +127,26 @@ def completed(aid, result, now=None, *, respect_delay=False):
                 "UPDATE lead.agents SET onboarding_state=onboarding_state || %s WHERE id=%s",
                 (j({"community_schedule": schedule}), aid),
             )
+        c.execute(
+            "UPDATE lead.agents SET onboarding_state=onboarding_state || %s WHERE id=%s",
+            (
+                j(
+                    {
+                        "operating_schedule": {
+                            "checked_at": now.isoformat(),
+                            "next_check_at": (
+                                now + timedelta(seconds=delay)
+                            ).isoformat(),
+                            "next_content_at": content_due.isoformat()
+                            if content_due
+                            else None,
+                            "reason": result.get("reason"),
+                        }
+                    }
+                ),
+                aid,
+            ),
+        )
         c.execute(
             """UPDATE lead.agents SET heartbeat_at=now(),health_state=CASE
               WHEN desired_state<>'running' THEN health_state

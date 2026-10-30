@@ -374,7 +374,11 @@ async def advance(aid):
                 task_id=task["id"],
             )
             task = None
-        if one(
+        # Public discovery uses a separate read-only context. Pending writes
+        # fence account-bound search/participation, not independent public pages.
+        if (
+            config.mode != "discovery" or (task and task["input"].get("account_id"))
+        ) and one(
             c,
             "SELECT 1 FROM lead.tasks WHERE type<>'community.discover' AND state IN ('queued','running','reconciling') OR (input->>'fresh_channel'='true' AND result->>'awaiting_first_publish'='true')",
         ):

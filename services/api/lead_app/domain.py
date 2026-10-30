@@ -278,6 +278,9 @@ def agent_detail(aid):
             c,
             "SELECT id,media_type,size_bytes,sha256,metadata,rights FROM lead.assets WHERE state='ready' ORDER BY created_at DESC LIMIT 100",
         )
+        from .content_backlog import status as workflow_status
+
+        a["operating_workflow"] = workflow_status(c, a, a["business"])
         return a
 
 
@@ -344,6 +347,21 @@ def metrics(c):
         c,
         "SELECT count(*) AS n FROM lead.conversion_events WHERE trust_level='server_verified' AND occurred_at>now()-interval '30 days' AND type=%s",
         (policy["objective"],),
+    )["n"]
+    # New event receipts preserve the older server-verified objective contract.
+    objective_name = {
+        "signup": "CompleteRegistration", "lead": "Lead",
+        "trial": "StartTrial", "purchase": "Purchase",
+    }[policy["objective"]]
+    conversions += one(
+        c,
+        """SELECT count(*) AS n FROM lead.pixel_receipts p
+           WHERE p.scope_key='live' AND p.counted AND p.trust_level='server_verified'
+             AND p.touchpoint_id IS NOT NULL AND p.occurred_at>now()-interval '30 days'
+             AND p.event_name=%s AND NOT EXISTS(
+               SELECT 1 FROM lead.conversion_events old
+               WHERE old.connection_id=p.connection_id AND old.source_event_id=p.event_id)""",
+        (objective_name,),
     )["n"]
     return {
         "clicks": clicks,

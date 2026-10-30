@@ -8,7 +8,7 @@ import json
 import math
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 from uuid import UUID
 
 from fastapi import APIRouter
@@ -317,23 +317,6 @@ def planning_context(c, targets, business, config_revision):
                 target["target_id"],
                 business["id"],
             )
-        selected = context.get("selected_plan")
-        examples = business_examples()
-        if (
-            selected
-            and not (
-                strategy_version and len(strategy_version.split("@")[0].split("/")) >= 3
-            )
-            and urlsplit(business.get("product_url") or "").hostname
-            == examples["hostname"]
-        ):
-            example = examples["plans"].get(selected["id"])
-            if example:
-                context["selected_plan"] = {**selected, **example}
-                context["example_note"] = examples["note"]
-                context["destination_url"] = urljoin(
-                    business["product_url"], example["destination_path"]
-                )
         selected = context.get("selected_plan")
         if (
             selected

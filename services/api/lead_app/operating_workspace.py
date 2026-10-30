@@ -3,7 +3,7 @@
 import hashlib
 import json
 from datetime import datetime, timezone
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 from uuid import UUID
 
 from fastapi import APIRouter
@@ -14,7 +14,6 @@ from .creative_pipeline import produce
 from .creative_schema import COVER_SIZES, CreativeBrief, CreativeCard
 from .db import all_rows, j, one, record, require_agent, tx, uid
 from .operating_playbooks import (
-    business_examples,
     catalog,
     channel_for,
     planning_context,
@@ -46,11 +45,9 @@ def draft_pack(agent, business, channel, version):
     """Produce truthful copy/asset briefs before any social account exists."""
     name = business.get("facts", {}).get("name") or agent["name"]
     site = business.get("product_url") or ""
-    examples = business_examples()
-    use_examples = urlsplit(site).hostname == examples["hostname"]
     plans = []
     for plan in channel["plans"]:
-        example = examples["plans"].get(plan["id"], {}) if use_examples else {}
+        example = {}
         plans.append(
             {
                 "plan_id": plan["id"],
@@ -149,10 +146,46 @@ def prepare_workspace(aid, platform):
         return {"id": job_id, **pack, "duplicate": False}
 
 
-def prepare_all(aid):
-    return [
-        prepare_workspace(aid, channel["platform"]) for channel in catalog()["channels"]
-    ]
+def prepare_all(aid, *, continue_on_error=False):
+    if continue_on_error:
+        with tx(aid) as c:
+            agent = require_agent(c, aid)
+            business = one(
+                c,
+                "SELECT description FROM lead.business_profiles ORDER BY revision DESC LIMIT 1",
+            )
+            if (
+                agent["desired_state"] != "running"
+                or not business
+                or not business["description"].strip()
+            ):
+                return []
+    packs = []
+    for channel in catalog()["channels"]:
+        try:
+            packs.append(prepare_workspace(aid, channel["platform"]))
+        except Exception as error:
+            if not continue_on_error:
+                raise
+            with tx(aid) as c:
+                agent = require_agent(c, aid)
+                if agent["desired_state"] != "running":
+                    break
+                detail = channel["platform"] + " · " + type(error).__name__
+                if not one(
+                    c,
+                    "SELECT 1 FROM lead.activity WHERE title='部分渠道底稿暂未完成' AND detail=%s AND created_at>now()-interval '1 hour'",
+                    (detail,),
+                ):
+                    record(c, aid, "部分渠道底稿暂未完成", detail, "warning")
+            packs.append(
+                {
+                    "platform": channel["platform"],
+                    "state": "failed",
+                    "error_type": type(error).__name__,
+                }
+            )
+    return packs
 
 
 async def prepare_example(aid, platform, plan_id=None, kind=None):
@@ -339,6 +372,9 @@ def status(aid: UUID):
             c,
             "SELECT id,state,input->>'platform' AS platform,input->'brief'->>'headline' AS headline,input->>'purpose' AS purpose,result->'assets' AS assets,result->>'kind' AS kind,result->>'error' AS error,completed_at FROM lead.tasks WHERE type='media.generate' ORDER BY created_at DESC LIMIT 30",
         )
+        from .content_backlog import status as workflow_status
+
+        workflow = workflow_status(c, agent, business)
     by_platform = {p["result"]["platform"]: p for p in reversed(packs)}
     return {
         "channels": [
@@ -352,4 +388,5 @@ def status(aid: UUID):
         "feedback": feedback,
         "reviews": reviews,
         "media_jobs": jobs,
+        "workflow": workflow,
     }

@@ -4,6 +4,7 @@ import html
 import re
 import time
 from contextlib import ExitStack
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -36,6 +37,7 @@ from .events import router as event_router
 from .operating_playbooks import router as playbook_router
 from .operating_workspace import router as operations_router
 from .ops import router as ops_router
+from .pixel_events import router as pixel_router
 from .promotion import CODE_PATTERN
 from .scope import current_tenant, tenant_scope
 from .security import internal_token, token, valid
@@ -55,6 +57,7 @@ app.add_middleware(
 )
 ORIGINS = {"http://localhost:3100", "http://127.0.0.1:3100", "http://127.0.0.1:8088"}
 app.include_router(analytics_router)
+app.include_router(pixel_router)
 
 app.include_router(event_router)
 app.include_router(conversion_router)
@@ -159,14 +162,14 @@ async def local_auth(request, call_next):
                             {"detail": error.detail}, status_code=error.status_code
                         )
     elif re.fullmatch("/r/" + CODE_PATTERN, path) or re.fullmatch(
-        r"/collect/[0-9a-fA-F-]{36}", path
+        r"/collect/[0-9a-fA-F-]{36}(?:/test)?", path
     ):
         from .identity_store import public_tenant
 
         public_workspace = await asyncio.to_thread(
             public_tenant,
             "link" if path.startswith("/r/") else "analytics",
-            path.rsplit("/", 1)[-1],
+            path.split("/")[2],
         )
     elif path.startswith("/lab/"):
         aid = path.split("/")[2]
@@ -470,6 +473,17 @@ class AccountTargetRequest(BaseModel):
     url: str = Field(max_length=2000)
 
 
+class AccountDisconnectRequest(BaseModel):
+    expected_verified_at: datetime | None
+
+
+@app.post("/api/agents/{aid}/accounts/{account_id}/disconnect")
+def disconnect_account(aid: UUID, account_id: UUID, body: AccountDisconnectRequest):
+    from .channels import disconnect_account
+
+    return disconnect_account(str(aid), str(account_id), body.expected_verified_at)
+
+
 @app.post("/api/agents/{aid}/telegram/verify-login")
 async def verify_telegram(aid: UUID):
     return await verify_login(aid, Connection(platform="telegram"))
@@ -484,6 +498,8 @@ async def verify_login(aid: UUID, body: Connection):
     if platform not in SPECS:
         raise ValueError("频道不存在")
     aid = str(aid)
+    with tx(aid) as c:
+        control_version = require_agent(c, aid)["control_version"]
     observed = (
         await gateway(f"/agents/{aid}/account/inspect", body={"platform": platform})
     ).json()
@@ -496,7 +512,12 @@ async def verify_login(aid: UUID, body: Connection):
         "youtube": f"https://www.youtube.com/channel/{observed['external_account_id']}/",
     }
     account_id = await asyncio.to_thread(
-        store_account, aid, platform, observed, platform not in auto
+        store_account,
+        aid,
+        platform,
+        observed,
+        platform not in auto,
+        expected_control_version=control_version,
     )
     with tx(aid) as c:
         c.execute(
@@ -607,10 +628,28 @@ def session(request: Request):
 
 @app.get("/api/health")
 async def health():
+    from .admin_settings import task_connection
+
     db_ok = False
+    connection = model_config()
+    model = connection["model"]
+    model_configured = bool(connection["key"])
+    models = {}
     try:
         with tx() as c:
             db_ok = bool(one(c, "SELECT 1 AS ok"))
+            for purpose in ("chat", "planning", "research"):
+                connection, reference, version = task_connection(c, None, purpose)
+                models[purpose] = {
+                    "reference": reference,
+                    "version": version,
+                    "credential_configured": bool(connection["key"]),
+                }
+                if purpose == "planning":
+                    model = connection["model"]
+            model_configured = all(
+                item["credential_configured"] for item in models.values()
+            )
     except Exception:
         pass
     worker_file = STATE / "worker-heartbeat"
@@ -628,8 +667,9 @@ async def health():
         "worker": worker_ok,
         "browser": browser_ok,
         "active_profiles": active_profiles,
-        "model_configured": bool(model_config()["key"]),
-        "model": model_config()["model"],
+        "model_configured": model_configured,
+        "model": model,
+        "models": models,
         "browser_capacity": int(env().get("LEAD_BROWSER_CONCURRENCY") or 3),
         "mode": auth_mode(),
     }

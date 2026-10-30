@@ -1,8 +1,7 @@
 "use client";
 import { useEffect, useId, useState } from "react";
 import { Code2, ArrowUpRight } from "lucide-react";
-import AnalyticsPanel from "./analytics-panel";
-import DialogPanel from "./dialog-panel";
+import AnalyticsPanel, { PixelTask } from "./analytics-panel";
 import { api } from "./api-client";
 import PromotionLink from "./promotion-link";
 import SocialIcon, { socialNames } from "./social-icon";
@@ -14,7 +13,8 @@ export default function AgentResults({
   agent: Row;
   readOnly: boolean;
 }) {
-  const [setup, setSetup] = useState(false),
+  const [task, setTask] = useState<PixelTask>(null),
+    [pixelData, setPixelData] = useState<Row | null>(null),
     [trend, setTrend] = useState<Row | null>(null),
     [error, setError] = useState("");
   const gradient = useId().replaceAll(":", "");
@@ -62,15 +62,6 @@ export default function AgentResults({
           account.state === "connected",
       ),
   );
-  const conversionLabel =
-    (
-      {
-        signup: "注册",
-        lead: "客户咨询",
-        trial: "开始试用",
-        purchase: "付费购买",
-      } as Row
-    )[m.conversion_objective] || "转化";
   const max = Math.max(2, ...series.map((d) => d.qualified_visits));
   const top = Math.ceil(max / 2) * 2;
   const points = series
@@ -79,6 +70,67 @@ export default function AgentResults({
         `${40 + i * (700 / Math.max(1, series.length - 1))},${164 - (d.qualified_visits / top) * 144}`,
     )
     .join(" ");
+  const pixel =
+    pixelData && pixelData.agent_id === agent.id ? pixelData.pixel : null;
+  const panel = (
+    <AnalyticsPanel
+      key={agent.id}
+      aid={agent.id}
+      url={agent.business?.product_url}
+      readOnly={readOnly}
+      task={task}
+      onTask={setTask}
+      onData={setPixelData}
+    />
+  );
+  if (!pixel?.completed) {
+    const step = pixel?.installed ? 2 : pixel?.embedded ? 1 : 0;
+    const labels = ["嵌入代码", "安装检测", "事件测试"];
+    return (
+      <section
+        className="workspace-section results-section"
+        aria-labelledby="results-heading"
+      >
+        <div className="section-head">
+          <h2 id="results-heading">获客效果</h2>
+          <span className="muted small">
+            {pixelData ? (step ? step + " / 3" : "未接入") : "正在读取…"}
+          </span>
+        </div>
+        <ol className="pixel-onboarding-progress" aria-label="像素接入进度">
+          {labels.map((label, index) => (
+            <li
+              key={label}
+              className={index < step ? "done" : index === step ? "active" : ""}
+              aria-current={index === step ? "step" : undefined}
+            >
+              <span>{index < step ? "✓" : index + 1}</span>
+              {label}
+            </li>
+          ))}
+        </ol>
+        <div className="pixel-current-step">
+          <h3>{["安装网站像素", "检测像素安装", "设置网站事件"][step]}</h3>
+          <button
+            className="primary"
+            aria-haspopup="dialog"
+            onClick={() =>
+              setTask((["embed", "detect", "events"] as const)[step])
+            }
+          >
+            {readOnly
+              ? "查看接入状态"
+              : [
+                  pixelData?.connection ? "查看像素代码" : "获取像素代码",
+                  "检测安装",
+                  "事件设置与测试",
+                ][step]}
+          </button>
+        </div>
+        {panel}
+      </section>
+    );
+  }
   return (
     <section
       className="workspace-section results-section"
@@ -89,15 +141,28 @@ export default function AgentResults({
           <h2 id="results-heading">获客效果</h2>
           <span className="muted small">近 30 天</span>
         </div>
-        <button
-          className="text-button"
-          aria-haspopup="dialog"
-          onClick={() => setSetup(true)}
-        >
-          <Code2 size={16} />
-          {m.coverage !== "not_connected" ? "网站像素" : "接入网站像素"}
-          <ArrowUpRight size={13} />
-        </button>
+        <details className="pixel-settings-menu">
+          <summary>像素设置 ↗</summary>
+          <div>
+            {(
+              [
+                ["embed", "嵌入指引"],
+                ["detect", "安装检测"],
+                ["events", "事件设置与测试"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                onClick={(e) => {
+                  e.currentTarget.closest("details")?.removeAttribute("open");
+                  setTask(value);
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </details>
       </div>
       <PromotionLink
         aid={agent.id}
@@ -118,36 +183,35 @@ export default function AgentResults({
           )
         }
       />
-      <dl className="results-metrics">
+      <dl className="results-metrics pixel-results-metrics">
         {[
-          ["有效访问", "qualified_visits"],
-          ["访问会话", "visits"],
-          ["推广点击", "clicks"],
-          ["累计发布", "published"],
-          [
-            (
-              {
-                signup: "注册",
-                lead: "客户咨询",
-                trial: "开始试用",
-                purchase: "付费购买",
-              } as Row
-            )[m.conversion_objective] || "转化",
-            "conversions",
-          ],
+          ["独立访客", "visitors"],
+          ["访问会话", "sessions"],
         ].map(([label, key]) => (
           <div key={key}>
             <dt>{label}</dt>
-            <dd>{m[key]?.toLocaleString() ?? "—"}</dd>
-            {key === "conversions" && m[key] == null && (
-              <small className="muted">
-                {m.conversion_coverage === "stale"
-                  ? "回传已过期"
-                  : "待接入回传"}
-              </small>
-            )}
+            <dd>{pixel.report[key]?.toLocaleString() ?? "—"}</dd>
           </div>
         ))}
+        <div>
+          <dt>
+            <button
+              className="pixel-event-metric"
+              aria-label="事件，查看各事件详细数据"
+              onClick={() => setTask("details")}
+            >
+              <span>
+                事件 <ArrowUpRight size={13} />
+              </span>
+              <strong aria-hidden="true">
+                {pixel.report.event_count?.toLocaleString() ?? "—"}
+              </strong>
+            </button>
+          </dt>
+          <dd className="pixel-sr-only">
+            {pixel.report.event_count?.toLocaleString() ?? "—"}
+          </dd>
+        </div>
       </dl>
       <div className="trend-chart">
         {covered && series.length && !error ? (
@@ -219,7 +283,7 @@ export default function AgentResults({
                   : "接入网站像素后，查看 Agent 带来的真实访问趋势")}
             </span>
             {!covered && (
-              <button className="text-button" onClick={() => setSetup(true)}>
+              <button className="text-button" onClick={() => setTask("embed")}>
                 配置网站像素 <ArrowUpRight size={13} />
               </button>
             )}
@@ -259,7 +323,6 @@ export default function AgentResults({
                     推广点击
                   </th>
                   <th scope="col">累计发布</th>
-                  <th scope="col">{conversionLabel}</th>
                 </tr>
               </thead>
               <tbody>
@@ -271,26 +334,22 @@ export default function AgentResults({
                         {socialNames[channel.platform]}
                       </span>
                     </th>
-                    {[
-                      "qualified_visits",
-                      "visits",
-                      "clicks",
-                      "published",
-                      "conversions",
-                    ].map((key) => (
-                      <td
-                        key={key}
-                        title={
-                          channel[key] == null
-                            ? key === "conversions"
-                              ? "转化回传未接入或已过期"
-                              : "网站回传未接入或已过期"
-                            : undefined
-                        }
-                      >
-                        {channel[key]?.toLocaleString() ?? "—"}
-                      </td>
-                    ))}
+                    {["qualified_visits", "visits", "clicks", "published"].map(
+                      (key) => (
+                        <td
+                          key={key}
+                          title={
+                            channel[key] == null
+                              ? key === "conversions"
+                                ? "转化回传未接入或已过期"
+                                : "网站回传未接入或已过期"
+                              : undefined
+                          }
+                        >
+                          {channel[key]?.toLocaleString() ?? "—"}
+                        </td>
+                      ),
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -303,22 +362,7 @@ export default function AgentResults({
           {error ? "社媒明细暂时无法读取，稍后自动重试。" : "正在读取社媒明细…"}
         </p>
       )}
-      {setup && (
-        <DialogPanel
-          title="网站像素"
-          description="连接你的网站，查看 Agent 带来的真实访问。"
-          onClose={() => setSetup(false)}
-          footer={<button onClick={() => setSetup(false)}>完成</button>}
-        >
-          <AnalyticsPanel
-            key={agent.id}
-            aid={agent.id}
-            url={agent.business?.product_url}
-            readOnly={readOnly}
-            request={api}
-          />
-        </DialogPanel>
-      )}
+      {panel}
     </section>
   );
 }

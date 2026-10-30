@@ -4,19 +4,21 @@ Client-observed engagement is never represented as server-verified revenue.
 
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import RedirectResponse, Response
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import env
 from .db import all_rows, audit, emit, j, one, record, require_agent, tx, uid
 from .fetch import resolve_public
+from .pixel_events import BrowserEvent, browser_receive
 from .promotion import CODE_PATTERN, configuration
 from .scope import current_tenant
-from .security import token, valid
+from .security import analytics_key, valid_analytics_key
 
 router = APIRouter()
 
@@ -31,6 +33,32 @@ def public_origin():
 
 class AnalyticsSetup(BaseModel):
     site_url: str = Field(max_length=2000)
+
+
+def site_origin(value):
+    """Register an origin; local pixel setup does not fetch the target website."""
+    value = value.strip()
+    p = urlsplit(value)
+    if (
+        p.scheme not in ("http", "https")
+        or not p.hostname
+        or p.username is not None
+        or p.password is not None
+    ):
+        raise ValueError("请输入有效的 http/https 网站地址")
+    port = p.port
+    if port == 0:
+        raise ValueError("网站端口须在 1 到 65535 之间")
+    host = p.hostname.lower()
+    if host in {"127.0.0.1", "localhost", "::1"}:
+        if env().get("LEAD_DEPLOYMENT_MODE") == "production":
+            raise ValueError("正式环境请使用公开网站地址")
+    else:
+        resolve_public(value)
+    authority = "[" + host + "]" if ":" in host else host
+    if port is not None and port != (443 if p.scheme == "https" else 80):
+        authority += ":" + str(port)
+    return p.scheme + "://" + authority
 
 
 class TrackingSetup(BaseModel):
@@ -92,6 +120,7 @@ def save_promotion(aid: UUID, body: PromotionSetup):
 
 
 class Event(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     key: str = Field(max_length=500)
     session_id: UUID
     event: str = Field(pattern=r"^(pageview|engagement)$")
@@ -106,7 +135,7 @@ def settings(aid: UUID):
         require_agent(c, aid)
         conn = one(
             c,
-            "SELECT id,site_host,state,last_received_at FROM lead.analytics_connections WHERE provider='lead_site' ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM lead.analytics_connections WHERE provider='lead_site' AND state<>'disconnected' ORDER BY selected_at DESC,created_at DESC LIMIT 1",
         )
         links = all_rows(
             c,
@@ -114,13 +143,33 @@ def settings(aid: UUID):
         )
         server = one(
             c,
-            "SELECT id,last_received_at FROM lead.analytics_credentials WHERE state='active' ORDER BY created_at DESC LIMIT 1",
+            "SELECT id,last_received_at FROM lead.analytics_credentials WHERE state='active' AND connection_id=%s ORDER BY created_at DESC LIMIT 1",
+            (conn["id"] if conn else None,),
         )
+        from .pixel_events import configuration as pixel_configuration
+
+        pixel = pixel_configuration(c, conn)
     if conn:
+        conn = {
+            k: conn[k]
+            for k in (
+                "id",
+                "site_host",
+                "state",
+                "last_received_at",
+                "embedded_at",
+                "last_pageview_at",
+                "onboarding_completed_at",
+            )
+        }
         cid = str(conn["id"])
-        write_key = token("analytics:" + cid, 365 * 86400)
+        write_key = analytics_key(cid)
         conn["snippet"] = (
-            f'<script defer src="{public_origin()}/lead.js" data-connection="{cid}" data-key="{write_key}"></script>'
+            "<script>window.leadq=window.leadq||function(){var a=arguments;"
+            "var p=new Promise(function(resolve,reject){"
+            "(window.leadq.queue=window.leadq.queue||[]).push({args:a,resolve:resolve,reject:reject})});"
+            "p.catch(function(){});return p};</script>\n"
+            f'<script async src="{public_origin()}/lead.js" data-connection="{cid}" data-key="{write_key}"></script>'
         )
     return {
         "connection": conn,
@@ -129,6 +178,8 @@ def settings(aid: UUID):
         ],
         "public_url": public_origin(),
         "server": server,
+        "pixel": pixel,
+        "agent_id": aid,
     }
 
 
@@ -211,22 +262,28 @@ def trend(aid: UUID):
 
 @router.post("/api/agents/{aid}/analytics")
 def setup(aid: UUID, body: AnalyticsSetup):
-    resolve_public(body.site_url)
+    origin = site_origin(body.site_url)
     aid = str(aid)
-    p = urlsplit(body.site_url)
-    origin = p.scheme + "://" + p.netloc
     with tx(aid) as c:
         require_agent(c, aid, True)
         conn = one(
             c,
-            "SELECT id FROM lead.analytics_connections WHERE provider='lead_site' AND site_host=%s",
+            "SELECT * FROM lead.analytics_connections WHERE provider='lead_site' AND site_host=%s AND state<>'disconnected'",
             (origin,),
         )
         if not conn:
-            c.execute(
-                "INSERT INTO lead.analytics_connections(tenant_id,agent_id,provider,site_host,secret_ref,state) VALUES(%s,%s,'lead_site',%s,'hmac:client-write','pending')",
+            conn = one(
+                c,
+                "INSERT INTO lead.analytics_connections(tenant_id,agent_id,provider,site_host,secret_ref,state) VALUES(%s,%s,'lead_site',%s,'hmac:client-write','pending') RETURNING *",
                 (current_tenant(), aid, origin),
             )
+        c.execute(
+            "UPDATE lead.analytics_connections SET selected_at=now() WHERE id=%s",
+            (conn["id"],),
+        )
+        from .pixel_events import seed
+
+        seed(c, conn)
         audit(c, aid, "analytics.setup", {"site_host": origin})
     return settings(UUID(aid))
 
@@ -300,6 +357,7 @@ def redirect(code: str, request: Request):
 
 
 @router.options("/collect/{cid}")
+@router.options("/collect/{cid}/test")
 def preflight(cid: UUID, request: Request):
     with tx() as c:
         conn = one(
@@ -319,7 +377,7 @@ def preflight(cid: UUID, request: Request):
 
 
 @router.post("/collect/{cid}")
-def collect(cid: UUID, body: Event, request: Request):
+def collect(cid: UUID, body: Event | BrowserEvent, request: Request):
     with tx() as c:
         conn = one(
             c,
@@ -328,7 +386,7 @@ def collect(cid: UUID, body: Event, request: Request):
         )
     if (
         not conn
-        or not valid(body.key, "analytics:" + str(cid))
+        or not valid_analytics_key(body.key, cid)
         or request.headers.get("origin") != conn["site_host"]
     ):
         raise HTTPException(403)
@@ -341,6 +399,21 @@ def collect(cid: UUID, body: Event, request: Request):
         return Response(
             status_code=204, headers={"Access-Control-Allow-Origin": conn["site_host"]}
         )
+    if isinstance(body, BrowserEvent):
+        try:
+            return browser_receive(conn, body)
+        except HTTPException as error:
+            from .pixel_events import record_test_failure
+
+            record_test_failure(conn, body, error.detail)
+            return JSONResponse(
+                {"detail": error.detail},
+                status_code=error.status_code,
+                headers={
+                    "Access-Control-Allow-Origin": conn["site_host"],
+                    "Vary": "Origin",
+                },
+            )
     aid = str(conn["agent_id"])
     with tx(aid) as c:
         from .admin_controls import attribution, legacy_attribution
@@ -408,7 +481,7 @@ def collect(cid: UUID, body: Event, request: Request):
 @router.get("/lead.js")
 def sdk():
     return Response(
-        """(()=>{const s=document.currentScript;if(!s)return;const base=new URL(s.src).origin,c=s.dataset.connection,k=s.dataset.key;if(!c||!k)return;let id;try{id=sessionStorage.getItem('lead_sid')||crypto.randomUUID();sessionStorage.setItem('lead_sid',id)}catch{id=crypto.randomUUID()}const q=new URL(location.href).searchParams;let ref=q.get('lr')||q.get('lead_ref');try{if(ref)sessionStorage.setItem('lead_ref',ref);else ref=sessionStorage.getItem('lead_ref')}catch{}const send=event=>fetch(base+'/collect/'+c,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k,session_id:id,event,url:location.href,ref}),keepalive:true,credentials:'omit'}).catch(()=>{});window.leadAttribution=()=>({connection_id:c,session_id:id,ref});send('pageview').then(r=>{const seconds=Math.max(10,Math.min(120,Number(r?.headers.get('X-Lead-Engagement-Seconds'))||10));let active=0,sent=false;const timer=setInterval(()=>{if(!document.hidden&&document.hasFocus())active++;if(active>=seconds&&!sent){sent=true;send('engagement');clearInterval(timer)}},1000)})})();""",
+        Path(__file__).with_name("pixel.js").read_text(),
         media_type="application/javascript",
         headers={"Cache-Control": "public,max-age=300"},
     )

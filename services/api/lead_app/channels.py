@@ -9,9 +9,84 @@ from .db import append_message, audit, emit, j, one, record, require_agent, tx
 from .scope import current_tenant
 
 
-def store_account(aid, platform, observed, prompt_target=True):
+def disconnect_account(aid, account_id, expected_verified_at):
+    """Release an account claim without deleting its operational history."""
     with tx(aid) as c:
         require_agent(c, aid, True)
+        account = one(
+            c,
+            "SELECT * FROM lead.social_accounts WHERE id=%s FOR UPDATE",
+            (account_id,),
+        )
+        if not account or account["platform"] not in SPECS:
+            raise LookupError("社媒账号不存在")
+        if account["verified_at"] != expected_verified_at:
+            raise ValueError("账号连接已更新，请刷新后重新确认解除绑定")
+        if account["state"] == "disconnected":
+            return {"ok": True, "duplicate": True}
+        c.execute(
+            "UPDATE lead.social_accounts SET state='disconnected',automation_enabled=false WHERE id=%s",
+            (account_id,),
+        )
+        c.execute(
+            "UPDATE lead.authorization_grants SET revoked_at=now() WHERE target_id IN (SELECT id FROM lead.account_targets WHERE account_id=%s) AND revoked_at IS NULL",
+            (account_id,),
+        )
+        c.execute(
+            "UPDATE lead.account_targets SET state='disabled' WHERE account_id=%s",
+            (account_id,),
+        )
+        c.execute(
+            """UPDATE lead.interaction_cards SET state='canceled'
+            WHERE state IN ('pending','accepted') AND
+              (payload->>'account_id'=%s OR payload->>'target_id' IN
+                (SELECT id::text FROM lead.account_targets WHERE account_id=%s))""",
+            (str(account_id), account_id),
+        )
+        # Submitted/unknown actions retain their receipts and reconciliation state.
+        c.execute(
+            "UPDATE lead.actions SET state='canceled' WHERE state IN ('prepared','not_applied') AND target_id IN (SELECT id FROM lead.account_targets WHERE account_id=%s)",
+            (account_id,),
+        )
+        c.execute(
+            """UPDATE lead.tasks t SET state='canceled',completed_at=now(),version=version+1
+            WHERE t.state IN ('planned','queued','running','waiting_user') AND
+              (t.input->>'platform'=%s OR t.input->>'account_id'=%s OR
+               t.input->>'target_id' IN (SELECT id::text FROM lead.account_targets WHERE account_id=%s) OR
+               EXISTS(SELECT 1 FROM lead.actions a JOIN lead.account_targets target ON target.id=a.target_id
+                      WHERE a.task_id=t.id AND target.account_id=%s))
+              AND NOT EXISTS(SELECT 1 FROM lead.actions a WHERE a.task_id=t.id AND a.state IN ('dispatching','unknown'))""",
+            (account["platform"], str(account_id), account_id, account_id),
+        )
+        # The browser commit gate takes the same agent lock before any submission.
+        c.execute(
+            "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+1,version=version+1,updated_at=now() WHERE id=%s",
+            (aid,),
+        )
+        c.execute(
+            "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending')"
+        )
+        audit(
+            c,
+            aid,
+            "account.disconnected",
+            {"account_id": str(account_id), "platform": account["platform"]},
+        )
+        record(c, aid, "已解除社媒账号绑定", account["platform"])
+        emit(c, aid, "supervisor.wake")
+    return {"ok": True}
+
+
+def store_account(
+    aid, platform, observed, prompt_target=True, *, expected_control_version=None
+):
+    with tx(aid) as c:
+        agent = require_agent(c, aid, True)
+        if (
+            expected_control_version is not None
+            and agent["control_version"] != expected_control_version
+        ):
+            raise ValueError("账号连接已变化，请重新打开登录窗口并验证")
         account = one(
             c,
             "SELECT * FROM lead.social_accounts WHERE platform=%s ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
@@ -41,7 +116,7 @@ def store_account(aid, platform, observed, prompt_target=True):
             )
         try:
             c.execute(
-                "UPDATE lead.social_accounts SET external_account_id=%s,display_name=%s,state='connected',verified_at=now() WHERE id=%s",
+                "UPDATE lead.social_accounts SET external_account_id=%s,display_name=%s,automation_enabled=CASE WHEN state='disconnected' THEN true ELSE automation_enabled END,state='connected',verified_at=now() WHERE id=%s",
                 (
                     observed["external_account_id"],
                     observed["display_name"],
@@ -49,7 +124,9 @@ def store_account(aid, platform, observed, prompt_target=True):
                 ),
             )
         except psycopg.errors.UniqueViolation:
-            raise ValueError("该账号已由另一名 Agent 管理，请先解除原绑定") from None
+            raise ValueError(
+                "该账号已由另一名 Agent 管理，请到原 Agent 的「社媒账号」解除绑定后重试"
+            ) from None
         record(c, aid, "已核对登录账号", platform)
         audit(
             c,

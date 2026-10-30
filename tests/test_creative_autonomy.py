@@ -299,10 +299,10 @@ def isolated_automation_database(monkeypatch):
         )
     try:
         upgrade({**admin, "dbname": name})
-        monkeypatch.setenv("LEAD_DB_NAME", name)
-        yield
+        with monkeypatch.context() as database_environment:
+            database_environment.setenv("LEAD_DB_NAME", name)
+            yield
     finally:
-        monkeypatch.delenv("LEAD_DB_NAME", raising=False)
         with psycopg.connect(**admin, autocommit=True) as c:
             c.execute(
                 sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name))

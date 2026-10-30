@@ -381,6 +381,7 @@ class Actor:
             raise ValueError("此社媒运营已暂停或账号已断开")
         if account_setup:
             from .admin_controls import enforce_channel
+
             enforce_channel(c, self.aid, platform, operation="setup")
             return
         grant = one(
@@ -391,8 +392,23 @@ class Actor:
         if not grant or "publish" not in grant["allowed_actions"]:
             raise ValueError("授权已失效")
         from .admin_controls import enforce_channel
-        content_format = action["intent"].get("format") or next((item.get("kind") for item in action["intent"].get("media", []) if item.get("kind")), "text")
-        enforce_channel(c, self.aid, platform, action.get("target_id"), content_format=content_format, action_id=action.get("id"))
+
+        content_format = action["intent"].get("format") or next(
+            (
+                item.get("kind")
+                for item in action["intent"].get("media", [])
+                if item.get("kind")
+            ),
+            "text",
+        )
+        enforce_channel(
+            c,
+            self.aid,
+            platform,
+            action.get("target_id"),
+            content_format=content_format,
+            action_id=action.get("id"),
+        )
         if platform in SPECS:
             from .social_publish import gate
 
@@ -498,6 +514,12 @@ class Actor:
                     "SELECT * FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1",
                     (action_id,),
                 )
+            continuation = bool(
+                action["state"] == "prepared"
+                and prior
+                and prior["outcome"] == "not_applied"
+                and (prior["observation"] or {}).get("nonapplication_proof")
+            )
             try:
                 await telegram.open_account(self.page, target["external_account_id"])
                 await telegram.inspect_target(
@@ -506,7 +528,7 @@ class Actor:
             except telegram.TelegramNeedsAuth:
                 with tx(self.aid) as c:
                     c.execute(
-                        "UPDATE lead.social_accounts SET state='needs_auth' WHERE id=%s",
+                        "UPDATE lead.social_accounts SET state='needs_auth' WHERE id=%s AND state='connected'",
                         (target["account_id"],),
                     )
                 return {
@@ -518,7 +540,7 @@ class Actor:
             except telegram.TelegramTargetMismatch:
                 with tx(self.aid) as c:
                     c.execute(
-                        "UPDATE lead.social_accounts SET state='needs_auth' WHERE id=%s",
+                        "UPDATE lead.social_accounts SET state='needs_auth' WHERE id=%s AND state='connected'",
                         (target["account_id"],),
                     )
                 return {
@@ -550,22 +572,49 @@ class Actor:
                         self.page, action["intent"]["body"], action["intent"]["marker"]
                     )
                     with tx(self.aid) as c:
-                        fresh_probe = one(
+                        probe = one(
                             c,
-                            "SELECT 1 FROM lead.tasks t JOIN lead.tasks parent ON parent.id::text=t.input->>'bootstrap_run_id' WHERE t.id=%s AND t.input->>'bootstrap_verification'='true' AND parent.input->>'fresh_channel'='true' AND parent.result->>'target_id'=%s AND parent.result->>'awaiting_first_publish'='true' AND t.created_at<now()-interval '60 seconds'",
-                            (action["task_id"], str(action["target_id"])),
+                            """SELECT count(*) AS n FROM lead.tasks t JOIN lead.tasks parent ON
+                            parent.id::text=t.input->>'bootstrap_run_id' OR
+                            (parent.result->>'verification_card_id'=t.input->>'key' AND parent.result->>'creation_state'='confirmed')
+                            WHERE t.id=%s AND t.type='connection.verify_publish' AND t.input->>'bootstrap_verification'='true'
+                            AND parent.type='account.prepare' AND parent.state='succeeded' AND parent.result->>'target_id'=%s
+                            AND ((parent.input->>'fresh_channel'='true' AND parent.result->>'awaiting_first_publish'='true')
+                              OR (parent.result->>'creation_state'='confirmed' AND parent.result->>'verification_card_id'=t.input->>'key'))
+                            AND EXISTS(SELECT 1 FROM lead.action_attempts WHERE id=%s AND started_at<now()-interval '60 seconds')
+                            AND NOT EXISTS(SELECT 1 FROM lead.action_attempts WHERE action_id=%s AND observation ? 'draft_continuation')""",
+                            (
+                                action["task_id"],
+                                str(action["target_id"]),
+                                prior["id"],
+                                action_id,
+                            ),
                         )
                     # Narrow negative proof for the very first write in a newly
                     # created channel: its entire visible history is the creation
                     # service event and the exact original text is still a draft.
                     if (
-                        fresh_probe
+                        probe["n"] == 1
+                        and prior["observation"].get("baseline_scope")
+                        == "visible_target_v1"
                         and diagnostic.get("creationServiceOnly")
                         and diagnostic["draftMatches"]
                         and not diagnostic["markerMatches"]
                         and not diagnostic["pending"]
                         and not diagnostic["systemDialogs"]
                     ):
+                        proof_data = await telegram.unconsumed_probe_proof(
+                            self.page,
+                            action["intent"]["body"],
+                            prior["observation"]["baseline_mid"],
+                            action["intent"]["marker"],
+                            target["external_target_id"],
+                        )
+                        if not proof_data:
+                            return {
+                                "state": "unknown",
+                                "reason": "尚无原草稿未生效的完整证据，继续核对",
+                            }
                         folder = STATE / "evidence" / self.aid
                         folder.mkdir(exist_ok=True, parents=True, mode=0o700)
                         proof = folder / (str(action_id) + "-not-applied.png")
@@ -581,7 +630,7 @@ class Actor:
                                 "UPDATE lead.action_attempts SET outcome='not_applied',error_code='CREATION_ONLY_WITH_EXACT_DRAFT',evidence_ref=%s,observation=observation || %s,ended_at=now() WHERE id=%s",
                                 (
                                     str(proof),
-                                    j({"nonapplication_proof": diagnostic}),
+                                    j({"nonapplication_proof": proof_data}),
                                     prior["id"],
                                 ),
                             )
@@ -597,6 +646,7 @@ class Actor:
                                 task_id=action["task_id"],
                             )
                         action["state"] = "prepared"
+                        continuation = True
                     else:
                         return {
                             "state": "unknown",
@@ -605,7 +655,8 @@ class Actor:
                         }
             if action["state"] == "prepared":
                 baseline = await telegram.baseline(self.page)
-                await telegram.fill(self.page, action["intent"]["body"])
+                if not continuation:
+                    await telegram.fill(self.page, action["intent"]["body"])
                 # Re-inspect identity immediately before the commit barrier.
                 identity = await telegram.inspect_account(self.page)
                 current = await self.page.evaluate(telegram.TARGET)
@@ -637,6 +688,11 @@ class Actor:
                                     "baseline_mid": baseline,
                                     "baseline_scope": "visible_target_v1",
                                     "marker": action["intent"]["marker"],
+                                    **(
+                                        {"draft_continuation": True}
+                                        if continuation
+                                        else {}
+                                    ),
                                 }
                             ),
                             action_id,
@@ -645,7 +701,12 @@ class Actor:
                 try:
                     with tx(self.aid) as c:
                         self.gate(c, action)
-                        await telegram.submit(self.page)
+                        if continuation:
+                            await telegram.continue_draft(
+                                self.page, action["intent"]["body"]
+                            )
+                        else:
+                            await telegram.submit(self.page)
                     observed = None
                     for _ in range(40):
                         observed = await telegram.receipt(
@@ -979,9 +1040,11 @@ async def inspect_account(aid: UUID, body: OpenRequest):
             from . import telegram
 
             with tx(str(aid)) as c:
+                # Released identities remain as history. Verify the owner's
+                # selected login instead of switching back to a released one.
                 known = one(
                     c,
-                    "SELECT external_account_id FROM lead.social_accounts WHERE platform='telegram' AND external_account_id IS NOT NULL ORDER BY verified_at DESC LIMIT 1",
+                    "SELECT external_account_id FROM lead.social_accounts WHERE platform='telegram' AND state IN ('connected','needs_auth','restricted') AND external_account_id IS NOT NULL ORDER BY verified_at DESC LIMIT 1",
                 )
             if known:
                 await telegram.open_account(actor.page, known["external_account_id"])

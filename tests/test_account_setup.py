@@ -214,6 +214,39 @@ async def test_uncertain_preparation_reuses_the_same_durable_task(connected):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload,allowed",
+    [
+        ({"mode": "discovery"}, True),
+        ({"mode": "discovery", "account_id": "fixture"}, False),
+        ({"mode": "contextual_outreach"}, False),
+        ({}, False),
+    ],
+)
+async def test_only_independent_public_discovery_can_overlap_preparation(
+    connected, payload, allowed
+):
+    aid, _, _ = connected
+    domain.set_control(aid, "resume")
+    with tx(aid) as c:
+        c.execute(
+            "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,scheduled_at) VALUES(%s,%s,'community.discover','running',%s,%s,now())",
+            (current_tenant(), aid, "fixture:" + uid(), j(payload)),
+        )
+    called = []
+
+    async def rpc(path, data):
+        called.append(path)
+        return {"state": "unknown"}
+
+    result = await account_setup.prepare_accounts(aid, rpc)
+    assert bool(called) is allowed
+    assert (result or {}).get("reason") == (
+        "account_preparation_unknown" if allowed else None
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("original", ["prepared", "unknown", "identity_changed"])
 async def test_saved_login_recovers_without_replacing_unknown_submissions(
     connected, original
@@ -300,7 +333,13 @@ async def test_saved_login_recovers_without_replacing_unknown_submissions(
     reason="real Camoufox, local DOM fixture only",
 )
 @pytest.mark.parametrize(
-    "failure", [None, "lost_create_receipt", "pause_before_create"]
+    "failure",
+    [
+        None,
+        "lost_create_receipt",
+        "lost_receipt_with_invite_confirmation",
+        "pause_before_create",
+    ],
 )
 async def test_browser_preparation_creates_once_and_preserves_slot(
     connected, monkeypatch, failure
@@ -315,6 +354,7 @@ async def test_browser_preparation_creates_once_and_preserves_slot(
             .read_text()
             .replace("__IDENTITY__", identity)
         )
+        await actor.page.route("**/*", lambda route: route.abort())
         await actor.page.route(
             "https://web.telegram.org/k/**",
             lambda route: route.fulfill(body=html, content_type="text/html"),
@@ -325,13 +365,15 @@ async def test_browser_preparation_creates_once_and_preserves_slot(
 
         async def lose_receipt(page):
             await original_submit(page)
+            if failure == "lost_receipt_with_invite_confirmation":
+                await page.locator("#invite-next").click()
             raise ConnectionError("receipt lost after channel was created")
 
         async def pause_before_submit(page, setup):
             await original_fill(page, setup)
             domain.set_control(aid, "pause")
 
-        if failure == "lost_create_receipt":
+        if failure in ("lost_create_receipt", "lost_receipt_with_invite_confirmation"):
             monkeypatch.setattr(telegram, "submit_new_channel", lose_receipt)
         elif failure == "pause_before_create":
             monkeypatch.setattr(telegram, "fill_new_channel", pause_before_submit)
@@ -354,6 +396,10 @@ async def test_browser_preparation_creates_once_and_preserves_slot(
             first = await account_setup.prepare_accounts(aid, rpc)
         assert first["reason"] == "account_verifying"
         assert await actor.page.evaluate("localStorage.getItem('create_count')") == "1"
+        assert await actor.page.evaluate("localStorage.getItem('invite_count')") is None
+        assert await actor.page.evaluate(
+            "localStorage.getItem('invite_submit_count')"
+        ) == ("1" if failure == "lost_receipt_with_invite_confirmation" else None)
         assert "account=2" in actor.page.url
         assert json.loads(
             await actor.page.evaluate("localStorage.getItem('setup_channel')")

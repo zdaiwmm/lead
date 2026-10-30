@@ -137,7 +137,7 @@ def request_fresh_channel(aid, request_id):
             "control_version": a["control_version"],
             "config_revision": a["config_revision"],
             "title": a["name"][:90]
-            + " 阅读与翻译"
+            + " 官方频道"
             + (f" · {number}" if number > 1 else ""),
             "handle": handle,
             "about": a["name"][:40]
@@ -274,7 +274,7 @@ async def prepare_requested_channel(aid, rpc):
             return {"delay": 600, "reason": "account_preparation_blocked"}
         if one(
             c,
-            "SELECT 1 FROM lead.tasks WHERE type<>'account.prepare' AND state IN ('queued','running','reconciling')",
+            "SELECT 1 FROM lead.tasks WHERE type<>'account.prepare' AND NOT(type='community.discover' AND coalesce(input->>'mode','')='discovery' AND NOT(input ? 'account_id')) AND state IN ('queued','running','reconciling')",
         ):
             return {"delay": 60, "reason": "finishing_existing_task"}
         account = one(
@@ -338,7 +338,7 @@ async def prepare_accounts(aid, rpc):
             return None
         if one(
             c,
-            "SELECT 1 FROM lead.tasks WHERE type<>'account.prepare' AND state IN ('queued','running','reconciling')",
+            "SELECT 1 FROM lead.tasks WHERE type<>'account.prepare' AND NOT(type='community.discover' AND coalesce(input->>'mode','')='discovery' AND NOT(input ? 'account_id')) AND state IN ('queued','running','reconciling')",
         ):
             return None
         business = one(
@@ -894,7 +894,7 @@ async def prepare_in_browser(actor, task_id):
                     )
                 if isinstance(error, telegram.TelegramNeedsAuth):
                     c.execute(
-                        "UPDATE lead.social_accounts SET state='needs_auth' WHERE id=%s",
+                        "UPDATE lead.social_accounts SET state='needs_auth' WHERE id=%s AND state='connected'",
                         (account["id"],),
                     )
                 if isinstance(

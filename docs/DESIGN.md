@@ -312,7 +312,7 @@ YAML 中的 OKLCH 为规范色值。颜色名称表示用途，不能按个人�
 | 入口 | 弹窗内容 | 桌面宽度 |
 | --- | --- | --- |
 | 头像、名称编辑 | 资料预览、名称、默认像素头像、上传图片 | compact，560px |
-| 已连接社媒 | 账号信息、运营状态、单渠道启停、重新登录 | compact，560px |
+| 已绑定社媒（含登录失效、受限） | 账号信息、运营状态、单渠道启停、重新登录、解除绑定 | compact，560px |
 | 业务或运营偏好编辑 | 带标签的编辑表单及保存、取消 | default，720px |
 | 完整业务介绍、全部运营偏好 | 完整内容、来源、编辑入口 | default，720px |
 | 高级设置、网站像素 | 分组配置、说明及就近反馈 | default，720px |
@@ -326,5 +326,7 @@ YAML 中的 OKLCH 为规范色值。颜色名称表示用途，不能按个人�
 - 完整工作记录的筛选不改变主页面筛选。服务器先按平台过滤，再按时间与 ID 排序分页；支持空状态、加载、失败重试。默认摘要仍为三条。
 - 弹窗内部可用低权重折叠项组织高级说明；不得将这些展开内容插回主工作台。切换到账号浏览器前关闭当前设置弹窗，避免原生顶层覆盖浏览器操作。
 - 统一入口图标：弹窗查看使用 ArrowUpRight，编辑使用 Pencil；不使用“收起”或旋转箭头暗示主页面展开。
+
+- 解除绑定在当前账号弹窗内切换至确认步骤，明确原 Agent 停止操作、未提交任务取消、历史保留，以及其他 Agent 需重新登录与授权。焦点默认进入“取消”，确认中禁止重复操作，错误留在弹窗；连接已变化时要求刷新后重新确认。成功后平台恢复“连接”入口，登录失效和受限状态仍可进入账号管理。
 
 组件：[DialogPanel](../apps/web/app/dialog-panel.tsx)、[AgentIdentity](../apps/web/app/agent-identity.tsx)、[AgentPreferences](../apps/web/app/agent-preferences.tsx)、[ActivityPanel](../apps/web/app/activity-panel.tsx)、[UsagePanel](../apps/web/app/usage-panel.tsx)、[SocialAccounts](../apps/web/app/social-accounts.tsx)。

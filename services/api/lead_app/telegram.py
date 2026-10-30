@@ -256,16 +256,36 @@ async def _own_channel_profile(page, setup):
 
 
 async def skip_new_channel_members(page):
-    """Complete only the optional, empty invite step after channel creation."""
-    skip = page.locator(".add-members-container .btn-corner.is-visible").filter(
+    """Leave optional invitations without submitting a member selection.
+
+    Web K's Next arrow can open an Add Member confirmation even for an empty
+    selector. Reconcile that dialog only through Cancel, then leave the sidebar
+    through its navigation control. Never treat the submit arrow as Skip.
+    """
+    confirmation = page.locator(".popup-add-members").filter(visible=True)
+    if await confirmation.count():
+        if await confirmation.count() != 1:
+            raise TelegramSetupBlocked("添加成员确认窗口不唯一，已停止操作")
+        cancel = confirmation.locator("button").filter(
+            has_text=re.compile(r"^(?:Cancel|取消)$", re.I), visible=True
+        )
+        if await cancel.count() != 1:
+            raise TelegramSetupBlocked("无法确认取消邀请按钮，已停止操作")
+        await cancel.click(timeout=10000)
+        await confirmation.wait_for(state="hidden", timeout=10000)
+
+    members = page.locator(".add-members-container").filter(visible=True)
+    if not await members.count():
+        return
+    if await members.count() != 1:
+        raise TelegramSetupBlocked("创建频道后的邀请页面不唯一，已停止操作")
+    close = members.locator(".sidebar-header .sidebar-close-button").filter(
         visible=True
     )
-    if await skip.count():
-        if await page.locator(
-            ".add-members-container input[type=checkbox]:checked"
-        ).count():
-            raise TelegramSetupBlocked("创建频道后的邀请列表不为空，已停止操作")
-        await skip.click(timeout=10000)
+    if await close.count() != 1:
+        raise TelegramSetupBlocked("无法确认退出邀请页面的按钮，已停止操作")
+    await close.click(timeout=10000)
+    await members.wait_for(state="hidden", timeout=10000)
 
 
 async def find_prepared_channel(page, setup):
@@ -349,14 +369,7 @@ async def created_channel(page, setup, expected_account):
         arg=setup["title"],
         timeout=20000,
     )
-    skip = page.locator(".add-members-container .btn-corner.is-visible").filter(
-        visible=True
-    )
-    if await skip.count():
-        checked = page.locator(".add-members-container input[type=checkbox]:checked")
-        if await checked.count():
-            raise TelegramSetupBlocked("创建频道后的邀请列表不为空，已停止操作")
-        await skip.click(timeout=10000)
+    await skip_new_channel_members(page)
     own = await inspect_account(page)
     current = await page.evaluate(TARGET)
     if (
@@ -583,6 +596,54 @@ async def submit(page):
         .filter(visible=True)
         .click(timeout=10000)
     )
+
+
+async def continue_draft(page, body):
+    """Continue the persisted draft through native keyboard handling once."""
+    editor = (
+        (await selected_chat(page))
+        .locator(".input-message-input[contenteditable=true]")
+        .filter(visible=True)
+    )
+    if await editor.count() != 1 or " ".join(
+        (await editor.inner_text()).split()
+    ) != " ".join(body.split()):
+        raise TelegramSetupBlocked("原验证草稿已变化，未继续提交")
+    await editor.press("Enter")
+
+
+async def unconsumed_probe_proof(page, body, minimum_mid, marker, peer):
+    """Require fresh scoped search and the exact untouched first-channel draft."""
+    from .community_runtime import latest_position, search_history
+
+    def unchanged(diagnostic):
+        return (
+            diagnostic.get("creationServiceOnly")
+            and diagnostic.get("draftMatches")
+            and diagnostic.get("markerMatches") == 0
+            and diagnostic.get("pending") == 0
+            and not diagnostic.get("systemDialogs")
+        )
+
+    await latest_position(page, peer)
+    if await baseline(page) != str(minimum_mid):
+        return None
+    if not unchanged(await receipt_diagnostic(page, body, marker)):
+        return None
+    _, search = await search_history(page, marker, peer, 5)
+    await close_chat_search(page)
+    if search != "no_matches":
+        return None
+    await latest_position(page, peer)
+    diagnostic = await receipt_diagnostic(page, body, marker)
+    if await baseline(page) != str(minimum_mid) or not unchanged(diagnostic):
+        return None
+    return {
+        **diagnostic,
+        "native_search": search,
+        "baseline_unchanged": str(minimum_mid),
+        "target_id": peer,
+    }
 
 
 async def receipt(page, body, minimum_mid, marker):

@@ -131,7 +131,16 @@ def test_telegram_target_urls_are_narrow():
     os.environ.get("LEAD_BROWSER_TESTS") != "1",
     reason="real browser adapter contract, no external Telegram post",
 )
-@pytest.mark.parametrize("failure", ["lost_receipt", "not_submitted"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "lost_receipt",
+        "not_submitted",
+        "managed_not_submitted",
+        "continuation_swallowed",
+        "search_unavailable",
+    ],
+)
 async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_resubmit(
     channel, monkeypatch, failure
 ):
@@ -158,7 +167,7 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
     channels.accept_card(aid, str(probe["id"]), 1, True)
     with tx(aid) as c:
         task = one(c, "SELECT id FROM lead.tasks")
-    if failure == "not_submitted":
+    if failure != "lost_receipt":
         with tx(aid) as c:
             parent = one(
                 c,
@@ -166,11 +175,23 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
                 (
                     TENANT,
                     aid,
-                    j({"fresh_channel": True}),
+                    j(
+                        {}
+                        if failure == "managed_not_submitted"
+                        else {"fresh_channel": True}
+                    ),
                     j(
                         {
                             "target_id": str(target["target_id"]),
                             "awaiting_first_publish": True,
+                            **(
+                                {
+                                    "creation_state": "confirmed",
+                                    "verification_card_id": str(probe["id"]),
+                                }
+                                if failure == "managed_not_submitted"
+                                else {}
+                            ),
                         }
                     ),
                     "fixture-fresh:" + uid(),
@@ -186,18 +207,24 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
     html = """<!doctype html><div class="chatlist" style="width:100px;height:100px">Chats</div>
     <div class="chat-info"><span class="peer-title" data-peer-id="PEER">自有验收频道</span><span>2 subscribers</span></div>
     <div class="input-message-input" contenteditable="true" data-placeholder="Broadcast"></div><button class="btn-send send">Send</button><div id="bubbles"></div>
+    <button aria-label="Search" id="search" onclick="document.getElementById('search-controls').hidden=false">Search</button>
+    <div id="search-controls" class="topbar-search-input-container" hidden><input class="topbar-search-input"><button class="input-search-clear" onclick="document.getElementById('search-controls').hidden=true">Close search</button></div>
     <div class="bubble service" data-mid="99">Channel created</div><div style="display:none"><div class="bubble" data-mid="99999999"><div class="message">Hidden other channel</div></div></div>
     <script>
     localStorage.setItem('account1',JSON.stringify({userId:'11111'}));
     localStorage.setItem('account2',JSON.stringify({userId:'ACCOUNT'}));
     localStorage.setItem('user_auth',JSON.stringify({id:'11111'}));
     function render(){document.getElementById('bubbles').replaceChildren();JSON.parse(localStorage.getItem('fixture_posts')||'[]').forEach((body,i)=>{const el=document.createElement('div');el.className='bubble';el.dataset.mid=String(100+i);const msg=document.createElement('div');msg.className='message';msg.textContent=body;el.append(msg);document.getElementById('bubbles').append(el)});}
-    render();document.querySelector('.btn-send').onclick=()=>{const posts=JSON.parse(localStorage.getItem('fixture_posts')||'[]');posts.push(document.querySelector('.input-message-input').textContent);localStorage.setItem('fixture_posts',JSON.stringify(posts));render();};
+    const editor=document.querySelector('.input-message-input');function send(){const posts=JSON.parse(localStorage.getItem('fixture_posts')||'[]');posts.push(editor.textContent);localStorage.setItem('fixture_posts',JSON.stringify(posts));editor.textContent='';render()};
+    render();document.querySelector('.btn-send').onclick=send;editor.onkeydown=e=>{if(e.key!=='Enter')return;e.preventDefault();localStorage.setItem('keyboard_continuations',String(Number(localStorage.getItem('keyboard_continuations')||0)+1));if(!location.search.includes('swallowed'))send()};
     </script>""".replace("PEER", peer).replace(
         "ACCOUNT", account["external_account_id"]
     )
     try:
         actor = await gateway.get(aid)
+        await actor.page.route("**/*", lambda route: route.abort())
+        if failure == "search_unavailable":
+            html = html.replace('aria-label="Search"', 'aria-label="Unavailable"')
         await actor.page.route(
             "https://web.telegram.org/k/**",
             lambda route: route.fulfill(body=html, content_type="text/html"),
@@ -227,9 +254,36 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
             monkeypatch.setattr(telegram, "submit", not_submitted)
         first = await actor.publish_telegram(str(action["id"]))
         assert first["state"] == "unknown"
+        if failure != "lost_receipt":
+            with tx(aid) as c:
+                c.execute(
+                    "UPDATE lead.action_attempts SET started_at=now()-interval '2 minutes' WHERE action_id=%s",
+                    (action["id"],),
+                )
+        if failure == "continuation_swallowed":
+            await actor.page.evaluate(
+                "history.replaceState(null,'',location.pathname+'?account=2&swallowed=1'+location.hash)"
+            )
         monkeypatch.setattr(telegram, "receipt", original)
         monkeypatch.setattr(telegram, "submit", submit)
         second = await actor.publish_telegram(str(action["id"]))
+        if failure in ("continuation_swallowed", "search_unavailable"):
+            assert second["state"] == "unknown"
+            assert (await actor.publish_telegram(str(action["id"])))[
+                "state"
+            ] == "unknown"
+            assert await actor.page.evaluate(
+                "localStorage.getItem('keyboard_continuations')"
+            ) == ("1" if failure == "continuation_swallowed" else None)
+            with tx(aid) as c:
+                assert one(c, "SELECT count(*) AS n FROM lead.action_attempts")[
+                    "n"
+                ] == (2 if failure == "continuation_swallowed" else 1)
+            assert (
+                await actor.page.evaluate("localStorage.getItem('fixture_posts')")
+                is None
+            )
+            return
         assert second["state"] == "confirmed"
         assert "?account=2" in actor.page.url
         posts = json.loads(
@@ -238,8 +292,15 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
         assert posts == [probe["payload"]["body"]]
         with tx(aid) as c:
             assert one(c, "SELECT count(*) AS n FROM lead.action_attempts")["n"] == (
-                2 if failure == "not_submitted" else 1
+                1 if failure == "lost_receipt" else 2
             )
+            if failure != "lost_receipt":
+                attempt = one(
+                    c,
+                    "SELECT observation FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1",
+                    (action["id"],),
+                )
+                assert attempt["observation"]["draft_continuation"]
             assert domain.metrics(c)["published"] == 0
             before = one(
                 c,

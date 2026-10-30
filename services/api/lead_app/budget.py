@@ -6,7 +6,9 @@ from .scope import current_tenant
 
 
 class BudgetExceeded(Exception):
-    pass
+    def __init__(self, message, *, required_units=None):
+        super().__init__(message)
+        self.required_units = required_units
 
 
 DEFAULT_DAILY_TOKEN_LIMIT = 1_000_000_000
@@ -37,6 +39,32 @@ def configuration(c, aid):
 def get_configuration(aid):
     with tx(aid) as c:
         return configuration(c, aid)
+
+
+def available(c, aid, now=None):
+    """Read the effective token ceiling and ledger; never reset usage to admit work."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    config = configuration(c, aid)
+    period = one(
+        c,
+        "SELECT spent_units,reserved_units FROM lead.budget_periods WHERE agent_id=%s AND unit='tokens' AND starts_at=%s",
+        (aid, start),
+    ) or {"spent_units": 0, "reserved_units": 0}
+    return {
+        "unit": "tokens",
+        "limit_units": config["daily_token_limit"],
+        **period,
+        "available_units": max(
+            0,
+            config["daily_token_limit"]
+            - period["spent_units"]
+            - period["reserved_units"],
+        ),
+        "period_ends_at": (start + timedelta(days=1)).isoformat(),
+        "config_version": config["config_version"],
+        "fixed_task_limit": None,
+    }
 
 
 def set_daily_limit(aid, value, expected_version=None):
@@ -116,7 +144,7 @@ def reserve(aid, operation_key, estimate, model_ref=None, provider=None):
             period["spent_units"] + period["reserved_units"] + estimate
             > period["limit_units"]
         ):
-            raise BudgetExceeded("daily_token_limit")
+            raise BudgetExceeded("daily_token_limit", required_units=estimate)
         from .admin_pricing import quote
 
         reservation = one(

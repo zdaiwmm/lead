@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark">
+<title>lead · 像素接入原型 v5</title>
+<style>
+:root{color-scheme:dark;--canvas:oklch(15% .008 270);--surface:oklch(18.5% .009 270);--raised:oklch(22% .01 270);--module:oklch(21.5% .009 270);--primary-module:oklch(24% .01 270);--line:oklch(30% .01 270);--text:oklch(94% .007 270);--secondary:oklch(73% .012 270);--muted:oklch(64% .012 270);--action:oklch(72% .17 28);--action-hover:oklch(75% .145 28);--ink:oklch(18% .008 270);--data:oklch(76% .11 285);--focus:oklch(80% .08 285);--success:oklch(76% .1 165);--warning:oklch(82% .12 80);--danger:oklch(70% .18 25);font:14px/1.6 Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--canvas);color:var(--text)}body:has(dialog[open]){overflow:hidden}h1,h2,h3,p,ol{margin:0}h1{font-size:24px;line-height:32px;font-weight:500}h2{font-size:20px;line-height:28px;font-weight:500}h3{font-size:16px;line-height:24px;font-weight:500}strong{font-weight:500}button,input,select,textarea{font:inherit}button{cursor:pointer;border:1px solid var(--line);border-radius:8px;background:var(--raised);color:var(--text);padding:7px 13px;min-height:36px;transition:background .18s ease-out}button:hover:not(:disabled){background:oklch(27% .01 270)}button:disabled{cursor:not-allowed;opacity:.5}button.primary{background:var(--action);color:var(--ink);border-color:transparent;font-weight:500}button.primary:hover:not(:disabled){background:var(--action-hover)}button.quiet{border-color:transparent;background:transparent;color:var(--secondary)}button.small{font-size:12px;min-height:30px;padding:4px 9px}button.close{font-size:24px;line-height:24px;width:34px;min-height:34px;padding:3px;background:transparent;border:0;color:var(--muted)}a{color:var(--secondary);text-decoration:none}a:hover{color:var(--text)}button,a{touch-action:manipulation}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:3px}input,select,textarea{background:var(--raised);border:1px solid var(--line);color:var(--text);border-radius:8px;min-height:40px;padding:9px 12px;width:100%}input::placeholder{color:var(--muted)}code,pre{font:12px/1.75 "SFMono-Regular",Consolas,monospace}code{overflow-wrap:anywhere}.muted{color:var(--muted)}.secondary{color:var(--secondary)}.success{color:var(--success)}.warning{color:var(--warning)}.danger{color:var(--danger)}.mini{font-size:12px;line-height:19px}.between{display:flex;justify-content:space-between;align-items:center;gap:16px}.flex{display:flex;align-items:center;gap:10px}.wrap{flex-wrap:wrap}.mt8{margin-top:8px}.mt16{margin-top:16px}.mt24{margin-top:24px}.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;margin-right:7px;vertical-align:2px}.icon{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;vertical-align:-3px;flex-shrink:0}
+.prototype-bar{height:42px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--canvas);display:flex;align-items:center;justify-content:space-between;gap:16px;color:var(--muted);font-size:11px}.prototype-bar select{min-height:28px;width:auto;font-size:11px;padding:2px 7px;background:transparent;border-color:transparent;color:var(--muted);max-width:136px}.prototype-bar .tools summary{font-size:11px;cursor:pointer;padding:6px}.prototype-bar .tools{position:relative;margin:0;padding:0;border:0}.popover{position:absolute;right:0;top:35px;width:160px;background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:6px;z-index:6;box-shadow:0 12px 30px oklch(6% .005 270 / .3)}.popover a,.popover button{display:block;text-align:left;width:100%;font-size:12px;padding:8px;border:0;background:none;min-height:32px}.popover a:hover,.popover button:hover{background:var(--module);border-radius:5px}.shell{display:grid;grid-template-columns:184px minmax(0,1.61803398875fr) minmax(0,1fr);min-height:calc(100vh - 42px)}.sidebar{padding:26px 18px;background:var(--surface);border-right:1px solid var(--line)}.brand{font-size:28px;font-weight:500;letter-spacing:-1px}.brand i{color:var(--action);font-style:normal}.nav-item{padding:8px;margin-top:24px;color:var(--secondary);font-size:13px}.nav-item.active{background:var(--raised);border-radius:8px;color:var(--text)}.workspace{padding:28px 40px;min-width:0}.crumb{font-size:12px;color:var(--muted);margin-bottom:38px}.identity{margin:12px 0 32px}.identity .mini{margin-top:7px}.avatar{width:40px;height:40px;border-radius:10px;background:var(--raised);display:grid;place-items:center;font-size:20px;color:var(--data)}.surface{padding:28px 32px;background:var(--module);border:1px solid var(--line);border-radius:12px;margin-bottom:32px}.acquisition{background:var(--primary-module);padding:32px}.acquisition-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:32px}.acquisition-head .mini{font-size:11px}.progress{display:flex;list-style:none;padding:0;gap:0;margin-bottom:36px}.progress li{flex:1;display:flex;align-items:center;gap:9px;font-size:12px;color:var(--muted);white-space:nowrap}.progress li:not(:last-child)::after{content:"";height:1px;background:var(--line);flex:1;margin:0 12px 0 4px}.progress .number{width:24px;height:24px;border:1px solid var(--line);border-radius:50%;display:grid;place-items:center;font-size:11px;flex-shrink:0}.progress li.active{color:var(--text)}.progress li.active .number{background:var(--action);border-color:transparent;color:var(--ink)}.progress li.done::after{background:oklch(76% .1 165 / .45)}.progress li.done .number{color:var(--success);border-color:oklch(76% .1 165 / .45)}.current-step{display:flex;justify-content:space-between;align-items:center;gap:24px;padding:2px 0 4px}.current-step h3{font-size:16px}.event-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 0;border-bottom:1px solid var(--line)}.event-row .mini{margin-top:3px}.event-row:last-child{border:0}.onboarding-actions{margin-top:24px;display:flex;align-items:center;justify-content:space-between;gap:16px}.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:30px 20px}.metric span{font-size:12px;color:var(--muted);display:block;margin-bottom:8px}.metric strong{font-size:28px;font-weight:400;line-height:34px;display:block}.metric strong.unknown{font-size:14px;color:var(--muted)}.metric-link{display:block;text-align:left;background:none;border:0;border-radius:6px;padding:0;min-height:0;width:100%}.metric-link:hover:not(:disabled){background:none}.metric-link:hover .metric-name{color:var(--text)}.metric-link .metric-name{display:flex;align-items:center;gap:7px}.metric-link .metric-name b{font-weight:400;color:var(--secondary)}.metric-link strong{text-align:left}.metric-period{font-size:12px;color:var(--muted);margin-top:32px}.settings-menu{position:relative;font-size:12px}.settings-menu summary{list-style:none;cursor:pointer;color:var(--secondary);padding:4px 0}.settings-menu .popover{top:28px;width:164px}.preference{display:grid;gap:18px;margin-top:24px}.preference div{display:flex;justify-content:space-between;gap:24px;font-size:12px}.chat{padding:32px 24px;background:var(--surface);border-left:1px solid var(--line);display:flex;flex-direction:column;min-width:0}.chat h3{font-size:14px}.chat .chat-time{font-size:11px;color:var(--muted);margin-top:8px}.chat-message{color:var(--secondary);margin-top:28px;font-size:13px;max-width:32ch}.composer{margin-top:auto;padding:16px;border:1px solid var(--line);border-radius:8px;color:var(--muted);font-size:13px}
+dialog{padding:0;width:min(640px,calc(100vw - 24px));max-width:calc(100vw - 24px);max-height:calc(100dvh - 48px);background:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 24px 90px oklch(6% .005 270 / .35)}dialog::backdrop{background:oklch(7% .004 270 / .76)}#event-details-dialog,#reference-dialog{width:min(860px,calc(100vw - 24px))}#embed-dialog{width:min(720px,calc(100vw - 24px))}#detect-dialog{width:min(480px,calc(100vw - 24px))}.dialog-layout{display:flex;flex-direction:column;max-height:calc(100dvh - 50px)}.dialog-header{padding:24px 32px 20px;display:flex;align-items:center;justify-content:space-between;gap:16px;border-bottom:1px solid var(--line)}.dialog-header h2{font-size:20px}.demo-badge{font-size:10px;color:var(--muted);font-weight:400;margin-left:10px;border:1px solid var(--line);padding:1px 5px;border-radius:4px;vertical-align:2px;white-space:nowrap}.dialog-body{padding:26px 32px 28px;overflow:auto;scrollbar-width:none}.dialog-body::-webkit-scrollbar{display:none}.dialog-footer{padding:18px 32px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:14px;flex-shrink:0}.dialog-footer .right{margin-left:auto;display:flex;gap:10px;align-items:center}.code{padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--canvas);color:var(--secondary);white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere;scrollbar-width:none;max-height:234px;margin:16px 0}.code::-webkit-scrollbar{display:none}.code-top{flex-wrap:wrap;display:flex;justify-content:space-between;align-items:center;gap:16px}.field{display:grid;gap:9px}.field label{font-size:12px;color:var(--secondary)}.field+.field{margin-top:18px}.detect-result{text-align:center;padding:24px 0 20px}.result-icon{width:48px;height:48px;border:1px solid var(--line);border-radius:50%;display:grid;place-items:center;margin:0 auto 16px;color:var(--muted)}.result-icon.good{color:var(--success);border-color:oklch(76% .1 165 / .4)}.result-icon.bad{color:var(--danger);border-color:oklch(70% .18 25 / .4)}.result-icon .icon{width:24px;height:24px}.detect-result h3{font-size:16px}.detect-result .mini{margin-top:7px}.result-inline{margin-top:20px;padding-top:17px;border-top:1px solid var(--line);font-size:13px}.result-inline .mini{margin-top:4px}.message-error{font-size:12px;color:var(--danger);margin-top:12px}details.advanced{margin-top:22px;padding-top:16px;border-top:1px solid var(--line)}details.advanced summary{font-size:12px;color:var(--muted);cursor:pointer}details.advanced>div{padding-top:16px}.rule{display:grid;grid-template-columns:80px 1fr;gap:12px;padding:8px 0;font-size:12px}.rule dt{color:var(--muted)}.rule dd{margin:0;color:var(--secondary)}.spinner{width:20px;height:20px;border:2px solid var(--line);border-top-color:var(--secondary);border-radius:50%;animation:spin .9s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);padding:10px 16px;background:var(--raised);border:1px solid var(--line);border-radius:8px;font-size:12px;z-index:20}
+.lab{max-width:860px;margin:40px auto;padding:32px}.lab>header{margin-bottom:24px}.lab .notice{background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-size:12px;margin-top:16px}.lab details{margin-top:22px;padding-top:16px;border-top:1px solid var(--line)}.lab summary{font-size:12px;color:var(--muted);cursor:pointer}.lab details>div{padding-top:16px}.source-link{padding:18px 0;border-bottom:1px solid var(--line)}.source-link code{font-size:11px;color:var(--secondary);display:block;margin-top:8px;word-break:break-all}.source-name{font-size:13px}.source-link .pill{font-size:11px;color:var(--muted);margin-left:8px}.source-actions{display:flex;gap:6px}.source-count,.site{font-size:12px;color:var(--muted)}.shelf{margin-top:24px}.flow-line{display:flex;justify-content:space-between;gap:8px;align-items:center;margin:20px 0;font-size:12px}.flow-line i{font-style:normal;color:var(--muted)}.address{padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--canvas);font:11px/1.7 monospace;color:var(--secondary);overflow-wrap:anywhere}.log-list{max-height:230px;overflow:auto;margin-top:16px}.log{padding:12px 0;border-bottom:1px solid var(--line);font-size:12px}.log .mini{color:var(--muted);margin-top:4px}.record-meta{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:5px}.log-tools{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}.table{width:100%;border-collapse:collapse;font-size:12px}.table th,.table td{text-align:left;vertical-align:top;padding:11px 5px;border-bottom:1px solid var(--line);font-weight:400}.table th{color:var(--muted)}.table td{color:var(--secondary)}.table td:first-child{color:var(--text)}.note{font-size:12px;color:var(--muted);margin-top:12px}.empty{font-size:12px;color:var(--muted);padding:22px 0}.callback{padding:12px 14px;background:var(--raised);border:1px solid var(--line);border-radius:8px;margin-top:12px;font-size:12px}
+.event-guide-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px}.event-guide-head h3{font-size:14px}.report-table{font-size:13px;table-layout:fixed}.report-table th,.report-table td{padding:16px 8px;vertical-align:middle;overflow-wrap:anywhere}.report-table th:first-child,.report-table td:first-child{padding-left:0}.report-table th:last-child,.report-table td:last-child{padding-right:0}.report-table code{display:block;font-size:11px;color:var(--muted);line-height:1.65;margin-top:4px}.report-table th{font-size:12px}.report-table .state{font-size:12px}.reference-table th:first-child{width:30%}.reference-table th:nth-child(2){width:49%}.reference-table th:last-child{width:21%}.reference-search{margin-bottom:20px}.reference-search input{max-width:360px}.reference-foot{font-size:12px;color:var(--muted);margin-top:20px}.reference-foot a{text-decoration:underline;text-underline-offset:3px}.reference-tag{font-size:11px;display:block;color:var(--muted);margin-top:4px}.report-context{color:var(--muted);font-size:12px;margin-bottom:16px}.reference-empty{padding:28px 0;color:var(--muted);font-size:13px}.table-rules{margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}.table-rules h3{font-size:12px;color:var(--secondary);margin-bottom:8px}.event-manager-tools{flex-wrap:wrap;display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:20px}.event-manager-tools h3{font-size:14px}.event-manager-actions{flex-wrap:wrap;max-width:100%;display:flex;gap:8px;align-items:center}.event-manager-search{margin-bottom:12px}.event-row code{display:block;color:var(--muted);font-size:11px;margin-top:2px}.event-row>div{min-width:0;overflow-wrap:anywhere}.event-row button{flex-shrink:0}.event-editor-title{margin-bottom:20px}.event-editor-title h3{font-size:16px}.event-editor-title code{font-size:11px;color:var(--muted)}.event-add-fields{display:grid;gap:20px}button[data-action="reference-events"]{white-space:nowrap}.dialog-header h2{min-width:0}.dialog-header .close{flex-shrink:0}
+@media(max-width:540px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr));gap:16px 12px}.metrics .metric strong{font-size:25px}.report-table,.report-table tbody,.report-table tr,.report-table td{display:block;width:100%}.report-table thead{display:none}.report-table tr{padding:16px 0;border-bottom:1px solid var(--line)}.report-table td{padding:4px 0!important;border:0}.report-table td:not(:first-child){display:grid;grid-template-columns:88px minmax(0,1fr);gap:12px}.report-table td:not(:first-child)::before{content:attr(data-label);font-size:12px;color:var(--muted)}.report-table td:first-child{padding-bottom:8px!important}.report-table .state{font-size:12px}.reference-search input{max-width:none}.event-guide-head{align-items:flex-start}.event-guide-head h3{padding-top:8px}.dialog-footer .reference-footer{width:100%;justify-content:space-between}.reference-table td code{word-break:normal}.code-top>.flex{gap:4px;flex-wrap:wrap}}
+@media(max-width:1279px){.shell{grid-template-columns:176px minmax(0,1fr)}.chat{display:none}.workspace{padding:28px 32px;max-width:1000px}}@media(max-width:767px){.prototype-bar{padding:0 12px;gap:6px;font-size:10px}.prototype-bar>.flex{gap:3px}.prototype-bar select{max-width:108px;font-size:10px}.shell{grid-template-columns:1fr}.sidebar{display:none}.workspace{padding:24px 20px}.crumb{margin-bottom:28px}.surface,.acquisition{padding:24px 20px}.acquisition-head{margin-bottom:28px}.progress{margin-bottom:30px}.progress li{gap:5px;font-size:11px}.progress li:not(:last-child)::after{margin:0 5px 0 0}.progress .number{width:21px;height:21px;font-size:10px}.current-step{flex-direction:column;align-items:flex-start;gap:20px}.current-step .primary{width:100%}.event-row{gap:10px}.event-row button{white-space:nowrap;font-size:12px}.onboarding-actions{gap:8px}.onboarding-actions button{font-size:12px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:26px 18px}.dialog-header{padding:20px}.dialog-header h2{font-size:18px}.dialog-body{padding:22px 20px}.dialog-footer{padding:16px 20px;gap:8px;flex-wrap:wrap}.dialog-footer button{font-size:12px}.dialog-footer .right{gap:6px}.dialog-layout{max-height:calc(100dvh - 26px)}dialog{max-height:calc(100dvh - 24px)}.demo-badge{font-size:9px;margin-left:6px}.code{font-size:11px;padding:12px;max-height:220px}.lab{padding:20px;margin:16px auto}.source-actions{flex-direction:column}button{min-height:44px}.dialog-header .close{min-height:44px;width:44px}.prototype-bar .tools summary{font-size:10px}.prototype-bar .popover{width:150px}.chat-message{display:none}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="prototype-bar"><span>交互原型 · v5</span><div class="flex"><select id="preview" aria-label="预览接入状态"><option value="new">未安装</option><option value="embedded">待检测</option><option value="connected">待测试</option><option value="ready">接入完成</option><option value="ready-sample">接入完成 · 示例</option></select><select id="scenario" aria-label="演示结果"><option value="ok">成功</option><option value="waiting">未收到数据</option><option value="domain">域名错误</option><option value="network">连接失败</option><option value="missing">缺少字段</option><option value="duplicate">重复事件</option></select><details class="tools"><summary>原型工具</summary><div class="popover"><a href="../workflow.svg" target="_blank" rel="noopener">流程图 ↗</a><a href="?lab=attribution" target="_blank" rel="noopener">归因演示 ↗</a><button id="reset">重置演示</button></div></details></div></div>
+<div id="product" class="shell">
+<aside class="sidebar"><div class="brand">lead<i>·</i></div><div class="nav-item">＋ 新建 Agent</div><div class="nav-item">概览</div><div class="nav-item active">示例项目</div></aside>
+<main class="workspace"><div class="crumb">我的 Agent　›　示例项目</div><div class="identity flex"><div class="avatar">✦</div><div><h1>示例项目</h1><p class="mini muted"><span class="success"><span class="dot"></span>运营中</span>　your-product.example</p></div></div><section id="acquisition" class="surface acquisition" aria-label="获客效果"></section><section class="surface"><h3>业务偏好</h3><div class="preference"><div><span class="muted">产品网址</span><span>your-product.example</span></div><div><span class="muted">目标客户</span><span>小团队与独立创作者</span></div></div></section></main>
+<aside class="chat"><h3>与 Agent 对话</h3><p class="chat-time">示例项目</p><p class="chat-message">随时补充想法，调整推广方向。</p><div class="composer">输入消息…</div></aside>
+</div>
+<main id="lab" class="lab" hidden><header class="between"><div><p class="mini muted">原型工具 · 独立演示</p><h2>推广来源关联</h2></div><a href="./" class="mini">返回工作台 ↗</a></header><div id="lab-content"></div></main>
+<dialog id="embed-dialog" aria-labelledby="embed-title"><div class="dialog-layout"><header class="dialog-header"><h2 id="embed-title">嵌入像素代码<span class="demo-badge">演示</span></h2><button class="close" data-close aria-label="关闭嵌入指引">×</button></header><div class="dialog-body"><p class="secondary">粘贴到网站的 <code>&lt;/head&gt;</code> 前。</p><pre id="base-code" class="code"></pre></div><footer class="dialog-footer"><button class="quiet" data-close>稍后嵌入</button><div class="right"><button id="copy-base" data-action="copy-base">复制代码</button><button class="primary" data-action="embedded">已发布，去检测</button></div></footer></div></dialog>
+<dialog id="detect-dialog" aria-labelledby="detect-title"><div class="dialog-layout"><header class="dialog-header"><h2 id="detect-title">检测像素安装<span class="demo-badge">演示</span></h2><button class="close" data-close aria-label="关闭安装检测">×</button></header><div id="detect-body" class="dialog-body"></div><footer id="detect-footer" class="dialog-footer"></footer></div></dialog>
+<dialog id="event-dialog" aria-labelledby="event-title"><div class="dialog-layout"><header class="dialog-header"><h2 id="event-title">事件设置与测试</h2><button class="close" data-close aria-label="关闭事件设置">×</button></header><div id="event-body" class="dialog-body"></div><footer id="event-footer" class="dialog-footer"></footer></div></dialog>
+<dialog id="event-details-dialog" aria-labelledby="event-details-title"><div class="dialog-layout"><header class="dialog-header"><h2 id="event-details-title">事件明细</h2><button class="close" data-close aria-label="关闭事件明细">×</button></header><div id="event-details-body" class="dialog-body"></div><footer class="dialog-footer"><button class="quiet" data-action="reference-events">标准事件参考</button><button data-close>关闭</button></footer></div></dialog>
+<dialog id="reference-dialog" aria-labelledby="reference-title"><div class="dialog-layout"><header class="dialog-header"><h2 id="reference-title">标准事件参考</h2><button class="close" data-close aria-label="关闭标准事件参考">×</button></header><div class="dialog-body"><div class="reference-search field"><label for="reference-search">查找事件</label><input id="reference-search" type="search" placeholder="事件名称或业务行为" autocomplete="off"></div><div id="reference-table"></div></div><footer class="dialog-footer"><button id="reference-return" data-close>返回</button></footer></div></dialog>
+<script>
+
+'use strict';
+const $=s=>document.querySelector(s);
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const paths={globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/>',check:'<path d="m5 12 4 4 10-10"/>',code:'<path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-14-2 18"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'};
+const icon=n=>'<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">'+paths[n]+'</svg>';
+const PIXEL='px_demo_project';
+const sources=[
+{code:'x_AbCdEfGh123',agent:'增长 Agent',agentId:'agent_growth',channel:'X',content:'产品介绍帖',contentId:'post_intro',pixel:PIXEL},
+{code:'tg_ZyXwVuTs987',agent:'社群 Agent',agentId:'agent_community',channel:'Telegram',content:'产品体验帖',contentId:'post_trial',pixel:PIXEL}
+];
+const eventTypes={registration:{title:'注册成功',name:'CompleteRegistration',where:'在账号创建成功后上报。'},activation:{title:'有效使用',name:'Activation',where:'在用户完成核心行为后上报。'},purchase:{title:'支付成功',name:'Purchase',where:'在支付成功确认后上报。'}};
+const standardEvents=[
+{title:'注册成功',name:'CompleteRegistration',when:'账号或注册流程完成',support:'可设置',id:'registration'},
+{title:'支付成功',name:'Purchase',when:'订单支付确认成功',support:'可设置',id:'purchase'},
+{title:'浏览页面',name:'PageView',when:'页面加载或路由切换',support:'基础代码',kind:'访问统计'},
+{title:'浏览内容',name:'ViewContent',when:'查看指定内容或产品详情',support:'仅供参考'},
+{title:'提交线索',name:'Lead',when:'成功提交意向表单',support:'仅供参考'},
+{title:'开始试用',name:'StartTrial',when:'试用成功开通',support:'仅供参考'},
+{title:'付费订阅',name:'Subscribe',when:'付费订阅成功开通',support:'仅供参考'},
+{title:'联系商家',name:'Contact',when:'发起电话、邮件或在线咨询',support:'仅供参考'},
+{title:'搜索',name:'Search',when:'执行站内搜索',support:'仅供参考'},
+{title:'加入购物车',name:'AddToCart',when:'商品成功加入购物车',support:'仅供参考'},
+{title:'加入心愿单',name:'AddToWishlist',when:'商品成功加入心愿单',support:'仅供参考'},
+{title:'开始结账',name:'InitiateCheckout',when:'开始结账流程',support:'仅供参考'},
+{title:'添加支付信息',name:'AddPaymentInfo',when:'成功添加支付方式',support:'仅供参考'},
+{title:'定制产品',name:'CustomizeProduct',when:'使用产品定制工具',support:'仅供参考'},
+{title:'捐赠',name:'Donate',when:'完成捐赠',support:'仅供参考'},
+{title:'查找位置',name:'FindLocation',when:'查找实体门店或位置',support:'仅供参考'},
+{title:'预约',name:'Schedule',when:'成功预约服务',support:'仅供参考'},
+{title:'提交申请',name:'SubmitApplication',when:'成功提交申请',support:'仅供参考'},
+{title:'有效使用',name:'Activation',when:'完成已定义的核心行为',support:'可设置',id:'activation',kind:'自定义事件'}
+];
+for(const e of standardEvents){if(e.name==='PageView')continue;e.id=e.id||e.name;e.support='可设置';if(!eventTypes[e.id])eventTypes[e.id]={title:e.title,name:e.name,where:e.when+'后上报。'};}
+function defaults(){return{embedded:false,ready:false,reportSample:false,visitOnly:false,view:'home',step:0,site:'https://your-product.example',installed:false,guideDone:false,installAt:null,events:{registration:{configured:false,received:false,method:'browser',definition:''},activation:{configured:false,received:false,method:'browser',definition:'首次成功导出报告'},purchase:{configured:false,received:false,method:'server',definition:''}},selectedEvent:'registration',source:0,advanced:{policy:'last',windowDays:'30'},demo:{visitor:1,sequence:0,touches:[],currentTouch:null,order:null,logs:[],eventIds:[],businessKeys:[],address:'',message:''}};}
+let state=defaults();
+const isLab=new URL(location.href).searchParams.get('lab')==='attribution';
+const storageKey=isLab?'lead:pixel-onboarding:lab:v3':'lead:pixel-onboarding:prototype:v3';
+try{const saved=JSON.parse(localStorage.getItem(storageKey));if(saved?.events?.registration&&saved?.demo?.touches){state={...state,...saved};}}catch{}
+for(const [id,e] of Object.entries(state.events)){if(e.custom&&e.name&&e.title)eventTypes[id]={title:e.title,name:e.name,where:'在指定业务行为完成后上报。',custom:true};}
+let busy=false,checkError='',scenario='ok',token=0,eventDraft=null,receipt=null,editingSite=false,sourceError='';
+const save=()=>{try{localStorage.setItem(storageKey,JSON.stringify(state));}catch{}};
+const time=d=>new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(d);
+const date=d=>new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);
+function toast(text){$('.toast')?.remove();const n=document.createElement('div');n.className='toast';n.setAttribute('role','status');n.textContent=text;(document.querySelector('dialog[open]')||document.body).append(n);setTimeout(()=>n.remove(),2300);}
+function pill(text,color='muted'){return '<span class="'+color+' mini"><span class="dot"></span>'+text+'</span>';}
+function details(title,body){return '<details><summary>'+title+'</summary><div>'+body+'</div></details>';}
+function code(text){return '<pre class="code">'+esc(text)+'</pre>';}
+function linkFor(i=state.source){const u=new URL(state.site);u.searchParams.set('lr',sources[i].code);return u.href;}
+function baseCode(){return '<!-- lead Pixel · 示例代码 -->\n<script>\n!function(w,d,s,u,q,t){if(w.leadq)return;\nq=w.leadq=function(){return q.callMethod?\nq.callMethod.apply(q,arguments):q.queue.push(arguments)};\nq.queue=[];t=d.createElement(s);t.async=true;t.src=u;\nd.head.appendChild(t)}(window,document,\'script\',\n\'https://collect.example/lead.js\');\nleadq(\'init\', \''+PIXEL+'\');\nleadq(\'track\', \'PageView\');\n</'+'script>';}
+function touchById(id){return state.demo.touches.find(t=>t.id===id)||null;}
+function currentTouch(){return touchById(state.demo.currentTouch);}
+function scopeTouch(){const valid=state.demo.touches.filter(t=>t.visitor===state.demo.visitor&&t.pixel===PIXEL&&Date.now()-t.at<=Number(state.advanced.windowDays)*86400000);return state.advanced.policy==='first'?valid[0]||null:valid[valid.length-1]||null;}
+function sourceName(t){return t?t.agent+' / '+t.channel:'未归因';}
+function sourceSnapshot(){const t=scopeTouch();return{pixel_id:PIXEL,anonymous_id:'demo_visitor_'+state.demo.visitor,session_id:'demo_session_'+state.demo.visitor,touchpoint_id:t?.id||null};}
+function eventParameters(id,e){
+if(id==='activation')return {action:e.definition,rule_version:'activation-v1'};
+if(eventTypes[id]?.custom)return {action:e.definition};
+const name=eventTypes[id].name;
+return ({Purchase:{order_id:'order_1001',value:99,currency:'CNY'},Search:{search_string:'站内搜索词'},ViewContent:{content_id:'content_1001'},Lead:{form_id:'form_1001'},StartTrial:{trial_id:'trial_1001'},Subscribe:{subscription_id:'subscription_1001',value:99,currency:'CNY'},Contact:{channel:'chat'},AddToCart:{content_id:'product_1001',quantity:1},AddToWishlist:{content_id:'product_1001'},InitiateCheckout:{order_id:'order_1001',value:99,currency:'CNY'},AddPaymentInfo:{payment_method:'card'},CustomizeProduct:{content_id:'product_1001'},Donate:{order_id:'donation_1001',value:99,currency:'CNY'},FindLocation:{location_id:'location_1001'},Schedule:{appointment_id:'appointment_1001'},SubmitApplication:{application_id:'application_1001'}})[name]||{};
+}
+function eventCode(id,draft=eventDraft){
+const type=eventTypes[id],e=draft||state.events[id],params=eventParameters(id,e);
+if(e.method==='server')return 'POST /collect/server/events\nAuthorization: Bearer <网站后端密钥>\n\n'+JSON.stringify({pixel_id:PIXEL,event_name:type.name,event_id:id==='purchase'?'purchase:order_1001':type.name+':event_1001',occurred_at:'2026-10-30T06:00:00Z',user_id:'user_1001',...params,attribution:{touchpoint_id:'业务记录中已保存的触点编号'}},null,2);
+if(id==='registration')return "leadq('identify', user.id);\nleadq('track', 'CompleteRegistration', {},\n  { event_id: 'signup:' + user.id });";
+if(id==='activation')return "leadq('track', 'Activation', {\n  action: "+JSON.stringify(e.definition)+",\n  rule_version: 'activation-v1'\n}, { event_id: 'activation:v1:' + user.id });";
+if(id==='purchase')return "leadq('track', 'Purchase', {\n  order_id: order.id,\n  value: order.paid_amount,\n  currency: order.currency\n}, { event_id: 'purchase:' + order.id });";
+return "leadq('track', "+JSON.stringify(type.name)+", "+JSON.stringify(params,null,2)+",\n  { event_id: businessEvent.id });";
+}
+
+function handoff(){return 'lead 网站像素接入（原型协议示意）\n网站：'+state.site+'\n像素：'+PIXEL+'\n1. 全站安装基础代码，页面切换上报 PageView。\n2. SDK 读取链接中的 lr，服务器校验其属于当前像素及网站，创建独立推广触点。\n3. 保存已验证触点，站内跳转不丢失；再次点击推广链接时新增触点，不覆盖旧记录。\n4. 注册或创建订单时，将 leadq attribution 返回的触点与匿名访客编号传到业务后端，并保存到用户或订单。\n5. 注册、核心使用、支付成功后上报对应事件；支付回调读取订单保存的来源。\n6. 所有事件按像素归属入库，再按有效触点归因；无来源标记为未归因。\n7. 事件编号与业务编号分别去重；发生时间和接收时间分开保存。\n示例域名、密钥和 API 不能用于正式接入。';}
+
+function sourcesPage(){
+const d=state.demo,t=currentTouch();
+return '<div class="between"><p class="site">链接自动关联到当前项目的像素</p><span class="source-count">'+sources.length+' 个推广来源</span></div>'+
+sources.map((s,i)=>'<div class="source-link '+(state.source===i?'selected':'')+'"><div class="between"><div><span class="source-name">'+esc(s.agent)+'</span><span class="pill">'+esc(s.channel)+'</span><p class="mini muted mt8">'+esc(s.content)+'</p></div><div class="source-actions"><button class="small quiet" data-select-source="'+i+'">'+(state.source===i?'已选中':'选择')+'</button><button class="small" data-copy-link="'+i+'">复制链接</button></div></div><code>'+esc(linkFor(i))+'</code></div>').join('')+
+'<div class="shelf"><div class="between"><h3>体验来源关联</h3><button data-demo="visit" '+(!state.installed?'disabled':'')+'>模拟访问</button></div><div class="flow-line"><span>分享链接</span><i>→</i><span>网站像素</span><i>→</i><span>服务器归因</span></div>'+
+'<div class="address">'+esc(d.address||linkFor())+'</div>'+
+(!state.installed?'<p class="note">当前网站尚未安装像素。<button class="quiet small" data-nav="install">去安装 ↗</button></p>':'')+
+(d.message?'<div class="notice '+(d.message.startsWith('来源已')?'good':'')+'" role="status">'+esc(d.message)+'</div>':'')+
+'<div class="log-list">'+(d.logs.length?d.logs.slice(0,4).map(logHTML).join(''):'<div class="empty">访问后，这里会显示收到的事件和推广来源。</div>')+'</div></div>'+
+details('站内跳转与注册','<div class="log-tools"><button class="small" data-demo="navigate" '+(!state.installed?'disabled':'')+'>站内跳转</button><button class="small" data-demo="register" '+(!state.installed?'disabled':'')+'>模拟注册成功</button><button class="small" data-demo="direct" '+(!state.installed?'disabled':'')+'>新访客直接访问</button></div><p class="note">站内跳转沿用已验证的来源；新访客直接进入时标为未归因。</p>')+
+details('开发者演示：换来源与支付回传','<div class="log-tools"><button class="small" data-demo="order" '+(!state.installed?'disabled':'')+'>创建测试订单</button><button class="small" data-demo="switch" '+(!state.installed?'disabled':'')+'>切换到另一推广来源</button><button class="small" data-demo="pay" '+(!d.order?'disabled':'')+'>延迟支付回传</button></div>'+(d.order?'<div class="callback">测试订单 '+esc(d.order.id)+'<p class="mini muted mt8">保存来源：'+esc(sourceName(touchById(d.order.touchId)))+'</p></div>':'')+'<div class="log-tools"><button class="small" data-demo="invalid" '+(!state.installed?'disabled':'')+'>无效来源标记</button><button class="small" data-demo="mismatch" '+(!state.installed?'disabled':'')+'>其他项目来源</button></div>')+
+details('技术说明：链接如何关联像素',sourceTechnical());}
+
+function sourceTechnical(){return '<table class="table"><thead><tr><th>标识</th><th>职责</th></tr></thead><tbody><tr><td>pixel_id</td><td>安装代码中的项目数据源；采集地址由 SDK 配置。</td></tr><tr><td>lr</td><td>服务端生成的公开来源码，映射项目、Agent、渠道、内容及目标网站。</td></tr><tr><td>touchpoint_id</td><td>服务器校验后为本次推广进入创建的触点；每次来源变化新增记录。</td></tr><tr><td>anonymous_id</td><td>本站匿名访客编号，站内连续访问保持一致。</td></tr></tbody></table>'+
+code(JSON.stringify({pixel_id:PIXEL,lr:sources[state.source].code,server_resolves:{agent_id:sources[state.source].agentId,channel:sources[state.source].channel,content_id:sources[state.source].contentId,site_origin:state.site},current_attribution:sourceSnapshot()},null,2))+
+'<p class="note">SDK 不信任 URL 中自填的 Agent 信息。服务端核对像素、项目和网站后创建触点；没有有效来源时仍接收项目事件。</p><p class="note">已验证触点在本站保存，归因窗口默认 30 天。注册或创建订单时把触点保存到业务后端；异步支付从订单记录读取，不依赖支付时浏览器仍打开。</p><p class="note">跨域跳转需在受支持的网站间显式传递并重新校验，不能依赖跨站共享浏览器存储。</p>';}
+
+function logHTML(l){return '<div class="log"><div class="between"><span>'+esc(l.name)+'</span><span class="'+(l.status==='duplicate'?'warning':l.status==='rejected'?'danger':'success')+'">'+({accepted:'已接收',duplicate:'重复已忽略',rejected:'未接收'})[l.status]+'</span></div><p class="mini">'+esc(l.source)+' · '+esc(l.note)+'</p><div class="record-meta"><span>发生 '+esc(l.occurred)+'</span><span>接收 '+esc(l.time)+'</span></div></div>';}
+
+function pushEvent(name,kind,touchId,mode='normal',at=Date.now(),orderId=null){
+const d=state.demo,previous=d.logs.find(l=>l.kind===kind&&l.status==='accepted'),id=mode==='duplicate'&&previous?previous.id:'demo_event_'+(++d.sequence);
+const business=kind==='purchase'?'purchase:'+(orderId||'demo_order_one'):kind==='registration'?'signup:demo_visitor_'+d.visitor:kind==='activation'?'activation:v1:demo_visitor_'+d.visitor:null;
+let status='accepted',note='';
+if(mode==='missing'){status='rejected';note='缺少业务编号。';}
+else if(d.eventIds.includes(id)||(business&&d.businessKeys.includes(business))){status='duplicate';note='事件或业务编号已存在，本次不新增计数。';}
+else{d.eventIds.push(id);if(business)d.businessKeys.push(business);note=touchId?'来源已验证。':'保留为未归因。';}
+const t=touchById(touchId),now=Date.now();
+const record={id,name,kind,status,touchId:t?.id||null,source:sourceName(t),note,occurred:date(new Date(at))+' '+time(new Date(at)),time:time(new Date(now)),payload:{pixel_id:PIXEL,event_id:id,event_name:name,anonymous_id:'demo_visitor_'+d.visitor,session_id:'demo_session_'+d.visitor,user_id:kind==='pageview'?null:'demo_user_'+d.visitor,touchpoint_id:t?.id||null,occurred_at:new Date(at).toISOString(),received_at:new Date(now).toISOString(),...(orderId?{order_id:orderId}:{})}};
+d.logs.unshift(record);d.logs=d.logs.slice(0,16);return record;}
+
+function receiveVisit(codeValue,mode='normal'){
+const d=state.demo;
+if(!state.installed){d.message='尚未安装像素，未收到网站事件。';return;}
+let candidate=sources.find(s=>s.code===codeValue),why='';
+if(mode==='invalid'){candidate=null;why='来源标记无效';}
+if(mode==='mismatch'){candidate=null;why='来源标记属于其他项目';}
+if(candidate){const t={id:'demo_touch_'+(++d.sequence),pixel:PIXEL,visitor:d.visitor,at:Date.now(),...candidate};d.touches.push(t);d.currentTouch=t.id;}
+else if(mode!=='navigate'){d.currentTouch=null;}
+const matched=scopeTouch();
+d.message=candidate?'来源已关联：'+candidate.agent+' / '+candidate.channel:mode==='navigate'?'站内跳转，沿用已验证的推广来源。':why?why+'，按未归因接收。':'自然访问，按未归因接收。';
+pushEvent('PageView','pageview',matched?.id||null);
+}
+
+function freshVisitor(){const d=state.demo;d.visitor++;d.currentTouch=null;}
+
+function demo(action){
+const d=state.demo;
+if(action==='visit'){d.address=linkFor();receiveVisit(sources[state.source].code);}
+if(action==='navigate'){d.address=state.site+'/pricing';receiveVisit(null,'navigate');}
+if(action==='direct'){freshVisitor();d.address=state.site;receiveVisit(null,'direct');}
+if(action==='invalid'||action==='mismatch'){freshVisitor();d.address=state.site+'/?lr='+(action==='invalid'?'unknown_code':'other_project_code');receiveVisit(null,action);}
+if(action==='switch'){state.source=(state.source+1)%sources.length;d.address=linkFor();receiveVisit(sources[state.source].code);}
+if(action==='register'){const t=scopeTouch();const r=pushEvent('CompleteRegistration','registration',t?.id||null);d.message=r.status==='duplicate'?'同一用户的注册已记录。':'注册已收到，来源：'+r.source;state.events.registration.received=true;}
+if(action==='order'){const t=scopeTouch();d.order={id:'demo_order_'+(++d.sequence),createdAt:Date.now(),sessionId:'demo_session_'+d.visitor,touchId:t?.id||null,visitor:d.visitor,anonymousId:'demo_visitor_'+d.visitor,userId:'demo_user_'+d.visitor};d.message='测试订单已保存当前推广来源。';}
+if(action==='pay'&&d.order){const order=d.order;const r=pushEvent('Purchase','purchase',order.touchId,'normal',Math.max(order.createdAt||Date.now(),Date.now()-5000),order.id);r.payload.anonymous_id=order.anonymousId;r.payload.user_id=order.userId;r.payload.session_id=order.sessionId;if(r.status==='accepted')r.note='从订单保存的触点归因；按业务实际发生时间统计。';d.message='支付回传来源：'+r.source+'；当前浏览器来源：'+sourceName(scopeTouch());state.events.purchase.received=true;}
+render();}
+
+
+let referenceReturn=null,eventView='list',eventSearch='',eventDrafts={},addDraft={type:'',title:'',name:''},addError='';
+let activeModal=null,opener=null,detectState='idle',testState='idle',testMessage='',testTime=null;
+if(isLab){state.installed=true;state.embedded=true;}
+function stage(){return !state.embedded?0:!state.installed?1:2;}
+function verified(){return Object.keys(state.events).filter(k=>state.events[k].verified);}
+function progress(){const current=stage();return '<ol class="progress" aria-label="像素接入进度">'+['嵌入代码','安装检测','事件测试'].map((label,i)=>'<li class="'+(i<current?'done':i===current?'active':'')+'" '+(i===current?'aria-current="step"':'')+'><span class="number">'+(i<current?'✓':i+1)+'</span><span>'+label+'</span></li>').join('')+'</ol>';}
+function settingsMenu(){return '<details class="settings-menu"><summary>像素设置 ↗</summary><div class="popover"><button data-open="embed">嵌入指引</button><button data-open="detect">安装检测</button><button data-open="event">事件设置与测试</button></div></details>';}
+function acquisition(){
+if(state.ready&&state.installed){const report=reportData(),total=report?Object.values(report.events).reduce((sum,e)=>sum+e.count,0):null;return '<div class="acquisition-head"><h2>获客效果</h2>'+settingsMenu()+'</div><div class="metrics">'+[['独立访客',report?.visitors],['访问会话',report?.sessions]].map(([title,value])=>'<div class="metric"><span>'+title+'</span><strong>'+((value??null)===null?'—':number(value))+'</strong></div>').join('')+'<button class="metric metric-link" data-open="metrics" aria-label="事件，查看各事件详细数据"><span class="metric-name">事件 <b aria-hidden="true">↗</b></span><strong class="'+(!verified().length?'unknown':'')+'">'+(total!==null?number(total):verified().length?'—':'未接入')+'</strong></button></div><p class="metric-period">'+(report?'近 30 天 · 示例数据':'近 30 天 · 等待正式数据')+'</p>';}
+const s=stage();let body='';
+if(s===0)body='<div class="current-step"><h3>安装网站像素</h3><button class="primary" data-open="embed">获取像素代码</button></div>';
+if(s===1)body='<div class="current-step"><h3>检测像素安装</h3><button class="primary" data-open="detect">检测安装</button></div>';
+if(s===2)body='<div class="current-step"><h3>设置网站事件</h3><button class="primary" data-open="event">事件设置与测试</button></div>';
+return '<div class="acquisition-head"><h2>获客效果</h2><span class="mini muted">'+(s===0?'未接入':s===1?'1 / 3':'2 / 3')+'</span></div>'+progress()+body;
+}
+const reportSample={visitors:1280,sessions:1632,events:{registration:{count:86,users:86,last:'今天 14:32'},activation:{count:51,users:51,last:'今天 14:26'},purchase:{count:18,users:14,last:'今天 14:18'}}};
+const reportData=()=>state.reportSample&&state.ready?reportSample:null;
+const number=v=>new Intl.NumberFormat('zh-CN').format(v);
+const reportPeriod=()=>reportData()?'近 30 天 · 示例数据':'近 30 天 · 正式数据';
+function renderEventDetails(){
+const report=reportData();
+const rows=Object.entries(state.events).map(([id,e])=>{const t=eventTypes[id],connected=!!e.verified,data=report?.events[id];return '<tr><td>'+esc(t.title)+'<code>'+esc(t.name)+'</code></td><td data-label="事件次数">'+(data?number(data.count):connected?'—':'未接入')+'</td><td data-label="触发人数">'+(data?number(data.users):connected?'—':'未接入')+'</td><td data-label="最近发生">'+(data?data.last:'—')+'</td><td data-label="接入状态"><span class="state '+(connected?'success':'muted')+'">'+(connected?'已接入':e.configured?'待测试':'未接入')+'</span></td></tr>';}).join('');
+$('#event-details-body').innerHTML='<p class="report-context">'+reportPeriod()+'</p><table class="table report-table" aria-label="各事件详细数据"><thead><tr><th scope="col" style="width:30%">事件</th><th scope="col">事件次数</th><th scope="col">触发人数</th><th scope="col">最近发生</th><th scope="col">接入状态</th></tr></thead><tbody>'+rows+'</tbody></table>'+(report?'':'<p class="empty">'+(verified().length?'暂无正式事件数据':'尚未接入业务事件')+'</p>')+'<section class="table-rules" aria-label="统计口径"><h3>统计口径</h3><p class="mini secondary">事件按业务规则去重计次，汇总各业务事件；不含页面访问和测试数据。触发人数按每个事件分别去重，不相加为总人数。</p></section>';
+}
+function renderReference(query=''){
+const q=query.trim().toLowerCase(),list=standardEvents.filter(e=>[e.title,e.name,e.when,e.kind||''].some(v=>v.toLowerCase().includes(q)));
+$('#reference-table').innerHTML=list.length?'<table class="table report-table reference-table" aria-label="标准事件参考表"><thead><tr><th scope="col">事件</th><th scope="col">触发时机</th><th scope="col">事件类型</th></tr></thead><tbody>'+list.map(e=>'<tr><td>'+esc(e.title)+'<code>'+esc(e.name)+'</code>'+'</td><td data-label="触发时机">'+esc(e.when)+'</td><td data-label="事件类型"><span class="secondary">'+(e.name==='PageView'?'自动采集':e.id==='activation'?'自定义事件':'标准事件')+'</span></td></tr>').join('')+'</tbody></table>':'<p class="reference-empty" role="status">没有匹配的事件</p>';
+}
+function openReference(){
+if(testState==='checking'&&activeModal==='event')return;
+referenceReturn={modal:activeModal,element:document.activeElement};
+const previous=document.querySelector('dialog[open]');if(previous)previous.close();
+activeModal='reference';$('#reference-search').value='';renderReference();
+$('#reference-return').textContent=referenceReturn.modal==='event'?'返回事件设置':referenceReturn.modal==='metrics'?'返回事件明细':'返回事件选择';
+$('#reference-dialog').showModal();
+}
+function render(){
+if(isLab){$('#product').hidden=true;$('#lab').hidden=false;const open=Array.from($('#lab-content').querySelectorAll('details[open]')).map(d=>d.querySelector('summary').textContent);$('#lab-content').innerHTML=sourcesPage();for(const d of $('#lab-content').querySelectorAll('details'))if(open.includes(d.querySelector('summary').textContent))d.open=true;}
+else{$('#acquisition').innerHTML=acquisition();}
+$('#base-code').textContent=baseCode();
+$('#preview').value=state.ready?(state.reportSample?'ready-sample':'ready'):state.installed?'connected':state.embedded?'embedded':'new';
+$('#scenario').value=scenario;save();
+}
+function detectBody(){
+const good=detectState==='success',bad=detectState==='error',loading=detectState==='checking';
+return '<div class="field"><label for="check-url">检测网址</label><input id="check-url" type="url" value="'+esc(state.site)+'" '+(loading?'disabled':'')+'></div><div class="detect-result" role="status"><div class="result-icon '+(good?'good':bad?'bad':'')+'">'+(loading?'<span class="spinner"></span>':icon(good?'check':bad?'code':'clock'))+'</div><h3 class="'+(bad?'danger':'')+'">'+(good?'像素已连接':bad?esc(checkError):loading?'正在检测…':'等待检测')+'</h3>'+(good?'<p class="mini muted">PageView · '+time(new Date(state.installAt))+'</p>':'')+'</div>';
+}
+function renderDetect(){const good=detectState==='success';$('#detect-body').innerHTML=detectBody();$('#detect-footer').innerHTML='<button class="quiet" data-close>'+(good?'关闭':'稍后检测')+'</button><div class="right">'+(detectState==='error'?'<button class="quiet" data-action="back-embed">查看嵌入指引</button>':'')+'<button class="primary" data-action="'+(good?'detect-done':'check-install')+'" '+(detectState==='checking'?'disabled':'')+'>'+(good?'完成检测':detectState==='error'?'重新检测':'开始检测')+'</button></div>';}
+function eventDeveloper(id){
+const e=eventDraft,dedup=({registration:'按用户编号。',activation:'按用户编号与规则版本。',purchase:'按订单编号；人数按用户编号。'})[id]||'按事件编号；人数按用户或匿名访客编号。';
+return '<details class="advanced"><summary>开发接入</summary><div><div class="field"><label for="event-method">上报方式</label><select id="event-method"><option value="browser" '+(e.method==='browser'?'selected':'')+'>浏览器</option><option value="server" '+(e.method==='server'?'selected':'')+'>服务端</option></select></div><dl><div class="rule"><dt>去重</dt><dd>'+dedup+'</dd></div><div class="rule"><dt>业务来源</dt><dd>沿用已验证触点，异步支付读取订单保存的来源。</dd></div></dl></div></details>';
+}
+function eventStatus(e){return e.verified?'✓ 测试通过':e.configured?'待测试':'待设置';}
+function managerRows(){
+const query=eventSearch.toLowerCase();
+const list=Object.entries(state.events).filter(([id,e])=>[eventTypes[id].title,eventTypes[id].name].some(v=>v.toLowerCase().includes(query)));
+return list.length?list.map(([id,e])=>{const t=eventTypes[id];return '<div class="event-row"><div>'+esc(t.title)+'<code>'+esc(t.name)+'</code><p class="mini '+(e.verified?'success':'muted')+'">'+eventStatus(e)+'</p></div><button data-edit-event="'+esc(id)+'" aria-label="设置并测试'+esc(t.title)+'">'+(e.verified?'重新测试':'设置并测试')+'</button></div>';}).join(''):'<p class="empty" role="status">没有匹配的事件</p>';
+}
+function renderEvent(){
+$('#event-title').innerHTML='事件设置与测试<span class="demo-badge">演示</span>';
+if(eventView==='list'){
+$('#event-body').innerHTML='<div class="event-manager-tools"><h3>已添加事件</h3><div class="event-manager-actions"><button class="quiet small" data-action="reference-events">标准事件参考</button><button class="small" data-action="add-event">添加事件</button></div></div><div class="event-manager-search field"><label for="event-search">查找已添加事件</label><input id="event-search" type="search" value="'+esc(eventSearch)+'" placeholder="事件名称或标识"></div><div id="manager-rows">'+managerRows()+'</div>';
+$('#event-footer').innerHTML='<button class="quiet" data-action="'+(state.ready?'close-events':'visits-only')+'">'+(state.ready?'关闭':'稍后配置事件')+'</button><button class="primary" data-action="'+(state.ready?'close-events':'finish-events')+'" '+(!state.ready&&!verified().length?'disabled':'')+'>'+(state.ready?'完成':'完成接入')+'</button>';return;
+}
+if(eventView==='add'){
+const options=standardEvents.filter(e=>e.name!=='PageView'&&!state.events[e.id]);
+if(!addDraft.type)addDraft.type=options[0]?.id||'custom';
+$('#event-body').innerHTML='<div class="event-manager-tools"><h3>添加事件</h3><button class="quiet small" data-action="reference-events">标准事件参考</button></div><div class="event-add-fields"><div class="field"><label for="new-event-type">事件类型</label><select id="new-event-type">'+options.map(e=>'<option value="'+esc(e.id)+'" '+(addDraft.type===e.id?'selected':'')+'>'+esc(e.title)+' · '+esc(e.name)+'</option>').join('')+'<option value="custom" '+(addDraft.type==='custom'?'selected':'')+'>自定义事件</option></select></div>'+(addDraft.type==='custom'?'<div class="field"><label for="custom-event-title">显示名称</label><input id="custom-event-title" value="'+esc(addDraft.title)+'" placeholder="例如：导出报告"></div><div class="field"><label for="custom-event-name">事件标识</label><input id="custom-event-name" value="'+esc(addDraft.name)+'" placeholder="例如：ReportExported" aria-describedby="custom-name-hint"><p id="custom-name-hint" class="mini muted">字母开头，最多 64 个字母、数字或下划线。</p></div>':'<p class="secondary mini">'+esc(eventTypes[addDraft.type].where)+'</p>')+'</div>'+(addError?'<p class="message-error" role="alert">'+esc(addError)+'</p>':'');
+$('#event-footer').innerHTML='<button class="quiet" data-action="event-list">返回事件列表</button><button class="primary" data-action="create-event">添加并设置</button>';return;
+}
+const id=state.selectedEvent,e=eventDraft,type=eventTypes[id],opened=$('#event-body details')?.open;
+$('#event-body').innerHTML='<div class="event-editor-title"><h3>'+esc(type.title)+'</h3><code>'+esc(type.name)+'</code></div>'+((id==='activation'||type.custom)?'<div class="field"><label for="definition">'+(id==='activation'?'核心行为':'触发行为')+'</label><input id="definition" value="'+esc(e.definition)+'" placeholder="例如：首次成功导出报告"></div>':'<p class="secondary">'+esc(type.where)+'</p>')+'<div class="code-top mt16"><span class="mini muted">事件代码</span><div class="flex"><button class="quiet small" data-action="reference-events" '+(testState==='checking'?'disabled':'')+'>标准事件参考</button><button class="quiet small" data-action="copy-event">复制代码</button></div></div>'+code(eventCode(id,e))+(testState!=='idle'?'<div class="result-inline" role="status"><span class="'+(testState==='success'?'success':testState==='error'?'danger':'muted')+'">'+(testState==='checking'?'正在等待测试事件…':esc(testMessage))+'</span>'+(testState==='success'?'<p class="mini muted">'+esc(type.name)+' · '+time(new Date(testTime))+'</p>':'')+'</div>':'')+eventDeveloper(id);
+if(opened)$('#event-body details').open=true;
+$('#event-footer').innerHTML='<button class="quiet" data-action="event-list" '+(testState==='checking'?'disabled':'')+'>返回事件列表</button><button class="primary" data-action="'+(testState==='success'?'event-done':'test-event')+'" '+(testState==='checking'?'disabled':'')+'>'+(testState==='success'?'完成测试':testState==='error'?'重新测试':'保存并测试')+'</button>';
+}
+function editEvent(id){
+if(!state.events[id])return;
+state.selectedEvent=id;eventView='edit';eventDraft={...(eventDrafts[id]||state.events[id])};testState='idle';testMessage='';renderEvent();$('#event-body').scrollTop=0;($('#definition')||$('#event-body [data-action="copy-event"]'))?.focus({preventScroll:true});
+}
+function eventList(){
+if(eventView==='edit'&&eventDraft)eventDrafts[state.selectedEvent]={...eventDraft};
+eventView='list';eventDraft=null;testState='idle';testMessage='';renderEvent();$('#event-body').scrollTop=0;$('#event-search')?.focus({preventScroll:true});
+}
+function createEvent(){
+let id=addDraft.type,metadata;
+if(id==='custom'){
+const name=addDraft.name.trim(),title=addDraft.title.trim();
+if(!title){addError='请填写显示名称';renderEvent();return;}
+if(!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)){addError='请填写符合格式的事件标识';renderEvent();return;}
+if(standardEvents.some(e=>e.name.toLowerCase()===name.toLowerCase())||Object.values(state.events).some(e=>(e.name||'').toLowerCase()===name.toLowerCase())){addError='该事件标识已存在';renderEvent();return;}
+id='custom:'+name;metadata={name,title,custom:true};eventTypes[id]={name,title,custom:true,where:'在指定业务行为完成后上报。'};
+}
+if(state.events[id]){addError='该事件已添加';renderEvent();return;}
+state.events[id]={configured:false,received:false,verified:false,method:'browser',definition:'',...metadata};save();addError='';editEvent(id);
+}
+
+function focusMain(){const target=state.ready?$('#acquisition summary'):$('#acquisition button:not(:disabled)');target?.focus({preventScroll:true});}
+function closeActive(focus=true){
+if(activeModal==='reference'&&referenceReturn){
+const back=referenceReturn;referenceReturn=null;$('#reference-dialog').close();
+if(focus&&back.modal){activeModal=back.modal;$(back.modal==='event'?'#event-dialog':'#event-details-dialog').showModal();if(back.element?.isConnected)back.element.focus({preventScroll:true});return;}
+if(focus){activeModal=null;if(back.element?.isConnected)back.element.focus({preventScroll:true});else focusMain();return;}
+}
+++token;busy=false;
+const dialog=document.querySelector('dialog[open]');if(dialog)dialog.close();
+activeModal=null;eventDraft=null;eventDrafts={};
+if(focus){if(opener?.isConnected&&opener!==document.body)opener.focus({preventScroll:true});else focusMain();}
+}
+function openTask(task,id=null){
+const previous=document.querySelector('dialog[open]');if(previous)previous.close();
+++token;busy=false;activeModal=task;opener=document.activeElement;
+document.querySelectorAll('details.settings-menu[open]').forEach(d=>d.open=false);
+if(task==='metrics'){renderEventDetails();$('#event-details-dialog').showModal();}
+if(task==='embed'){$('#copy-base').textContent='复制代码';$('#embed-dialog').showModal();}
+if(task==='detect'){detectState='idle';checkError='';renderDetect();$('#detect-dialog').showModal();}
+if(task==='event'){
+if(!state.installed){openTask('detect');return;}
+eventView='list';eventSearch='';eventDrafts={};eventDraft=null;testState='idle';testMessage='';renderEvent();$('#event-dialog').showModal();if(id)editEvent(id);
+}
+}
+async function copyValue(value,button=null){try{await navigator.clipboard.writeText(value);if(button)button.textContent='已复制';else toast('已复制');}catch{if(button)button.textContent='请手动复制';else toast('请选中代码手动复制');}}
+async function checkInstall(){
+let url;try{url=new URL($('#check-url').value);}catch{}
+if(!url||url.origin!==state.site){detectState='error';checkError='请填写当前项目的网站地址';renderDetect();return;}
+const task=++token;detectState='checking';renderDetect();
+await new Promise(resolve=>setTimeout(resolve,650));if(task!==token)return;
+if(scenario==='ok'||scenario==='duplicate'){state.installed=true;state.embedded=true;state.installAt=Date.now();detectState='success';}
+else{state.installed=false;state.ready=false;detectState='error';checkError=({waiting:'未收到像素数据',domain:'安装域名不匹配',network:'连接失败，请重试',missing:'未收到像素数据'})[scenario];}
+render();renderDetect();
+}
+async function testEventSetup(){
+const id=state.selectedEvent;
+if((id==='activation'||eventTypes[id].custom)&&!eventDraft.definition.trim()){testState='error';testMessage=id==='activation'?'请填写核心行为':'请填写触发行为';renderEvent();return;}
+state.events[id]={...eventDraft,configured:true,verified:false};render();
+const task=++token;testState='checking';renderEvent();
+await new Promise(resolve=>setTimeout(resolve,650));if(task!==token)return;
+if(scenario==='ok'||scenario==='duplicate'){
+const t=scopeTouch();if(scenario==='duplicate')pushEvent(eventTypes[id].name,id,t?.id||null,'normal',Date.now(),id==='purchase'?'demo_setup_order':null);
+const r=pushEvent(eventTypes[id].name,id,t?.id||null,scenario==='duplicate'?'duplicate':'normal',Date.now(),id==='purchase'?'demo_setup_order':null);
+state.events[id].verified=true;state.events[id].received=true;eventDraft={...state.events[id]};eventDrafts[id]={...eventDraft};testState='success';testTime=Date.now();testMessage=r.status==='duplicate'?'事件已接收，重复已忽略':'测试通过';
+}else{testState='error';testMessage=({waiting:'尚未收到测试事件',domain:'事件来源不匹配',network:'连接失败，请重试',missing:'事件缺少必要字段'})[scenario];}
+render();renderEvent();
+}
+function seed(value){
+closeActive(false);state=defaults();scenario='ok';
+if(value!=='new')state.embedded=true;
+if(value==='connected'||value==='ready'||value==='ready-sample'){state.installed=true;state.installAt=Date.now();}
+if(value==='ready'){state.ready=true;state.events.registration.configured=true;state.events.registration.verified=true;state.events.registration.received=true;}
+if(value==='ready-sample'){state.ready=true;state.reportSample=true;for(const e of Object.values(state.events)){e.configured=true;e.verified=true;e.received=true;}}
+if(isLab){state.installed=true;state.embedded=true;}render();
+}
+document.addEventListener('click',event=>{
+const t=event.target.closest('button');if(!t||t.disabled)return;
+if(t.hasAttribute('data-close')){closeActive();return;}
+if(t.dataset.open){openTask(t.dataset.open);return;}
+if(t.dataset.editEvent){editEvent(t.dataset.editEvent);return;}
+if(isLab){
+if(t.dataset.demo){demo(t.dataset.demo);return;}
+if(t.dataset.selectSource!==undefined){state.source=Number(t.dataset.selectSource);render();return;}
+if(t.dataset.copyLink!==undefined){copyValue(linkFor(Number(t.dataset.copyLink)));return;}
+if(t.dataset.nav){location.href='./';return;}
+}
+switch(t.dataset.action){
+case'reference-events':openReference();break;
+case'add-event':eventView='add';addDraft={type:'',title:'',name:''};addError='';renderEvent();$('#new-event-type')?.focus({preventScroll:true});break;
+case'event-list':case'event-done':eventList();break;
+case'create-event':createEvent();break;
+case'close-events':closeActive();break;
+case'finish-events':if(verified().length){state.ready=true;state.visitOnly=false;closeActive(false);render();focusMain();}break;
+case'copy-base':copyValue(baseCode(),t);break;
+case'copy-event':copyValue(eventCode(state.selectedEvent,eventDraft),t);break;
+case'embedded':state.embedded=true;render();openTask('detect');break;
+case'back-embed':openTask('embed');break;
+case'check-install':checkInstall();break;
+case'detect-done':closeActive(false);render();focusMain();$('#acquisition').scrollIntoView({block:'nearest',behavior:'instant'});break;
+case'test-event':testEventSetup();break;
+
+case'finish':if(verified().length){state.ready=true;state.visitOnly=false;render();focusMain();}break;
+case'visits-only':state.ready=true;state.visitOnly=true;closeActive(false);render();focusMain();break;
+}
+});
+document.addEventListener('input',event=>{if(event.target.id==='event-search'){eventSearch=event.target.value;$('#manager-rows').innerHTML=managerRows();return;}if(event.target.id==='custom-event-title'){addDraft.title=event.target.value;addError='';$('#event-body .message-error')?.remove();return;}if(event.target.id==='custom-event-name'){addDraft.name=event.target.value;addError='';$('#event-body .message-error')?.remove();return;}if(event.target.id==='reference-search'){renderReference(event.target.value);return;}if(event.target.id==='definition'&&eventDraft){eventDraft.definition=event.target.value;const pre=$('#event-body .code');if(pre)pre.textContent=eventCode(state.selectedEvent,eventDraft);if(testState==='success'){const start=event.target.selectionStart,end=event.target.selectionEnd;testState='idle';renderEvent();const input=$('#definition');input.focus({preventScroll:true});input.setSelectionRange(start,end);}}});
+document.addEventListener('change',event=>{
+if(event.target.id==='new-event-type'){addDraft.type=event.target.value;addError='';renderEvent();$('#new-event-type')?.focus({preventScroll:true});}
+if(event.target.id==='event-method'){eventDraft.method=event.target.value;testState='idle';renderEvent();}
+if(event.target.id==='preview')seed(event.target.value);
+if(event.target.id==='scenario')scenario=event.target.value;
+});
+for(const d of document.querySelectorAll('dialog'))d.addEventListener('cancel',event=>{event.preventDefault();closeActive();});
+$('#reset').onclick=()=>{seed('new');document.querySelector('.tools').open=false;};
+render();
+
+</script>
+</body>
+</html>
