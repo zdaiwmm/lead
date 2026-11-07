@@ -246,6 +246,21 @@ def candidates(c, aid, agent, business, now=None):
         previous = lanes.get(key, {})
         if browser and busy:
             return
+        community_operation = None
+        paid_step = None
+        if kind == "community_progress":
+            from .community_growth import GrowthConfig
+            from .community_selection import choose
+            config = GrowthConfig.model_validate(agent["onboarding_state"].get("community_growth", {}))
+            community_operation = choose(c, agent, config, now)
+            if not community_operation:
+                return
+            paid_step = community_operation["paid"]
+            delivery_ready = bool(community_operation.get("overdue") or
+                                  (community_operation["kind"] == "resume" and not paid_step))
+            contract_repair = community_operation["kind"] == "correct_voice"
+            if contract_repair:
+                priority = 95
         if (
             previous.get("next_at")
             and datetime.fromisoformat(previous["next_at"]) > now
@@ -261,8 +276,6 @@ def candidates(c, aid, agent, business, now=None):
             and r["body"]["state"] == "executing" and r["body"]["task_ids"][-1:] == [task_id]
             for r in experiments)):
             return
-        paid_step = None
-        community_operation = None
         if pilot and kind == "publish":
             from .content_backlog import ready
             owned = next((r for r in experiments if r["body"]["state"]=="awaiting_publication" and not r["body"].get("publication_task_id")),None)
@@ -278,13 +291,6 @@ def candidates(c, aid, agent, business, now=None):
                     AND result->>'target_id'=%s LIMIT 1""",(target_id,)):
                 experiment_id = owned["body"]["id"]
             paid_step = bool(experiment_id) or not reusable
-        elif kind == "community_progress":
-            from .community_growth import GrowthConfig
-            from .community_selection import choose
-            community_operation = choose(c, agent, GrowthConfig.model_validate(agent["onboarding_state"].get("community_growth", {})), now)
-            if not community_operation:
-                return
-            paid_step = community_operation["paid"]
         request_units = None
         if pilot and kind == "operating.strategy":
             from .model import managed_prompt, reservation_units
@@ -479,20 +485,12 @@ def candidates(c, aid, agent, business, now=None):
         agent["onboarding_state"].get("community_growth", {}).get("mode")
         == "contextual_outreach"
     ):
-        from .community_runtime import next_voice_edit
-        correction_due = bool(next_voice_edit(c,agent))
-        delivery_ready = bool(trials.chamber_campaign(agent) and one(c, """SELECT 1 FROM lead.tasks
-            WHERE type='community.engage' AND state='running' AND input ? 'reply'
-            AND (result->>'receipt_review_after' IS NULL OR (result->>'receipt_review_after')::timestamptz<=now())
-            AND result->>'reply_state' IS NULL LIMIT 1"""))
         add(
             "community_progress",
             "community_progress",
-            95 if correction_due else 75,
+            75,
             "核对已授权的社群任务与回访排期。",
             browser=True,
-            contract_repair=correction_due,
-            delivery_ready=delivery_ready,
         )
     if one(
         c,

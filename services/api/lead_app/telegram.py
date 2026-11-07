@@ -798,10 +798,15 @@ async def fill(page, body):
     await (await selected_chat(page)).locator(".btn-send.send").filter(visible=True).wait_for(timeout=10000)
 
 
-async def submit(page):
+async def submit(page, *, expected_peer=None):
     # Scope the native button to the selected chat: inactive Web K chats retain
     # geometrically visible send buttons, and Enter may be configured as newline.
     chat = await selected_chat(page)
+    if expected_peer is not None:
+        if not re.fullmatch(r"-[0-9]+", expected_peer):
+            raise TelegramTargetMismatch("无效群编号")
+        header = page.locator(f'.chat-info .peer-title[data-peer-id="{expected_peer}"]').filter(visible=True)
+        chat = chat.filter(has=header)
     button = chat.locator(".btn-send.send").filter(visible=True)
     if await button.count() != 1:
         raise TelegramSetupBlocked("无法唯一确认当前聊天发送按钮")

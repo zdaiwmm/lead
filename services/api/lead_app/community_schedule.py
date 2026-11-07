@@ -72,7 +72,7 @@ def next_pending_inventory(c):
         ORDER BY due,coalesce((t.result->>'join_checked_at')::timestamptz,t.created_at),t.id LIMIT 1""")
 
 
-def next_membership_review(c, *, repair_legacy=False, focus=False, exit_restricted=False, proactive=False):
+def next_membership_review(c, *, repair_legacy=False, focus=False, exit_restricted=False, proactive=False, excluded_accounts=()):
     """Schedule a fresh visit only with confirmed membership and no pending write."""
     from .community_health import eligible_sql
 
@@ -125,7 +125,8 @@ def next_membership_review(c, *, repair_legacy=False, focus=False, exit_restrict
             AND (m.result->>'join_submitted'='true' OR m.result->>'membership_origin'='existing') AND m.result->>'join_state'='confirmed'
             ORDER BY m.created_at DESC LIMIT 1
         ) membership ON true
-        WHERE """ + eligible_sql("recent") + """ AND coalesce(recent.result->>'leave_state','')<>'confirmed'
+        WHERE """ + eligible_sql("recent", write=True) + """ AND coalesce(recent.result->>'leave_state','')<>'confirmed'
+          AND NOT (coalesce(recent.input->>'account_id','')=ANY(%s::text[]))
           AND NOT EXISTS (SELECT 1 FROM lead.tasks orig WHERE orig.id=membership.id AND orig.result->>'leave_state'='confirmed')
           AND coalesce(recent.result->'decision'->>'automation_forbidden','false')<>'true'
           AND NOT EXISTS (SELECT 1 FROM history h WHERE h.peer=recent.peer
@@ -133,12 +134,12 @@ def next_membership_review(c, *, repair_legacy=False, focus=False, exit_restrict
               AND (h.result->>'leave_state'='confirmed'
                   OR h.result->>'reply_state' IN ('unknown','dispatching'))
               )
-          AND ((recent.state='succeeded' AND recent.result->'history_observation'->>'joined'='true')
+          AND (((recent.state='succeeded' OR recent.result->>'reply_state'='failed') AND recent.result->'history_observation'->>'joined'='true')
             OR (recent.state='failed' AND recent.input->>'membership_task_id'=membership.id::text
                 AND NOT (recent.input ? 'reply' OR recent.result ?| ARRAY['reply_state','join_state','join_submitted'])
                 AND coalesce(recent.result#>>'{history_observation,joined}','true')<>'false'
                 AND NOT (recent.result ? 'leave_state')))
-        ORDER BY due,recent.id LIMIT 1""", (focus, proactive, exit_restricted, repair_legacy, focus, focus))
+        ORDER BY due,recent.id LIMIT 1""", (focus, proactive, exit_restricted, repair_legacy, focus, focus, list(excluded_accounts)))
 
 
 def deadlines(c, agent, now=None):

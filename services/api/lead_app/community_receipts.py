@@ -6,10 +6,82 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-from playwright.async_api import TimeoutError as BrowserTimeout
-
 from . import telegram
-from .db import j, tx
+from .db import j, one, tx
+
+
+async def message_observation(page, peer, body, baseline, prior_failed=None):
+    """Match one outgoing message in the verified chat, after the submission baseline."""
+    if not body or not str(baseline).isdigit():
+        return {"state": "unknown"}
+    chat = await telegram.selected_chat(page)
+    result = await chat.evaluate(
+        r"""(root, {peer, body, baseline, priorFailed}) => {
+          const visible = e => !!(e.getBoundingClientRect().width && e.getBoundingClientRect().height);
+          const headers = [...root.querySelectorAll('.chat-info .peer-title[data-peer-id]')].filter(visible);
+          if (headers.length !== 1 || headers[0].dataset.peerId !== peer) return {state: 'wrong_peer'};
+          const norm = text => text.replace(/\s+/g, ' ').trim();
+          const matches = [];
+          for (const bubble of root.querySelectorAll('.bubble.is-out[data-mid]')) {
+            const mid = bubble.dataset.mid;
+            if (priorFailed?.includes(mid) || !visible(bubble) || !/^\d+(?:\.\d+)?$/.test(mid)) continue;
+            const [whole, fraction] = mid.split('.');
+            if (BigInt(whole) < BigInt(baseline) || (BigInt(whole) === BigInt(baseline) && !fraction)) continue;
+            const message = bubble.querySelector('.message,.message-text')?.cloneNode(true);
+            if (!message) continue;
+            message.querySelectorAll('.time,.time-inner,.reactions,.message-reactions,.reply,.webpage').forEach(el => el.remove());
+            message.querySelectorAll('br').forEach(el => el.replaceWith(' '));
+            message.querySelectorAll('div,p').forEach(el => el.prepend(' '));
+            if (norm(message.textContent) !== norm(body)) continue;
+            const failed = bubble.matches('.is-error,.error') || !!bubble.querySelector('.tgico-sendingerror');
+            // Older submissions did not snapshot temporary IDs already visible in the editor.
+            if (failed && priorFailed === null && BigInt(whole) === BigInt(baseline)) continue;
+            const pending = bubble.matches('.is-sending,.sending') || !!bubble.querySelector('.sending,.is-sending,.tgico-sending');
+            matches.push({state: failed ? 'failed' : pending || fraction ? 'unknown' : 'confirmed', mid});
+          }
+          // Web K may leave a local sending placeholder beside the acknowledged server bubble.
+          const terminal = matches.filter(match => match.state !== 'unknown');
+          if (terminal.length === 1 && terminal[0].state === 'confirmed') return terminal[0];
+          return matches.length === 1 ? matches[0] : {state:'unknown'};
+        }""",
+        {"peer": peer, "body": body, "baseline": str(baseline), "priorFailed": prior_failed},
+    )
+    if result["state"] == "wrong_peer":
+        raise telegram.TelegramTargetMismatch("发送回执的当前群与原群不匹配")
+    return result
+
+
+def save_message(c, aid, task, peer, observation):
+    """Never let a late read downgrade a terminal receipt or repeat the write."""
+    row = one(c, "SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE", (task["id"],))
+    saved = row["result"] or {}
+    if saved.get("target_id") != peer:
+        raise telegram.TelegramTargetMismatch("回执与持久化目标不匹配")
+    state = saved.get("reply_state")
+    if state == "confirmed" and saved.get("reply_external_id"):
+        return {"state": state, "external_id": saved["reply_external_id"]}
+    if state == "failed":
+        return {"state": state, "reason": "客户端已明确标记原消息发送失败"}
+    if state not in ("dispatching", "unknown"):
+        raise ValueError("没有已提交的原消息可供核对")
+    state = observation["state"]
+    evidence = {"reply_state": state}
+    outcome = {"state": state}
+    if state == "confirmed":
+        external = peer + ":" + observation["mid"]
+        evidence.update(reply_external_id=external, reply_confirmed_at=datetime.now(timezone.utc).isoformat())
+        outcome["external_id"] = external
+    elif state == "failed":
+        from .community_health import failed
+        evidence["reply_failed_at"] = datetime.now(timezone.utc).isoformat()
+        evidence["receipt_diagnostic"] = {"failedMatching": 1, "mid": observation["mid"]}
+        failed(c, aid, row, {"error_code": "send_failed", "stage": "reply", "scope": "target",
+                             "retryable": True, "write_may_have_happened": False})
+        outcome["reason"] = "客户端已明确标记原消息发送失败"
+    else:
+        outcome["reason"] = "只读核对原提交，平台回执尚未确认"
+    c.execute("UPDATE lead.tasks SET result=result || %s WHERE id=%s", (j(evidence), task["id"]))
+    return outcome
 
 
 async def bound_view(page, account, peer):
@@ -46,34 +118,19 @@ async def reconcile(actor, task, account, peer, limit):
              "target_id": peer, "status": "reading", "timings_ms": timings}
     evidence = {}
     try:
-        try:
-            await bound_view(actor.page, account["external_account_id"], peer)
-        except BrowserTimeout:
-            await runtime.reload_telegram(actor.page, account["external_account_id"])
-            await bound_view(actor.page, account["external_account_id"], peer)
+        await bound_view(actor.page, account["external_account_id"], peer)
         timings["navigation"] = round((time.monotonic() - started) * 1000)
         phase = "message" if saved.get("reply_state") in ("dispatching", "unknown") else "membership"
         read_started = time.monotonic()
         if phase == "message":
             publication = task["input"].get("reply") or {}
             body, baseline = publication.get("body"), saved.get("baseline_mid")
-            receipt = await runtime.own_reply_receipt(actor.page, body, baseline) if body and baseline is not None else None
-            if not receipt and body and baseline is not None:
+            observation = await message_observation(actor.page, peer, body, baseline, saved.get("prior_failed_mids"))
+            if observation["state"] == "unknown" and body and baseline is not None:
                 await runtime.search_history(actor.page, " ".join(body.split())[:40], peer, limit)
-                if (await actor.page.evaluate(telegram.TARGET))["target_id"] == peer:
-                    receipt = await runtime.own_reply_receipt(actor.page, body, baseline)
-            if receipt:
-                external = peer + ":" + receipt["mid"]
-                evidence = {"reply_state": "confirmed", "reply_external_id": external,
-                            "reply_confirmed_at": datetime.now(timezone.utc).isoformat()}
-                outcome = {"state": "confirmed", "external_id": external}
-            else:
-                # A failed bubble is a terminal receipt, including after a lost
-                # submit response. Never click it to resend.
-                diagnostic = await telegram.receipt_diagnostic(actor.page, body, body[:80]) if body and baseline is not None else {}
-                failed = diagnostic.get("failedMatching") == 1
-                evidence = {"reply_state": "failed" if failed else "unknown", "receipt_diagnostic": diagnostic}
-                outcome = {"state": "failed" if failed else "unknown", "reason": "客户端已明确标记原消息发送失败" if failed else "原消息尚未取得回执，已安排再次核对"}
+                observation = await message_observation(actor.page, peer, body, baseline, saved.get("prior_failed_mids"))
+            with tx(actor.aid) as c:
+                outcome = save_message(c, actor.aid, task, peer, observation)
         elif saved.get("join_state") in ("dispatching", "unknown", "pending_approval"):
             controls = await runtime.membership_controls(actor.page)
             state = ("pending_approval" if runtime.pending_join_request(controls) else
@@ -111,9 +168,6 @@ async def reconcile(actor, task, account, peer, limit):
         check["duration_ms"] = round((time.monotonic() - started) * 1000)
         with tx(actor.aid) as c:
             runtime.guard(actor, c, task, reading_receipt=task["state"] == "reconciling")
-            if check["status"] == "failed":
-                from .community_health import failed
-                failed(c, actor.aid, task, {"error_code": "send_failed", "stage": "receipt", "scope": "target", "retryable": True, "write_may_have_happened": False})
             c.execute("UPDATE lead.tasks SET result=coalesce(result,'{}') || %s WHERE id=%s",
                       (j({**(evidence if check["status"] != "read_failed" else {}),
                           "receipt_observation": check,

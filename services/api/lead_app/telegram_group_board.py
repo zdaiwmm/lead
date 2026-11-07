@@ -128,7 +128,7 @@ def execution(c, aid, day, now):
             (result#>>'{draft_validation,at}')::timestamptz BETWEEN %(day)s AND %(now)s) AS drafts_repaired,
         count(*) FILTER (WHERE result#>>'{draft_validation,state}'='rejected' AND
             (result#>>'{draft_validation,at}')::timestamptz BETWEEN %(day)s AND %(now)s) AS drafts_rejected,
-        count(*) FILTER (WHERE result->>'reply_state'='failed' AND completed_at BETWEEN %(day)s AND %(now)s) AS sends_failed,
+        count(*) FILTER (WHERE result->>'reply_state'='failed' AND coalesce((result->>'reply_failed_at')::timestamptz,(result->>'reply_dispatched_at')::timestamptz,completed_at) BETWEEN %(day)s AND %(now)s) AS sends_failed,
         count(DISTINCT coalesce(result->>'target_id',lower(input#>>'{candidate,telegram_url}')))
             FILTER (WHERE result#>>'{history_observation,joined}'='true'
               AND result#>>'{history_observation,can_reply}'='false'
@@ -203,7 +203,7 @@ def report(c, agent, day, now):
         SELECT coalesce(input#>>'{candidate,name}','Telegram') AS name,
           result#>>'{outcome,reason}' AS reason FROM lead.tasks WHERE agent_id=%(aid)s
           AND type='community.engage' AND completed_at BETWEEN %(day)s AND %(now)s
-          AND result#>>'{outcome,state}' IN ('skipped','blocked','pending_verification','unknown')
+          AND result#>>'{outcome,state}' IN ('skipped','blocked','pending_verification','unknown','failed')
           AND result#>>'{outcome,reason}' IS NOT NULL ORDER BY completed_at DESC,id LIMIT 1
     """, args)
     owner = next((r["reason"] or task_action(r) for r in work if r["state"] == "waiting_user"), None)

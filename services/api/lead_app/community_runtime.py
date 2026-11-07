@@ -1143,6 +1143,10 @@ async def browser_step(actor, task_id, operation):
             else:
                 account, config = guard(actor,c,task, reading_receipt=operation == "receipt")
             saved = task["result"] or {}
+            if operation in ("reply", "receipt") and saved.get("reply_state") == "failed":
+                return {"state": "failed", "reason": "客户端已明确标记原消息发送失败"}
+            if operation in ("reply", "receipt") and saved.get("reply_state") == "confirmed" and saved.get("reply_external_id"):
+                return {"state": "confirmed", "external_id": saved["reply_external_id"]}
             if operation in {"reply", "join"} and not (saved.get("reply_state") in {"unknown", "dispatching"} or saved.get("join_state") in {"unknown", "dispatching", "pending_approval"}):
                 if community_health.blocked(c, actor.aid, task):
                     return {"state": "blocked", "reason": "目标故障尚未取得恢复证据"}
@@ -1428,14 +1432,17 @@ async def browser_step(actor, task_id, operation):
                     "state": "blocked",
                     "reason": "推广链接仍是本机地址，保留原回复等待平台配置",
                 }
+            chat = await telegram.selected_chat(actor.page)
+            editor = chat.locator(".input-message-input[contenteditable=true]").filter(visible=True)
+            if await editor.count() != 1:
+                return {"state": "blocked", "reason": "当前群没有唯一可用的编辑器"}
+            draft = " ".join((await editor.inner_text()).split())
+            if draft and draft != " ".join(body.split()):
+                return {"state": "blocked", "reason": "当前编辑区有其他草稿，保留现场"}
             if publication.get("standalone"):
                 if not config.allow_proactive_post or not publication.get("promote") or not placement_allowed(task["input"]["candidate"], observed.get("description")):
                     return {"state":"blocked", "reason":"当前策略或群内规则不允许独立展示"}
-                chat = await telegram.selected_chat(actor.page)
-                editor = chat.locator(".input-message-input[contenteditable=true]").filter(visible=True)
-                if (await editor.count() != 1
-                    or ((await editor.inner_text()).strip() and " ".join((await editor.inner_text()).split()) != " ".join(body.split()))
-                    or await chat.evaluate("e=>e.classList.contains('is-helper-active')")):
+                if await chat.evaluate("e=>e.classList.contains('is-helper-active')") or await chat.locator(".reply-wrapper").filter(visible=True).count():
                     return {"state":"blocked", "reason":"当前编辑区有其他草稿或已选回复，暂缓独立发帖"}
                 with tx(actor.aid) as c:
                     prior = recent_placements(c, account["external_account_id"], observed["target_id"])
@@ -1517,61 +1524,48 @@ async def browser_step(actor, task_id, operation):
                         "state": "blocked",
                         "reason": "不重复发送相同文案或回应已处理的问题",
                     }
-                c.execute(
-                    "UPDATE lead.tasks SET result=result || %s WHERE id=%s",
-                    (
-                        j({"reply_state": "dispatching", "baseline_mid": baseline, "submit_method": "native_button", "reply_dispatched_at": datetime.now(timezone.utc).isoformat()}),
-                        task_id,
-                    ),
-                )
+                peer = observed["target_id"]
+                locked = one(c, "SELECT result FROM lead.tasks WHERE id=%s FOR UPDATE", (task_id,))
+                claimed = locked["result"] or {}
+                if claimed.get("reply_state") == "confirmed" and claimed.get("reply_external_id"):
+                    return {"state": "confirmed", "external_id": claimed["reply_external_id"]}
+                if claimed.get("reply_state") == "failed":
+                    return {"state": "failed", "reason": "客户端已明确标记原消息发送失败"}
+                if claimed.get("reply_state") is not None:
+                    return {"state": "unknown", "reason": "原意图已被认领，仅核对回执"}
+                if (await actor.page.evaluate(telegram.TARGET)).get("target_id") != peer:
+                    raise telegram.TelegramTargetMismatch("填写前目标群发生变化")
+                await telegram.fill(actor.page, body)
+                if (await actor.page.evaluate(telegram.TARGET)).get("target_id") != peer:
+                    raise telegram.TelegramTargetMismatch("提交前目标群发生变化")
+                if " ".join((await editor.inner_text()).split()) != " ".join(body.split()):
+                    return {"state": "blocked", "reason": "当前编辑区与持久化原稿不一致"}
+                prior_failed = await chat.locator(
+                    ".bubble.is-out.is-error[data-mid],.bubble.is-out.error[data-mid],"
+                    ".bubble.is-out[data-mid]:has(.tgico-sendingerror)"
+                ).evaluate_all("els => els.map(el => el.dataset.mid)")
+                claim = one(c, """UPDATE lead.tasks SET result=result || %s
+                    WHERE id=%s AND state='running' AND result->>'reply_state' IS NULL
+                      AND result->>'target_id'=%s RETURNING id""",
+                    (j({"reply_state": "dispatching", "baseline_mid": baseline, "prior_failed_mids": prior_failed, "submit_method": "native_button",
+                        "reply_dispatched_at": datetime.now(timezone.utc).isoformat()}), task_id, peer))
+                if not claim:
+                    return {"state": "unknown", "reason": "原意图已被认领，仅核对回执"}
             with tx(actor.aid) as c:
                 guard(actor, c, task)
-                await telegram.fill(actor.page, body)
-                await telegram.submit(actor.page)
+                await telegram.submit(actor.page, expected_peer=peer)
         else:
             baseline = saved["baseline_mid"]
-        for _ in range(20):
-            receipt = await own_reply_receipt(actor.page, body, baseline)
-            if receipt:
-                external = observed["target_id"] + ":" + receipt["mid"]
-                with tx(actor.aid) as c:
-                    c.execute(
-                        "UPDATE lead.tasks SET result=result || %s WHERE id=%s",
-                        (
-                            j(
-                                {
-                                    "reply_state": "confirmed",
-                                    "reply_external_id": external,
-                                    "reply_confirmed_at": datetime.now(timezone.utc).isoformat(),
-                                }
-                            ),
-                            task_id,
-                        ),
-                    )
-                return {"state": "confirmed", "external_id": external}
+            prior_failed = saved.get("prior_failed_mids")
+        from .community_receipts import message_observation, save_message
+
+        for attempt in range(20):
+            observation = await message_observation(actor.page, observed["target_id"], body, baseline, prior_failed)
+            if observation["state"] != "unknown" or attempt == 19:
+                break
             await asyncio.sleep(0.5)
-        diagnostic = await telegram.receipt_diagnostic(actor.page, body, body[:80])
-        if diagnostic.get("failedMatching") == 1:
-            with tx(actor.aid) as c:
-                c.execute("UPDATE lead.tasks SET result=result || %s WHERE id=%s",
-                    (j({"reply_state": "failed", "receipt_diagnostic": diagnostic}), task_id))
-                current_task = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (task_id,))
-                community_health.failed(c, actor.aid, current_task, {"error_code": "send_failed", "stage": "reply", "scope": "target", "retryable": True, "write_may_have_happened": False})
-            return {"state": "blocked", "reason": "客户端明确标记此条消息发送失败；继续其他群，不把失败气泡当作未知回执反复等待"}
-        diagnostic["composer"] = await (
-            await telegram.selected_chat(actor.page)
-        ).evaluate(
-            """root=>{const visible=e=>!!(e.getBoundingClientRect().width&&e.getBoundingClientRect().height);return {chatClass:root.className,editors:[...root.querySelectorAll('.input-message-input')].filter(visible).map(e=>({class:e.className,role:e.getAttribute('role'),peer:e.dataset.peerId,editable:e.isContentEditable,characters:e.innerText.length,children:[...e.children].map(child=>({tag:child.tagName,class:child.className}))})),buttons:[...root.querySelectorAll('.btn-send')].filter(visible).map(e=>({class:e.className,label:e.getAttribute('aria-label'),disabled:e.disabled,ariaDisabled:e.getAttribute('aria-disabled')})),alerts:[...document.querySelectorAll('.toast,.toast-container,[role=alert]')].filter(visible).map(e=>e.innerText.slice(0,300))}}"""
-        )
         with tx(actor.aid) as c:
-            c.execute(
-                "UPDATE lead.tasks SET result=result || %s WHERE id=%s",
-                (
-                    j({"reply_state": "unknown", "receipt_diagnostic": diagnostic}),
-                    task_id,
-                ),
-            )
-        return {"state": "unknown", "reason": "只核对已提交回复，不重复发送"}
+            return save_message(c, actor.aid, task, observed["target_id"], observation)
 
 
 def supported_promotion_rule(decision, candidate):
@@ -1744,10 +1738,10 @@ def next_interrupted_read(c, revision):
         ORDER BY created_at DESC LIMIT 1""", (str(revision),))
 
 
-def membership_review(c, *, focus=False, exit_restricted=False, proactive=False):
+def membership_review(c, *, focus=False, exit_restricted=False, proactive=False, excluded_accounts=()):
     from .community_schedule import next_membership_review
 
-    review = next_membership_review(c, repair_legacy=True, focus=focus, exit_restricted=exit_restricted, proactive=proactive)
+    review = next_membership_review(c, repair_legacy=True, focus=focus, exit_restricted=exit_restricted, proactive=proactive, excluded_accounts=excluded_accounts)
     if review and review["due"] <= datetime.now(timezone.utc):
         return review
     return None
@@ -1786,7 +1780,7 @@ def next_candidate(c, revision, focus, *, chamber=False, proactive=False, accoun
             item.get("online", -1), item.get("members", -1),
         ), reverse=True)
     return next(
-        (item for item in pool if (not account or not community_health.blocked(c, aid, {"input": {"external_account_id": account["external_account_id"], "candidate": item}}, write=False)) and not candidate_already_assessed(c, item["telegram_url"], focus=focus,
+        (item for item in pool if (not account or not community_health.blocked(c, aid, {"input": {"external_account_id": account["external_account_id"], "candidate": item}})) and not candidate_already_assessed(c, item["telegram_url"], focus=focus,
              observation=chamber and item.get("selection_basis") == "observe_recent_chat", proactive=proactive)),
         None,
     )
@@ -1830,14 +1824,22 @@ async def community_cycle(aid, rpc, selection=None):
             return
         step = {"at":datetime.now(timezone.utc).isoformat(), "phase":phase,
                 "duration_ms":round((time.monotonic()-started)*1000),
-                "state":"failed" if error else "completed", "error":error}
+                "state":"failed" if error else "completed", "error":error,
+                "recovery": bool(selection and selection["kind"] in ("receipt", "inventory", "diagnose"))
+                            or phase in ("browser_receipt", "browser_scan_pending") or (phase == "browser_observe" and bool(error))}
         with tx(aid) as c:
             row = one(c, "SELECT result FROM lead.tasks WHERE id=%s FOR UPDATE", (task["id"],))
-            steps = ((row["result"] or {}).get("execution_steps") or [])[-19:]
-            checkpoint = (row["result"] or {}).get("checkpoint") or {}
+            saved = row["result"] or {}
+            steps = saved.get("execution_steps") or []
+            patch = {"execution_steps": [*steps[-19:], step], "checkpoint": {
+                **(saved.get("checkpoint") or {}), "state": step["state"], "finished_at": step["at"]}}
+            if phase.startswith("browser_"):
+                window = datetime.now(timezone.utc) - timedelta(hours=1)
+                usage = saved.get("browser_usage", steps)
+                patch["browser_usage"] = [entry for entry in usage if entry["phase"].startswith("browser_")
+                                          and datetime.fromisoformat(entry["at"]) > window] + [step]
             c.execute("UPDATE lead.tasks SET result=coalesce(result,'{}') || %s WHERE id=%s",
-                      (j({"execution_steps":[*steps,step], "checkpoint": {**checkpoint,
-                          "state": "failed" if error else "completed", "finished_at": step["at"]}}),task["id"]))
+                      (j(patch), task["id"]))
 
     async def run_model(*args, **kwargs):
         if task:
@@ -2211,7 +2213,7 @@ async def community_cycle(aid, rpc, selection=None):
                 checks = int(receipt.get("receipt_checks", 0))
                 c.execute("""UPDATE lead.tasks SET state=%s,completed_at=CASE WHEN %s THEN now() END,
                     result=(result-'receipt_review_after') || %s WHERE id=%s AND state='reconciling'""",
-                    ("succeeded" if finished else "reconciling", finished,
+                    ("failed" if outcome["state"] == "failed" else "succeeded" if finished else "reconciling", finished,
                      j({"outcome": outcome,
                         **({} if finished else {"receipt_review_after": (datetime.now(timezone.utc) +
                             timedelta(minutes=receipt_wait_minutes(receipt, checks))).isoformat()})}), task["id"]))
@@ -2245,7 +2247,8 @@ async def community_cycle(aid, rpc, selection=None):
                     health = community_health.blocked(c, aid, current_task)
             if health:
                 with tx(aid) as c:
-                    c.execute("UPDATE lead.tasks SET state='succeeded',completed_at=now(),result=coalesce(result,'{}') || %s WHERE id=%s",
+                    c.execute("""UPDATE lead.tasks SET state=CASE WHEN result->>'reply_state'='failed' THEN 'failed' ELSE 'succeeded' END,
+                               completed_at=now(),result=coalesce(result,'{}') || %s WHERE id=%s""",
                               (j({"outcome": {"state": "blocked", "reason": "原故障条件未变化，保留目标诊断，暂不生成新稿或发送"},
                                   "health_block": health["error_code"], "retry_after": health["read_after"]}), task["id"]))
                 return {"delay": 1, "reason": "community_target_cooling", "task_id": str(task["id"])}
@@ -2253,7 +2256,7 @@ async def community_cycle(aid, rpc, selection=None):
             # on the next cycle, after the persisted recovery evidence exists.
             with tx(aid) as c:
                 c.execute("""UPDATE lead.tasks SET result=result-'receipt_review_after'-'health_block',
-                    state=CASE WHEN result->>'reply_state'='failed' THEN 'succeeded' ELSE state END,
+                    state=CASE WHEN result->>'reply_state'='failed' THEN 'failed' ELSE state END,
                     completed_at=CASE WHEN result->>'reply_state'='failed' THEN now() ELSE completed_at END WHERE id=%s""", (task["id"],))
             return {"delay": 1, "reason": "community_target_recovered", "task_id": str(task["id"])}
         profile = a["onboarding_state"].get("community_profile_receipt") or {}
@@ -2639,7 +2642,7 @@ async def community_cycle(aid, rpc, selection=None):
             c.execute(
                 "UPDATE lead.tasks SET state=%s,result=coalesce(result,'{}') || %s,completed_at=CASE WHEN %s THEN now() ELSE NULL END WHERE id=%s",
                 (
-                    "reconciling" if pending_placement else "succeeded",
+                    "reconciling" if pending_placement else "failed" if outcome["state"] == "failed" else "succeeded",
                     j({"outcome": outcome, **({"receipt_checks": checks + 1, "receipt_review_after":
                         (datetime.now(timezone.utc) + timedelta(minutes=receipt_delay)).isoformat()} if pending_placement else {})}),
                     outcome["state"] != "unknown",
