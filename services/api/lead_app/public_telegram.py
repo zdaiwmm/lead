@@ -182,7 +182,8 @@ async def read_metadata(actor, context, operation, args):
         if not url or telegram_link(url) != url:
             raise ValueError("只读取公开账号资料页")
     await actor.forward_proxy.validate_url(url)
-    from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
+    from playwright.async_api import Error as BrowserError
+    from playwright.async_api import TimeoutError as BrowserTimeout
 
     def unavailable(reason):
         return {"url": url, "title": "公开资料暂未核实", "text": "", "elements": [],

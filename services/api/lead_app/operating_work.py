@@ -332,11 +332,9 @@ def is_acquisition_review(task):
 
 def acquisition_review_prompt(c, agent, business, task):
     """Use current evidence for this specific decision, without the full planning dashboard."""
-    from .operating_plans import acquisition
-    from .growth_experiments import first_users
-
     from .community_growth import CHAMBER_BRIEF, campaign_progress, group_inventory
-    from .growth_experiments import chamber_campaign
+    from .growth_experiments import chamber_campaign, first_users
+    from .operating_plans import acquisition
 
     required = task["input"].get("required_evidence_task_id")
     evidence = all_rows(

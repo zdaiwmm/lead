@@ -632,8 +632,9 @@ def process_ingest(args):
                         body.conversion_id,
                     )
                 else:
-                    from .community_feedback import probe_cookie
                     from uuid import uuid5
+
+                    from .community_feedback import probe_cookie
                     probe_device = str(uuid5(UUID(str(row["agent_id"])), probe_cookie(row["agent_id"])))
                     probe = network.get("user_agent") == "LeadCoverageBot/1" and payload.get("anonymous_id") == probe_device
                     c.execute(

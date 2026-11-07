@@ -35,7 +35,7 @@ def guard(actor, c, task=None):
 
 
 async def browser_step(actor, operation, task_id=None):
-    from .community_runtime import read_history, own_reply_receipt, digest
+    from .community_runtime import digest, own_reply_receipt, read_history
     async with actor.lock:
         actor.touch()
         with tx(actor.aid) as c:
@@ -160,7 +160,8 @@ async def cycle(aid, rpc):
                     if body and decision.share_link:
                         destination=configuration(a,business)['destination_url']
                         if destination:
-                            marker=new_marker('telegram');body,_=promotion_body(body,destination,marker,business.get('product_url'))
+                            marker=new_marker('telegram')
+                            body,_=promotion_body(body,destination,marker,business.get('product_url'))
                             link=one(c,"INSERT INTO lead.tracking_links(tenant_id,agent_id,platform,public_code,destination_url,allowed_host) VALUES(%s,%s,'telegram',%s,%s,%s) RETURNING id",(current_tenant(),aid,marker,destination,urlsplit(destination).hostname))
                         else:
                             link=None
