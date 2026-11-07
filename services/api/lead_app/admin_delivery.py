@@ -28,6 +28,11 @@ CATEGORIES = [
     "uncertain_action",
     "knowledge_expired",
     "measurement_stale",
+    "analytics_ingest_backlog",
+    "analytics_delivery_failure",
+    "analytics_report_failure",
+    "analytics_rate_limited",
+    "analytics_recovered",
 ]
 
 
@@ -38,10 +43,10 @@ class Destination(BaseModel):
     kind: Literal["webhook", "email"] = "webhook"
     enabled: bool = False
     categories: list[str] = Field(
-        default_factory=lambda: CATEGORIES.copy(), max_length=7
+        default_factory=lambda: CATEGORIES.copy(), max_length=len(CATEGORIES)
     )
-    severities: list[Literal["warning", "error"]] = Field(
-        default_factory=lambda: ["warning", "error"]
+    severities: list[Literal["warning", "error", "info"]] = Field(
+        default_factory=lambda: ["warning", "error", "info"]
     )
     agent_ids: list[UUID] | None = Field(default=None, max_length=1000)
     max_attempts: int = Field(default=3, strict=True, ge=1, le=5)

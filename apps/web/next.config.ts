@@ -6,7 +6,8 @@ const config: NextConfig = {
     return ["api/:path*", "r/:path*", "collect/:path*", "lead.js"].map(
       (path) => ({
         source: "/" + path,
-        destination: "http://127.0.0.1:8088/" + path,
+        destination:
+          (process.env.LEAD_API_ORIGIN || "http://127.0.0.1:8088") + "/" + path,
       }),
     );
   },

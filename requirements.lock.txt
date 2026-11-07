@@ -118,3 +118,5 @@ wcwidth==0.9.4
 websockets==17.3
 xmod==1.10.0
 zstandard==0.25.0
+maxminddb==3.2.0
+psycopg-pool==3.3.3

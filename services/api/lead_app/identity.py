@@ -68,7 +68,12 @@ async def check(actor):
             await sample.locator("#result[data-ready=true]").wait_for(timeout=10000)
             result["device"] = json.loads(await sample.locator("#result").inner_text())
             for name, url in [
-                ("ipify", "https://api.ipify.org?format=json"),
+                (
+                    "ipify",
+                    "https://api6.ipify.org?format=json"
+                    if actor.forward_proxy.bound_ipv6
+                    else "https://api.ipify.org?format=json",
+                ),
                 ("cloudflare", "https://www.cloudflare.com/cdn-cgi/trace"),
             ]:
                 try:
@@ -151,6 +156,7 @@ async def check(actor):
         production = env().get("LEAD_DEPLOYMENT_MODE") == "production"
         result["production_policy_complete"] = bool(
             result["os_egress_enforced"]
+            and network_policy.get("usable")
             and result["region_matches"]
             and result["timezone_matches"]
             and result["locale_matches"]

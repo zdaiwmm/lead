@@ -13,6 +13,7 @@ import httpx
 from .budget import reserve, settle
 from .config import ROOT, STATE, env
 from .db import uid
+from .model_reasoning import selected_effort
 from .research import ResearchPage, begin_run, finish_run, public_url
 from .security import internal_token
 
@@ -78,7 +79,7 @@ class HybridResearchPage(ResearchPage):
             self.playwright = None
 
 
-async def explore(aid, url, goal, *, mode="research", message_id=None):
+async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=None):
     from .admin_settings import for_agent
     from .config import model_reference, resolve_model
 
@@ -98,7 +99,7 @@ async def explore(aid, url, goal, *, mode="research", message_id=None):
         raise ValueError("研究模型尚未配置服务端凭据")
     url = public_url(url)
     reservation = reserve(aid, uid(), 100000, model_reference(connection), connection["provider"])
-    rid = begin_run(aid, goal, message_id=message_id, mode=mode)
+    rid = begin_run(aid, goal, message_id=message_id, task_id=task_id, mode=mode)
     child = None
     result = None
     try:
@@ -117,6 +118,7 @@ async def explore(aid, url, goal, *, mode="research", message_id=None):
                 "cdp_url": response.json()["cdp_url"],
                 "gateway_token": internal_token(),
                 "model": connection,
+                "reasoning_effort": selected_effort(settings, "research"),
                 "max_steps": min(
                     6, settings["max_tool_calls"], settings["max_model_requests"]
                 ),

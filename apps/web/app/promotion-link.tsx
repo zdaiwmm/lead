@@ -109,7 +109,7 @@ function PromotionEditor({
     <DialogPanel
       title="推广链接"
       size="compact"
-      description="Agent 推广时会自动使用此链接，并附上简短的社媒来源参数。"
+      description="填写用户最终访问的网站。Agent 推广时会使用可统计点击的短链，跳转后保留来源信息。"
       onClose={() => {
         if (!busy) onClose();
       }}

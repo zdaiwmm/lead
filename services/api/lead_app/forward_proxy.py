@@ -25,6 +25,7 @@ class BrowserForwardProxy:
     def __init__(self, aid, upstream=None):
         self.aid = aid
         self.upstream = upstream
+        self.bound_ipv6 = (upstream or {}).get("server") == "bound-ipv6"
         self.server = None
         self.unix_server = None
         self.socket_path = STATE / "sockets" / (aid + ".sock")
@@ -90,11 +91,17 @@ class BrowserForwardProxy:
             task.cancel()
         await asyncio.gather(*list(self.tasks), return_exceptions=True)
 
-    @staticmethod
-    def public_ip(value):
+    def public_ip(self, value):
         ip = ipaddress.ip_address(value)
-        if not ip.is_global:
+        if not ip.is_global or ip.is_multicast:
             raise ValueError("Private browser destination is forbidden")
+        if self.bound_ipv6 and (
+            ip.version != 6
+            or ip not in ipaddress.IPv6Network("2000::/3")
+            or ip.sixtofour
+            or ip.teredo
+        ):
+            raise ValueError("This exit requires native public IPv6")
         return ip
 
     async def resolve(self, host):
@@ -123,21 +130,36 @@ class BrowserForwardProxy:
             proxy_url = (
                 f"http://{quote(self.aid)}:{self.password}@127.0.0.1:{self.port}"
             )
+            # For a source-bound exit, bind the DNS socket to that same address.
+            # This also avoids sending an IPv6 literal through HTTP CONNECT.
+            transport = (
+                httpx.AsyncHTTPTransport(local_address=self.upstream["source"])
+                if self.bound_ipv6
+                else None
+            )
             async with httpx.AsyncClient(
-                proxy=proxy_url, timeout=12, trust_env=False
+                proxy=None if self.bound_ipv6 else proxy_url,
+                transport=transport,
+                timeout=12,
+                trust_env=False,
             ) as client:
                 response = await client.get(
-                    "https://1.1.1.1/dns-query",
-                    params={"name": host, "type": "A"},
+                    "https://[2606:4700:4700::1111]/dns-query"
+                    if self.bound_ipv6
+                    else "https://1.1.1.1/dns-query",
+                    params={"name": host, "type": "AAAA" if self.bound_ipv6 else "A"},
                     headers={"Accept": "application/dns-json"},
                 )
                 response.raise_for_status()
                 body = response.json()
             if body.get("Status") != 0:
                 raise ValueError("Public hostname resolution failed")
-            answers = [a for a in body.get("Answer", []) if a.get("type") == 1]
+            record_type = 28 if self.bound_ipv6 else 1
+            answers = [
+                a for a in body.get("Answer", []) if a.get("type") == record_type
+            ]
             if not answers:
-                raise ValueError("Public hostname has no IPv4 address")
+                raise ValueError("Public hostname has no address for this exit")
             ips = [str(self.public_ip(a["data"])) for a in answers]
             ttl = max(1, min(60, min(a.get("TTL", 30) for a in answers)))
             self.cache[host] = (ips[0], time.monotonic() + ttl)
@@ -162,16 +184,27 @@ class BrowserForwardProxy:
         upstream = urlsplit(self.upstream["server"])
         # There is intentionally no direct-connection fallback in any error path.
         try:
+            if self.bound_ipv6:
+                return await asyncio.wait_for(
+                    asyncio.open_connection(
+                        ip,
+                        port,
+                        family=socket.AF_INET6,
+                        local_addr=(self.upstream["source"], 0),
+                    ),
+                    15,
+                )
             tls = ssl.create_default_context() if upstream.scheme == "https" else None
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(
+            if upstream.scheme == "socks5+unix":
+                connection = asyncio.open_unix_connection(upstream.path)
+            else:
+                connection = asyncio.open_connection(
                     upstream.hostname,
                     upstream.port,
                     ssl=tls,
                     server_hostname=upstream.hostname if tls else None,
-                ),
-                15,
-            )
+                )
+            reader, writer = await asyncio.wait_for(connection, 15)
             if upstream.scheme in ("http", "https"):
                 host = "[" + ip + "]" if ":" in ip else ip
                 headers = f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n"
@@ -189,7 +222,7 @@ class BrowserForwardProxy:
                 result = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 15)
                 if result.split(b" ", 2)[1] != b"200":
                     raise ConnectionError("Upstream proxy rejected CONNECT")
-            elif upstream.scheme == "socks5":
+            elif upstream.scheme in ("socks5", "socks5+unix"):
                 auth = bool(self.upstream.get("username"))
                 writer.write(b"\x05\x01" + (b"\x02" if auth else b"\x00"))
                 await writer.drain()
@@ -351,6 +384,8 @@ class BrowserForwardProxy:
             await asyncio.gather(*pipes, return_exceptions=True)
         except (Exception, asyncio.CancelledError):
             self.denied += 1
+            if writer.is_closing():
+                return
             try:
                 writer.write(
                     b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"

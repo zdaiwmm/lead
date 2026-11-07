@@ -60,6 +60,7 @@ def main():
             "--no-access-log",
         ],
         "worker": [sys.executable, "-m", "lead_app.worker"],
+        "analytics": [sys.executable, "-m", "lead_app.analytics_worker"],
         "maintenance": [sys.executable, "-m", "lead_app.maintenance"],
         "web": [
             "node",

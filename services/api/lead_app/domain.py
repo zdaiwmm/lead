@@ -31,12 +31,15 @@ PLATFORMS = [
 ]
 
 
-def create_agent(request_key=None, setup=None, setup_template_version=None):
+def create_agent(
+    request_key=None, setup=None, setup_template_version=None, *, confirmed_brief=None
+):
     aid, nid, pid = uid(), uid(), uid()
     model = model_config()
+    payload = confirmed_brief or setup
     request_hash = (
-        hashlib.sha256(json.dumps(setup, sort_keys=True).encode()).hexdigest()
-        if setup
+        hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        if payload
         else "empty"
     )
     with tx() as c:
@@ -60,7 +63,7 @@ def create_agent(request_key=None, setup=None, setup_template_version=None):
             (
                 aid,
                 current_tenant(),
-                setup["product_name"] if setup else "新 Agent",
+                (payload or {}).get("product_name") or "新 Agent",
                 "ready",
             ),
         )
@@ -98,7 +101,9 @@ def create_agent(request_key=None, setup=None, setup_template_version=None):
             c,
             aid,
             "assistant",
-            "业务与运营方向已保存，连接一个社媒账号后即可创建 Agent。"
+            "已保存你确认的业务资料。你可以在工作台连接运营渠道。"
+            if confirmed_brief
+            else "业务与运营方向已保存，连接一个社媒账号后即可创建 Agent。"
             if setup
             else "你好，我是你的 AI 运营人员。你想推广什么？发给我产品网址，或者简单介绍一下。",
         )
@@ -108,12 +113,66 @@ def create_agent(request_key=None, setup=None, setup_template_version=None):
                 "UPDATE lead.idempotency_requests SET state='complete',response_ref=%s,http_status=201,agent_id=%s WHERE id=%s",
                 (aid, aid, claimed["id"]),
             )
-        if setup:
+        if payload:
             c.execute("SELECT set_config('app.agent_id',%s,true)", (aid,))
+        if confirmed_brief:
+            _save_confirmed_brief(c, aid, confirmed_brief)
+        elif setup:
             from .admin_config import onboarding_snapshot
 
             _write_setup(c, aid, setup, onboarding_snapshot(c, setup_template_version))
     return aid
+
+
+def _save_confirmed_brief(c, aid, brief):
+    sections = [brief["introduction"]] if brief["introduction"] else []
+    for label, lines in (
+        ("产品与核心功能", brief["features"]),
+        ("客户需求与使用场景", brief["scenarios"]),
+        (
+            "产品优势与依据",
+            [
+                item["text"] + ("（" + item["source"] + "）" if item["source"] else "")
+                for item in brief["advantages"]
+            ],
+        ),
+    ):
+        if lines:
+            sections.append(label + "\n" + "\n".join(lines))
+    description = "\n\n".join(sections)
+    audience = "\n".join(brief["customers"])
+    if len(description) > 10000 or len(audience) > 2000:
+        raise ValueError("业务介绍最多 10000 字，目标客户最多 2000 字，请精简后创建")
+    facts = {
+        "name": brief["product_name"],
+        "audience": audience,
+        "_provenance": {
+            key: {"source": "owner_setup"}
+            for key in ("name", "description", "audience", "product_url")
+        },
+    }
+    sources = [
+        {"url": url}
+        for url in dict.fromkeys(
+            ([brief["product_url"]] if brief["product_url"] else [])
+            + [item["source"] for item in brief["advantages"] if item["source"]]
+        )
+    ]
+    c.execute(
+        "INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,product_url,description,facts,source_refs) VALUES(%s,%s,1,%s,%s,%s,%s)",
+        (
+            current_tenant(),
+            aid,
+            brief["product_url"] or None,
+            description,
+            j(facts),
+            j(sources),
+        ),
+    )
+    if brief["notes"].strip():
+        remember(c, aid, brief["notes"].strip())
+    record(c, aid, "Agent 已创建，业务资料已确认")
+    emit(c, aid, "agent.created")
 
 
 def _write_setup(c, aid, profile, template=None):
@@ -243,7 +302,7 @@ def agent_detail(aid):
         )
         a["accounts"] = all_rows(
             c,
-            "SELECT s.*, t.id AS target_id,t.canonical_url,t.display_name AS target_name,t.target_type,t.verified_permissions,t.state AS target_state, EXISTS(SELECT 1 FROM lead.authorization_grants g JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.target_type=t.target_type AND pc.action_type='publish' WHERE g.target_id=t.id AND g.revoked_at IS NULL AND g.allowed_actions ? 'publish' AND pc.technical_state='verified' AND pc.permission_state='approved' AND t.state='active' AND s.state='connected' AND (s.platform='lab' OR (jsonb_array_length(coalesce(t.verified_permissions->'publishing_verified_formats','[]'))>0 AND t.verified_permissions->>'adapter_version'=pc.adapter_version))) AS operational_ready FROM lead.social_accounts s LEFT JOIN LATERAL (SELECT t.* FROM lead.account_targets t WHERE t.account_id=s.id ORDER BY (t.state='active') DESC,(jsonb_array_length(coalesce(t.verified_permissions->'publishing_verified_formats','[]'))>0) DESC,(SELECT max(g.granted_at) FROM lead.authorization_grants g WHERE g.target_id=t.id AND g.revoked_at IS NULL) DESC NULLS LAST,t.id DESC LIMIT 1) t ON true ORDER BY s.created_at",
+            "SELECT s.*, t.id AS target_id,t.canonical_url,t.display_name AS target_name,t.target_type,t.verified_permissions,t.state AS target_state, EXISTS(SELECT 1 FROM lead.authorization_grants g JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.target_type=t.target_type AND pc.action_type='publish' WHERE g.target_id=t.id AND g.revoked_at IS NULL AND g.allowed_actions ? 'publish' AND pc.technical_state='verified' AND (pc.permission_state='approved' OR pc.permission_state='pending' AND lead.owner_browser_pilot_allowed(t.id,g.id)) AND t.state='active' AND s.state='connected' AND (s.platform='lab' OR (jsonb_array_length(coalesce(t.verified_permissions->'publishing_verified_formats','[]'))>0 AND t.verified_permissions->>'adapter_version'=pc.adapter_version))) AS operational_ready FROM lead.social_accounts s LEFT JOIN LATERAL (SELECT t.* FROM lead.account_targets t WHERE t.account_id=s.id ORDER BY (t.state='active') DESC,(jsonb_array_length(coalesce(t.verified_permissions->'publishing_verified_formats','[]'))>0) DESC,(SELECT max(g.granted_at) FROM lead.authorization_grants g WHERE g.target_id=t.id AND g.revoked_at IS NULL) DESC NULLS LAST,t.id DESC LIMIT 1) t ON true ORDER BY s.created_at",
         )
         a["activity"] = _activity_rows(c)
         a["browser_runs"] = all_rows(
@@ -326,43 +385,53 @@ def metrics(c):
         (policy["freshness_hours"],),
     )
     fresh = conn["n"]
-    visits = one(
-        c,
-        "SELECT count(*) AS visits,count(*) FILTER(WHERE qualified) AS qualified FROM lead.visit_sessions WHERE started_at>now()-interval '30 days' AND trust_level<>'redirect_observed' AND tracking_link_id IS NOT NULL",
-    )
+    from .analytics_reporting import materialized_metrics
+
+    projected = materialized_metrics(c, policy["objective"])
     posted = one(
         c,
-        "SELECT count(*) AS n FROM lead.actions a JOIN lead.account_targets t ON t.id=a.target_id JOIN lead.social_accounts s ON s.id=t.account_id JOIN lead.tasks task ON task.id=a.task_id WHERE a.state='confirmed' AND s.platform<>'lab' AND coalesce(task.input->>'bootstrap_verification','false')<>'true'",
-    )["n"]
-    clicks = one(
-        c,
-        "SELECT count(*) AS n FROM lead.visit_sessions WHERE trust_level='redirect_observed' AND exclusion_reason IS NULL AND started_at>now()-interval '30 days'",
+        "SELECT count(*) AS n FROM lead.actions a JOIN lead.account_targets t ON t.id=a.target_id JOIN lead.social_accounts s ON s.id=t.account_id JOIN lead.tasks task ON task.id=a.task_id WHERE a.state='confirmed' AND s.platform<>'lab' AND coalesce(task.input->>'bootstrap_verification','false')<>'true' AND CASE WHEN task.result ? 'delivery' THEN task.result->'delivery'->>'state'='public' AND (s.platform<>'tiktok' OR task.result->'delivery'->>'visibility'='public') ELSE s.platform<>'tiktok' END",
     )["n"]
     server = one(
         c,
         "SELECT count(*) FILTER(WHERE last_received_at>now()-make_interval(hours=>%s)) AS fresh,max(last_received_at) AS last FROM lead.analytics_credentials WHERE state='active'",
         (policy["freshness_hours"],),
     )
-    conversions = one(
-        c,
-        "SELECT count(*) AS n FROM lead.conversion_events WHERE trust_level='server_verified' AND occurred_at>now()-interval '30 days' AND type=%s",
-        (policy["objective"],),
-    )["n"]
-    # New event receipts preserve the older server-verified objective contract.
-    objective_name = {
-        "signup": "CompleteRegistration", "lead": "Lead",
-        "trial": "StartTrial", "purchase": "Purchase",
-    }[policy["objective"]]
-    conversions += one(
-        c,
-        """SELECT count(*) AS n FROM lead.pixel_receipts p
-           WHERE p.scope_key='live' AND p.counted AND p.trust_level='server_verified'
-             AND p.touchpoint_id IS NOT NULL AND p.occurred_at>now()-interval '30 days'
-             AND p.event_name=%s AND NOT EXISTS(
-               SELECT 1 FROM lead.conversion_events old
-               WHERE old.connection_id=p.connection_id AND old.source_event_id=p.event_id)""",
-        (objective_name,),
-    )["n"]
+    if projected is not None:
+        visits = projected
+        clicks = projected["clicks"]
+        conversions = projected["conversions"]
+    else:
+        visits = one(
+            c,
+            "SELECT count(*) AS visits,count(*) FILTER(WHERE qualified) AS qualified FROM lead.visit_sessions WHERE started_at>now()-interval '30 days' AND trust_level<>'redirect_observed' AND tracking_link_id IS NOT NULL",
+        )
+        clicks = one(
+            c,
+            "SELECT count(*) AS n FROM lead.visit_sessions WHERE trust_level='redirect_observed' AND exclusion_reason IS NULL AND started_at>now()-interval '30 days'",
+        )["n"]
+        conversions = one(
+            c,
+            "SELECT count(*) AS n FROM lead.conversion_events WHERE trust_level='server_verified' AND occurred_at>now()-interval '30 days' AND type=%s",
+            (policy["objective"],),
+        )["n"]
+        # New event receipts preserve the older server-verified objective contract.
+        objective_name = {
+            "signup": "CompleteRegistration",
+            "lead": "Lead",
+            "trial": "StartTrial",
+            "purchase": "Purchase",
+        }[policy["objective"]]
+        conversions += one(
+            c,
+            """SELECT count(*) AS n FROM lead.pixel_receipts p
+               WHERE p.scope_key='live' AND p.counted AND p.trust_level='server_verified'
+                 AND p.touchpoint_id IS NOT NULL AND p.occurred_at>now()-interval '30 days'
+                 AND p.event_name=%s AND NOT EXISTS(
+                   SELECT 1 FROM lead.conversion_events old
+                   WHERE old.connection_id=p.connection_id AND old.source_event_id=p.event_id)""",
+            (objective_name,),
+        )["n"]
     return {
         "clicks": clicks,
         "visits": visits["visits"] if fresh else None,

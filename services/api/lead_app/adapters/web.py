@@ -4,15 +4,19 @@ Every selector recipe fails closed on ambiguity; no network posting APIs, inject
 platform internals, arbitrary JavaScript from the model, or automatic login.
 """
 
+import asyncio
 import hashlib
 import hmac
 import re
 from urllib.parse import parse_qs, urlsplit
 
+from playwright.async_api import TimeoutError as BrowserTimeoutError
+
 from .catalog import SPECS, target_url, validate
 from .core import (
     LayoutChanged,
     NeedsAuth,
+    PreparationNotStarted,
     ScopeChanged,
     check_surface,
     click,
@@ -147,9 +151,12 @@ RECEIPTS = {
 
 
 class WebAdapter:
+    preparation_checkpoints = True
+
     def __init__(self, platform):
         self.platform = platform
         self.spec = SPECS[platform]
+        self.owner_hint = None
 
     @property
     def hosts(self):
@@ -171,6 +178,94 @@ class WebAdapter:
 
     async def account(self, page):
         await check_surface(page, self.hosts)
+        if self.platform == "tiktok" and urlsplit(page.url).path.startswith(
+            "/tiktokstudio/"
+        ):
+            intro = page.get_by_text(
+                "Turn on automatic content checks?", exact=True
+            ).filter(visible=True)
+            if await intro.count() == 1:
+                cancel = page.get_by_role("button", name="Cancel", exact=True).filter(
+                    visible=True
+                )
+                if await cancel.count() != 1:
+                    raise LayoutChanged("无法唯一关闭 TikTok 可选设置提示")
+                await cancel.click()
+            for title in (
+                "New editing features added",
+                "Preview your video on your phone",
+            ):
+                tour = page.get_by_text(title, exact=True).filter(visible=True)
+                if await tour.count() != 1:
+                    continue
+                done = page.get_by_role("button", name="Got it", exact=True).filter(
+                    visible=True
+                )
+                if await done.count() != 1:
+                    raise LayoutChanged("无法唯一关闭 TikTok 功能介绍")
+                await done.click()
+            avatar = page.locator(
+                'button[data-tt="Header_NewHeader_Clickable"]'
+            ).filter(visible=True)
+            if await avatar.count() == 1:
+                await avatar.click()
+                try:
+                    await first_visible(
+                        page,
+                        (
+                            'header a[href*="/@"]',
+                            '[role=menu] a[href*="/@"]',
+                            'a:text-is("View profile")',
+                        ),
+                        timeout=3000,
+                    )
+                    href = await local_account_link(
+                        page,
+                        (
+                            'header a[href*="/@"]',
+                            '[role=menu] a[href*="/@"]',
+                            'a:text-is("View profile")',
+                        ),
+                    )
+                    parsed = urlsplit(
+                        href
+                        if href.startswith("https://")
+                        else "https://www.tiktok.com" + href
+                    )
+                    match = re.fullmatch(r"/@([A-Za-z0-9_.]{1,64})/?", parsed.path)
+                    if parsed.hostname in self.hosts and match:
+                        return {
+                            "platform": "tiktok",
+                            "external_account_id": match[1],
+                            "display_name": "tiktok · " + match[1],
+                        }
+                except (NeedsAuth, LayoutChanged):
+                    pass
+                finally:
+                    await page.keyboard.press("Escape")
+            # Studio does not expose the public app's authenticated header.
+            # Inspect that same browser session in a temporary read-only tab;
+            # leave the upload and its declarations untouched.
+            proof = await page.context.new_page()
+            try:
+                # A bound owner is a navigation hint only. Authentication still
+                # comes from the current session's header/app context, and the
+                # caller compares that identity with the original action.
+                hint = self.owner_hint
+                url = (
+                    "https://www.tiktok.com/@" + hint + "/"
+                    if hint and re.fullmatch(r"[A-Za-z0-9_.]{1,64}", hint)
+                    else "https://www.tiktok.com/"
+                )
+                await proof.goto(url, wait_until="commit", timeout=45000)
+                await proof.locator(
+                    'script#__UNIVERSAL_DATA_FOR_REHYDRATION__,a[data-e2e="nav-profile"],a[data-e2e="nav-profile-link"]'
+                ).first.wait_for(state="attached", timeout=30000)
+                if urlsplit(proof.url).path.startswith("/tiktokstudio/"):
+                    raise NeedsAuth("无法核对 TikTok 当前登录身份")
+                return await self.account(proof)
+            finally:
+                await proof.close()
         if self.platform == "facebook":
             cookies = await page.context.cookies(["https://www.facebook.com"])
             own = next((c["value"] for c in cookies if c["name"] == "c_user"), None)
@@ -207,8 +302,30 @@ class WebAdapter:
             ).hexdigest()
         else:
             try:
-                href = await local_account_link(page, ACCOUNT_LINKS[self.platform])
+                href = await local_account_link(
+                    page,
+                    ACCOUNT_LINKS[self.platform],
+                    timeout=12000 if self.platform == "tiktok" else 0,
+                )
             except NeedsAuth:
+                if self.platform == "tiktok":
+                    # This is the authenticated app context, never the public
+                    # webapp.user-detail object for the page being visited.
+                    identity = await page.evaluate(r"""() => {
+                      const scripts=document.querySelectorAll('script#__UNIVERSAL_DATA_FOR_REHYDRATION__');
+                      if(scripts.length!==1)return null;
+                      try{const user=JSON.parse(scripts[0].textContent).__DEFAULT_SCOPE__?.['webapp.app-context']?.user;
+                        if(!user || !/^\d{8,24}$/.test(String(user.uid||'')) || typeof user.uniqueId!=='string' || !/^[A-Za-z0-9_.]{1,64}$/.test(user.uniqueId))return null;
+                        return user.uniqueId;
+                      }catch{return null}
+                    }""")
+                    if identity:
+                        await check_surface(page, self.hosts)
+                        return {
+                            "platform": self.platform,
+                            "external_account_id": identity,
+                            "display_name": "tiktok · " + identity,
+                        }
                 menus = {
                     "youtube": (
                         "button#avatar-btn",
@@ -220,6 +337,7 @@ class WebAdapter:
                     raise
                 await click(page, menus[self.platform])
                 href = await local_account_link(page, ACCOUNT_LINKS[self.platform])
+            await check_surface(page, self.hosts)
             p = urlsplit(
                 href
                 if href.startswith("https://")
@@ -260,6 +378,9 @@ class WebAdapter:
 
     async def target(self, page, url, expected_account):
         canonical = target_url(self.platform, url)
+        # Restore the validated platform before checking the bound identity.
+        if urlsplit(page.url).hostname not in self.hosts:
+            await page.goto(canonical, wait_until="domcontentloaded", timeout=45000)
         own = await self.account(page)
         if own["external_account_id"] != expected_account:
             raise ScopeChanged("登录身份已改变")
@@ -313,7 +434,7 @@ class WebAdapter:
                 "adapter_version": self.spec.version,
             }
         # A fresh document prevents matching a previous account/target's stale DOM.
-        await page.goto("about:blank")
+        await page.goto("about:blank", wait_until="commit", timeout=10000)
         await page.goto(canonical, wait_until="domcontentloaded", timeout=45000)
         after = await self.account(page)
         if after["external_account_id"] != expected_account:
@@ -364,7 +485,7 @@ class WebAdapter:
             "adapter_version": self.spec.version,
         }
 
-    async def prepare(self, page, target, publication, media, paths):
+    async def prepare(self, page, target, publication, media, paths, checkpoint=None):
         kind = validate(self.platform, publication, media)
         if (
             kind == "video"
@@ -375,8 +496,21 @@ class WebAdapter:
             )
         ):
             raise ValueError("此平台当前使用 MP4 / H.264 视频")
-        own = await self.account(page)
-        await self.target(page, target["canonical_url"], own["external_account_id"])
+        try:
+            if urlsplit(page.url).hostname not in self.hosts:
+                await page.goto(
+                    target["canonical_url"],
+                    wait_until="domcontentloaded",
+                    timeout=45000,
+                )
+            own = await self.account(page)
+            await self.target(page, target["canonical_url"], own["external_account_id"])
+        except BrowserTimeoutError as error:
+            # All initial identity/target navigation is read-only. A timeout here
+            # must not strand the action as though an upload had been interrupted.
+            raise PreparationNotStarted(
+                "发布前页面核对超时，未上传或编辑草稿"
+            ) from error
         platform = self.platform
         observation = {"kind": kind}
         if platform == "x":
@@ -450,10 +584,24 @@ class WebAdapter:
                 publication["title"],
             )
         elif platform == "tiktok":
-            await page.goto(
-                "https://www.tiktok.com/tiktokstudio/upload",
-                wait_until="domcontentloaded",
-            )
+            try:
+                await page.goto(
+                    "https://www.tiktok.com/tiktokstudio/upload",
+                    wait_until="commit",
+                    timeout=45000,
+                )
+                await page.locator("input[type=file]").first.wait_for(
+                    state="attached", timeout=60000
+                )
+                await check_surface(page, self.hosts)
+            except (NeedsAuth, ScopeChanged):
+                raise
+            except Exception as error:
+                # This branch runs before upload_files or any editor operation.
+                # It can safely retry navigation, unlike an interrupted upload.
+                raise PreparationNotStarted(
+                    "TikTok 上传页尚未就绪，未上传或提交"
+                ) from error
         elif platform == "youtube":
             if kind == "video":
                 return await self.youtube_video(page, target, publication, media, paths)
@@ -493,6 +641,20 @@ class WebAdapter:
                 )
             await upload_files(page, paths)
             await wait_ready(page)
+            if platform == "tiktok":
+                observation.update(
+                    phase="uploaded",
+                    uploaded_file=paths[0].name,
+                    prepared_url=page.url,
+                    account_id=own["external_account_id"],
+                    target_id=target["external_target_id"],
+                    ai_generated=media[0]["rights"]["ai_generated"],
+                )
+                if checkpoint:
+                    await checkpoint(observation)
+                return await self.resume_preparation(
+                    page, target, publication, observation, checkpoint
+                )
             if platform == "instagram":
                 await click(
                     page,
@@ -613,6 +775,262 @@ class WebAdapter:
             )
         return observation
 
+    async def tiktok_control(self, page, label, selectors):
+        try:
+            return await first_visible(page, selectors, timeout=1200)
+        except LayoutChanged:
+            text = page.get_by_text(label, exact=True).filter(visible=True)
+            if await text.count() != 1:
+                raise LayoutChanged("无法唯一核对 TikTok 内容声明：" + label) from None
+            container = text
+            for _ in range(8):
+                container = container.locator("xpath=..")
+                controls = container.locator(
+                    "input[type=checkbox],[role=switch],[role=checkbox]"
+                )
+                count = await controls.count()
+                if count == 1:
+                    return controls
+                if count > 1:
+                    break
+            raise LayoutChanged("无法唯一核对 TikTok 内容声明：" + label) from None
+
+    async def tiktok_declarations(self, page, ai_generated, verify=False):
+        checks = [
+            (
+                "Disclose post content",
+                (
+                    'input[name="commercial_content"]',
+                    '[role=checkbox][aria-label="Disclose post content"]',
+                ),
+            ),
+            (
+                "Your brand",
+                (
+                    'input[value="own_brand"]',
+                    '[role=checkbox][aria-label="Your brand"]',
+                ),
+            ),
+        ]
+        if ai_generated:
+            checks.append(
+                (
+                    "AI-generated content",
+                    (
+                        'input[name="ai_generated"]',
+                        '[role=checkbox][aria-label="AI-generated content"]',
+                    ),
+                )
+            )
+        for label, selectors in checks:
+            node = await self.tiktok_control(page, label, selectors)
+            if verify:
+                if not await node.is_checked():
+                    raise ScopeChanged("提交前 TikTok 内容声明已变化：" + label)
+            else:
+                if not await node.is_checked():
+                    if await node.is_visible():
+                        try:
+                            await node.set_checked(True, timeout=3000)
+                        except BrowserTimeoutError:
+                            pass
+                    if not await node.is_checked():
+                        wrapper = node.locator("xpath=..")
+                        if not await wrapper.is_visible():
+                            wrapper = wrapper.locator("xpath=..")
+                        await wrapper.click(timeout=3000)
+                    if label == "AI-generated content":
+                        await self.tiktok_ai_notice(page)
+                    if not await node.is_checked():
+                        raise LayoutChanged("TikTok 内容声明未生效：" + label)
+
+    async def tiktok_ai_notice(self, page):
+        # This enables the truthful label for this known AI-generated post. It
+        # does not opt into the unrelated automatic account checks prompt.
+        title = page.get_by_text("Labeling AI-generated content", exact=True).filter(
+            visible=True
+        )
+        if await title.count() == 1:
+            confirm = page.get_by_role("button", name="Turn on", exact=True).filter(
+                visible=True
+            )
+            if await confirm.count() != 1:
+                raise LayoutChanged("无法唯一确认本帖的 AI 内容标签")
+            await confirm.click()
+
+    async def resume_preparation(
+        self, page, target, publication, observation, checkpoint=None
+    ):
+        if self.platform != "tiktok" or observation.get("phase") not in {
+            "uploaded",
+            "captioned",
+        }:
+            raise LayoutChanged("此准备记录不支持恢复")
+        await check_surface(page, self.hosts)
+        if (
+            page.url != observation["prepared_url"]
+            or observation["target_id"] != target["external_target_id"]
+        ):
+            raise ScopeChanged("原上传页面或目标已变化，未重新上传")
+        if observation["ai_generated"]:
+            await self.tiktok_ai_notice(page)
+        self.owner_hint = observation["account_id"]
+        own = await self.account(page)
+        if own["external_account_id"] != observation["account_id"]:
+            raise ScopeChanged("原上传账号已变化")
+        # This optional prompt changes account defaults. Dismiss it; do not opt in.
+        intro = page.get_by_text(
+            "Turn on automatic content checks?", exact=True
+        ).filter(visible=True)
+        if await intro.count():
+            cancel = page.get_by_role("button", name="Cancel", exact=True).filter(
+                visible=True
+            )
+            if await intro.count() != 1 or await cancel.count() != 1:
+                raise LayoutChanged("无法唯一关闭 TikTok 可选设置提示")
+            await cancel.click()
+        filename = observation["uploaded_file"]
+        filename_pattern = re.compile(
+            re.escape(filename.removesuffix(".mp4")) + r"(?:\s*\.mp4)?"
+        )
+        try:
+            await page.get_by_text(filename_pattern).first.wait_for(
+                state="visible", timeout=20000
+            )
+        except BrowserTimeoutError:
+            raise LayoutChanged("原上传文件尚未在当前页面就绪，未重新上传") from None
+        editor = await first_visible(page, EDITORS["tiktok"])
+        await editor.click()
+        original = " ".join((await editor.inner_text()).split())
+        if original:
+            # A fingerprint's OS can differ from the engine's shortcut mapping.
+            # Verify the visible selection before deleting; never append a new
+            # caption over text that a supposed select-all failed to select.
+            for shortcut in ("ControlOrMeta+A", "Meta+A", "Control+A"):
+                await editor.press(shortcut)
+                selected = await editor.evaluate(
+                    "el => window.getSelection()?.toString() || ''"
+                )
+                if " ".join(selected.split()) == original:
+                    break
+            else:
+                # Scope the visible browser selection to this editor only.
+                # This changes the UI selection, never DOM text or Draft.js
+                # internals. Deletion still uses the native keyboard event.
+                selected_all = await editor.evaluate("""el => {
+                  const selection=window.getSelection();
+                  if(!selection)return false;
+                  const range=document.createRange();range.selectNodeContents(el);
+                  selection.removeAllRanges();selection.addRange(range);
+                  return selection.rangeCount===1 && selection.getRangeAt(0).startContainer===el &&
+                    selection.getRangeAt(0).startOffset===0 && selection.getRangeAt(0).endContainer===el &&
+                    selection.getRangeAt(0).endOffset===el.childNodes.length;
+                }""")
+                if not selected_all:
+                    raise LayoutChanged("TikTok 原描述未完整选中，未提交")
+                await asyncio.sleep(0.1)
+                observation = {
+                    **observation,
+                    "caption_selection": {
+                        "method": "scoped_dom_range",
+                        "original_chars": len(original),
+                    },
+                }
+                if checkpoint:
+                    await checkpoint(observation)
+        await editor.press("Backspace")
+
+        async def saved_text(expected):
+            # A transient DOM match can precede a controlled-state rollback.
+            deadline = asyncio.get_running_loop().time() + 3
+            stable_since = None
+            while asyncio.get_running_loop().time() < deadline:
+                value = await editor.inner_text()
+                now = asyncio.get_running_loop().time()
+                if " ".join(value.split()) == " ".join(expected.split()):
+                    stable_since = stable_since if stable_since is not None else now
+                    if now - stable_since >= 0.3:
+                        return
+                else:
+                    stable_since = None
+                await asyncio.sleep(0.1)
+            if checkpoint:
+                await checkpoint(
+                    {
+                        **observation,
+                        "caption_check": {
+                            "expected_chars": len(expected),
+                            "observed_chars": len(value),
+                            "observed_text": value[:5000],
+                        },
+                    }
+                )
+            raise LayoutChanged("TikTok 描述尚未保存，未提交")
+
+        await saved_text("")
+        await editor.click()
+        # Commit each paragraph before another native edit. Newlines use native
+        # Enter because text insertion does not create rendered blocks. Draft.js
+        # also needs the native key events to commit its controlled text state.
+        prefix = ""
+        for index, line in enumerate(publication["body"].split("\n")):
+            if index:
+                await editor.press("Enter")
+                prefix += "\n"
+                await saved_text(prefix)
+            if line:
+                await editor.press_sequentially(line[0], delay=150)
+                prefix += line[0]
+                await saved_text(prefix)
+                if len(line) > 1:
+                    # A controlled focus render may restore the caret to zero
+                    # after the first input, rotating that character to the end.
+                    # Place the visible caret after the saved text, inside its
+                    # last text node; never mutate editor text or React state.
+                    await editor.evaluate("""el => {
+                      const walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT);
+                      let text,last;while(text=walker.nextNode())if(text.length)last=text;
+                      if(!last)throw new Error('caption_caret_unavailable');
+                      const range=document.createRange();range.setStart(last,last.length);range.collapse(true);
+                      const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+                    }""")
+                    await asyncio.sleep(0.1)
+                    await editor.press_sequentially(line[1:], delay=150)
+                    prefix += line[1:]
+                await saved_text(prefix)
+        await editor.press("Tab")
+        await saved_text(publication["body"])
+        try:
+            await verify_fields(
+                page,
+                [{"selectors": list(EDITORS["tiktok"]), "value": publication["body"]}],
+            )
+        except ScopeChanged:
+            raise LayoutChanged("TikTok 描述尚未保存，未提交") from None
+        observation = {**observation, "phase": "captioned"}
+        observation.pop("caption_check", None)
+        if checkpoint:
+            await checkpoint(observation)
+        more = page.get_by_text("Show more", exact=True).filter(visible=True)
+        if await more.count() == 1:
+            await more.click()
+        await self.tiktok_declarations(page, observation["ai_generated"])
+        button = await first_visible(page, FINALS["tiktok"])
+        if not await button.is_enabled():
+            raise LayoutChanged("TikTok 仍在处理视频，未提交")
+        return {
+            **observation,
+            "phase": "ready",
+            "final_selectors": list(FINALS["tiktok"]),
+            "fields": [
+                {"selectors": list(EDITORS["tiktok"]), "value": publication["body"]}
+            ],
+            "disclosures": {
+                "own_brand": True,
+                "ai_generated": observation["ai_generated"],
+            },
+        }
+
     async def youtube_video(self, page, target, publication, media, paths):
         channel = target["external_target_id"]
         await page.goto(
@@ -720,6 +1138,7 @@ class WebAdapter:
         }
 
     async def before_commit(self, page, target, observation, expected_account):
+        self.owner_hint = expected_account
         own = await self.account(page)
         if own["external_account_id"] != expected_account:
             raise ScopeChanged("提交前账号已改变")
@@ -737,11 +1156,16 @@ class WebAdapter:
         if not await button.is_enabled():
             raise LayoutChanged("发布按钮不再可用")
         await verify_fields(page, observation["fields"])
+        if self.platform == "tiktok" and observation.get("disclosures"):
+            await self.tiktok_declarations(
+                page, observation["disclosures"]["ai_generated"], verify=True
+            )
 
     async def submit(self, page, observation):
         await click(page, observation["final_selectors"])
 
     async def receipt(self, page, target, publication, observation, expected_account):
+        self.owner_hint = expected_account
         own = await self.account(page)
         if own["external_account_id"] != expected_account:
             raise ScopeChanged("核对时账号已改变，禁止重发")
@@ -778,7 +1202,7 @@ class WebAdapter:
         match = publication
         if self.platform == "reddit" and observation.get("kind") != "text":
             match = {**publication, "body": publication["title"]}
-        return await scoped_receipt(
+        result = await scoped_receipt(
             page,
             containers,
             pattern,
@@ -798,9 +1222,99 @@ class WebAdapter:
                 "tiktok": '[data-e2e="post-author"] a,a[href*="/video/"],header a',
             }[self.platform],
         )
+        if result and self.platform == "tiktok":
+            result["delivery"] = await self.delivery_status(
+                page, result["url"], publication
+            )
+        return result
+
+    async def delivery_status(self, page, url, publication):
+        if self.platform != "tiktok":
+            raise LayoutChanged("此渠道尚无交付状态适配")
+        return await page.evaluate(
+            r"""({url,body,marker}) => {
+          const normal=s=>(s||'').replace(/\s+/g,' ').trim();
+          const wanted=new URL(url); const candidates=[];
+          for(const link of document.querySelectorAll('a[href]')) {
+            let u;try{u=new URL(link.href)}catch{continue}
+            if(u.hostname!==wanted.hostname||u.pathname!==wanted.pathname)continue;
+            for(let root=link.parentElement,depth=0;root&&depth<12;root=root.parentElement,depth++){
+              const text=normal(root.innerText);
+              if(!text.includes(marker)||!text.includes(normal(body)))continue;
+              const ids=new Set(Array.from(root.querySelectorAll('a[href]')).map(a=>{try{return new URL(a.href).pathname.match(/\/video\/(\d+)/)?.[1]}catch{return null}}).filter(Boolean));
+              if(ids.size!==1)break;
+              const labels=new Set(Array.from(root.querySelectorAll('*')).map(n=>normal(n.innerText)).filter(t=>t.length<80));
+              const review=labels.has('Content under review')||labels.has('Under review');
+              const removed=labels.has('Removed')||labels.has('Rejected');
+              const own=labels.has('Only me')||labels.has('Private');
+              const publicView=labels.has('Everyone')||labels.has('Public');
+              const restricted=labels.has('Friends')||labels.has('Followers');
+              if(!(review||removed||own||publicView||restricted))continue;
+              const state=removed?'rejected':review?'under_review':own?'private':restricted?'restricted':publicView?'public':'unknown';
+              candidates.push({state,visibility:own?'private':restricted?'restricted':publicView?'public':'unknown'});break;
+            }
+          }
+          const distinct=[...new Map(candidates.map(x=>[x.state+':'+x.visibility,x])).values()];
+          return distinct.length===1?distinct[0]:{state:'unknown',visibility:'unknown'};
+        }""",
+            {"url": url, "body": publication["body"], "marker": publication["marker"]},
+        )
+
+    async def review_delivery(self, page, target, publication, url, expected_account):
+        wanted = urlsplit(url)
+        match = re.fullmatch(r"/@([A-Za-z0-9_.]{1,64})/video/(\d+)", wanted.path)
+        if (
+            wanted.hostname not in self.hosts
+            or not match
+            or match[1] != expected_account
+        ):
+            raise ScopeChanged("交付回执不属于原授权账号")
+        self.owner_hint = expected_account
+        await page.goto(
+            "https://www.tiktok.com/tiktokstudio/content",
+            wait_until="commit",
+            timeout=45000,
+        )
+        await page.locator(
+            'button[data-tt="Header_NewHeader_Clickable"],a[data-e2e="nav-profile"]'
+        ).first.wait_for(state="attached", timeout=30000)
+        own = await self.account(page)
+        if own["external_account_id"] != expected_account:
+            raise ScopeChanged("交付核对时登录身份已改变")
+        search = page.get_by_placeholder("Search for post description", exact=True)
+        if await search.count() == 1:
+            await search.fill(publication["marker"])
+            await search.press("Enter")
+        await page.locator('a[href*="/video/' + match[2] + '"]').first.wait_for(
+            state="attached", timeout=30000
+        )
+        return await self.delivery_status(page, url, publication)
 
     async def reconcile(self, page, target, publication, observation, expected_account):
         # Read the known own target; never open a new composer or upload again.
+        if self.platform == "tiktok":
+            proof = await page.context.new_page()
+            try:
+                self.owner_hint = expected_account
+                await proof.goto(
+                    "https://www.tiktok.com/tiktokstudio/content",
+                    wait_until="commit",
+                    timeout=45000,
+                )
+                await proof.locator(RECEIPTS["tiktok"][0]).first.wait_for(
+                    state="attached", timeout=30000
+                )
+                search = proof.get_by_placeholder(
+                    "Search for post description", exact=True
+                )
+                if await search.count() == 1:
+                    await search.fill(publication["marker"])
+                    await search.press("Enter")
+                return await self.receipt(
+                    proof, target, publication, observation, expected_account
+                )
+            finally:
+                await proof.close()
         if self.platform == "youtube" and observation.get("video_id"):
             await page.goto(
                 f"https://studio.youtube.com/channel/{target['external_target_id']}/videos/upload",

@@ -6,6 +6,7 @@ Only confirmed posts with a full observation window enter outcome comparisons.
 
 import json
 import math
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urljoin
@@ -111,7 +112,7 @@ def recommend(channel, stats, coverage, available_formats=None):
     )
     if (
         coverage == "connected"
-        and len(rows) == len(channel["plans"])
+        and len(rows) > 1
         and enough
         and sum(s["outcomes"] for s in rows) >= settings["min_outcomes"]
     ):
@@ -138,6 +139,16 @@ def recommend(channel, stats, coverage, available_formats=None):
     }
 
 
+def event_version(event):
+    if not event:
+        return ""
+    return (
+        f"{event['connection_id']}:{event['revision']}"
+        if event.get("ready")
+        else "awaiting_event"
+    )
+
+
 def evidence(
     c,
     target_id,
@@ -147,6 +158,7 @@ def evidence(
     objective,
     catalog_version=None,
     attribution_version="attribution/builtin@0",
+    event=None,
 ):
     """Aggregate visits and outcomes separately to prevent join fanout.
 
@@ -155,37 +167,54 @@ def evidence(
     Multiple events of the objective on one session count as one outcome.
     """
     settings = catalog()["defaults"]
+    event = event or {}
+    version = event_version(event)
     stats = all_rows(
         c,
         """
-        WITH published AS (
+        WITH public_actions AS (
+          SELECT a.*,CASE WHEN t.result ? 'delivery' THEN
+            CASE WHEN t.result#>>'{delivery,state}'='public' AND (s.platform<>'tiktok' OR
+              t.result#>>'{delivery,visibility}'='public') THEN (t.result#>>'{delivery,public_at}')::timestamptz END
+            WHEN s.platform<>'tiktok' THEN a.confirmed_at END AS public_at
+          FROM lead.actions a JOIN lead.tasks t ON t.id=a.task_id
+          JOIN lead.account_targets target ON target.id=a.target_id JOIN lead.social_accounts s ON s.id=target.account_id
+          WHERE a.state='confirmed' AND a.target_id=%s
+            AND coalesce(t.input->>'bootstrap_verification','false')<>'true'
+        ), published AS (
           SELECT ci.id, p.body->'operating_strategy'->>'plan_id' AS plan_id,
-            min(a.confirmed_at) AS published_at
+            min(a.public_at) AS published_at
           FROM lead.content_items ci
           JOIN lead.plans p ON p.id=ci.plan_id
           JOIN lead.agent_revisions r ON r.id=p.agent_revision_id
-          JOIN lead.actions a ON a.content_id=ci.id AND a.state='confirmed'
-          JOIN lead.tasks t ON t.id=a.task_id
+          JOIN public_actions a ON a.content_id=ci.id AND a.public_at IS NOT NULL
           WHERE ci.target_id=%s AND p.business_profile_id=%s AND r.revision=%s
             AND p.body->'operating_strategy'->>'catalog_version'=%s
             AND coalesce(p.body->'operating_strategy'->>'attribution_version','attribution/builtin@0')=%s
             AND p.body->'operating_strategy'->>'objective'=%s
-            AND coalesce(t.input->>'bootstrap_verification','false')<>'true'
+            AND coalesce(p.body#>>'{operating_strategy,event_version}','')=%s
           GROUP BY ci.id,p.body->'operating_strategy'->>'plan_id'
-          HAVING min(a.confirmed_at)>now()-make_interval(days=>%s)
+          HAVING min(a.public_at)>now()-make_interval(days=>%s)
         ), visits AS (
           SELECT p.id, count(v.id) AS sessions,
             count(v.id) FILTER (WHERE v.qualified) AS qualified,
             count(v.id) FILTER (WHERE EXISTS (
               SELECT 1 FROM lead.conversion_events cv
               WHERE cv.visit_session_id=v.id AND cv.trust_level='server_verified'
-                AND cv.type=%s AND cv.occurred_at>=v.started_at
+                AND %s='' AND cv.type=%s AND cv.occurred_at>=v.started_at
                 AND cv.occurred_at<p.published_at+make_interval(days=>%s)
+            ) OR EXISTS (
+              SELECT 1 FROM lead.pixel_receipts px JOIN lead.pixel_touchpoints tp ON tp.id=px.touchpoint_id
+              WHERE tp.tracking_link_id=l.id AND tp.visit_session_id=v.id AND px.connection_id=%s
+                AND px.scope_key='live' AND px.counted AND px.event_name=%s
+                AND px.definition_revision=%s AND px.trust_level=%s AND px.occurred_at>=v.started_at
+                AND px.occurred_at<p.published_at+make_interval(days=>%s)
             )) AS outcomes
           FROM published p
           JOIN lead.tracking_links l ON l.content_id=p.id AND l.state='active'
           JOIN lead.visit_sessions v ON v.tracking_link_id=l.id
             AND v.trust_level='client_observed' AND v.exclusion_reason IS NULL
+            AND v.source NOT LIKE 'pixel-test:%%' AND (%s::uuid IS NULL OR v.source='site:'||%s::text)
             AND v.started_at>=p.published_at
             AND v.started_at<p.published_at+make_interval(days=>%s)
           WHERE p.published_at<=now()-make_interval(days=>%s)
@@ -201,14 +230,24 @@ def evidence(
         """,
         (
             target_id,
+            target_id,
             business["id"],
             config_revision,
             catalog_version or catalog()["version"],
             attribution_version,
             objective,
+            version,
             settings["cohort_days"],
+            version,
             objective,
             channel["maturity_days"],
+            event.get("connection_id"),
+            objective,
+            event.get("revision"),
+            event.get("trust"),
+            channel["maturity_days"],
+            event.get("connection_id"),
+            event.get("connection_id"),
             channel["maturity_days"],
             channel["maturity_days"],
             channel["maturity_days"],
@@ -242,6 +281,17 @@ def evidence(
         and (not first or measurement["site_since"] <= first)
         and (not first or measurement["server_since"] <= first)
     )
+    if event:
+        ready = bool(event.get("ready"))
+        if ready and event.get("trust") == "server_verified":
+            ready = bool(
+                one(
+                    c,
+                    """SELECT 1 FROM lead.analytics_credentials WHERE connection_id=%s
+                AND state='active' AND last_received_at>now()-make_interval(hours=>%s)""",
+                    (event["connection_id"], freshness_hours),
+                )
+            )
     # Datetimes are serialized explicitly before entering saved JSONB plans.
     for row in stats:
         row["first_published_at"] = row["first_published_at"].isoformat()
@@ -250,18 +300,32 @@ def evidence(
 
 def planning_context(c, targets, business, config_revision):
     contexts = {}
+    if not targets:
+        return contexts
     requested_goal = business.get("facts", {}).get("conversion_goal", "signup")
     objective = (
         requested_goal
         if requested_goal in {"lead", "signup", "trial", "purchase"}
         else "signup"
     )
+    event = None
     attribution_version = "attribution/builtin@0"
     if c is not None and business.get("agent_id"):
         from .admin_controls import attribution
 
         policy, attribution_version = attribution(c, str(business["agent_id"]))
         objective = policy["objective"]
+        from .operating_contract import configuration
+        from .operating_plans import acquisition
+
+        agent = require_agent(c, str(business["agent_id"]))
+        if configuration(agent, business).get("objective_event"):
+            mode = acquisition(c, agent, business, datetime.now(timezone.utc))
+            objective = mode["objective_event"]
+            event = next(
+                (row for row in mode["events"] if row["name"] == objective),
+                {"ready": False},
+            )
     for target in targets:
         from .admin_config import strategy_for
 
@@ -288,9 +352,34 @@ def planning_context(c, targets, business, config_revision):
             objective,
             catalog_version,
             attribution_version,
+            event,
         )
+        formats = target.get("available_formats")
+        if formats is None and "verified_permissions" in target:
+            from .adapters.catalog import SPECS
+            from .admin_controls import channel_policy
+
+            spec = SPECS.get(target["platform"])
+            permissions = target["verified_permissions"] or {}
+            policy, _ = channel_policy(
+                c,
+                str(business["agent_id"]),
+                target["platform"],
+                str(target["target_id"]),
+            )
+            formats = (
+                set(permissions.get("publishing_verified_formats", []))
+                & set(policy["formats"])
+                & set(spec.formats)
+                if spec
+                and permissions.get("adapter_version") == spec.version
+                and policy["enabled"]
+                and policy["allow_publishing"]
+                else set()
+            )
         contexts[str(target["target_id"])] = {
             "catalog_version": catalog_version,
+            "event_version": event_version(event),
             "platform": channel["platform"],
             "setup": channel["setup"],
             "cadence": channel["cadence"],
@@ -301,10 +390,11 @@ def planning_context(c, targets, business, config_revision):
             "objective": objective,
             "attribution_version": attribution_version,
             "objective_status": "business_defined"
-            if attribution_version != "attribution/builtin@0"
+            if event
+            or attribution_version != "attribution/builtin@0"
             or "conversion_goal" in business.get("facts", {})
             else "provisional_default",
-            **recommend(channel, stats, coverage, target.get("available_formats")),
+            **recommend(channel, stats, coverage, formats),
         }
         context = contexts[str(target["target_id"])]
         if c is not None and business.get("agent_id"):
@@ -360,6 +450,7 @@ def plan_snapshot(context):
         "plan_id": context["selected_plan"]["id"],
         "name": context["selected_plan"]["name"],
         "objective": context["objective"],
+        "event_version": context.get("event_version", ""),
         "attribution_version": context.get(
             "attribution_version", "attribution/builtin@0"
         ),
@@ -395,7 +486,7 @@ def get_playbooks(aid: UUID):
         )
         targets = all_rows(
             c,
-            """SELECT t.id AS target_id,s.platform FROM lead.account_targets t
+            """SELECT t.id AS target_id,s.platform,t.verified_permissions FROM lead.account_targets t
                JOIN lead.social_accounts s ON s.id=t.account_id
                WHERE t.state='active' AND s.state='connected'""",
         )

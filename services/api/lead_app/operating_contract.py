@@ -27,11 +27,15 @@ def configuration(agent, business=None):
         or facts.get("operating_goal")
         or facts.get("conversion_goal")
     )
+    from .growth_experiments import chamber_campaign
+    clicks_only = chamber_campaign(agent)
+    if clicks_only:
+        objective = "广泛探索真实受众，持续获得可归因的有效产品短链点击"
     return {
         "objective": objective or "了解真实需求并取得可验证的业务进展",
         "objective_status": "user_defined" if objective else "provisional",
-        "objective_event": saved.get("objective_event"),
-        "audience": saved.get("audience") or facts.get("audience", ""),
+        "objective_event": None if clicks_only else saved.get("objective_event"),
+        "audience": "跨人群探索，按成熟短链点击调整" if clicks_only else saved.get("audience") or facts.get("audience", ""),
         "language": saved.get("language", ""),
         "preferred_work": saved.get("preferred_work", []),
         "revision": saved.get("revision", 0),

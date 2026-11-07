@@ -22,18 +22,23 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel, Field
 
-from . import domain
+from . import domain, website_brief
 from .admin_advanced_api import router as advanced_admin_router
 from .admin_api import router as admin_router
 from .analytics import router as analytics_router
+from .analytics_ingest import router as analytics_ingest_router
+from .analytics_limits import router as analytics_limits_router
+from .analytics_reporting import router as analytics_reporting_router
 from .auth import auth_mode, public_origin
 from .auth import router as auth_router
+from .browser_pilot import router as browser_pilot_router
 from .community_growth import GrowthConfig
 from .config import STATE, env, model_config
 from .conversions import router as conversion_router
 from .creative_pipeline import router as creative_router
 from .db import all_rows, audit, one, record, require_agent, tx
 from .events import router as event_router
+from .operating_plans import router as plans_router
 from .operating_playbooks import router as playbook_router
 from .operating_workspace import router as operations_router
 from .ops import router as ops_router
@@ -57,6 +62,9 @@ app.add_middleware(
 )
 ORIGINS = {"http://localhost:3100", "http://127.0.0.1:3100", "http://127.0.0.1:8088"}
 app.include_router(analytics_router)
+app.include_router(analytics_ingest_router)
+app.include_router(analytics_reporting_router)
+app.include_router(analytics_limits_router)
 app.include_router(pixel_router)
 
 app.include_router(event_router)
@@ -66,6 +74,8 @@ app.include_router(ops_router)
 app.include_router(playbook_router)
 app.include_router(creative_router)
 app.include_router(operations_router)
+app.include_router(plans_router)
+app.include_router(browser_pilot_router)
 app.include_router(admin_router)
 app.include_router(advanced_admin_router)
 
@@ -162,7 +172,7 @@ async def local_auth(request, call_next):
                             {"detail": error.detail}, status_code=error.status_code
                         )
     elif re.fullmatch("/r/" + CODE_PATTERN, path) or re.fullmatch(
-        r"/collect/[0-9a-fA-F-]{36}(?:/test)?", path
+        r"/collect/[0-9a-fA-F-]{36}(?:/test|/batch|/receipts)?", path
     ):
         from .identity_store import public_tenant
 
@@ -255,6 +265,31 @@ class AgentSetupCreate(AgentSetupProfile):
 
 class AgentSetupEdit(AgentSetupProfile):
     expected_revision: int = Field(ge=1)
+
+
+@app.post("/api/agents/setup/analyze")
+async def analyze_website(body: website_brief.Website, request: Request):
+    async def disconnected():
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+
+    work = asyncio.create_task(website_brief.analyze(body.product_url))
+    closed = asyncio.create_task(disconnected())
+    try:
+        await asyncio.wait((work, closed), return_when=asyncio.FIRST_COMPLETED)
+        if work.done():
+            return work.result()
+        return Response(status_code=499)
+    finally:
+        work.cancel()
+        closed.cancel()
+        await asyncio.gather(work, closed, return_exceptions=True)
+
+
+@app.post("/api/agents/setup/confirm", status_code=201)
+def confirm_website(body: website_brief.ConfirmedBrief):
+    brief = body.model_dump(exclude={"client_id"})
+    return {"id": domain.create_agent(str(body.client_id), confirmed_brief=brief)}
 
 
 @app.post("/api/agents/setup", status_code=201)
@@ -458,6 +493,7 @@ class LabPublish(BaseModel):
 
 
 class BrowserInput(BaseModel):
+    takeover: UUID | None = None
     kind: Literal["click", "text", "key", "scroll", "back", "forward", "reload"]
     x: float = 0
     y: float = 0
@@ -908,22 +944,27 @@ def end_takeover(aid: UUID):
 
 
 @app.get("/api/agents/{aid}/browser/screenshot")
-async def screenshot(aid: UUID, format: Literal["png", "jpeg"] = "png"):
+async def screenshot(aid: UUID, request: Request, format: Literal["png", "jpeg"] = "png", takeover: UUID | None = None):
     with tx(str(aid)) as c:
         require_agent(c, str(aid))
     result = await gateway(
-        "/agents/" + str(aid) + "/screenshot?format=" + format, "GET"
+        f"/agents/{aid}/screenshot?format={format}" + (f"&takeover={takeover}" if takeover else ""), "GET"
     )
-    return Response(
-        result.content, media_type="image/jpeg" if format == "jpeg" else "image/png"
-    )
+    headers = {"Cache-Control": "private, no-store"}
+    if format == "jpeg":
+        tag = '"' + hashlib.sha256(result.content).hexdigest() + '"'
+        headers["ETag"] = tag
+        if request.headers.get("if-none-match") == tag:
+            return Response(status_code=304, headers=headers)
+    return Response(result.content, media_type="image/jpeg" if format == "jpeg" else "image/png", headers=headers)
+
 
 
 @app.post("/api/agents/{aid}/browser/input")
 async def browser_input(aid: UUID, body: BrowserInput):
     with tx(str(aid)) as c:
         require_agent(c, str(aid))
-    await gateway("/agents/" + str(aid) + "/input", body=body.model_dump())
+    await gateway("/agents/" + str(aid) + "/input", body=body.model_dump(mode="json"))
     return {"ok": True}
 
 

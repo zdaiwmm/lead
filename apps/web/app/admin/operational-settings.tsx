@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api-client";
 import ConfigEditor, { clone, Row } from "./config-editor";
 import { Lines } from "./strategy-form";
+import Disclosure from "./disclosure";
 
 const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const categories: Row = {
@@ -14,6 +15,11 @@ const categories: Row = {
   uncertain_action: "外部操作结果待核对",
   knowledge_expired: "知识资料过期",
   measurement_stale: "网站或转化回传过期",
+  analytics_ingest_backlog: "数据处理积压",
+  analytics_delivery_failure: "数据投递失败",
+  analytics_report_failure: "统计更新失败",
+  analytics_rate_limited: "采集达到保护上限",
+  analytics_recovered: "数据处理恢复",
 };
 const roles: Row = {
   owner: "所有者",
@@ -156,6 +162,16 @@ function Hours({
   );
 }
 
+const effortLabels: Record<string, string> = {
+  none: "关闭",
+  minimal: "最低",
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "很高",
+  max: "最高",
+};
+
 function Models({
   body,
   change,
@@ -182,6 +198,67 @@ function Models({
     ]),
   ] as string[];
   const field = (key: string, value: any) => change({ ...body, [key]: value });
+  const efforts: Record<string, string> = body.reasoning_efforts || {};
+  const levelsFor = (model: string): string[] =>
+    options.reasoning_options?.[model] || [];
+
+  function changeModel(slot: string, name: string) {
+    const next: Row = { ...body, reasoning_efforts: { ...efforts } };
+    if (slot === "default") next.default_model = name;
+    else next.task_models = { ...body.task_models, [slot]: name };
+    for (const [key, effort] of Object.entries(efforts)) {
+      if (key !== slot && (slot !== "default" || next.task_models[key]))
+        continue;
+      const model = next.task_models[key] || next.default_model;
+      if (!levelsFor(model).includes(effort))
+        delete next.reasoning_efforts[key];
+    }
+    change(next);
+  }
+
+  function effortField(slot: string, label: string) {
+    const taskModel = body.task_models[slot];
+    const model = taskModel || body.default_model;
+    const levels = levelsFor(model);
+    const inherit = slot !== "default" && !taskModel;
+    const defaultLabel = model.startsWith("openai:")
+      ? "模型默认"
+      : "系统默认（关闭推理）";
+    return (
+      <label>
+        {label}推理程度
+        <select
+          value={efforts[slot] || ""}
+          disabled={!levels.length}
+          onChange={(e) => {
+            const next = { ...efforts };
+            if (e.target.value) next[slot] = e.target.value;
+            else delete next[slot];
+            field("reasoning_efforts", next);
+          }}
+        >
+          <option value="">
+            {inherit
+              ? `跟随默认设置（${effortLabels[efforts.default] || (model.startsWith("openai:") ? "模型默认" : "关闭推理")}）`
+              : defaultLabel}
+          </option>
+          {levels.map((value) => (
+            <option key={value} value={value}>
+              {effortLabels[value]}
+            </option>
+          ))}
+        </select>
+        {!levels.length && (
+          <small>
+            {options.reasoning_options
+              ? "当前模型没有已知的可调档位。"
+              : "推理档位尚未加载。"}
+          </small>
+        )}
+      </label>
+    );
+  }
+
   const modelOptions = () =>
     ["deepseek", "openai"].map((provider) => (
       <optgroup
@@ -196,6 +273,10 @@ function Models({
           .map((name) => (
             <option key={name} value={name}>
               {name.replace(/^(openai|deepseek):/, "")}
+              {options.providers?.find((p: Row) => p.id === provider)
+                ?.credential_configured === false
+                ? "（服务未配置）"
+                : ""}
             </option>
           ))}
       </optgroup>
@@ -206,102 +287,109 @@ function Models({
         默认模型
         <select
           value={body.default_model}
-          onChange={(e) => field("default_model", e.target.value)}
+          disabled={!options.reasoning_options}
+          onChange={(e) => changeModel("default", e.target.value)}
         >
           {modelOptions()}
         </select>
         <small>
-          DeepSeek 与 OpenAI
-          分别使用服务端凭据。下面的任务可以各自选择服务；关闭自动切换，缺少凭据会明确提示。
+          选择已配置服务的模型后保存。没有特别需要时，各类任务会跟随默认模型；系统不会自动切换服务。
         </small>
       </label>
-      <div className="admin-subheading">
-        <h3>按任务选择模型</h3>
-      </div>
-      <div className="admin-step-fields">
-        {[
-          ["chat", "对话"],
-          ["planning", "运营规划与内容"],
-          ["research", "研究与分析"],
-        ].map(([key, label]) => (
-          <label key={key}>
-            {label}
-            <select
-              value={body.task_models[key]}
-              onChange={(e) =>
-                field("task_models", {
-                  ...body.task_models,
-                  [key]: e.target.value,
-                })
-              }
-            >
-              <option value="">跟随默认模型</option>
-              {modelOptions()}
-            </select>
-          </label>
-        ))}
-      </div>
-      <div className="admin-subheading">
-        <h3>调用与工具用量</h3>
-      </div>
-      <div className="admin-field-pair">
-        <NumberField
-          label="单次响应等待上限（秒）"
-          value={body.timeout_seconds}
-          min={15}
-          max={120}
-          onChange={(v) => field("timeout_seconds", v)}
-        />
-        <NumberField
-          label="每次输出 token 上限"
-          value={body.max_output_tokens}
-          min={256}
-          max={8000}
-          onChange={(v) => field("max_output_tokens", v)}
-        />
-      </div>
-      <div className="admin-field-pair">
-        <NumberField
-          label="每轮最多模型请求次数"
-          value={body.max_model_requests}
-          min={1}
-          max={10}
-          onChange={(v) => field("max_model_requests", v)}
-        />
-        <NumberField
-          label="每轮最多工具操作次数"
-          value={body.max_tool_calls}
-          min={0}
-          max={20}
-          onChange={(v) => field("max_tool_calls", v)}
-        />
-      </div>
-      <fieldset className="admin-choice-group">
-        <legend>可用工具</legend>
-        {[
-          ["public_web", "公开网页读取"],
-          ["advanced_research", "进阶网页研究"],
-          ["community_research", "社群线索研究"],
-          ["media_creation", "原创图文与视频制作"],
-        ].map(([key, label]) => (
-          <label className="admin-checkbox" key={key}>
-            <input
-              type="checkbox"
-              checked={body.tools[key]}
-              onChange={(e) =>
-                field("tools", { ...body.tools, [key]: e.target.checked })
-              }
-            />
-            {label}
-          </label>
-        ))}
-      </fieldset>
-      <p className="admin-help">
-        工具开关用于限制实际调用，账号操作仍受原有授权约束。
-        {options.advanced_research_available === false
-          ? "本机尚未启用进阶研究环境，勾选后也需环境就绪才能使用。"
-          : ""}
-      </p>
+      {effortField("default", "默认")}
+      <Disclosure
+        title={`按任务单独选择模型${Object.values(body.task_models).some(Boolean) || Object.keys(efforts).some((key) => key !== "default") ? " · 已有独立设置" : " · 当前跟随默认"}`}
+      >
+        <p className="admin-help">
+          同一模型也可以按任务设置不同的推理程度。较高档位可能增加耗时和 token
+          用量。
+        </p>
+        <div className="admin-step-fields">
+          {[
+            ["chat", "对话"],
+            ["planning", "运营规划与内容"],
+            ["research", "研究与分析"],
+          ].map(([key, label]) => (
+            <div key={key} className="admin-field-pair">
+              <label>
+                {label}
+                <select
+                  disabled={!options.reasoning_options}
+                  value={body.task_models[key]}
+                  onChange={(e) => changeModel(key, e.target.value)}
+                >
+                  <option value="">跟随默认模型</option>
+                  {modelOptions()}
+                </select>
+              </label>
+              {effortField(key, label)}
+            </div>
+          ))}
+        </div>
+      </Disclosure>
+      <Disclosure title="调用限制与工具权限">
+        <p className="admin-help">
+          当前设置继续生效。仅在需要限制响应时间、调用次数或工具能力时调整。
+        </p>
+        <div className="admin-field-pair">
+          <NumberField
+            label="单次响应等待上限（秒）"
+            value={body.timeout_seconds}
+            min={15}
+            max={120}
+            onChange={(v) => field("timeout_seconds", v)}
+          />
+          <NumberField
+            label="每次输出 token 上限"
+            value={body.max_output_tokens}
+            min={256}
+            max={8000}
+            onChange={(v) => field("max_output_tokens", v)}
+          />
+        </div>
+        <div className="admin-field-pair">
+          <NumberField
+            label="每轮最多模型请求次数"
+            value={body.max_model_requests}
+            min={1}
+            max={10}
+            onChange={(v) => field("max_model_requests", v)}
+          />
+          <NumberField
+            label="每轮最多工具操作次数"
+            value={body.max_tool_calls}
+            min={0}
+            max={20}
+            onChange={(v) => field("max_tool_calls", v)}
+          />
+        </div>
+        <fieldset className="admin-choice-group">
+          <legend>可用工具</legend>
+          {[
+            ["public_web", "公开网页读取"],
+            ["advanced_research", "进阶网页研究"],
+            ["community_research", "社群线索研究"],
+            ["media_creation", "原创图文与视频制作"],
+          ].map(([key, label]) => (
+            <label className="admin-checkbox" key={key}>
+              <input
+                type="checkbox"
+                checked={body.tools[key]}
+                onChange={(e) =>
+                  field("tools", { ...body.tools, [key]: e.target.checked })
+                }
+              />
+              {label}
+            </label>
+          ))}
+        </fieldset>
+        <p className="admin-help">
+          工具开关用于限制实际调用，账号操作仍受原有授权约束。
+          {options.advanced_research_available === false
+            ? "本机尚未启用进阶研究环境，勾选后也需环境就绪才能使用。"
+            : ""}
+        </p>
+      </Disclosure>
     </>
   );
 }
@@ -362,50 +450,52 @@ function Brand({ body, change }: { body: Row; change: (body: Row) => void }) {
           onChange={(e) => field("voice", e.target.value)}
         />
       </label>
-      <label>
-        品牌定位
-        <textarea
-          maxLength={4000}
-          rows={3}
-          value={body.positioning}
-          onChange={(e) => field("positioning", e.target.value)}
-        />
-      </label>
-      <label>
-        目标人群
-        <textarea
-          maxLength={2000}
-          rows={2}
-          value={body.audience}
-          onChange={(e) => field("audience", e.target.value)}
-        />
-      </label>
       <Lines
         label="已确认的产品事实"
         value={body.facts}
         onChange={(v) => field("facts", v)}
         help="每行一条。需要定期复核的价格、活动和时效信息建议放入带有效期的知识资料。"
       />
-      <Lines
-        label="禁用表达"
-        value={body.forbidden_phrases}
-        onChange={(v) => field("forbidden_phrases", v)}
-        help="发布前会检查这些词句；不区分英文字母大小写。"
-      />
-      <Lines
-        label="应避免的承诺和说法"
-        value={body.claims_to_avoid}
-        onChange={(v) => field("claims_to_avoid", v)}
-      />
-      <label>
-        素材使用与视觉要求
-        <textarea
-          rows={3}
-          maxLength={4000}
-          value={body.asset_guidance}
-          onChange={(e) => field("asset_guidance", e.target.value)}
+      <Disclosure title="定位、人群与表达限制">
+        <label>
+          品牌定位
+          <textarea
+            maxLength={4000}
+            rows={3}
+            value={body.positioning}
+            onChange={(e) => field("positioning", e.target.value)}
+          />
+        </label>
+        <label>
+          目标人群
+          <textarea
+            maxLength={2000}
+            rows={2}
+            value={body.audience}
+            onChange={(e) => field("audience", e.target.value)}
+          />
+        </label>
+        <Lines
+          label="禁用表达"
+          value={body.forbidden_phrases}
+          onChange={(v) => field("forbidden_phrases", v)}
+          help="发布前会检查这些词句；不区分英文字母大小写。"
         />
-      </label>
+        <Lines
+          label="应避免的承诺和说法"
+          value={body.claims_to_avoid}
+          onChange={(v) => field("claims_to_avoid", v)}
+        />
+        <label>
+          素材使用与视觉要求
+          <textarea
+            rows={3}
+            maxLength={4000}
+            value={body.asset_guidance}
+            onChange={(e) => field("asset_guidance", e.target.value)}
+          />
+        </label>
+      </Disclosure>
       <div className="admin-subheading">
         <h3>知识资料</h3>
         <button
@@ -861,12 +951,16 @@ export default function OperationalSettings({
   kind,
   agents,
   readOnly,
+  initialAgentId = "",
+  onScopeChange,
 }: {
   kind: string;
   agents: Row[];
   readOnly: boolean;
+  initialAgentId?: string;
+  onScopeChange?: (agentId: string) => void;
 }) {
-  const [aid, setAid] = useState(""),
+  const [aid, setAid] = useState(initialAgentId),
     [options, setOptions] = useState<Row>({}),
     [members, setMembers] = useState<Row[]>([]),
     [status, setStatus] = useState<Row | null>(null),
@@ -913,8 +1007,14 @@ export default function OperationalSettings({
       <div className="admin-toolbar">
         <label className="admin-search">
           适用范围
-          <select value={aid} onChange={(e) => setAid(e.target.value)}>
-            <option value="">工作室默认配置</option>
+          <select
+            value={aid}
+            onChange={(e) => {
+              setAid(e.target.value);
+              onScopeChange?.(e.target.value);
+            }}
+          >
+            <option value="">所有 Agent 的默认设置</option>
             {agents.map((agent) => (
               <option key={agent.id} value={agent.id}>
                 {agent.name}
@@ -933,53 +1033,65 @@ export default function OperationalSettings({
       )}
       {kind === "models" && (
         <section className="admin-model-services" aria-label="模型服务状态">
-          {!options.providers && <p role="status">正在读取模型服务状态…</p>}
-          {(options.providers || []).map((provider: Row) => (
-            <div className="admin-service-status" key={provider.id}>
-              <div>
-                <strong>{provider.name}</strong>
-                <p>
-                  {provider.credential_configured
-                    ? "服务端已配置凭据，尚未检查连接。"
-                    : "尚未配置服务端凭据，请由部署方补充。"}
-                </p>
-                <small>密钥只在服务端使用，不进入配置版本或浏览器。</small>
-                {connection[provider.id] && (
-                  <p role="status">{connection[provider.id]}</p>
+          {options.providers && (
+            <p className="admin-help">
+              已配置凭据：
+              {options.providers
+                .filter((provider: Row) => provider.credential_configured)
+                .map((provider: Row) => provider.name)
+                .join("、") || "尚无"}
+              。连接情况可展开检查。
+            </p>
+          )}
+          <Disclosure title="服务连接状态与检查">
+            {!options.providers && <p role="status">正在读取模型服务状态…</p>}
+            {(options.providers || []).map((provider: Row) => (
+              <div className="admin-service-status" key={provider.id}>
+                <div>
+                  <strong>{provider.name}</strong>
+                  <p>
+                    {provider.credential_configured
+                      ? "服务端已配置凭据，尚未检查连接。"
+                      : "尚未配置服务端凭据，请由部署方补充。"}
+                  </p>
+                  <small>密钥只在服务端使用，不进入配置版本或浏览器。</small>
+                  {connection[provider.id] && (
+                    <p role="status">{connection[provider.id]}</p>
+                  )}
+                </div>
+                {!readOnly && (
+                  <button
+                    type="button"
+                    disabled={!!checking}
+                    onClick={async () => {
+                      setChecking(provider.id);
+                      try {
+                        const result = await api(
+                          `/admin/model-check?provider=${provider.id}${aid ? "&aid=" + aid : ""}`,
+                          { models: checkModels },
+                        );
+                        setConnection((previous) => ({
+                          ...previous,
+                          [provider.id]: result.message,
+                        }));
+                      } catch (e) {
+                        setConnection((previous) => ({
+                          ...previous,
+                          [provider.id]: (e as Error).message,
+                        }));
+                      } finally {
+                        setChecking("");
+                      }
+                    }}
+                  >
+                    {checking === provider.id
+                      ? "检查中…"
+                      : `检查 ${provider.name} 连接`}
+                  </button>
                 )}
               </div>
-              {!readOnly && (
-                <button
-                  type="button"
-                  disabled={!!checking}
-                  onClick={async () => {
-                    setChecking(provider.id);
-                    try {
-                      const result = await api(
-                        `/admin/model-check?provider=${provider.id}${aid ? "&aid=" + aid : ""}`,
-                        { models: checkModels },
-                      );
-                      setConnection((previous) => ({
-                        ...previous,
-                        [provider.id]: result.message,
-                      }));
-                    } catch (e) {
-                      setConnection((previous) => ({
-                        ...previous,
-                        [provider.id]: (e as Error).message,
-                      }));
-                    } finally {
-                      setChecking("");
-                    }
-                  }}
-                >
-                  {checking === provider.id
-                    ? "检查中…"
-                    : `检查 ${provider.name} 连接`}
-                </button>
-              )}
-            </div>
-          ))}
+            ))}
+          </Disclosure>
         </section>
       )}
       {kind === "runtime" && status && (

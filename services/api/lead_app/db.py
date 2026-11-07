@@ -20,7 +20,7 @@ def j(value):
 
 
 @contextmanager
-def tx(agent_id=None, tenant_id=None):
+def tx(agent_id=None, tenant_id=None, *, pooled=True):
     from .scope import tenant_scope, trusted_execution
 
     if agent_id:
@@ -30,12 +30,19 @@ def tx(agent_id=None, tenant_id=None):
 
         tenant_id = agent_tenant(agent_id)
     tenant_id = str(tenant_id or current_tenant())
+    from .db_pool import pool
+
+    connection = (
+        pool().connection()
+        if pooled
+        else psycopg.connect(**database_kwargs(), row_factory=dict_row)
+    )
     with (
         tenant_scope(tenant_id),
-        psycopg.connect(**database_kwargs(), row_factory=dict_row) as conn,
+        connection as conn,
     ):
         conn.execute(
-            "SELECT set_config('app.tenant_id',%s,true), set_config('app.agent_id',%s,true)",
+            "SELECT set_config('app.tenant_id',%s,true), set_config('app.agent_id',%s,true),set_config('app.analytics_scope','',true)",
             (tenant_id, agent_id or ""),
         )
         from .scope import principal
@@ -47,6 +54,10 @@ def tx(agent_id=None, tenant_id=None):
             (json.dumps(allowed) if allowed is not None else "*",),
         )
         yield conn
+
+
+def pooled_tx(agent_id=None, tenant_id=None):
+    return tx(agent_id, tenant_id, pooled=True)
 
 
 def one(conn, sql, params=()):

@@ -32,7 +32,8 @@ export default function OnboardingForm({
   return (
     <>
       <div className="admin-subheading">
-        <h3>步骤与默认渠道</h3>
+        <h3>旧版创建引导</h3>
+        <p>此模板用于旧版分步流程。新建 Agent 已改用官网业务确认卡。</p>
       </div>
       <div className="admin-step-fields">
         {body.steps.map((step: string, i: number) => (

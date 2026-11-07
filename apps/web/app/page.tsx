@@ -4,7 +4,7 @@ import {
   ArrowUp,
   Plus,
   LayoutGrid,
-  MessageSquare,
+  ChevronUp,
   ChevronRight,
   Settings,
   Pause,
@@ -25,11 +25,11 @@ import AgentIdentity from "./agent-identity";
 import AgentPreferences from "./agent-preferences";
 import SocialAccounts from "./social-accounts";
 import AgentResults from "./agent-results";
-import ActivityPanel from "./activity-panel";
 import OperatingPanel from "./operating-panel";
+import OperatingPlans from "./operating-plans";
 import AccountBrowser from "./account-browser";
 import SocialIcon from "./social-icon";
-import NewAgentDialog from "./new-agent-dialog";
+import NewAgentDialog from "./website-agent-dialog";
 import NotificationIndicator from "./notification-indicator";
 
 type Row = Record<string, any>;
@@ -56,6 +56,10 @@ const names: Row = {
   planned: "待执行",
 };
 function status(a: Row) {
+  const kernel = a.onboarding_state?.operating_kernel;
+  if (a.desired_state === "running" && kernel?.last_result?.idle) {
+    return "持续运营，等待下一项工作";
+  }
   return a.desired_state === "running"
     ? (["ready", "queued"].includes(a.health_state)
         ? names.running
@@ -65,8 +69,9 @@ function status(a: Row) {
 export default function Lead() {
   const [view, setView] = useState<View>("home");
   const [chatOpen, setChatOpen] = useState(false);
+  const chatDock = useRef<HTMLElement>(null);
+  const chatInput = useRef<HTMLTextAreaElement>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  const [createInitial, setCreateInitial] = useState("");
   const [agents, setAgents] = useState<Row[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
   const [detail, setDetail] = useState<Row | null>(null);
@@ -140,9 +145,19 @@ export default function Lead() {
   useEffect(() => {
     if (!ready) return;
     const events = new EventSource("/api/events");
-    events.onmessage = () => refresh().catch(() => {});
-    events.onopen = () => refresh().catch(() => {});
-    const timer = setInterval(() => refresh().catch(() => {}), 15000);
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try { await refresh(); } catch { /* Retry on the next tick. */ }
+      finally { polling = false; }
+    };
+    events.onmessage = () => {
+      window.dispatchEvent(new Event("lead:updated"));
+      void poll();
+    };
+    events.onopen = poll;
+    const timer = setInterval(poll, 15000);
     return () => {
       events.close();
       clearInterval(timer);
@@ -188,50 +203,31 @@ export default function Lead() {
     };
   }, [channels]);
   useEffect(() => {
-    if (!chatOpen || !window.matchMedia("(max-width:1279px)").matches) return;
-    const panel = document.querySelector<HTMLElement>(".chat-panel");
-    const previous = document.activeElement as HTMLElement | null;
-    const background = [".agent-canvas", ".sidebar", ".topbar", ".chat-launch"]
-      .map((s) => document.querySelector<HTMLElement>(s))
-      .filter((e): e is HTMLElement => !!e);
-    background.forEach((e) => {
-      e.inert = true;
+    if (!chatOpen) return;
+    const log = messagesRef.current;
+    if (!log) return;
+    followMessages.current = true;
+    log.scrollTop = log.scrollHeight;
+    const observer = new ResizeObserver(() => {
+      if (followMessages.current) log.scrollTop = log.scrollHeight;
     });
-    panel?.setAttribute("role", "dialog");
-    panel?.setAttribute("aria-modal", "true");
-    panel?.querySelector<HTMLElement>(".close-chat")?.focus();
-    function key(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setChatOpen(false);
-      }
-      if (e.key !== "Tab") return;
-      const items = panel?.querySelectorAll<HTMLElement>(
-        "button:not(:disabled),textarea:not(:disabled),a[href],summary",
-      );
-      if (!items?.length) return;
-      if (e.shiftKey && document.activeElement === items[0]) {
-        e.preventDefault();
-        items[items.length - 1].focus();
-      } else if (
-        !e.shiftKey &&
-        document.activeElement === items[items.length - 1]
-      ) {
-        e.preventDefault();
-        items[0].focus();
-      }
+    observer.observe(log);
+    function outside(e: PointerEvent) {
+      if (!chatDock.current?.contains(e.target as Node)) setChatOpen(false);
     }
-    document.addEventListener("keydown", key);
+    function escape(e: KeyboardEvent) {
+      if (e.key !== "Escape" || document.querySelector("dialog[open], [aria-modal='true']")) return;
+      setChatOpen(false);
+      if (chatDock.current?.contains(document.activeElement)) chatInput.current?.focus();
+    }
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
     return () => {
-      document.removeEventListener("keydown", key);
-      background.forEach((e) => {
-        e.inert = false;
-      });
-      panel?.removeAttribute("role");
-      panel?.removeAttribute("aria-modal");
-      previous?.focus();
+      observer.disconnect();
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
     };
-  }, [chatOpen, current, !!detail]);
+  }, [chatOpen]);
   function actionError(message: string) {
     const dialog = document.querySelector("dialog[open]");
     if (dialog)
@@ -275,15 +271,14 @@ export default function Lead() {
       setError((e as Error).message);
     }
   }
-  function beginCreate(initial = "") {
-    setCreateInitial(initial);
+  function beginCreate() {
     setCreateOpen(true);
   }
   async function send() {
     if ((!text.trim() && !attachments.length) || busy) return;
     const value = text.trim() || "我上传了素材，供后续运营使用。";
     if (!current) {
-      beginCreate(value);
+      beginCreate();
       return;
     }
     await run(async () => {
@@ -309,7 +304,7 @@ export default function Lead() {
   async function connect(p: Row) {
     if (!current || readOnly) return;
     window.dispatchEvent(new Event("lead:close-dialogs"));
-    setBrowser({ platform: p.id, name: p.name });
+    setBrowser({ platform: p.id, name: p.name, activate: p.activate });
     setChannels(false);
   }
   const running = agents.filter((a) => a.desired_state === "running").length;
@@ -321,10 +316,10 @@ export default function Lead() {
     (m: Row) =>
       m.role === "user" && ["pending", "processing"].includes(m.job_status),
   );
-  function composer(first = false) {
-    if (readOnly) return <p className="readonly-label">仅可查看</p>;
+  const latest = detail?.messages?.at(-1);
+  function composer() {
     return (
-      <div className={"composer " + (first ? "first" : "")}>
+      <div className="composer">
         {!!attachments.length && (
           <div className="attachment-list">
             {attachments.map((asset) => (
@@ -348,18 +343,27 @@ export default function Lead() {
           </div>
         )}
         <textarea
-          aria-label={first ? "产品网址或介绍" : "发消息给 Agent"}
+          ref={chatInput}
+          aria-label={readOnly ? "查看 Agent 对话" : "发消息给 Agent"}
+          aria-controls="agent-chat-log"
+          onClick={() => setChatOpen(true)}
           placeholder={
-            first ? "输入产品网址，或简单介绍你的业务" : "说说你的想法…"
+            readOnly ? "仅可查看对话" : "发消息给 " + detail?.name + "…"
           }
+          readOnly={readOnly}
           value={text}
           onChange={(e) => {
             setText(e.target.value);
             sendKey.current = null;
           }}
           onKeyDown={(e) => {
+            if (!chatOpen && e.key === "Enter" && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              setChatOpen(true);
+              return;
+            }
             if (
-              e.key === "Enter" &&
+              !readOnly && e.key === "Enter" &&
               !e.shiftKey &&
               !e.nativeEvent.isComposing
             ) {
@@ -367,7 +371,7 @@ export default function Lead() {
               send();
             }
           }}
-          rows={first ? 3 : 2}
+          rows={1}
         />
         <div className="composer-bottom">
           <span>
@@ -391,7 +395,7 @@ export default function Lead() {
           <button
             aria-label="发送"
             className="send"
-            disabled={(!text.trim() && !attachments.length) || busy || !ready}
+            disabled={readOnly || (!text.trim() && !attachments.length) || busy || !ready}
             onClick={send}
           >
             <ArrowUp size={18} />
@@ -560,9 +564,9 @@ export default function Lead() {
                   l<span>·</span>
                 </div>
                 <div className="eyebrow">YOUR AI SOCIAL TEAM</div>
-                <h1>你想推广什么？</h1>
-                <p>介绍你的业务，Agent 将持续为你运营社媒。</p>
-                {composer(true)}
+                <h1>创建你的第一个 Agent</h1>
+                <p>可直接创建，也可先填写或从官网生成业务资料。</p>
+                <button className="primary" disabled={readOnly || busy} onClick={beginCreate}>新建 Agent</button>
               </div>
             ) : (
               <>
@@ -755,7 +759,6 @@ export default function Lead() {
                       </button>
                     )}
                   </div>
-                </header>
                 <SocialAccounts
                   key={current}
                   agent={detail}
@@ -764,11 +767,21 @@ export default function Lead() {
                   onConnect={connect}
                   onComplete={refresh}
                 />
+                </header>
+                <div className="workspace-overview">
                 <AgentResults
                   key={"results" + current}
                   agent={detail}
                   readOnly={readOnly}
                 />
+                <OperatingPlans
+                  key={"plans" + current}
+                  aid={current!}
+                  agent={detail}
+                  readOnly={readOnly}
+                />
+                </div>
+                <OperatingPanel key={"operations" + current} aid={current!} />
                 {detail.cards?.some(
                   (c: Row) => c.state === "pending" && c.valid,
                 ) && (
@@ -801,6 +814,7 @@ export default function Lead() {
                     />
                   </section>
                 )}
+
                 <AgentPreferences
                   key={"prefs" + current}
                   agent={detail}
@@ -808,8 +822,6 @@ export default function Lead() {
                   onComplete={refresh}
                   onError={setError}
                 />
-                <ActivityPanel key={"activity" + current} agent={detail} />
-                <OperatingPanel key={"operations" + current} aid={current!} />
                 <UsagePanel
                   canManageBudget={user?.role === "owner"}
                   key={"usage" + current}
@@ -932,38 +944,36 @@ export default function Lead() {
                 </UsagePanel>
               </div>
             </main>
-            <button
-              className="chat-launch"
-              aria-label="打开 Agent 对话"
-              onClick={() => setChatOpen(true)}
-            >
-              <MessageSquare size={18} />与 {detail.name} 对话
-            </button>
             <aside
-              className={"chat-panel " + (chatOpen ? "is-open" : "")}
-              aria-label="Agent 辅助对话"
+              className="conversation-dock"
+              ref={chatDock}
+              data-expanded={chatOpen}
+              aria-label="Agent 对话"
+              onBlur={(e) => {
+                if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget)) setChatOpen(false);
+              }}
             >
-              <header className="chat-heading">
-                <AgentAvatar agent={detail} size={28} />
-                <div>
-                  <h2>与 {detail.name} 对话</h2>
-                  <p className="muted small">补充想法，调整方向</p>
-                </div>
-                <button
-                  className="icon close-chat"
-                  aria-label="关闭对话"
-                  onClick={() => setChatOpen(false)}
-                >
-                  <X size={16} />
-                </button>
-              </header>
+              <div className="dock-tray">
+              <div className="dock-toggle">
+                <AgentAvatar agent={detail} size={24} />
+                <strong>与 {detail.name} 对话</strong>
+                <span className="dock-preview">{!chatOpen && (pending ? "正在回复…" : latest?.content?.text || (latest ? "素材消息" : ""))}</span>
+                {chatOpen && <button className="icon" aria-label="收起对话" aria-controls="agent-chat-log"
+                  onClick={() => { setChatOpen(false); chatInput.current?.focus(); }}>
+                  <ChevronUp size={16} aria-hidden="true" style={{transform:"rotate(180deg)"}} />
+                </button>}
+              </div>
               <div
+                id="agent-chat-log"
+                inert={!chatOpen}
+                aria-hidden={!chatOpen}
                 className="messages"
                 role="log"
                 aria-label="Agent 对话记录"
                 tabIndex={0}
                 ref={messagesRef}
                 onScroll={(e) => {
+                  if (!chatOpen) return;
                   const box = e.currentTarget;
                   followMessages.current =
                     box.scrollHeight - box.scrollTop - box.clientHeight < 100;
@@ -1076,11 +1086,9 @@ export default function Lead() {
                 )}
                 <div ref={end} />
               </div>
+              </div>
               <div className="chat-input">{composer()}</div>
 
-              <p className="chat-caption muted small">
-                无需保持对话，Agent 会持续工作
-              </p>
             </aside>
           </div>
         )}
@@ -1133,7 +1141,6 @@ export default function Lead() {
       )}
       {createOpen && (
         <NewAgentDialog
-          initial={createInitial}
           platforms={platforms}
           onClose={() => setCreateOpen(false)}
           onCreated={async (id) => {
@@ -1150,6 +1157,15 @@ export default function Lead() {
           aid={current}
           platform={browser.platform}
           name={browser.name}
+          verifyLabel={browser.activate ? "验证并激活" : "验证并完成"}
+          onVerified={browser.activate ? async () => {
+            const platform = browser.platform;
+            setBrowser(null);
+            await run(async () => {
+              await api(`/agents/${current}/channels/${platform}/control`, { enabled: true });
+            });
+            await refresh();
+          } : undefined}
           onClose={() => {
             setBrowser(null);
             refresh().catch((e) => setError(e.message));

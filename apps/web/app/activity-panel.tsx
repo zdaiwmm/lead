@@ -118,7 +118,7 @@ function ActivityList({
     </ol>
   );
 }
-function ActivityHistory({
+export function ActivityHistory({
   agent,
   initialPlatform,
   onClose,

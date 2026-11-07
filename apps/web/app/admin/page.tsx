@@ -5,17 +5,10 @@ import {
   ArrowLeft,
   Bot,
   Gauge,
-  GitBranch,
-  History as HistoryIcon,
   LayoutGrid,
-  ListChecks,
-  RefreshCw,
-  SlidersHorizontal,
   BookOpen,
-  Clock3,
-  Bell,
-  ClipboardCheck,
-  Library,
+  Settings2,
+  RefreshCw,
 } from "lucide-react";
 import { api, setWorkspace } from "../api-client";
 import ConfigEditor, { History, Row } from "./config-editor";
@@ -34,28 +27,18 @@ import {
 } from "./management";
 import "./admin.css";
 
-const sections = [
-  { id: "overview", label: "管理总览", icon: LayoutGrid },
-  { id: "readiness", label: "配置就绪", icon: ClipboardCheck },
-  { id: "content", label: "资料初始化", icon: Library },
-  { id: "budgets", label: "Agent 额度", icon: Gauge },
-  { id: "usage", label: "模型用量", icon: Gauge },
-  { id: "agents", label: "Agent 管理", icon: Bot },
-  { id: "strategies", label: "渠道策略", icon: GitBranch },
-  { id: "channel-rules", label: "渠道规则", icon: SlidersHorizontal },
-  { id: "experiences", label: "经验审核", icon: ClipboardCheck },
-  { id: "attribution", label: "数据与归因", icon: Gauge },
-  { id: "onboarding", label: "创建引导", icon: ListChecks },
-  { id: "models", label: "模型与工具", icon: SlidersHorizontal },
-  { id: "model-catalog", label: "可选模型", icon: ListChecks },
-  { id: "brand", label: "品牌与知识", icon: BookOpen },
-  { id: "runtime", label: "调度与异常", icon: Clock3 },
-  { id: "notifications", label: "通知配置", icon: Bell },
-  { id: "external-notifications", label: "外部通知", icon: Bell },
-  { id: "pricing", label: "模型定价", icon: Gauge },
-  { id: "members", label: "成员权限", icon: Bot },
-  { id: "history", label: "变更记录", icon: HistoryIcon },
-];
+import {
+  businessSections,
+  commonSections,
+  costSections,
+  resolveSection,
+  sectionGroup,
+  sections,
+} from "./navigation";
+import Overview from "./overview";
+import SettingsIndex from "./settings-index";
+
+const navIcons = [LayoutGrid, Bot, BookOpen, Gauge];
 const format = (value: number) => new Intl.NumberFormat("zh-CN").format(value);
 const stateNames: Row = {
   draft: "未启动",
@@ -120,14 +103,16 @@ function Budgets({
   agents,
   readOnly,
   refresh,
+  initialAgentId = "",
 }: {
   agents: Row[];
   readOnly: boolean;
   refresh: () => void;
+  initialAgentId?: string;
 }) {
   const [query, setQuery] = useState(""),
     [selected, setSelected] = useState<string[]>([]),
-    [editing, setEditing] = useState("default");
+    [editing, setEditing] = useState(initialAgentId || "default");
   const [limit, setLimit] = useState(""),
     [inherit, setInherit] = useState(false),
     [busy, setBusy] = useState(false),
@@ -240,9 +225,11 @@ function Budgets({
                   </small>
                 </th>
                 <td>
-                  {format(agent.budget.daily_token_limit)}
+                  {agent.budget.acquisition_uncapped ? "不限额" : format(agent.budget.daily_token_limit)}
                   <small>
-                    {agent.budget.custom_daily_token_limit === null
+                    {agent.budget.acquisition_uncapped
+                      ? "获客模式"
+                      : agent.budget.custom_daily_token_limit === null
                       ? "跟随默认"
                       : "独立额度"}
                   </small>
@@ -250,7 +237,7 @@ function Budgets({
                 <td>{format(agent.spent)}</td>
                 <td>{format(agent.reserved)}</td>
                 <td className={agent.remaining === 0 ? "admin-attention" : ""}>
-                  {format(agent.remaining)}
+                  {agent.budget.acquisition_uncapped ? "不限额" : format(agent.remaining)}
                 </td>
                 <td>
                   <button type="button" onClick={() => setEditing(agent.id)}>
@@ -343,13 +330,17 @@ function Strategies({
   agents,
   options,
   readOnly,
+  initialAgentId = "",
+  onScopeChange,
 }: {
   agents: Row[];
   options: Row;
   readOnly: boolean;
+  initialAgentId?: string;
+  onScopeChange?: (agentId: string) => void;
 }) {
   const [platform, setPlatform] = useState("telegram"),
-    [aid, setAid] = useState(""),
+    [aid, setAid] = useState(initialAgentId),
     [target, setTarget] = useState(""),
     [evidence, setEvidence] = useState<Row | null>(null),
     [error, setError] = useState("");
@@ -402,6 +393,7 @@ function Strategies({
             value={aid}
             onChange={(e) => {
               setAid(e.target.value);
+              onScopeChange?.(e.target.value);
               setTarget("");
             }}
           >
@@ -558,10 +550,41 @@ export default function AdminPage() {
     [agents, setAgents] = useState<Row[]>([]),
     [options, setOptions] = useState<Row>({ platforms: [], targets: [] });
   const [loaded, setLoaded] = useState(false);
+  const [scopedAgent, setScopedAgent] = useState("");
+  const [revision, setRevision] = useState(0);
   useEffect(() => {
-    const saved = window.location.hash.slice(1);
-    if (sections.some((item) => item.id === saved)) setSection(saved);
+    const sync = () => {
+      setSection(resolveSection(window.location.hash.slice(1)));
+      setScopedAgent(
+        new URLSearchParams(window.location.search).get("agent") || "",
+      );
+    };
+    sync();
+    window.addEventListener("popstate", sync);
+    window.addEventListener("hashchange", sync);
+    return () => {
+      window.removeEventListener("popstate", sync);
+      window.removeEventListener("hashchange", sync);
+    };
   }, []);
+  const navigate = (next: string, agentId = "") => {
+    const target = resolveSection(next);
+    setSection(target);
+    setScopedAgent(agentId);
+    const url = new URL(window.location.href);
+    url.hash = target;
+    if (agentId) url.searchParams.set("agent", agentId);
+    else url.searchParams.delete("agent");
+    if (url.href !== window.location.href)
+      window.history.pushState(null, "", url);
+    document.getElementById("admin-main")?.scrollTo({ top: 0 });
+    if (window.matchMedia("(max-width: 700px)").matches) {
+      document.getElementById("admin-main")?.scrollIntoView({ block: "start" });
+    }
+    requestAnimationFrame(() =>
+      document.getElementById("admin-title")?.focus({ preventScroll: true }),
+    );
+  };
   const [ready, setReady] = useState(false),
     [error, setError] = useState(""),
     [loginUrl, setLoginUrl] = useState(""),
@@ -574,6 +597,7 @@ export default function AdminPage() {
         api("/admin/strategy-options"),
       ]);
       setAgents(a);
+      setRevision((value) => value + 1);
       setLoaded(true);
       setOptions(o);
       setError("");
@@ -647,12 +671,28 @@ export default function AdminPage() {
   const readOnly =
     user?.role !== "owner" &&
     !(user?.capabilities || []).includes(sectionCapabilities[section]);
-  const needsAttention = agents.filter(
-    (a) => a.health_state === "needs_attention" || a.remaining === 0,
-  );
+  const group = sectionGroup(section);
+  const current = sections.find((item) => item.id === section)!;
+  const heading = commonSections.find((item) => item.id === group) || current;
+  const subSections =
+    group === "business"
+      ? businessSections
+      : group === "costs"
+        ? costSections
+        : [];
+  const validScope = agents.some((agent) => agent.id === scopedAgent)
+    ? scopedAgent
+    : "";
   return (
     <div className="admin-shell">
-      <a className="admin-skip" href="#admin-main">
+      <a
+        className="admin-skip"
+        href="#admin-main"
+        onClick={(event) => {
+          event.preventDefault();
+          document.getElementById("admin-main")?.focus();
+        }}
+      >
         跳到配置内容
       </a>
       <aside className="admin-sidebar">
@@ -661,20 +701,27 @@ export default function AdminPage() {
           <small>管理后台</small>
         </a>
         <nav aria-label="后台导航">
-          {sections.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              aria-current={section === id ? "page" : undefined}
-              onClick={() => {
-                setSection(id);
-                window.history.replaceState(null, "", `/admin#${id}`);
-                document.getElementById("admin-main")?.scrollTo({ top: 0 });
-              }}
-            >
-              <Icon size={17} />
-              {label}
-            </button>
-          ))}
+          {commonSections.map(({ id, label }, index) => {
+            const Icon = navIcons[index];
+            return (
+              <button
+                key={id}
+                aria-current={group === id ? "page" : undefined}
+                onClick={() => navigate(id)}
+              >
+                <Icon size={17} aria-hidden="true" />
+                {label}
+              </button>
+            );
+          })}
+          <button
+            className="admin-advanced-nav"
+            aria-current={group === "settings" ? "page" : undefined}
+            onClick={() => navigate("settings")}
+          >
+            <Settings2 size={17} aria-hidden="true" />
+            高级设置
+          </button>
         </nav>
         <div className="admin-sidebar-bottom">
           <span className="muted small">
@@ -690,52 +737,24 @@ export default function AdminPage() {
           </a>
         </div>
       </aside>
-      <main className="admin-main" id="admin-main">
+      <main className="admin-main" id="admin-main" tabIndex={-1}>
         <header className="admin-page-heading">
           <div>
-            <span className="admin-eyebrow">工作室管理</span>
-            <h1>{sections.find((s) => s.id === section)?.label}</h1>
-            <p>
-              {section === "members"
-                ? "维护成员角色、可操作功能与 Agent 数据范围。"
-                : section === "pricing"
-                  ? "维护有来源的模型单价，保留历史调用的计价版本。"
-                  : section === "external-notifications"
-                    ? "管理 Webhook、邮件接收渠道与真实发送结果。"
-                    : section === "agents"
-                      ? "集中查找 Agent，核对状态后批量暂停或归档。"
-                      : section === "channel-rules"
-                        ? "维护渠道、Agent 与目标层级的运行限制。"
-                        : section === "attribution"
-                          ? "维护转化目标、归因窗口和数据新鲜度。"
-                          : section === "experiences"
-                            ? "审核渠道观察，将适用的做法纳入后续规划。"
-                            : section === "model-catalog"
-                              ? "维护共用同一 OpenAI 凭据的可选模型，并保留配置版本。"
-                              : section === "overview"
-                                ? "维护 Agent 的运行规则、运营策略和创建流程。"
-                                : section === "readiness"
-                                  ? "核对配置、业务资料、账号授权和真实数据接入的缺口。"
-                                  : section === "content"
-                                    ? "把已有研究填充到配置，保留来源、版本和人工编辑。"
-                                    : section === "usage"
-                                      ? "按实际模型区分 token 消耗、输入输出、缓存和待核对预留。"
-                                      : section === "budgets"
-                                        ? "集中分配每日额度，查看消耗与待核对预留。"
-                                        : section === "strategies"
-                                          ? "把渠道方法和实际经验沉淀为可追溯的运营策略。"
-                                          : section === "onboarding"
-                                            ? "维护三个创建步骤，发布前可直接预览填写体验。"
-                                            : section === "models"
-                                              ? "按任务选择模型，管理 Agent 实际可用的工具。"
-                                              : section === "brand"
-                                                ? "维护品牌表达、业务事实和有来源的知识资料。"
-                                                : section === "runtime"
-                                                  ? "安排自动运营时段，控制并发、重试和失败暂停。"
-                                                  : section === "notifications"
-                                                    ? "选择真实异常的提醒方式、接收范围与免打扰时段。"
-                                                    : "查看配置何时改变、由谁修改，以及具体差异。"}
-            </p>
+            {group === "settings" && section !== "settings" ? (
+              <button
+                className="admin-back-settings"
+                onClick={() => navigate("settings")}
+              >
+                <ArrowLeft size={13} aria-hidden="true" />
+                高级设置
+              </button>
+            ) : (
+              <span className="admin-eyebrow">工作室管理</span>
+            )}
+            <h1 id="admin-title" tabIndex={-1}>
+              {heading.label}
+            </h1>
+            <p>{heading.description}</p>
           </div>
           <button
             aria-label="刷新后台数据"
@@ -746,98 +765,56 @@ export default function AdminPage() {
             刷新
           </button>
         </header>
+        {subSections.length > 0 && (
+          <nav className="admin-subnav" aria-label={`${heading.label}分类`}>
+            {subSections.map((item) => (
+              <button
+                key={item.id}
+                aria-current={section === item.id ? "page" : undefined}
+                onClick={() => navigate(item.id, validScope)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </nav>
+        )}
         {error && (
           <p className="admin-feedback error-feedback" role="alert">
             {error}
           </p>
         )}
-        {readOnly && (
-          <p className="admin-readonly">
-            你可以查看已授权范围内的配置和记录。修改、发布及回滚需要所有者授予对应权限。
-          </p>
-        )}
+        {readOnly &&
+          !["overview", "readiness", "settings", "usage", "history"].includes(
+            section,
+          ) && (
+            <p className="admin-readonly">
+              你可以查看已授权范围内的配置和记录。修改、发布及回滚需要所有者授予对应权限。
+            </p>
+          )}
         {loaded && section === "overview" && (
-          <>
-            <section className="admin-overview">
-              <h2>Agent 运行概况</h2>
-              <dl>
-                <div>
-                  <dt>当前 Agent</dt>
-                  <dd>{agents.length}</dd>
-                </div>
-                <div>
-                  <dt>今日已用 token</dt>
-                  <dd>{format(agents.reduce((sum, a) => sum + a.spent, 0))}</dd>
-                </div>
-                <div>
-                  <dt>调用中预留</dt>
-                  <dd>
-                    {format(agents.reduce((sum, a) => sum + a.reserved, 0))}
-                  </dd>
-                </div>
-                <div>
-                  <dt>需要处理</dt>
-                  <dd>{needsAttention.length}</dd>
-                </div>
-              </dl>
-            </section>
-            <section className="admin-editor">
-              <header className="admin-section-heading">
-                <div>
-                  <h2>待处理事项</h2>
-                  <p>额度和运行异常会集中显示在这里。</p>
-                </div>
-              </header>
-              {needsAttention.length ? (
-                <ul className="admin-attention-list">
-                  {needsAttention.map((a) => (
-                    <li key={a.id}>
-                      <Bot size={18} />
-                      <div>
-                        <strong>{a.name}</strong>
-                        <p>
-                          {a.remaining === 0
-                            ? "今日可用额度已耗尽，或被调用中预留占满。"
-                            : "Agent 当前需要处理，请前往工作台查看。"}
-                        </p>
-                      </div>
-                      <button onClick={() => setSection("budgets")}>
-                        查看额度
-                      </button>
-                      <a href={`/?agent=${a.id}`}>工作台</a>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="admin-empty">
-                  当前没有额度耗尽或需要处理的 Agent。
-                </p>
-              )}
-            </section>
-            <div className="admin-overview-links">
-              {sections
-                .filter((s) =>
-                  ["readiness", "content", "strategies"].includes(s.id),
-                )
-                .map(({ id, label, icon: Icon }) => (
-                  <button key={id} onClick={() => setSection(id)}>
-                    <Icon size={18} />
-                    <span>{label}</span>
-                    <span aria-hidden="true">→</span>
-                  </button>
-                ))}
-            </div>
-          </>
+          <Overview agents={agents} navigate={navigate} revision={revision} />
+        )}
+        {loaded && section === "settings" && (
+          <SettingsIndex navigate={navigate} />
         )}
         {loaded && section === "budgets" && (
           <Budgets
+            key={validScope}
+            initialAgentId={validScope}
             agents={agents}
             readOnly={readOnly}
             refresh={() => void refresh()}
           />
         )}
         {loaded && section === "strategies" && (
-          <Strategies agents={agents} options={options} readOnly={readOnly} />
+          <Strategies
+            key={validScope}
+            initialAgentId={validScope}
+            onScopeChange={(aid) => navigate(section, aid)}
+            agents={agents}
+            options={options}
+            readOnly={readOnly}
+          />
         )}
         {loaded && section === "onboarding" && (
           <ConfigEditor
@@ -875,28 +852,19 @@ export default function AdminPage() {
             readOnly={readOnly}
             agents={agents}
             options={options}
-            navigate={(next) => {
-              setSection(next);
-              window.history.replaceState(null, "", `/admin#${next}`);
-            }}
+            navigate={navigate}
           />
         )}
         {loaded && section === "content" && (
           <ContentLibrary readOnly={readOnly} />
         )}
-        {loaded && section === "readiness" && (
-          <Readiness
-            navigate={(next) => {
-              setSection(next);
-              window.history.replaceState(null, "", `/admin#${next}`);
-              document.getElementById("admin-main")?.scrollTo({ top: 0 });
-            }}
-          />
-        )}
+        {loaded && section === "readiness" && <Readiness navigate={navigate} />}
         {loaded &&
           ["models", "brand", "runtime", "notifications"].includes(section) && (
             <OperationalSettings
-              key={section}
+              key={`${section}/${validScope}`}
+              initialAgentId={validScope}
+              onScopeChange={(aid) => navigate(section, aid)}
               kind={section}
               agents={agents}
               readOnly={readOnly}

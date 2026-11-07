@@ -3,7 +3,7 @@
 import asyncio
 
 from .adapters import get_adapter
-from .adapters.core import NeedsAuth, ScopeChanged
+from .adapters.core import NeedsAuth, PreparationNotStarted, ScopeChanged
 from .assets import resolve
 from .config import STATE
 from .db import j, one, tx, uid
@@ -18,7 +18,8 @@ async def execute(actor, action_id):
             action = one(c, "SELECT * FROM lead.actions WHERE id=%s", (action_id,))
             if not action:
                 raise LookupError("发布动作不存在")
-            if action["state"] == "confirmed":
+            confirmed = action["state"] == "confirmed"
+            if confirmed and action["intent"].get("platform") != "tiktok":
                 return {"state": "confirmed", "external_id": action["external_id"]}
             if action["state"] in ("canceled", "not_applied"):
                 return {"state": action["state"]}
@@ -35,15 +36,39 @@ async def execute(actor, action_id):
                 (action_id,),
             )
             uncertain = action["state"] in ("unknown", "dispatching")
+            navigation_not_started = bool(
+                preparation
+                and preparation["stage"] == "preparing"
+                and preparation["observation"].get("navigation_not_started") is True
+                and not one(
+                    c,
+                    "SELECT 1 FROM lead.action_attempts WHERE action_id=%s",
+                    (action_id,),
+                )
+            )
+            reviewed_reset = bool(
+                preparation
+                and preparation["stage"] == "uncertain"
+                and preparation["observation"].get("reviewed_unsubmitted_reset") == 1
+                and not one(
+                    c,
+                    "SELECT 1 FROM lead.action_attempts WHERE action_id=%s",
+                    (action_id,),
+                )
+            )
             if one(
                 c,
                 "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now()",
             ):
                 return {
-                    "state": "unknown" if uncertain else "prepared",
+                    "state": "confirmed"
+                    if confirmed
+                    else "unknown"
+                    if uncertain
+                    else "prepared",
                     "reason": "用户正在接管",
                 }
-            if not uncertain:
+            if not uncertain and not confirmed:
                 actor.gate(c, action)
             else:
                 if action["state"] == "dispatching":
@@ -51,10 +76,22 @@ async def execute(actor, action_id):
                         "UPDATE lead.actions SET state='unknown' WHERE id=%s",
                         (action_id,),
                     )
+        if confirmed:
+            from .publication_delivery import review_actor
+
+            return await review_actor(actor, action)
         adapter = get_adapter(target["platform"])
         publication = action["intent"]
         media_manifest = publication.get("media", [])
         observed = None
+
+        async def checkpoint(observation):
+            with tx(aid) as c:
+                c.execute(
+                    "UPDATE lead.publish_preparations SET observation=%s,updated_at=now() WHERE action_id=%s",
+                    (j({**observation, "session_id": actor.session}), action_id),
+                )
+
         try:
             if uncertain:
                 if not preparation or not preparation["observation"]:
@@ -75,15 +112,46 @@ async def execute(actor, action_id):
                         "reason": "未找到唯一已发布内容，未重新上传或提交",
                     }
             else:
-                if preparation and (
-                    preparation["stage"] != "ready"
-                    or preparation["observation"].get("session_id") != actor.session
+                if (
+                    preparation
+                    and preparation["stage"] == "uncertain"
+                    and preparation["observation"].get("session_id") == actor.session
+                    and preparation["observation"].get("phase")
+                    in {"uploaded", "captioned"}
+                    and getattr(adapter, "preparation_checkpoints", False)
+                ):
+                    observation = await adapter.resume_preparation(
+                        actor.page,
+                        target,
+                        publication,
+                        preparation["observation"],
+                        checkpoint,
+                    )
+                    observation["session_id"] = actor.session
+                    with tx(aid) as c:
+                        c.execute(
+                            "UPDATE lead.publish_preparations SET stage='ready',observation=%s,updated_at=now() WHERE action_id=%s",
+                            (j(observation), action_id),
+                        )
+                    preparation = {
+                        **preparation,
+                        "stage": "ready",
+                        "observation": observation,
+                    }
+                if (
+                    preparation
+                    and not navigation_not_started
+                    and not reviewed_reset
+                    and (
+                        preparation["stage"] != "ready"
+                        or preparation["observation"].get("session_id") != actor.session
+                    )
                 ):
                     return {
                         "state": "blocked",
                         "reason": "媒体准备曾中断，需要核对原草稿，未重新上传",
                     }
-                if preparation:
+                if preparation and not navigation_not_started and not reviewed_reset:
                     observation = preparation["observation"]
                 else:
                     media = []
@@ -98,15 +166,51 @@ async def execute(actor, action_id):
                         paths.append(path)
                     with tx(aid) as c:
                         actor.gate(c, action)
-                        c.execute(
-                            "INSERT INTO lead.publish_preparations(tenant_id,agent_id,action_id,stage,manifest) VALUES(%s,%s,%s,'preparing',%s)",
-                            (current_tenant(), aid, action_id, j(media_manifest)),
-                        )
+                        if not preparation:
+                            c.execute(
+                                "INSERT INTO lead.publish_preparations(tenant_id,agent_id,action_id,stage,manifest) VALUES(%s,%s,%s,'preparing',%s)",
+                                (current_tenant(), aid, action_id, j(media_manifest)),
+                            )
+                        else:
+                            c.execute(
+                                "UPDATE lead.publish_preparations SET observation='{}'::jsonb,updated_at=now() WHERE action_id=%s",
+                                (action_id,),
+                            )
                     try:
-                        observation = await adapter.prepare(
-                            actor.page, target, publication, media, paths
-                        )
+                        if getattr(adapter, "preparation_checkpoints", False):
+                            observation = await adapter.prepare(
+                                actor.page,
+                                target,
+                                publication,
+                                media,
+                                paths,
+                                checkpoint=checkpoint,
+                            )
+                        else:
+                            observation = await adapter.prepare(
+                                actor.page, target, publication, media, paths
+                            )
                         observation["session_id"] = actor.session
+                    except PreparationNotStarted:
+                        # The adapter proves it has not yet reached an upload or
+                        # draft edit. Keep the same action, not an uncertain draft.
+                        from .db import audit
+
+                        with tx(aid) as c:
+                            c.execute(
+                                "UPDATE lead.publish_preparations SET observation=%s,updated_at=now() WHERE action_id=%s AND stage='preparing'",
+                                (j({"navigation_not_started": True}), action_id),
+                            )
+                            audit(
+                                c,
+                                aid,
+                                "publication.preparation_not_started",
+                                {
+                                    "action_id": str(action_id),
+                                    "platform": target["platform"],
+                                },
+                            )
+                        raise
                     except BaseException:
                         with tx(aid) as c:
                             c.execute(
@@ -209,11 +313,23 @@ async def execute(actor, action_id):
                 "UPDATE lead.action_attempts SET outcome='confirmed',evidence_ref=%s,ended_at=now() WHERE action_id=%s AND attempt=(SELECT max(attempt) FROM lead.action_attempts WHERE action_id=%s)",
                 (str(path), action_id, action_id),
             )
+            delivery = None
+            if target["platform"] == "tiktok":
+                from .publication_delivery import persist
+
+                delivery = persist(
+                    c,
+                    aid,
+                    action_id,
+                    observed.get("delivery") or {"state": "unknown"},
+                    evidence_ref=str(path),
+                )
         return {
             "state": "confirmed",
             "external_id": observed["external_id"],
             "external_url": observed.get("url"),
             "reconciled": uncertain,
+            **({"delivery": delivery} if delivery else {}),
         }
 
 
@@ -246,7 +362,17 @@ def gate(actor, c, action):
         "SELECT * FROM lead.platform_capabilities WHERE platform=%s AND action_type='publish' AND target_type=%s",
         (platform, target["target_type"]),
     )
-    if not cap or cap["permission_state"] != "approved":
+    pilot = bool(
+        one(
+            c,
+            "SELECT lead.owner_browser_pilot_allowed(%s,%s) AS allowed",
+            (target["id"], action["grant_id"]),
+        )["allowed"]
+    )
+    if not cap or (
+        cap["permission_state"] != "approved"
+        and not (cap["permission_state"] == "pending" and pilot)
+    ):
         raise ScopeChanged("此渠道尚未完成适用权限审查")
     task = one(c, "SELECT input FROM lead.tasks WHERE id=%s", (action["task_id"],))
     grant = one(
@@ -283,11 +409,12 @@ def gate(actor, c, action):
             not in target["verified_permissions"].get("publishing_verified_formats", [])
         ):
             raise ScopeChanged("此目标与发布格式尚未完成真实验证")
-    limit = int(grant["limits"].get("publish_per_day", 3))
-    used = one(
-        c,
-        "SELECT count(*) AS n FROM lead.actions WHERE target_id=%s AND id<>%s AND state IN ('dispatching','unknown','confirmed') AND created_at>now()-interval '24 hours'",
-        (action["target_id"], action["id"]),
-    )["n"]
-    if used >= limit:
-        raise ValueError("此目标已达到当前发布上限")
+    limit = grant["limits"].get("publish_per_day", None if platform == "telegram" else 3)
+    if limit is not None:
+        used = one(
+            c,
+            "SELECT count(*) AS n FROM lead.actions WHERE target_id=%s AND id<>%s AND state IN ('dispatching','unknown','confirmed') AND created_at>now()-interval '24 hours'",
+            (action["target_id"], action["id"]),
+        )["n"]
+        if used >= limit:
+            raise ValueError("此目标已达到当前发布上限")

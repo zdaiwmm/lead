@@ -7,7 +7,9 @@ import json
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from .db import all_rows, one, tx
+from .config import env
+from .db import all_rows, one
+from .db import pooled_tx as tx
 from .scope import current_tenant, tenant_scope
 
 router = APIRouter()
@@ -18,7 +20,7 @@ def revision():
         payload = {
             "agents": all_rows(
                 c,
-                "SELECT id,name,desired_state,health_state,config_revision,control_version,authorization_version,version FROM lead.agents WHERE desired_state<>'archived' ORDER BY id",
+                "SELECT id,name,desired_state,health_state,config_revision,control_version,authorization_version,version,analytics_revision FROM lead.agents WHERE desired_state<>'archived' ORDER BY id",
             ),
             "messages": one(
                 c, "SELECT coalesce(sum(next_seq),0) AS n FROM lead.conversations"
@@ -46,11 +48,6 @@ def revision():
                 c,
                 "SELECT count(*) AS n,max(created_at) AS last FROM lead.assets WHERE state='ready'",
             ),
-            "visits": one(
-                c,
-                "SELECT count(*) AS n,count(*) FILTER(WHERE qualified) AS qualified,max(last_seen_at) AS last FROM lead.visit_sessions",
-            ),
-            "conversions": one(c, "SELECT count(*) AS n FROM lead.conversion_events"),
         }
     return hashlib.sha256(
         json.dumps(payload, default=str, sort_keys=True).encode()
@@ -58,9 +55,10 @@ def revision():
 
 
 async def stream(request):
+    poll_seconds = max(1, min(10, float(env().get("LEAD_UI_POLL_SECONDS") or 1)))
     previous = request.headers.get("last-event-id", "")
     yield "retry: 2000\n\n"
-    for tick in range(55):
+    for tick in range(max(1, int(55 / poll_seconds))):
         if await request.is_disconnected():
             return
         from .auth import auth_mode
@@ -84,9 +82,9 @@ async def stream(request):
         if current != previous:
             previous = current
             yield "id: " + current + '\ndata: {"refresh":true}\n\n'
-        elif tick % 15 == 0:
+        elif tick % max(1, int(15 / poll_seconds)) == 0:
             yield ": keepalive\n\n"
-        await asyncio.sleep(1)
+        await asyncio.sleep(poll_seconds)
 
 
 @router.get("/api/events")

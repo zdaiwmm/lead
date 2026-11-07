@@ -26,8 +26,10 @@ def configuration(c, aid):
         else int(env().get("LEAD_DAILY_TOKEN_LIMIT") or DEFAULT_DAILY_TOKEN_LIMIT)
     )
     custom = agent["onboarding_state"].get("daily_token_limit")
+    from .growth_experiments import chamber_campaign
     config = head(c, "budgets/" + str(aid))
     return {
+        "acquisition_uncapped": chamber_campaign(agent),
         "daily_token_limit": custom if custom is not None else default,
         "default_daily_token_limit": default,
         "custom_daily_token_limit": custom,
@@ -51,11 +53,13 @@ def available(c, aid, now=None):
         "SELECT spent_units,reserved_units FROM lead.budget_periods WHERE agent_id=%s AND unit='tokens' AND starts_at=%s",
         (aid, start),
     ) or {"spent_units": 0, "reserved_units": 0}
+    uncapped = config["acquisition_uncapped"]
     return {
+        "acquisition_uncapped": uncapped,
         "unit": "tokens",
-        "limit_units": config["daily_token_limit"],
+        "limit_units": None if uncapped else config["daily_token_limit"],
         **period,
-        "available_units": max(
+        "available_units": None if uncapped else max(
             0,
             config["daily_token_limit"]
             - period["spent_units"]
@@ -123,7 +127,7 @@ def reserve(aid, operation_key, estimate, model_ref=None, provider=None):
     now = datetime.now(timezone.utc)
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     with tx(aid) as c:
-        require_agent(c, aid, True)
+        agent = require_agent(c, aid, True)
         limit = configuration(c, aid)["daily_token_limit"]
         c.execute(
             "INSERT INTO lead.budget_periods(tenant_id,agent_id,starts_at,ends_at,unit,limit_units) VALUES(%s,%s,%s,%s,'tokens',%s) ON CONFLICT(tenant_id,agent_id,starts_at,unit) DO NOTHING",
@@ -140,13 +144,35 @@ def reserve(aid, operation_key, estimate, model_ref=None, provider=None):
                 (limit, period["id"]),
             )
             period["limit_units"] = limit
-        if (
+        from .growth_experiments import chamber_campaign
+        if not chamber_campaign(agent) and (
             period["spent_units"] + period["reserved_units"] + estimate
             > period["limit_units"]
         ):
             raise BudgetExceeded("daily_token_limit", required_units=estimate)
         from .admin_pricing import quote
-
+        from .growth_experiments import (
+            allowances,
+            enabled,
+            headroom,
+            runtime,
+            trial_spend,
+        )
+        trial = runtime.get()
+        pricing = quote(c, model_ref)
+        if trial and str(trial["aid"]) == str(aid):
+            if not enabled(agent) or trial["control"] != agent["control_version"] or trial["revision"] != agent["config_revision"]:
+                raise BudgetExceeded("experiment_configuration_changed", required_units=estimate)
+            remaining = allowances(c,agent,limit,now)
+            if "daily" not in remaining and trial.get("max_tokens"):
+                usage = trial_spend(c,trial["id"])
+                if usage["spent"]+usage["held"]+estimate>trial["max_tokens"]:
+                    raise BudgetExceeded("experiment_limit",required_units=estimate)
+            if not chamber_campaign(agent) and estimate > headroom(remaining,trial["bucket"],bool(trial.get("max_tokens"))):
+                raise BudgetExceeded("experiment_working_budget",required_units=estimate)
+            if operation_key.startswith("trial-cache:") and one(c,"SELECT 1 FROM lead.budget_reservations WHERE operation_key=%s",(operation_key,)):
+                raise BudgetExceeded("experiment_judgement_already_reserved",required_units=estimate)
+            pricing = {**(pricing or {}), "trial":{**trial, "evidence_key":operation_key}}
         reservation = one(
             c,
             "INSERT INTO lead.budget_reservations(tenant_id,agent_id,period_id,operation_key,units,state,expires_at,model_ref,provider,pricing_snapshot) VALUES(%s,%s,%s,%s,%s,'reserved',%s,%s,%s,%s) RETURNING id",
@@ -159,7 +185,7 @@ def reserve(aid, operation_key, estimate, model_ref=None, provider=None):
                 start + timedelta(days=1),
                 model_ref,
                 provider,
-                j(quote(c, model_ref)),
+                j(pricing),
             ),
         )
         c.execute(
@@ -214,6 +240,8 @@ def settle(
             from .metering import priced
 
             measured = priced(details or {}, snapshot=r["pricing_snapshot"])
+            if (r["pricing_snapshot"] or {}).get("trial"):
+                measured["trial"] = r["pricing_snapshot"]["trial"]
             c.execute(
                 "INSERT INTO lead.usage_events(tenant_id,agent_id,reservation_id,event_key,category,units,rate_version,occurred_at,details) VALUES(%s,%s,%s,%s,'model_tokens',%s,%s,now(),%s) ON CONFLICT DO NOTHING",
                 (

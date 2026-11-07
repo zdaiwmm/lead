@@ -136,6 +136,7 @@ const fieldNames: Row = {
   schedule: "运营排期",
   default_model: "默认模型",
   task_models: "任务模型",
+  reasoning_efforts: "推理程度",
   chat: "对话",
   planning: "规划",
   research: "研究",
@@ -554,7 +555,7 @@ export default function ConfigEditor({
                   disabled={busy || (!dirty && !config.draft)}
                   type="submit"
                 >
-                  {busy ? "保存中…" : drafts ? "发布配置" : "保存额度"}
+                  {busy ? "保存中…" : drafts ? "保存并生效" : "保存额度"}
                 </button>
               </div>
             )}

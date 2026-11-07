@@ -1,6 +1,13 @@
 "use client";
 import { useState } from "react";
-import { Pause, Play } from "lucide-react";
+import {
+  CircleAlert,
+  LockKeyhole,
+  Pause,
+  Play,
+  Plus,
+  ChevronRight,
+} from "lucide-react";
 import SocialIcon, { socialNames } from "./social-icon";
 import DialogPanel from "./dialog-panel";
 import { api } from "./api-client";
@@ -19,6 +26,7 @@ export default function SocialAccounts({
   onComplete: () => Promise<void>;
 }) {
   const [open, setOpen] = useState("");
+  const [picker, setPicker] = useState(false);
   const [busy, setBusy] = useState("");
   const [confirmDisconnect, setConfirmDisconnect] = useState<Row | null>(null);
   const [error, setError] = useState("");
@@ -28,14 +36,6 @@ export default function SocialAccounts({
     name: socialNames[id],
     ...platforms.find((p) => p.id === id),
   }));
-  const connected = unique.filter((p) =>
-    accounts.some((a: Row) => a.platform === p.id && a.state === "connected"),
-  );
-  const operating = connected.filter(
-    (p) =>
-      accounts.some((a: Row) => a.platform === p.id && a.automation_enabled) &&
-      agent.desired_state === "running",
-  );
   async function toggle(id: string, enabled: boolean) {
     setBusy("control");
     setError("");
@@ -67,15 +67,9 @@ export default function SocialAccounts({
   return (
     <section
       id="social-accounts"
-      className="workspace-section social-section"
-      aria-labelledby="social-heading"
+      className="identity-channels"
+      aria-label="社媒账号"
     >
-      <div className="section-head">
-        <h2 id="social-heading">社媒账号</h2>
-        <span className="muted small">
-          {connected.length} 已连接 · {operating.length} 运营中
-        </span>
-      </div>
       <div className="social-grid">
         {unique.map((p) => {
           const a = accounts.find(
@@ -88,6 +82,7 @@ export default function SocialAccounts({
             isConnected &&
             a.automation_enabled &&
             agent.desired_state === "running";
+          const canOperate = !!p.automation || !!a?.operational_ready;
           const caption = !a
             ? "连接"
             : a.state === "needs_auth"
@@ -102,31 +97,64 @@ export default function SocialAccounts({
             <div className="social-item" key={p.id}>
               <button
                 data-platform={p.id}
+                data-state={a?.state || "offline"}
+                title={`${p.name} · ${caption}`}
                 className={`social-trigger ${a ? "is-connected" : ""}`}
-                disabled={!a && readOnly}
                 aria-label={`${p.name}，${a ? caption : "连接账号"}`}
                 aria-haspopup="dialog"
                 onClick={() => {
                   setError("");
                   setConfirmDisconnect(null);
-                  a ? setOpen(p.id) : onConnect(p);
+                  setOpen(p.id);
                 }}
               >
                 <span className="social-symbol">
-                  <SocialIcon platform={p.id} connected={!!a} />
+                  <SocialIcon
+                    platform={p.id}
+                    connected={isConnected}
+                    size={18}
+                  />
                   {a && (
                     <span className={`social-state ${enabled ? "active" : ""}`}>
-                      {!enabled && <Pause size={8} />}
+                      {!enabled &&
+                        (a.state === "needs_auth" ? (
+                          <CircleAlert size={10} />
+                        ) : a.state === "restricted" ? (
+                          <LockKeyhole size={9} />
+                        ) : (
+                          <Pause size={8} />
+                        ))}
                     </span>
                   )}
                 </span>
-                <span className="social-name">{p.name}</span>
-                <span
-                  className={`social-caption ${enabled ? "success" : "muted"}`}
-                >
-                  {caption}
-                </span>
               </button>
+              {!a && open === p.id && (
+                <DialogPanel
+                  title={`激活 ${p.name}`}
+                  size="compact"
+                  onClose={() => setOpen("")}
+                  footer={
+                    <button
+                      className="primary"
+                      disabled={readOnly}
+                      onClick={() => {
+                        setOpen("");
+                        onConnect({ ...p, activate: !!canOperate });
+                      }}
+                    >
+                      {p.automation ? "连接并激活" : "连接账号"}
+                    </button>
+                  }
+                >
+                  <p>
+                    {readOnly
+                      ? "当前为只读，请由有管理权限的成员连接账号。"
+                      : p.automation
+                        ? "登录并验证此渠道账号后，启动该渠道运营。"
+                        : "可先绑定账号，自主运营尚未开放。"}
+                  </p>
+                </DialogPanel>
+              )}
               {a && open === p.id && (
                 <DialogPanel
                   title={
@@ -179,7 +207,7 @@ export default function SocialAccounts({
                         ? "此 Agent 将停止操作该账号，未提交的相关任务会取消，历史记录保留。其他 Agent 可重新登录并绑定，运营授权需重新确认。浏览器登录状态不会转移。"
                         : !isConnected
                           ? `${caption}。可重新登录，或解除绑定后交给其他 Agent。`
-                          : !p.automation
+                          : !canOperate
                             ? "已支持登录，自主运营尚未开放"
                             : enabled
                               ? a.operational_ready
@@ -200,7 +228,10 @@ export default function SocialAccounts({
                       <div className="settings-button-row">
                         <button
                           disabled={
-                            readOnly || !!busy || !p.automation || !isConnected
+                            readOnly ||
+                            !!busy ||
+                            (!canOperate && !enabled) ||
+                            !isConnected
                           }
                           onClick={() => toggle(p.id, !enabled)}
                         >
@@ -209,7 +240,7 @@ export default function SocialAccounts({
                             ? "正在更新…"
                             : enabled
                               ? "暂停此社媒"
-                              : "启动此社媒"}
+                              : "激活此渠道"}
                         </button>
                         <button
                           className="text-button"
@@ -239,7 +270,63 @@ export default function SocialAccounts({
             </div>
           );
         })}
+        <button
+          className="channel-add icon"
+          aria-label="激活渠道"
+          title="激活渠道"
+          aria-haspopup="dialog"
+          onClick={() => setPicker(true)}
+        >
+          <Plus size={16} />
+        </button>
       </div>
+      {picker && (
+        <DialogPanel
+          title="激活渠道"
+          size="compact"
+          onClose={() => setPicker(false)}
+        >
+          <div className="channel-picker">
+            {unique.map((p) => {
+              const account = accounts.find(
+                (a: Row) =>
+                  a.platform === p.id &&
+                  ["connected", "needs_auth", "restricted"].includes(a.state),
+              );
+              const active =
+                account?.state === "connected" &&
+                account.automation_enabled &&
+                agent.desired_state === "running";
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    setPicker(false);
+                    setConfirmDisconnect(null);
+                    setError("");
+                    setOpen(p.id);
+                  }}
+                >
+                  <SocialIcon platform={p.id} size={18} />
+                  <span>{p.name}</span>
+                  <small>
+                    {active
+                      ? "已激活"
+                      : !account
+                        ? "未连接"
+                        : account.state !== "connected"
+                          ? "需重新登录"
+                          : p.automation || account?.operational_ready
+                            ? "待激活"
+                            : "仅支持连接"}
+                  </small>
+                  <ChevronRight size={14} />
+                </button>
+              );
+            })}
+          </div>
+        </DialogPanel>
+      )}
     </section>
   );
 }

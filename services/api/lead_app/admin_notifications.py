@@ -123,7 +123,8 @@ def collect(now=None):
         for agent in agents:
             aid = str(agent["id"])
             settings, _ = effective(c, "notifications", aid)
-            limit = configuration(c, aid)["daily_token_limit"]
+            quota = configuration(c, aid)
+            limit = quota["daily_token_limit"]
             runtime, _ = effective(c, "runtime", aid)
             brand, _ = effective(c, "brand", aid)
             from .admin_controls import attribution
@@ -157,7 +158,7 @@ def collect(now=None):
                 ),
                 (
                     "budget_warning",
-                    limit > 0
+                    not quota.get("acquisition_uncapped") and limit > 0
                     and settings["budget_warning_percent"] * limit
                     <= agent["occupied"] * 100
                     < limit * 100,
@@ -167,7 +168,7 @@ def collect(now=None):
                 ),
                 (
                     "budget_exhausted",
-                    agent["occupied"] >= limit,
+                    not quota.get("acquisition_uncapped") and agent["occupied"] >= limit,
                     "今日可用额度已用尽",
                     "新增模型调用已受额度限制，已用量与待核对预留继续保留。",
                     "error",
@@ -225,6 +226,20 @@ def collect(now=None):
             WHERE n.agent_id=a.id AND a.desired_state='archived' AND n.resolved_at IS NULL""",
             (now,),
         )
+
+    from .analytics_alerts import collect_agent
+
+    for agent in agents:
+        try:
+            collect_agent(str(agent["id"]), now)
+        except LookupError:
+            continue  # The Agent may have been archived after enumeration.
+        except Exception as error:
+            import logging
+
+            logging.warning(
+                "Agent analytics notification unavailable (%s)", type(error).__name__
+            )
 
 
 def visible(c, limit=50, before=None, before_id=None):

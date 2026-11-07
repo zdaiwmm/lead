@@ -3,19 +3,19 @@ Client-observed engagement is never represented as server-verified revenue.
 """
 
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import env
-from .db import all_rows, audit, emit, j, one, record, require_agent, tx, uid
+from .db import all_rows, audit, emit, j, one, record, require_agent, uid
+from .db import pooled_tx as tx
 from .fetch import resolve_public
-from .pixel_events import BrowserEvent, browser_receive
+from .pixel_events import BrowserEvent
 from .promotion import CODE_PATTERN, configuration
 from .scope import current_tenant
 from .security import analytics_key, valid_analytics_key
@@ -24,10 +24,20 @@ router = APIRouter()
 
 
 def public_origin():
-    value = (env().get("LEAD_PUBLIC_URL") or "http://127.0.0.1:3100").rstrip("/")
-    p = urlsplit(value)
-    if p.scheme not in ("http", "https") or not p.hostname or p.username or p.password:
-        raise ValueError("公开地址无效")
+    from .auth import public_origin as workspace_origin
+    from .outbound_links import external_url_problem
+
+    value = env().get("LEAD_COLLECTOR_URL", "").rstrip("/")
+    if not value:
+        return workspace_origin()
+    parsed = urlsplit(value)
+    if (
+        external_url_problem(value, https=True)
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("采集入口需要独立的公网 HTTPS 来源")
     return value
 
 
@@ -96,7 +106,7 @@ def save_promotion(aid: UUID, body: PromotionSetup):
     query = [
         (k, v)
         for k, v in parse_qsl(p.query, keep_blank_values=True)
-        if k not in ("lr", "lead_ref")
+        if k not in ("lr", "lead_ref", "lc")
     ]
     destination = urlunsplit(p._replace(query=urlencode(query)))
     aid = str(aid)
@@ -327,37 +337,51 @@ def redirect(code: str, request: Request):
     if dest.hostname != link["allowed_host"] or dest.scheme not in ("http", "https"):
         raise HTTPException(409)
     session = uid()
-    bot = bool(
-        re.search(
-            r"bot|crawler|spider|preview|slack|facebookexternalhit",
-            request.headers.get("user-agent", ""),
-            re.I,
-        )
+    from .analytics_ingest import admit_redirect, request_network
+
+    # Navigation waits only for durable admission, never for cleaning or Temporal.
+    from .analytics_limits import guard
+
+    limited = guard(
+        link["agent_id"], link["tenant_id"], "production", events=0, redirect=True
     )
-    with tx(str(link["agent_id"])) as c:
-        c.execute(
-            "INSERT INTO lead.visit_sessions(tenant_id,agent_id,tracking_link_id,source,source_session_id,trust_level,qualified,exclusion_reason,rule_version,started_at,last_seen_at) VALUES(%s,%s,%s,'redirect',%s,'redirect_observed',NULL,%s,'engaged-v1',now(),now())",
-            (
-                current_tenant(),
-                link["agent_id"],
-                link["id"],
-                session,
-                "known_bot" if bot else None,
-            ),
-        )
+    browser = request.cookies.get("lead_click_browser", "")
+    if not re.fullmatch(r"[0-9a-f]{32}", browser):
+        browser = UUID(uid()).hex
+    admitted = None
+    if not limited:
+        device = str(uuid5(UUID(str(link["agent_id"])), browser))
+        admitted = admit_redirect(link, session, request_network(request), device=device)
     query = [
         (k, v)
         for k, v in parse_qsl(dest.query, keep_blank_values=True)
-        if k not in ("lr", "lead_ref")
+        if k not in ("lr", "lead_ref", "lc")
     ]
-    query.append(("lead_ref" if len(code) == 16 else "lr", code))
-    return RedirectResponse(
-        urlunsplit(dest._replace(query=urlencode(query))), status_code=302
+    if admitted:
+        query.append(("lead_ref" if len(code) == 16 else "lr", code))
+        query.append(("lc", admitted["click_token"]))
+    response = RedirectResponse(
+        urlunsplit(dest._replace(query=urlencode(query))),
+        status_code=302,
+        headers={
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            "X-Lead-Measurement": "rate_limited" if limited else "accepted",
+        },
     )
+
+    if admitted:
+        response.set_cookie(
+            "lead_click_browser", browser, max_age=86400, path="/r/",
+            secure=request.url.scheme == "https", httponly=True, samesite="lax",
+        )
+    return response
 
 
 @router.options("/collect/{cid}")
 @router.options("/collect/{cid}/test")
+@router.options("/collect/{cid}/batch")
+@router.options("/collect/{cid}/receipts")
 def preflight(cid: UUID, request: Request):
     with tx() as c:
         conn = one(
@@ -401,7 +425,14 @@ def collect(cid: UUID, body: Event | BrowserEvent, request: Request):
         )
     if isinstance(body, BrowserEvent):
         try:
-            return browser_receive(conn, body)
+            from .analytics_ingest import collect_browser
+            from .analytics_limits import enforce
+
+            enforce(
+                conn, request, environment="test" if body.test_code else "production"
+            )
+
+            return collect_browser(conn, body, request)
         except HTTPException as error:
             from .pixel_events import record_test_failure
 
@@ -410,72 +441,17 @@ def collect(cid: UUID, body: Event | BrowserEvent, request: Request):
                 {"detail": error.detail},
                 status_code=error.status_code,
                 headers={
+                    **(error.headers or {}),
                     "Access-Control-Allow-Origin": conn["site_host"],
                     "Vary": "Origin",
                 },
             )
-    aid = str(conn["agent_id"])
-    with tx(aid) as c:
-        from .admin_controls import attribution, legacy_attribution
+    from .analytics_ingest import collect_legacy
+    from .analytics_limits import enforce
 
-        policy, policy_version = attribution(c, aid)
-        link = (
-            one(
-                c,
-                "SELECT id FROM lead.tracking_links WHERE public_code=%s AND state='active'",
-                (body.ref,),
-            )
-            if body.ref
-            else None
-        )
-        existing = one(
-            c,
-            "SELECT * FROM lead.visit_sessions WHERE source=%s AND source_session_id=%s FOR UPDATE",
-            ("site:" + str(cid), str(body.session_id)),
-        )
-        if not existing:
-            if body.event != "pageview":
-                return Response(
-                    status_code=204,
-                    headers={"Access-Control-Allow-Origin": conn["site_host"]},
-                )
-            c.execute(
-                "INSERT INTO lead.visit_sessions(tenant_id,agent_id,tracking_link_id,source,source_session_id,trust_level,qualified,rule_version,started_at,last_seen_at,attribution_policy,attribution_version) VALUES(%s,%s,%s,%s,%s,'client_observed',false,'engaged-v1',now(),now(),%s,%s)",
-                (
-                    current_tenant(),
-                    aid,
-                    link["id"] if link else None,
-                    "site:" + str(cid),
-                    str(body.session_id),
-                    j(policy),
-                    policy_version,
-                ),
-            )
-        else:
-            policy = legacy_attribution(existing["attribution_policy"])
-            elapsed = (
-                datetime.now(timezone.utc) - existing["started_at"]
-            ).total_seconds()
-            qualified = existing["qualified"] or (
-                body.event == "engagement" and elapsed >= policy["engagement_seconds"]
-            )
-            c.execute(
-                "UPDATE lead.visit_sessions SET last_seen_at=now(),qualified=%s WHERE id=%s",
-                (qualified, existing["id"]),
-            )
-        c.execute(
-            "UPDATE lead.analytics_connections SET state='verified',last_received_at=now() WHERE id=%s",
-            (cid,),
-        )
-    return Response(
-        status_code=204,
-        headers={
-            "Access-Control-Allow-Origin": conn["site_host"],
-            "Vary": "Origin",
-            "X-Lead-Engagement-Seconds": str(policy["engagement_seconds"]),
-            "Access-Control-Expose-Headers": "X-Lead-Engagement-Seconds",
-        },
-    )
+    enforce(conn, request)
+
+    return collect_legacy(conn, body, request)
 
 
 @router.get("/lead.js")

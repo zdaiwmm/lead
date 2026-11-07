@@ -367,7 +367,13 @@ class ResearchPage:
                     ),
                 )
             try:
-                if operation == "open":
+                metadata = None
+                if operation in ("community_directory", "community_catalog", "community_preview"):
+                    if not self.community_discovery:
+                        raise ValueError("此操作仅用于公开社群核验")
+                    from .public_telegram import read_metadata
+                    metadata = await read_metadata(self.actor, self.context, operation, args)
+                elif operation == "open":
                     url = public_url(args["url"])
                     await self.actor.forward_proxy.validate_url(url)
                     self.community_redirects = []
@@ -412,6 +418,13 @@ class ResearchPage:
                         if host == "html.duckduckgo.com"
                         else None
                     )
+                    # Discourse mounts its navigation before the result list or post body.
+                    if host == "discuss.privacyguides.net":
+                        path = urlsplit(self.page.url).path
+                        if path.rstrip("/") == "/search":
+                            search_selector = '.fps-result a[href*="/t/"]'
+                        elif path.startswith("/t/"):
+                            search_selector = ".topic-post .cooked"
                     if search_selector and not self.redirect_metadata_only:
                         try:
                             await self.page.locator(search_selector).first.wait_for(
@@ -497,19 +510,20 @@ class ResearchPage:
                 else:
                     raise ValueError("未知浏览操作")
                 self.gate()
-                result = await self.observe()
+                result = metadata if metadata is not None else await self.observe()
                 result["evidence_id"] = step
                 result["run_id"] = self.run_id
                 folder = STATE / "evidence" / self.actor.aid
                 folder.mkdir(parents=True, exist_ok=True, mode=0o700)
                 screenshot = folder / (step + ".png")
-                await self.page.screenshot(path=str(screenshot))
+                if metadata is None:
+                    await self.page.screenshot(path=str(screenshot))
                 bodyfile = folder / (step + ".json")
                 bodyfile.write_text(json.dumps(result, ensure_ascii=False))
                 with tx(self.actor.aid) as c:
                     c.execute(
                         "UPDATE lead.browser_steps SET state='completed',output=%s,screenshot_ref=%s,ended_at=now() WHERE id=%s",
-                        (j(result), str(screenshot), step),
+                        (j(result), str(screenshot) if metadata is None else None, step),
                     )
                     if result["text"] and result["url"].startswith(
                         ("http://", "https://")

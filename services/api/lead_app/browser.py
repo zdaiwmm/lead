@@ -14,6 +14,7 @@ import os
 import platform
 import time
 from contextlib import asynccontextmanager, nullcontext
+from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -105,6 +106,10 @@ class Actor:
         from .managed_network import policy
 
         network_policy = policy(self.aid) or {}
+        if env().get("LEAD_DEPLOYMENT_MODE") == "production" and (
+            not proxy or not network_policy.get("usable")
+        ):
+            raise BrowserBusy("正在等待分配专属出口，请稍后再连接账号")
         if network_policy.get("timezone"):
             native_config = {**native_config, "timezone": network_policy["timezone"]}
         digest = hashlib.sha256(
@@ -161,6 +166,10 @@ class Actor:
                 "network.http.speculative-parallel-limit": 0,
                 "network.http.http3.enable": False,
                 "media.peerconnection.enabled": False,
+                # Keep live text operations responsive on a shared worker host.
+                "media.autoplay.default": 5,
+                "image.animation_mode": "none",
+                "ui.prefersReducedMotion": 1,
             },
             accept_downloads=False,
             i_know_what_im_doing=True,
@@ -355,6 +364,10 @@ class Actor:
         if platform not in ("lab", "telegram") and platform not in SPECS:
             raise ValueError("该频道的自动发布适配尚未开放")
         a = require_agent(c, self.aid, True)
+        if not account_setup and action["intent"].get("body"):
+            from .promotion import promoter_copy_ok, promoter_voice
+            if promoter_voice(a) and not promoter_copy_ok((action["intent"].get("title") or "") + "\n" + action["intent"]["body"], a["name"]):
+                raise ValueError("待发原稿身份表述与当前运营身份不符")
         if (
             a["desired_state"] in ("paused", "archived")
             or a["control_version"] != action["expected_control_version"]
@@ -409,6 +422,9 @@ class Actor:
             content_format=content_format,
             action_id=action.get("id"),
         )
+        from .outbound_links import guard_action
+
+        guard_action(c, action)
         if platform in SPECS:
             from .social_publish import gate
 
@@ -456,14 +472,15 @@ class Actor:
                 or not target["verified_permissions"].get("publishing_verified")
             ):
                 raise ValueError("请先完成这个频道的真实发布验证")
-            maximum = int(grant["limits"].get("publish_per_day", 3))
-            used = one(
-                c,
-                "SELECT count(*) AS n FROM lead.actions WHERE target_id=%s AND id<>%s AND state IN ('dispatching','unknown','confirmed') AND created_at>now()-interval '24 hours'",
-                (action["target_id"], action["id"]),
-            )["n"]
-            if used >= maximum:
-                raise ValueError("此频道已达到今天的发布上限")
+            maximum = grant["limits"].get("publish_per_day", None if platform == "telegram" else 3)
+            if maximum is not None:
+                used = one(
+                    c,
+                    "SELECT count(*) AS n FROM lead.actions WHERE target_id=%s AND id<>%s AND state IN ('dispatching','unknown','confirmed') AND created_at>now()-interval '24 hours'",
+                    (action["target_id"], action["id"]),
+                )["n"]
+                if used >= maximum:
+                    raise ValueError("此频道已达到今天的发布上限")
             if env().get("LEAD_DEPLOYMENT_MODE") == "production":
                 if not one(
                     c,
@@ -508,7 +525,10 @@ class Actor:
                     )
                     action["state"] = "unknown"
                 if action["state"] == "prepared":
-                    self.gate(c, action)
+                    agent = self.gate(c, action)
+                    from .growth_experiments import first_users
+                    business_post = one(c, "SELECT type FROM lead.tasks WHERE id=%s", (action["task_id"],))
+                    check_audience = first_users(agent) and business_post["type"] == "telegram.publish"
                 prior = one(
                     c,
                     "SELECT * FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1",
@@ -522,9 +542,20 @@ class Actor:
             )
             try:
                 await telegram.open_account(self.page, target["external_account_id"])
-                await telegram.inspect_target(
+                observation = await telegram.inspect_target(
                     self.page, target["canonical_url"], target["external_account_id"]
                 )
+                if action["state"] == "prepared" and check_audience:
+                    from .owned_audience import save
+                    count = observation.get("audience_count")
+                    with tx(self.aid) as c:
+                        save(c, target["id"], count)
+                        if count is None or count <= 1:
+                            skipped = {"state": "canceled", "reason": "频道尚无可核验的其他受众，转向外部获客"}
+                            c.execute("UPDATE lead.actions SET state='canceled' WHERE id=%s AND state='prepared'", (action_id,))
+                            c.execute("""UPDATE lead.tasks SET state='canceled',completed_at=now(),
+                                result=coalesce(result,'{}') || %s WHERE id=%s""", (j(skipped), action["task_id"]))
+                            return skipped
             except telegram.TelegramNeedsAuth:
                 with tx(self.aid) as c:
                     c.execute(
@@ -574,13 +605,13 @@ class Actor:
                     with tx(self.aid) as c:
                         probe = one(
                             c,
-                            """SELECT count(*) AS n FROM lead.tasks t JOIN lead.tasks parent ON
+                            """SELECT count(*) AS n,bool_or(coalesce((parent.result->>'owner_selected_existing_target')::boolean,false)) AS selected_existing FROM lead.tasks t JOIN lead.tasks parent ON
                             parent.id::text=t.input->>'bootstrap_run_id' OR
-                            (parent.result->>'verification_card_id'=t.input->>'key' AND parent.result->>'creation_state'='confirmed')
+                            (parent.result->>'verification_card_id'=t.input->>'key' AND (parent.result->>'creation_state'='confirmed' OR parent.result->>'owner_selected_existing_target'='true'))
                             WHERE t.id=%s AND t.type='connection.verify_publish' AND t.input->>'bootstrap_verification'='true'
                             AND parent.type='account.prepare' AND parent.state='succeeded' AND parent.result->>'target_id'=%s
                             AND ((parent.input->>'fresh_channel'='true' AND parent.result->>'awaiting_first_publish'='true')
-                              OR (parent.result->>'creation_state'='confirmed' AND parent.result->>'verification_card_id'=t.input->>'key'))
+                              OR ((parent.result->>'creation_state'='confirmed' OR parent.result->>'owner_selected_existing_target'='true') AND parent.result->>'verification_card_id'=t.input->>'key'))
                             AND EXISTS(SELECT 1 FROM lead.action_attempts WHERE id=%s AND started_at<now()-interval '60 seconds')
                             AND NOT EXISTS(SELECT 1 FROM lead.action_attempts WHERE action_id=%s AND observation ? 'draft_continuation')""",
                             (
@@ -590,14 +621,18 @@ class Actor:
                                 action_id,
                             ),
                         )
-                    # Narrow negative proof for the very first write in a newly
-                    # created channel: its entire visible history is the creation
-                    # service event and the exact original text is still a draft.
+                    # Only a bootstrap probe can continue once after negative
+                    # proof: exact untouched draft, unchanged message baseline,
+                    # no pending message and native scoped server search absence.
+                    # Existing channels additionally require explicit owner choice.
                     if (
                         probe["n"] == 1
                         and prior["observation"].get("baseline_scope")
                         == "visible_target_v1"
-                        and diagnostic.get("creationServiceOnly")
+                        and (
+                            diagnostic.get("creationServiceOnly")
+                            or probe.get("selected_existing")
+                        )
                         and diagnostic["draftMatches"]
                         and not diagnostic["markerMatches"]
                         and not diagnostic["pending"]
@@ -609,6 +644,9 @@ class Actor:
                             prior["observation"]["baseline_mid"],
                             action["intent"]["marker"],
                             target["external_target_id"],
+                            require_creation_only=not bool(
+                                probe.get("selected_existing")
+                            ),
                         )
                         if not proof_data:
                             return {
@@ -627,7 +665,7 @@ class Actor:
                                 (action_id,),
                             )
                             c.execute(
-                                "UPDATE lead.action_attempts SET outcome='not_applied',error_code='CREATION_ONLY_WITH_EXACT_DRAFT',evidence_ref=%s,observation=observation || %s,ended_at=now() WHERE id=%s",
+                                "UPDATE lead.action_attempts SET outcome='not_applied',error_code='SCOPED_ABSENCE_WITH_EXACT_DRAFT',evidence_ref=%s,observation=observation || %s,ended_at=now() WHERE id=%s",
                                 (
                                     str(proof),
                                     j({"nonapplication_proof": proof_data}),
@@ -641,8 +679,8 @@ class Actor:
                             record(
                                 c,
                                 self.aid,
-                                "已确认首次验证仍为草稿，恢复提交",
-                                "新频道仅有创建服务消息；保留未生效证据和原任务。",
+                                "已确认原验证仍为草稿，恢复提交",
+                                "原草稿、未变化的消息基线与服务器范围搜索均已核对；保留原任务与未生效证据。",
                                 task_id=action["task_id"],
                             )
                         action["state"] = "prepared"
@@ -864,12 +902,61 @@ class Actor:
                 return {"state": "unknown", "reason": "发布结果待核对"}
 
 
+def private_preparation(c, session_id):
+    """Do not evict a live, unsubmitted upload while its original draft is needed."""
+    return bool(
+        one(
+            c,
+            """SELECT 1 FROM lead.publish_preparations p
+      JOIN lead.actions a ON a.id=p.action_id JOIN lead.agents agent ON agent.id=a.agent_id
+      JOIN lead.authorization_grants g ON g.id=a.grant_id
+      WHERE a.state='prepared' AND agent.desired_state='running' AND g.revoked_at IS NULL
+      AND p.stage IN ('preparing','uncertain','ready')
+      AND p.observation->>'session_id'=%s AND p.observation->>'phase' IN ('uploaded','captioned','ready')
+      AND p.updated_at>now()-interval '24 hours' LIMIT 1""",
+            (str(session_id),),
+        )
+    )
+
+
 class Gateway:
     def __init__(self):
         self.actors = {}
         self.locks = {}
         self.slots = asyncio.Semaphore(int(env().get("LEAD_BROWSER_CONCURRENCY") or 3))
         self.waiting = 0
+
+    def keep_preparation(self, aid, session_id):
+        with tx(aid) as c:
+            return bool(one(
+                c,
+                "SELECT 1 FROM lead.takeover_sessions WHERE browser_session_id=%s AND state IN ('requested','active','ending') AND expires_at>now()",
+                (str(session_id),),
+            )) or private_preparation(c, session_id)
+
+    def keep_idle(self, aid, session_id, idle):
+        from .resource_pressure import browser_idle_seconds, sample
+
+        if idle < 30:
+            return True
+        ttl = browser_idle_seconds()
+        if sample()["memory_pressure"]:
+            return self.keep_preparation(aid, session_id)
+        if idle < ttl:
+            # Release early only when this idle session would already be closed
+            # by the next scheduled cycle. A new activity lease overrides old waits.
+            with tx(aid) as c:
+                long_rest = one(c, """SELECT 1 FROM lead.agents
+                    WHERE id=%s AND desired_state='running'
+                      AND (onboarding_state#>>'{operating_schedule,host_backoff_seconds}')::int > 0
+                      AND (onboarding_state#>>'{operating_schedule,next_check_at}')::timestamptz
+                          > now()+make_interval(secs => %s)
+                      AND NOT EXISTS (SELECT 1 FROM lead.admin_runtime_leases
+                          WHERE agent_id=%s AND released_at IS NULL AND expires_at>now())""",
+                    (aid, ttl-idle, aid))
+            if not long_rest:
+                return True
+        return self.keep_preparation(aid, session_id)
 
     async def evict_idle(self):
         for aid, actor in sorted(
@@ -882,6 +969,8 @@ class Gateway:
                     c,
                     "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now()",
                 ):
+                    continue
+                if private_preparation(c, actor.session):
                     continue
             await self.close(aid)
             return
@@ -948,7 +1037,12 @@ class Gateway:
                     try:
                         if actor.disconnected and not actor.lock.locked():
                             await self.close(aid)
-                        elif actor.lock.locked() or time.monotonic() - actor.used < 300:
+                        elif (
+                            actor.lock.locked()
+                            or actor.research_pages
+                            or self.locks[aid].locked()
+                            or self.keep_idle(aid, actor.session, time.monotonic() - actor.used)
+                        ):
                             actor.measure()
                             with tx(aid) as c:
                                 c.execute(
@@ -1012,6 +1106,7 @@ class PublishRequest(BaseModel):
 
 
 class InputRequest(BaseModel):
+    takeover: UUID | None = None
     kind: str
     x: float = 0
     y: float = 0
@@ -1061,35 +1156,105 @@ async def community_search(aid: UUID, body: CommunitySearchRequest):
     from .community_search import native_search
 
     actor = await gateway.get(str(aid))
-    return await native_search(actor, str(body.task_id), body.query)
+    return await asyncio.wait_for(native_search(actor, str(body.task_id), body.query), timeout=100)
 
 
 class CommunityStepRequest(BaseModel):
     task_id: UUID
-    operation: Literal["observe", "join", "reply"]
+    operation: Literal["observe", "join", "reply", "leave_restricted", "profile_bio", "correct_voice", "scan_pending", "receipt"]
 
 
 @app.post("/agents/{aid}/community/step")
 async def community_step(aid: UUID, body: CommunityStepRequest):
-    from playwright.async_api import TimeoutError as BrowserTimeout
+    from playwright.async_api import Error as BrowserError
 
     from .community_runtime import browser_step
 
-    actor = await gateway.get(str(aid))
+    started = time.monotonic()
+    budget = 150 if body.operation == "observe" else 105
+
+    def remaining(maximum):
+        return max(0.1, min(maximum, budget-(time.monotonic()-started)))
+
+    cold = str(aid) not in gateway.actors
+    actor = await asyncio.wait_for(gateway.get(str(aid)), timeout=remaining(90))
+    acquired_ms = round((time.monotonic()-started)*1000)
     try:
-        return await browser_step(actor, str(body.task_id), body.operation)
-    except (BrowserTimeout, ValueError) as error:
-        diagnostic = await actor.page.evaluate(
-            """() => {const visible=e=>!!(e.getBoundingClientRect().width&&e.getBoundingClientRect().height);return {bodyClass:document.body.className,rightInert:document.querySelector('#column-right')?.inert,menuLabels:[...document.querySelectorAll('.btn-menu-item')].filter(visible).map(e=>e.innerText.slice(0,120)).slice(0,20),forumPanels:[...document.querySelectorAll('.topics-container')].map(e=>({cls:e.className,visible:visible(e),peer:e.querySelector('.sidebar-header .peer-title[data-peer-id]')?.dataset.peerId,buttons:[...e.querySelectorAll('.sidebar-header button')].map(b=>({cls:b.className,label:b.getAttribute('aria-label')}))})),chats:[...document.querySelectorAll('.chat[data-type=chat]')].map(e=>{const h=e.querySelector('.chat-info');const r=h?.getBoundingClientRect();return {cls:e.className,peer:h?.querySelector('[data-peer-id]')?.dataset.peerId,visible:visible(e),headerParent:h?.parentElement?.className,headerHit:r?document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.className:null}}),profiles:[...document.querySelectorAll('.profile-container')].map(e=>({cls:e.className,parent:e.parentElement?.className,tab:e.closest('.tabs-tab')?.className,visible:visible(e),handles:[...e.querySelectorAll('.row-title')].map(x=>x.textContent).filter(t=>/^t.me\\//.test(t))})),topbarSearch:[...document.querySelectorAll('.topbar-search-input')].map(e=>({visible:visible(e),chat:e.closest('.chat')?.className}))}}"""
+        result = await asyncio.wait_for(
+            browser_step(actor, str(body.task_id), body.operation),
+            timeout=remaining(45 if body.operation in ("scan_pending", "receipt") else 90),
         )
         with tx(str(aid)) as c:
+            c.execute("UPDATE lead.tasks SET result=coalesce(result,'{}') || %s WHERE id=%s",
+                      (j({"browser_timing":{"at":datetime.now(timezone.utc).isoformat(),
+                           "operation":body.operation, "cold_start":cold, "gateway_ms":acquired_ms,
+                           "duration_ms":round((time.monotonic()-started)*1000)}}),body.task_id))
+        return result
+    except (BrowserError, ValueError, TimeoutError) as error:
+        diagnostic = {"error": type(error).__name__, "operation": body.operation}
+        try:
+            diagnostic["page"] = await asyncio.wait_for(actor.page.evaluate(
+            """() => {const visible=e=>!!(e.getBoundingClientRect().width&&e.getBoundingClientRect().height);return {bodyClass:document.body.className,rightInert:document.querySelector('#column-right')?.inert,menuLabels:[...document.querySelectorAll('.btn-menu-item')].filter(visible).map(e=>e.innerText.slice(0,120)).slice(0,20),forumPanels:[...document.querySelectorAll('.topics-container')].map(e=>({cls:e.className,visible:visible(e),peer:e.querySelector('.sidebar-header .peer-title[data-peer-id]')?.dataset.peerId,buttons:[...e.querySelectorAll('.sidebar-header button')].map(b=>({cls:b.className,label:b.getAttribute('aria-label')}))})),chats:[...document.querySelectorAll('.chat[data-type=chat]')].map(e=>{const h=e.querySelector('.chat-info');const r=h?.getBoundingClientRect();return {cls:e.className,peer:h?.querySelector('[data-peer-id]')?.dataset.peerId,visible:visible(e),headerParent:h?.parentElement?.className,headerHit:r?document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.className:null}}),profiles:[...document.querySelectorAll('.profile-container')].map(e=>({cls:e.className,parent:e.parentElement?.className,tab:e.closest('.tabs-tab')?.className,visible:visible(e),handles:[...e.querySelectorAll('.row-title')].map(x=>x.textContent).filter(t=>/^t.me\\//.test(t))})),topbarSearch:[...document.querySelectorAll('.topbar-search-input')].map(e=>({visible:visible(e),chat:e.closest('.chat')?.className}))}}"""
+        ), timeout=3)
+        except (BrowserError, TimeoutError):
+            diagnostic["unavailable"] = True
+        with tx(str(aid)) as c:
+            from . import community_health
+
+            task = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (body.task_id,))
+            saved = task["result"] or {}
+            uncertain = saved.get("reply_state") in {"dispatching", "unknown"} or saved.get("join_state") in {"dispatching", "unknown"}
+            envelope = community_health.fault(error, body.operation, uncertain=uncertain,
+                                              evidence_ref=str(body.task_id))
             c.execute(
                 "UPDATE lead.tasks SET result=coalesce(result,'{}') || %s WHERE id=%s",
-                (j({"browser_diagnostic": diagnostic}), body.task_id),
+                (j({"browser_diagnostic": diagnostic, "fault": envelope}), body.task_id),
             )
+            read_only = body.operation in {"observe", "receipt", "scan_pending"}
+            recovery = None
+            if read_only and envelope["error_code"] in community_health.TRANSIENT and not envelope.get("retry_after"):
+                community_health.failed(c, str(aid), task, {**envelope, "evidence_ref": (saved.get("checkpoint") or {}).get("at")})
+                for action in ("refresh", "rebuild_profile"):
+                    if community_health.claim_recovery(c, str(aid), task, action):
+                        recovery = action
+                        break
+        if recovery and remaining(30) >= 5:
+            # Retry only the read, on the original profile and persisted peer.
+            # Each recovery action is claimed durably before execution.
+            try:
+                if recovery == "refresh":
+                    from .community_runtime import reload_telegram
+                    async with actor.lock:
+                        await asyncio.wait_for(reload_telegram(actor.page, task["input"]["external_account_id"]), timeout=remaining(15))
+                else:
+                    await gateway.close(str(aid))
+                    actor = await asyncio.wait_for(gateway.get(str(aid)), timeout=remaining(30))
+                result = await asyncio.wait_for(browser_step(actor, str(body.task_id), body.operation), timeout=remaining(30))
+                if body.operation == "observe":
+                    with tx(str(aid)) as c:
+                        current = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (body.task_id,))
+                        community_health.observed(c, str(aid), current, result)
+                return result
+            except (BrowserError, ValueError, TimeoutError):
+                pass
         raise HTTPException(
-            409, detail=type(error).__name__ + ": " + str(error)[:1500]
+            409, detail=envelope
         ) from None
+
+
+class InboxStepRequest(BaseModel):
+    operation: Literal["scan", "read", "reply"]
+    task_id: UUID | None = None
+
+
+@app.post("/agents/{aid}/inbox/step")
+async def inbox_step(aid: UUID, body: InboxStepRequest):
+    from .telegram_inbox import browser_step
+    actor = await gateway.get(str(aid))
+    return await asyncio.wait_for(
+        browser_step(actor, body.operation, str(body.task_id) if body.task_id else None),
+        timeout=75 if body.operation == "reply" else 30,
+    )
 
 
 class AccountPrepareRequest(BaseModel):
@@ -1143,6 +1308,41 @@ async def inspect_telegram_account(aid: UUID):
         return await inspect_account(actor.page)
 
 
+@app.get("/agents/{aid}/tiktok/diagnostic")
+async def tiktok_diagnostic(aid: UUID):
+    """Fixed read-only loading diagnostics; no cookies, tokens or script values."""
+    aid = str(aid)
+    with tx(aid) as c:
+        require_agent(c, aid)
+        if not one(
+            c,
+            "SELECT 1 FROM lead.social_accounts WHERE platform='tiktok' AND state='connected'",
+        ):
+            raise HTTPException(404, "没有已连接的 TikTok 账号")
+    actor = await gateway.get(aid)
+    async with actor.lock:
+        if urlsplit(actor.page.url).hostname not in {"www.tiktok.com", "tiktok.com"}:
+            return {"state": "off_platform"}
+        return await actor.page.evaluate(r"""() => {
+          let scope={};try{scope=JSON.parse(document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')?.textContent||'{}').__DEFAULT_SCOPE__||{}}catch{}
+          const app=scope['webapp.app-context']||{};
+          return {
+            state:document.readyState,
+            path:location.pathname,
+            file_inputs:Array.from(document.querySelectorAll('input[type=file]')).map(el=>({accept:el.accept,multiple:el.multiple,files:el.files?.length||0})),
+            controls:Array.from(document.querySelectorAll('button,[role=button],[role=switch],[role=checkbox],input[type=checkbox]')).filter(el=>el.getClientRects().length).map(el=>({tag:el.tagName,role:el.getAttribute('role'),name:(el.getAttribute('aria-label')||el.innerText||'').trim().slice(0,120),tt:el.getAttribute('data-tt'),e2e:el.getAttribute('data-e2e')})).slice(0,60),
+            editors:Array.from(document.querySelectorAll('[contenteditable=true]')).map(el=>({e2e:el.getAttribute('data-e2e'),role:el.getAttribute('role'),class:el.className})),
+            form_controls:Array.from(document.querySelectorAll('input[type=checkbox],[role=switch],[role=checkbox]')).map(el=>({id:el.id,name:el.name,role:el.getAttribute('role'),checked:el.checked,labels:Array.from(el.labels||[]).map(x=>x.innerText.trim().slice(0,150)),parents:[el.parentElement?.innerText,el.parentElement?.parentElement?.innerText].map(x=>(x||'').trim().slice(0,350))})),
+            own_nav_links:Array.from(document.querySelectorAll('nav a[href],aside a[href],[role=navigation] a[href]')).map(a=>({path:new URL(a.href,location.href).pathname,label:(a.getAttribute('aria-label')||a.textContent||'').trim().slice(0,50)})).filter(a=>a.path.startsWith('/@')).slice(0,10),
+            profile_selectors:document.querySelectorAll('[data-e2e="nav-profile"],[data-e2e="nav-profile-link"]').length,
+            hydration_scopes:Object.keys(scope),app_context_fields:Object.keys(app),user_context_fields:Object.keys(app.user||app.userInfo||{}),
+            login_controls:document.querySelectorAll('input[type=password],[data-e2e="top-login-button"]').length,
+            loading_controls:document.querySelectorAll('[aria-busy=true],[role=progressbar]').length,
+            resource_errors:performance.getEntriesByType('resource').filter(r=>r.responseStatus>=400).map(r=>({host:new URL(r.name).hostname,status:r.responseStatus})).slice(0,20)
+          };
+        }""")
+
+
 @app.post("/agents/{aid}/telegram/target")
 async def inspect_telegram_target(aid: UUID, body: TelegramTargetRequest):
     from .telegram import inspect_target
@@ -1166,6 +1366,17 @@ async def inspect_telegram_target(aid: UUID, body: TelegramTargetRequest):
         return await inspect_target(
             actor.page, body.url, account["external_account_id"]
         )
+
+
+@app.post("/agents/{aid}/telegram/check-published-link")
+async def check_published_link(aid: UUID, body: PublishRequest):
+    from .identity import check
+    from .telegram_links import check_action
+
+    actor = await gateway.get(str(aid))
+    if env().get("LEAD_DEPLOYMENT_MODE") == "production" and not (await check(actor))["verified"]:
+        raise BrowserBusy("运营环境核验未通过")
+    return {"link_check": await check_action(actor, body.action_id)}
 
 
 @app.post("/agents/{aid}/publish")
@@ -1192,7 +1403,18 @@ async def publish_action(aid: UUID, body: PublishRequest):
             from .social_publish import execute
 
             return await execute(actor, body.action_id)
-        return await actor.publish_telegram(body.action_id)
+        result = await actor.publish_telegram(body.action_id)
+        if result["state"] == "confirmed" and action["intent"].get("link"):
+            from .telegram_links import check_action
+
+            try:
+                result["link_check"] = await check_action(actor, body.action_id)
+            except Exception as error:
+                result["link_check"] = "needs_review"
+                with tx(aid) as c:
+                    task = one(c, "SELECT task_id FROM lead.actions WHERE id=%s", (body.action_id,))
+                    record(c, aid, "原帖推广链接待核对", str(error)[:220], "warning", task_id=task["task_id"])
+        return result
     if action["intent"].get("platform") == "lab":
         return await actor.publish_lab(body.action_id)
     if action["intent"].get("platform") in SPECS:
@@ -1200,6 +1422,37 @@ async def publish_action(aid: UUID, body: PublishRequest):
 
         return await execute(actor, body.action_id)
     raise HTTPException(409, "该渠道尚未通过发布适配验证")
+
+
+@app.post("/agents/{aid}/publishing/reload-adapter")
+async def reload_publishing_adapter(aid: UUID, body: PublishRequest):
+    """Local development: retain a private draft while loading fixed recipes.
+
+    Fixed module names only; no code, paths, selectors or browser commands are
+    accepted from a caller. Submission still requires the original action gates.
+    """
+    if env().get("LEAD_DEPLOYMENT_MODE") == "production":
+        raise HTTPException(404)
+    import importlib
+
+    from . import adapters, social_publish
+    from .adapters import web
+
+    aid = str(aid)
+    actor = await gateway.get(aid)
+    async with actor.lock:
+        with tx(aid) as c:
+            action = one(c, "SELECT * FROM lead.actions WHERE id=%s", (body.action_id,))
+            if (
+                not action
+                or action["state"] != "prepared"
+                or action["intent"].get("platform") != "tiktok"
+            ):
+                raise HTTPException(409, "仅支持核对未提交的 TikTok 原动作")
+            actor.gate(c, action)
+        adapters.WebAdapter = importlib.reload(web).WebAdapter
+        importlib.reload(social_publish)
+    return {"ok": True, "session_id": actor.session, "action_id": body.action_id}
 
 
 @app.post("/agents/{aid}/research/command")
@@ -1265,6 +1518,11 @@ async def check_identity(aid: UUID):
 @app.post("/agents/{aid}/open")
 async def open_browser(aid: str, body: OpenRequest):
     actor = await gateway.get(aid)
+    if body.platform != "lab" and env().get("LEAD_DEPLOYMENT_MODE") == "production":
+        from .identity import check
+
+        if not (await check(actor))["verified"]:
+            raise BrowserBusy("专属出口核验未通过，暂时无法登录社媒账号")
     async with actor.lock:
         url = (
             "http://127.0.0.1:8088/lab/" + aid + "/"
@@ -1283,12 +1541,25 @@ async def publish(aid: str, body: PublishRequest):
     return await actor.publish_lab(body.action_id)
 
 
+def require_takeover(aid, actor, takeover):
+    with tx(aid) as c:
+        a = require_agent(c, aid, True)
+        if not one(
+            c,
+            "SELECT 1 FROM lead.takeover_sessions ts JOIN lead.browser_sessions bs ON bs.id=ts.browser_session_id JOIN lead.profile_leases l ON l.profile_id=ts.profile_id WHERE ts.state='active' AND ts.expires_at>now() AND (%s::uuid IS NULL OR ts.id=%s) AND ts.control_version=%s AND bs.id=%s AND bs.epoch=%s AND bs.ended_at IS NULL AND l.epoch=bs.epoch AND l.state='held' AND l.expires_at>now()",
+            (takeover, takeover, a["control_version"], actor.session, actor.epoch),
+        ):
+            raise HTTPException(409, "接管已过期")
+
+
 @app.get("/agents/{aid}/screenshot")
-async def screenshot(aid: str, format: str = "png"):
+async def screenshot(aid: str, format: str = "png", takeover: UUID | None = None):
     actor = await gateway.get(aid)
     async with actor.lock:
+        if takeover:
+            require_takeover(aid, actor, takeover)
         return Response(
-            await actor.page.screenshot(type="jpeg", quality=72)
+            await actor.page.screenshot(type="jpeg", quality=48 if takeover else 72)
             if format == "jpeg"
             else await actor.page.screenshot(),
             media_type="image/jpeg" if format == "jpeg" else "image/png",
@@ -1296,18 +1567,24 @@ async def screenshot(aid: str, format: str = "png"):
         )
 
 
+@app.get("/agents/{aid}/page-status")
+async def page_status(aid: UUID):
+    actor = await gateway.get(str(aid))
+    async with actor.lock:
+        return await asyncio.wait_for(actor.page.evaluate("""() => ({
+            url: location.href, title: document.title, ready: document.readyState,
+            bodyClass: document.body?.className,
+            text: document.body?.innerText?.slice(0, 500),
+            chatLists: document.querySelectorAll('.chatlist,.chatlist-container').length,
+            scripts: [...document.scripts].filter(s=>s.src).map(s=>s.src).slice(0,10)
+        })"""), timeout=5)
+
+
 @app.post("/agents/{aid}/input")
 async def user_input(aid: str, body: InputRequest):
     actor = await gateway.get(aid)
     async with actor.lock:
-        with tx(aid) as c:
-            a = require_agent(c, aid, True)
-            if not one(
-                c,
-                "SELECT 1 FROM lead.takeover_sessions ts JOIN lead.browser_sessions bs ON bs.id=ts.browser_session_id JOIN lead.profile_leases l ON l.profile_id=ts.profile_id WHERE ts.state='active' AND ts.expires_at>now() AND ts.control_version=%s AND bs.id=%s AND bs.epoch=%s AND bs.ended_at IS NULL AND l.epoch=bs.epoch AND l.state='held' AND l.expires_at>now()",
-                (a["control_version"], actor.session, actor.epoch),
-            ):
-                raise HTTPException(409, "接管已过期")
+        require_takeover(aid, actor, body.takeover)
         if body.kind == "click":
             await actor.page.mouse.click(
                 max(0, min(body.x, 1280)), max(0, min(body.y, 900))

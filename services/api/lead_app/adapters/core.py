@@ -17,6 +17,10 @@ class LayoutChanged(ValueError):
     pass
 
 
+class PreparationNotStarted(LayoutChanged):
+    """Only navigation failed; no upload, draft edit or submit has begun."""
+
+
 async def first_visible(page, selectors, timeout=12000):
     deadline = asyncio.get_running_loop().time() + timeout / 1000
     while True:
@@ -61,16 +65,22 @@ async def optional_click(page, selectors):
     return False
 
 
-async def local_account_link(page, selectors):
-    found = set()
-    for selector in selectors:
-        for item in await page.locator(selector).filter(visible=True).all():
-            href = await item.get_attribute("href")
-            if href:
-                found.add(href.split("?")[0].rstrip("/"))
-    if len(found) != 1:
-        raise NeedsAuth("无法唯一核对当前登录账号，请在专属浏览器中完成登录")
-    return next(iter(found))
+async def local_account_link(page, selectors, timeout=0):
+    # Client-rendered navigation may arrive after DOMContentLoaded. Retry only
+    # missing evidence; conflicting identities must still fail immediately.
+    deadline = asyncio.get_running_loop().time() + timeout / 1000
+    while True:
+        found = set()
+        for selector in selectors:
+            for item in await page.locator(selector).filter(visible=True).all():
+                href = await item.get_attribute("href")
+                if href:
+                    found.add(href.split("?")[0].rstrip("/"))
+        if len(found) == 1:
+            return next(iter(found))
+        if len(found) > 1 or asyncio.get_running_loop().time() >= deadline:
+            raise NeedsAuth("无法唯一核对当前登录账号，请在专属浏览器中完成登录")
+        await asyncio.sleep(0.15)
 
 
 async def upload_files(page, paths, selectors=("input[type=file]",)):

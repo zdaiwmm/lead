@@ -5,6 +5,20 @@ import DialogPanel from "./dialog-panel";
 import { api } from "./api-client";
 
 type Row = Record<string, any>;
+function pixelInstallPrompt(site: string, snippet: string) {
+  return `请在 ${site} 面向访客的网站安装下面的 Lead 基础像素。
+
+1. 先核对仓库、分支和访客页面的公共入口，检查代码与标签管理器是否已安装 Lead。同一连接已安装时只验证现有接入。如果目标站点不明确、配置冲突，或无法核对已有标签管理器的线上配置，请先向我确认。
+2. 沿用网站现有的脚本加载方式和追踪同意机制。先建立 window.leadq 队列，再异步加载 lead.js，原样保留脚本地址、data-connection 和 data-key。同一文档只加载一次。
+3. SDK 在首次加载时自动发送 PageView。pushState、replaceState 或 popstate 使 URL 改变时也会自动发送。请勿在路由回调中补发 PageView。如果网站依赖纯 hash 路由或自定义导航，请实测并说明覆盖情况。本次仅安装基础像素，注册、留资等转化事件另行配置。
+4. 在本地打开页面前拦截 Lead 上报请求，避免测试流量进入真实数据。检查脚本顺序、加载次数和浏览器报错，核对首次访问、站内切换及前进后退时的 PageView 次数。如有追踪同意机制，分别验证同意前后的行为。
+5. 改动留在本地供审阅。交付时列出修改文件和覆盖页面，分别说明脚本加载、浏览器上报和 Lead 后台收数的验证结果。只拦截到请求时，请将后台收数标为未验证。
+
+当前连接的完整安装代码
+
+${snippet}`;
+}
+
 export type PixelTask =
   "embed" | "detect" | "events" | "details" | "reference" | null;
 export default function AnalyticsPanel({
@@ -14,6 +28,8 @@ export default function AnalyticsPanel({
   task,
   onTask,
   onData,
+  onResumeEvent,
+  onCodeCopied,
 }: {
   aid: string;
   url?: string;
@@ -21,6 +37,8 @@ export default function AnalyticsPanel({
   task: PixelTask;
   onTask: (task: PixelTask) => void;
   onData: (data: Row) => void;
+  onResumeEvent?: (label: string) => void;
+  onCodeCopied?: () => void;
 }) {
   const [data, setData] = useState<Row | null>(null);
   const readOnly = readOnlyProp || !!data?.configuration_denied;
@@ -56,8 +74,12 @@ export default function AnalyticsPanel({
   const id = useId(),
     root = "/agents/" + aid + "/analytics";
   const load = useCallback(async () => {
+    const requestedTask = currentTask.current;
     let value: Row;
-    if (readOnlyProp) value = await api("/agents/" + aid + "/analytics/report");
+    if (!currentTask.current)
+      value = await api("/agents/" + aid + "/analytics/setup-state");
+    else if (readOnlyProp)
+      value = await api("/agents/" + aid + "/analytics/report");
     else {
       try {
         value = await api("/agents/" + aid + "/analytics");
@@ -68,7 +90,12 @@ export default function AnalyticsPanel({
         };
       }
     }
-    if (currentAid.current !== aid || !mounted.current) return null;
+    if (
+      currentAid.current !== aid ||
+      !mounted.current ||
+      currentTask.current !== requestedTask
+    )
+      return null;
     setData(value);
     if (!siteEdited.current) setSite(value.connection?.site_host || url || "");
     onData(value);
@@ -101,6 +128,12 @@ export default function AnalyticsPanel({
       clearInterval(timer);
     };
   }, [aid, url, load]);
+  useEffect(() => {
+    if (task && task !== "detect")
+      void load().catch((e) => {
+        if (currentAid.current === aid) setError(e.message);
+      });
+  }, [task, aid, load]);
   useEffect(() => {
     if (!copied) return;
     const timer = setTimeout(() => setCopied(""), 2500);
@@ -170,17 +203,25 @@ export default function AnalyticsPanel({
     try {
       await navigator.clipboard.writeText(value);
       setCopied(name);
+      if (name === "base" || name === "agent") onCodeCopied?.();
     } catch {
-      setError("复制未完成，请手动复制代码");
+      setError(
+        name === "agent"
+          ? "未能复制安装指令，请允许访问剪贴板后重试"
+          : "复制未完成，请手动复制代码",
+      );
     }
   }
   function dismiss() {
     setError("");
     setTest(null);
     setServerKey("");
-    setView("list");
-    setDraft(null);
-    drafts.current = {};
+    if (view !== "edit" || !draft || test?.received_at) {
+      setView("list");
+      setDraft(null);
+      onResumeEvent?.("");
+      drafts.current = {};
+    }
     if (mounted.current) onTask(null);
   }
   async function stopTest() {
@@ -206,9 +247,11 @@ export default function AnalyticsPanel({
   function edit(row: Row) {
     setDraft({ ...(drafts.current[row.id] || row) });
     setView("edit");
+    onResumeEvent?.(row.label);
     setError("");
   }
   function list() {
+    onResumeEvent?.("");
     if (draft) drafts.current[draft.id] = { ...draft };
     setView("list");
     setError("");
@@ -297,6 +340,27 @@ export default function AnalyticsPanel({
     drafts.current[row.id] = row;
     await load();
   }
+  async function verifySelectedEvent() {
+    if (!draft || !conn) return;
+    const tab = window.open("about:blank", "_blank");
+    if (tab) tab.opener = null;
+    try {
+      let session = test;
+      if (!session?.active) {
+        if (revision !== draft.revision) throw new Error("请先保存事件设置");
+        session = await api(root + "/events/test", {
+          definition_id: draft.id,
+          expected_revision: draft.revision,
+        });
+        if (!session) throw new Error("测试未启动");
+        setTest(session);
+      }
+      if (tab) tab.location.replace(session.url);
+    } catch (error) {
+      tab?.close();
+      throw error;
+    }
+  }
   async function startTest() {
     if (!conn) return;
     if (test?.active) {
@@ -344,7 +408,7 @@ export default function AnalyticsPanel({
     dismiss();
   }
   if (!task) return null;
-  let title = "事件设置与测试",
+  let title = "03　配置转化事件",
     content: React.ReactNode,
     footer: React.ReactNode;
   const reference = (
@@ -353,7 +417,8 @@ export default function AnalyticsPanel({
     </button>
   );
   if (task === "embed") {
-    title = "嵌入像素代码";
+    const copyDisabled = busy || !conn?.snippet || siteChanged || readOnly;
+    title = "01　安装像素代码";
     content = (
       <div className="pixel-task">
         <form
@@ -368,6 +433,7 @@ export default function AnalyticsPanel({
               setSite(value.connection.site_host);
               setData(value);
               onData(value);
+              if (value.connection?.snippet) onCodeCopied?.();
             });
           }}
         >
@@ -392,74 +458,89 @@ export default function AnalyticsPanel({
             )}
           </div>
         </form>
-        {conn?.snippet && (
-          <>
-            <p className="pixel-task-hint">
-              {siteChanged
-                ? "以下是已保存网站的代码，更换网站请先保存网址。"
-                : "同一网站只需安装一次，后续可直接复用此代码。"}
-              <br />
-              粘贴到网站的 <code>&lt;/head&gt;</code> 前。
-            </p>
-            <textarea
-              className="pixel-code"
-              aria-label="像素安装代码"
+        <div className="pixel-install-snippet">
+          <div>
+            <strong>像素代码</strong>
+            <div className="pixel-copy-actions">
+              <button
+                className="text-button"
+                disabled={copyDisabled}
+                onClick={() => copy(conn.snippet, "base")}
+              >
+                <Copy size={14} />
+                {copied === "base" ? "已复制" : "复制代码"}
+              </button>
+              <button
+                className="text-button"
+                disabled={copyDisabled}
+                onClick={() =>
+                  copy(pixelInstallPrompt(conn.site_host, conn.snippet), "agent")
+                }
+              >
+                <Copy size={14} />
+                {copied === "agent" ? "已复制指令" : "复制给 Agent"}
+              </button>
+            </div>
+          </div>
+          <textarea
+            className="pixel-code"
+            aria-label="像素安装代码"
+            readOnly
+            rows={3}
+            value={siteChanged ? "" : conn?.snippet || ""}
+            placeholder={
               readOnly
-              value={conn.snippet}
-              rows={6}
-              spellCheck={false}
-            />
-          </>
-        )}
+                ? "仅有配置权限的成员可获取安装代码"
+                : "确认网站地址后获取代码"
+            }
+          />
+          <p className="muted small">粘贴到网站的 &lt;/head&gt; 前并发布。</p>
+        </div>
         {data?.public_url?.startsWith("http://127.0.0.1") && (
           <details className="pixel-advanced">
             <summary>接入环境</summary>
-            <p>当前采集地址仅本机可用。接入公开网站前需配置公开 HTTPS 地址。</p>
+            <p>公开网站需使用公开 HTTPS 采集地址。</p>
           </details>
         )}
       </div>
     );
     footer = (
-      <>
-        <button onClick={close}>稍后嵌入</button>
-        <div className="pixel-footer-actions">
-          {conn?.snippet && (
-            <button onClick={() => copy(conn.snippet, "base")}>
-              <Copy size={14} />
-              {copied === "base" ? "已复制" : "复制代码"}
-            </button>
-          )}
-          <button
-            className="primary"
-            disabled={busy || readOnly || !conn || siteChanged}
-            onClick={() =>
-              run(async () => {
-                await api(root + "/published", { connection_id: conn.id });
-                await load();
-                if (currentTask.current === "embed") onTask("detect");
-              })
-            }
-          >
-            已发布，去检测
-          </button>
-        </div>
-      </>
+      <div className="pixel-footer-actions">
+        <button
+          className="primary"
+          disabled={busy || readOnly || !conn?.snippet || siteChanged}
+          onClick={() =>
+            run(async () => {
+              await api(root + "/published", { connection_id: conn.id });
+              await load();
+              if (currentTask.current === "embed") onTask("detect");
+            })
+          }
+        >
+          已发布，去检测
+        </button>
+      </div>
     );
   } else if (task === "detect") {
-    title = "检测像素安装";
+    title = "02　检测像素安装";
     content = (
       <div className="pixel-task">
-        <label>检测网址</label>
         <p className="pixel-site">
-          {conn?.site_host || site || "请先嵌入像素代码"}
+          {conn?.site_host || site || "请先安装像素代码"}{" "}
+          {conn?.site_host && (
+            <a href={conn.site_host} target="_blank" rel="noopener noreferrer">
+              访问网站 ↗
+            </a>
+          )}
         </p>
         <div className="pixel-detect-result" role="status">
           <RefreshCw size={26} />
-          <h3>等待网站数据</h3>
-          {conn?.last_received_at && (
+          <h3>等待首次页面访问</h3>
+          <small>PageView</small>
+          {conn?.last_pageview_at && (
             <p className="muted small">
               最近收到：
-              {new Date(conn.last_received_at).toLocaleString("zh-CN")}
+              {new Date(conn.last_pageview_at).toLocaleString("zh-CN")}
             </p>
           )}
         </div>
@@ -467,9 +548,8 @@ export default function AnalyticsPanel({
     );
     footer = (
       <>
-        <button onClick={close}>稍后检测</button>
         <div className="pixel-footer-actions">
-          <button onClick={() => onTask("embed")}>查看嵌入指引</button>
+          <button onClick={() => onTask("embed")}>查看安装代码</button>
           <button
             className="primary"
             onClick={() =>
@@ -901,33 +981,54 @@ export default function AnalyticsPanel({
             {catalog.find((e) => e.name === draft.name)?.when}后上报。
           </p>
         )}
-        <div className="pixel-code-head">
-          <span>固定业务埋点 · 只需接入一次</span>
-          <div>
-            {reference}
-            <button
-              className="text-button"
-              onClick={() => copy(eventCode(), "event")}
-            >
-              {copied === "event" ? <Check size={14} /> : <Copy size={14} />}
-              {copied === "event" ? "已复制" : "复制代码"}
-            </button>
-          </div>
-        </div>
-        <textarea
-          className="pixel-code"
-          aria-label="固定业务埋点代码"
-          readOnly
-          value={eventCode()}
-          rows={7}
-          spellCheck={false}
-        />
-        <p className="small muted">
-          在业务成功回调中接入。开始、重试或结束测试都不需要修改此代码；测试上下文由
-          SDK 自动携带。
-        </p>
+        <button
+          className="text-button"
+          onClick={() =>
+            copy(
+              [
+                draft.label,
+                catalog.find((e) => e.name === draft.name)?.when ||
+                  draft.definition,
+                eventCode(),
+              ]
+                .filter(Boolean)
+                .join("\n\n"),
+              "event",
+            )
+          }
+        >
+          <Copy size={14} />
+          {copied === "event" ? "已复制" : "复制接入说明"}
+        </button>
+        {test?.active && (
+          <p role="status">
+            {test.current !== false &&
+            test.events?.some(
+              (r: Row) =>
+                r.event_name === draft.name &&
+                r.status === "accepted" &&
+                r.definition_revision === draft.revision,
+            ) ? (
+              `已收到${draft.label} · 测试通过`
+            ) : (
+              <>
+                等待{draft.label} ·{" "}
+                <a href={test.url} rel="noopener noreferrer" target="_blank">
+                  打开网站 ↗
+                </a>
+              </>
+            )}
+          </p>
+        )}
         <details className="pixel-advanced">
-          <summary>开发接入</summary>
+          <summary>开发者接入</summary>
+          <textarea
+            className="pixel-code"
+            aria-label="事件代码"
+            readOnly
+            value={eventCode()}
+            rows={7}
+          />
           <label htmlFor={id + "-method"}>上报方式</label>
           <select
             id={id + "-method"}
@@ -985,21 +1086,45 @@ export default function AnalyticsPanel({
     );
     footer = (
       <>
-        <button onClick={list} disabled={busy}>
-          返回事件列表
-        </button>
         <button
-          className="primary"
-          disabled={busy || readOnly}
+          disabled={busy}
           onClick={() =>
             run(async () => {
-              await saveEvent();
+              await stopTest();
+              setTest(null);
               list();
             })
           }
         >
-          {busy ? "正在保存…" : "保存设置"}
+          返回事件列表
         </button>
+        {revision !== draft?.revision ? (
+          <button
+            className="primary"
+            disabled={busy || readOnly}
+            onClick={() => run(saveEvent)}
+          >
+            保存设置
+          </button>
+        ) : test?.received_at &&
+          test.events?.some(
+            (r: Row) =>
+              r.status === "accepted" &&
+              r.event_name === draft?.name &&
+              r.definition_revision === draft?.revision,
+          ) ? (
+          <button className="primary" disabled={busy} onClick={close}>
+            完成
+          </button>
+        ) : (
+          <button
+            className="primary"
+            disabled={busy || readOnly || !pixel?.installed}
+            onClick={() => run(verifySelectedEvent)}
+          >
+            前往 {siteOrigin.replace(/^https?:\/\//, "")} 验证 ↗
+          </button>
+        )}
       </>
     );
   }
@@ -1010,7 +1135,7 @@ export default function AnalyticsPanel({
       size={
         task === "details" || task === "reference"
           ? "wide"
-          : task === "detect"
+          : task === "detect" || task === "embed"
             ? "compact"
             : "default"
       }

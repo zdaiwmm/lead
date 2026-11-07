@@ -26,7 +26,7 @@ def overview(c, now=None):
       t.id AS target_id,t.state AS target_state,t.verified_permissions,
       EXISTS(SELECT 1 FROM lead.authorization_grants g WHERE g.target_id=t.id AND g.revoked_at IS NULL AND g.allowed_actions ? 'publish') AS granted,
       EXISTS(SELECT 1 FROM lead.platform_capabilities pc WHERE pc.platform=s.platform AND pc.target_type=t.target_type AND pc.action_type='publish'
-      AND pc.technical_state='verified' AND pc.permission_state='approved') AS platform_approved
+      AND pc.technical_state='verified' AND (pc.permission_state='approved' OR pc.permission_state='pending' AND lead.owner_browser_pilot_allowed(t.id))) AS platform_approved
       FROM lead.social_accounts s LEFT JOIN lead.account_targets t ON t.account_id=s.id WHERE s.platform<>'lab' ORDER BY s.created_at""",
     )
     analytics = all_rows(

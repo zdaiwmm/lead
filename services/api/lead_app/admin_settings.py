@@ -19,6 +19,7 @@ from .admin_delivery import ExternalNotificationSettings
 from .admin_permissions import MemberAccessSettings
 from .admin_pricing import PricingSettings
 from .config import env, model_config, model_reference, resolve_model
+from .model_reasoning import reasoning_options
 
 
 class SettingsModel(BaseModel):
@@ -41,6 +42,9 @@ class TaskModels(SettingsModel):
 class ModelSettings(SettingsModel):
     default_model: str = Field(min_length=1, max_length=100)
     task_models: TaskModels = Field(default_factory=TaskModels)
+    reasoning_efforts: dict[Literal["default", "chat", "planning", "research"], str] = (
+        Field(default_factory=dict)
+    )
     timeout_seconds: int = Field(default=90, strict=True, ge=15, le=120)
     max_output_tokens: int = Field(default=4000, strict=True, ge=256, le=8000)
     max_model_requests: int = Field(default=10, strict=True, ge=1, le=10)
@@ -153,6 +157,11 @@ class NotificationSettings(SettingsModel):
             "uncertain_action",
             "knowledge_expired",
             "measurement_stale",
+            "analytics_ingest_backlog",
+            "analytics_delivery_failure",
+            "analytics_report_failure",
+            "analytics_rate_limited",
+            "analytics_recovered",
         ]
     ] = Field(
         default_factory=lambda: [
@@ -163,6 +172,11 @@ class NotificationSettings(SettingsModel):
             "uncertain_action",
             "knowledge_expired",
             "measurement_stale",
+            "analytics_ingest_backlog",
+            "analytics_delivery_failure",
+            "analytics_report_failure",
+            "analytics_rate_limited",
+            "analytics_recovered",
         ]
     )
     budget_warning_percent: int = Field(default=80, strict=True, ge=1, le=99)
@@ -245,6 +259,10 @@ def validate(kind, data, c=None):
         for name in [data["default_model"], *data["task_models"].values()]:
             if name:
                 resolve_model(name)
+        for slot, effort in data.get("reasoning_efforts", {}).items():
+            name = data["task_models"].get(slot) or data["default_model"]
+            if effort not in reasoning_options(name):
+                raise ValueError(f"{name} 不支持所选的推理程度")
     elif kind == "brand":
         ids = [doc["id"] for doc in data["documents"]]
         if len(set(ids)) != len(ids):
@@ -338,6 +356,12 @@ def brand_context(c, aid, now=None, query=""):
 
 
 def validate_brand_content(c, aid, text):
+    from .db import require_agent
+    from .promotion import promoter_copy_ok, promoter_voice
+
+    agent = require_agent(c, aid)
+    if promoter_voice(agent) and not promoter_copy_ok(text, agent["name"]):
+        raise ValueError("文案应直接介绍产品，不以官方或产品团队身份发言")
     data, _ = effective(c, "brand", aid)
     if any(
         phrase.casefold() in text.casefold() for phrase in data["forbidden_phrases"]

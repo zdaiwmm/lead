@@ -124,7 +124,7 @@ async def native_search(actor, task_id, query):
             raise ValueError(
                 f"原生全局搜索入口匹配 {await search.count()} 个，无法唯一确认"
             )
-        await search.click(timeout=10000)
+        await telegram.click_navigation(search, timeout=10000)
         try:
             await (
                 actor.page.locator("#search-container .search-super")
@@ -144,7 +144,7 @@ async def native_search(actor, task_id, query):
             visible=True
         )
         if await clear.count() == 1:
-            await clear.click(timeout=5000)
+            await telegram.click_navigation(clear, timeout=5000)
             await asyncio.sleep(0.2)
         if (
             await actor.page.locator("#column-left .input-search [data-key]")
@@ -156,7 +156,7 @@ async def native_search(actor, task_id, query):
         # input retains focus. Re-enter native search before typing; a cached
         # search-super element alone does not prove the active tab is search.
         await search.blur()
-        await search.click(timeout=10000)
+        await telegram.click_navigation(search, timeout=10000)
         await (
             actor.page.locator("#column-left .item-main.is-search-active")
             .filter(visible=True)
@@ -184,7 +184,7 @@ async def native_search(actor, task_id, query):
                 and not reactivated
             ):
                 await search.blur()
-                await search.click(timeout=10000)
+                await telegram.click_navigation(search, timeout=10000)
                 await (
                     actor.page.locator("#column-left .item-main.is-search-active")
                     .filter(visible=True)
@@ -207,7 +207,7 @@ async def native_search(actor, task_id, query):
                 .filter(visible=True)
             )
             if expansions < 3 and await more.count():
-                await more.first.click(timeout=5000)
+                await telegram.click_navigation(more.first, timeout=5000)
                 expansions += 1
                 previous = None
                 continue

@@ -131,7 +131,7 @@ def agents():
             )
             row["budget"] = configuration(c, aid)
             row["config"] = configs.read(c, "budgets/" + aid)
-            row["remaining"] = max(
+            row["remaining"] = None if row["budget"]["acquisition_uncapped"] else max(
                 0, row["budget"]["daily_token_limit"] - row["spent"] - row["reserved"]
             )
         return rows
@@ -339,7 +339,9 @@ def model_options():
     from .admin_settings import model_catalog
     from .config import model_config
     from .hybrid_research import available
+    from .model_reasoning import reasoning_options
 
+    models = model_catalog()
     connection = model_config()
     providers = [
         {
@@ -351,7 +353,8 @@ def model_options():
         for provider, name in (("deepseek", "DeepSeek"), ("openai", "OpenAI"))
     ]
     return {
-        "models": model_catalog(),
+        "models": models,
+        "reasoning_options": {name: reasoning_options(name) for name in models},
         "credential_configured": bool(connection["key"]),
         "provider": connection["provider"],
         "providers": providers,

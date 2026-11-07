@@ -45,6 +45,9 @@ def occupied(port):
 
 
 def supervise():
+    from analytics_service import start as start_analytics
+
+    start_analytics()
     os.chdir(ROOT)
     STATE.mkdir(exist_ok=True, mode=0o700)
     PID.write_text(str(os.getpid()))
@@ -53,6 +56,7 @@ def supervise():
         **os.environ,
         "PYTHONPATH": str(ROOT / "services/api"),
         "PYTHONUNBUFFERED": "1",
+        "LEAD_ANALYTICS_DEDICATED": "1",
     }
     services = {
         "api": (
@@ -160,6 +164,9 @@ def start():
             "Use the production service entries; local start uses a development Temporal service."
         )
     if current_pid():
+        from analytics_service import start as start_analytics
+
+        start_analytics()
         print("lead is already running: http://127.0.0.1:3100")
         return
     if any(occupied(p) for p in (3100, 8088, 8089)):
@@ -217,6 +224,9 @@ def start():
 
 
 def stop():
+    from analytics_service import stop as stop_analytics
+
+    stop_analytics()
     pid = current_pid()
     if not pid:
         print("lead supervisor is not running.")

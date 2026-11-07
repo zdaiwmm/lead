@@ -8,6 +8,8 @@ reconciled. Existing publish grants, evidence and pause fencing still apply.
 from .db import all_rows, audit, emit, j, one, record, require_agent, tx, uid
 from .scope import current_tenant
 
+SETUP_REVISION = 2
+
 
 def delegate_accounts(c, aid, platform=None):
     for account in all_rows(
@@ -36,7 +38,7 @@ def delegate_accounts(c, aid, platform=None):
                             "publish",
                             "upload_media",
                         ],
-                        "limits": {"publish_per_day": 3, "read_others": False},
+                        "limits": {"publish_per_day": None, "read_others": False},
                         "source": "owner_start",
                     }
                 ),
@@ -72,6 +74,40 @@ def require_delegation(c, agent, account, delegation_id):
     ):
         raise ValueError("账号运营授权已变化，筹备已停止")
     return card
+
+
+CHANNEL_LANGUAGES = {"zh": "中文交流频道", "en": "English Community"}
+
+
+def channel_copy(name, handle, language):
+    suffix = CHANNEL_LANGUAGES[language]
+    title = name[:90] + " " + suffix
+    description = (
+        f"围绕 {name[:60]} 交流使用经验、问题和建议。由 AI 助手维护。"
+        if language == "zh" else
+        f"A place to share tips, questions and feedback about {name[:60]}. Maintained by an AI assistant."
+    )
+    return {"title": title, "about": description + "\nhttps://t.me/" + handle,
+            "handle": handle, "channel_language": language}
+
+
+def queue_companion_channels(c, aid, agent, parent):
+    """Provision the other default locales once per delegated login."""
+    from .operating_progress import digest
+    source = parent["input"]
+    for lang in CHANNEL_LANGUAGES:
+        if lang == source["channel_language"]:
+            continue
+        if one(c, """SELECT 1 FROM lead.account_targets WHERE account_id=%s AND state='active'
+                  AND verified_permissions->>'channel_language'=%s""", (source["account_id"], lang)):
+            continue
+        key = f"account.prepare:locale:{source['account_id']}:{source['external_account_id']}:{lang}"
+        handle = "lead_" + digest([key])[:20]
+        payload = {k: source[k] for k in ("account_id","external_account_id","delegation_id","control_version","config_revision")}
+        payload.update(channel_copy(agent["name"], handle, lang), fresh_channel=True)
+        c.execute("""INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,scheduled_at)
+                  VALUES(%s,%s,'account.prepare','queued',%s,%s,now()) ON CONFLICT(workflow_id) DO NOTHING""",
+                  (current_tenant(), aid, key, j(payload)))
 
 
 def request_fresh_channel(aid, request_id):
@@ -114,13 +150,6 @@ def request_fresh_channel(aid, request_id):
             (str(account["id"]), account["external_account_id"]),
         )
         require_delegation(c, a, account, card["id"])
-        number = (
-            one(
-                c,
-                "SELECT count(*) AS n FROM lead.tasks WHERE input->>'fresh_channel'='true'",
-            )["n"]
-            + 1
-        )
         handle = (
             "lead_"
             + str(account["id"]).replace("-", "")[:10]
@@ -136,15 +165,7 @@ def request_fresh_channel(aid, request_id):
             "delegation_id": str(card["id"]),
             "control_version": a["control_version"],
             "config_revision": a["config_revision"],
-            "title": a["name"][:90]
-            + " 官方频道"
-            + (f" · {number}" if number > 1 else ""),
-            "handle": handle,
-            "about": a["name"][:40]
-            + " 官方频道，由 AI 助手维护。\n"
-            + business["description"][:125]
-            + "\nhttps://t.me/"
-            + handle,
+            **channel_copy(a["name"], handle, "zh"),
         }
         task = one(
             c,
@@ -274,7 +295,7 @@ async def prepare_requested_channel(aid, rpc):
             return {"delay": 600, "reason": "account_preparation_blocked"}
         if one(
             c,
-            "SELECT 1 FROM lead.tasks WHERE type<>'account.prepare' AND NOT(type='community.discover' AND coalesce(input->>'mode','')='discovery' AND NOT(input ? 'account_id')) AND state IN ('queued','running','reconciling')",
+            "SELECT 1 FROM lead.tasks WHERE type<>'account.prepare' AND NOT(type='community.engage' AND state='reconciling') AND NOT(type='community.discover' AND coalesce(input->>'mode','')='discovery' AND NOT(input ? 'account_id')) AND state IN ('queued','running','reconciling')",
         ):
             return {"delay": 60, "reason": "finishing_existing_task"}
         account = one(
@@ -336,10 +357,16 @@ async def prepare_accounts(aid, rpc):
             "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now()",
         ):
             return None
-        if one(
+        from .publication_recovery import stale_identity_tasks
+
+        stale = stale_identity_tasks(c)
+        pending = all_rows(
             c,
-            "SELECT 1 FROM lead.tasks WHERE type<>'account.prepare' AND NOT(type='community.discover' AND coalesce(input->>'mode','')='discovery' AND NOT(input ? 'account_id')) AND state IN ('queued','running','reconciling')",
-        ):
+            """SELECT id FROM lead.tasks WHERE type<>'account.prepare' AND NOT(type='community.engage' AND state='reconciling')
+          AND NOT(type='community.discover' AND coalesce(input->>'mode','')='discovery' AND NOT(input ? 'account_id'))
+          AND state IN ('queued','running','reconciling')""",
+        )
+        if any(str(t["id"]) not in stale for t in pending):
             return None
         business = one(
             c, "SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1"
@@ -379,19 +406,25 @@ async def prepare_accounts(aid, rpc):
             previous
             and previous["state"] == "waiting_user"
             and previous["input"]["control_version"] == a["control_version"]
+            and (previous.get("result") or {}).get("setup_revision", 1)
+            >= SETUP_REVISION
         ):
             return {"delay": 3600, "reason": "account_preparation_blocked"}
-        handle = "lead_" + str(account["id"]).replace("-", "")[:20]
+        from .operating_progress import digest
+
+        handle = (
+            "lead_" + digest([str(account["id"]), account["external_account_id"]])[:20]
+        )
         payload = {
             "account_id": str(account["id"]),
             "external_account_id": account["external_account_id"],
             "delegation_id": str(account["delegation_id"]),
             "control_version": a["control_version"],
             "config_revision": a["config_revision"],
-            "title": a["name"][:110] + " 官方动态",
-            "handle": handle,
-            "about": business["description"][:190] + "\nhttps://t.me/" + handle,
+            **channel_copy(a["name"], handle, "zh"),
         }
+        if previous and not previous["input"].get("channel_language"):
+            payload.pop("channel_language", None)
         task = one(
             c,
             "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,scheduled_at,started_at) VALUES(%s,%s,'account.prepare','running',%s,%s,now(),now()) ON CONFLICT(workflow_id) DO UPDATE SET state='running',input=excluded.input,completed_at=NULL RETURNING *",
@@ -488,6 +521,11 @@ async def finish_preparation(aid, account, task, observed):
                 )
                 return {"delay": 60, "reason": "account_verifying"}
     binding = store_target(aid, str(account["id"]), observed, notify=False)
+    language = task["input"].get("channel_language") if observed["display_name"] == task["input"]["title"] else None
+    if language:
+        with tx(aid) as c:
+            c.execute("UPDATE lead.account_targets SET verified_permissions=verified_permissions || %s WHERE id=%s",
+                      (j({"channel_language": language}), binding["target_id"]))
     if binding["card_id"]:
         with tx(aid) as c:
             card = one(
@@ -575,6 +613,8 @@ async def finish_preparation(aid, account, task, observed):
                 task["id"],
             ),
         )
+        if language:
+            queue_companion_channels(c, aid, a, task)
         record(c, aid, "Telegram 频道已准备，正在验证发布连接", task_id=task["id"])
         emit(c, aid, "supervisor.wake")
     return {"delay": 60, "reason": "account_verifying"}
@@ -766,6 +806,15 @@ async def prepare_in_browser(actor, task_id):
                     saved["target"]["canonical_url"],
                     account["external_account_id"],
                 )
+            elif saved.get("created_peer_id"):
+                observed = await telegram.inspect_target(
+                    actor.page,
+                    "https://web.telegram.org/k/?account="
+                    + (await telegram.inspect_account(actor.page))["slot"]
+                    + "#"
+                    + saved["created_peer_id"],
+                    account["external_account_id"],
+                )
             else:
                 observed = await telegram.find_prepared_channel(
                     actor.page, task["input"]
@@ -873,6 +922,7 @@ async def prepare_in_browser(actor, task_id):
                             {
                                 "phase": phase,
                                 "error_type": type(error).__name__,
+                                "setup_revision": SETUP_REVISION,
                                 "error_detail": str(error)[:1600],
                                 "diagnostic": diagnostic,
                             }

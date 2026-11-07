@@ -12,6 +12,11 @@ const categories: Row = {
   uncertain_action: "外部操作待核对",
   knowledge_expired: "知识过期",
   measurement_stale: "数据回传过期",
+  analytics_ingest_backlog: "数据处理积压",
+  analytics_delivery_failure: "数据投递失败",
+  analytics_report_failure: "统计更新失败",
+  analytics_rate_limited: "采集达到保护上限",
+  analytics_recovered: "数据处理恢复",
 };
 const roleNames: Row = {
   owner: "所有者",
@@ -962,6 +967,7 @@ function ExternalFields({
                 {[
                   ["warning", "需要关注"],
                   ["error", "需要处理"],
+                  ["info", "恢复通知"],
                 ].map(([id, label]) => (
                   <label className="admin-checkbox" key={id}>
                     <input
@@ -1089,7 +1095,7 @@ function ExternalFields({
                   kind: "webhook",
                   enabled: false,
                   categories: Object.keys(categories),
-                  severities: ["warning", "error"],
+                  severities: ["warning", "error", "info"],
                   agent_ids: null,
                   max_attempts: 3,
                   retry_seconds: 60,

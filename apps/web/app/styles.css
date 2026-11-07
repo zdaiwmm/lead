@@ -4065,3 +4065,131 @@ progress::-moz-progress-bar {
 }
 
 .pixel-test-error { color: var(--danger, oklch(78% 0.13 25)); }
+
+/* The conversation shares the bottom edge of the agent workspace. */
+.agent-layout { flex-direction: column; }
+.agent-layout > .agent-canvas { min-height: 0; }
+.conversation-dock {
+  box-sizing: border-box;
+  flex: none;
+  position: relative;
+  z-index: 5;
+  display: grid;
+  grid-template-rows: 40px auto;
+  align-content: end;
+  width: 100%;
+  padding: 0 max(16px, calc((100% - 1160px) / 2)) calc(22px + env(safe-area-inset-bottom));
+  background: var(--surface);
+}
+.dock-tray {
+  align-self: end;
+  display: flex;
+  flex-direction: column;
+  height: 40px;
+  padding-inline: inherit;
+  margin-inline: calc(-1 * max(16px, (100% - 1160px) / 2));
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -10px 24px -12px rgb(0 0 0 / 48%);
+  overflow: hidden;
+}
+.conversation-dock[data-expanded="true"] .dock-tray { height: max(100px, calc(50dvh - 68px - env(safe-area-inset-bottom))); }
+@media (prefers-reduced-motion: no-preference) {
+  .dock-tray { transition: height 440ms cubic-bezier(.25,.8,.25,1); }
+  .conversation-dock .messages { transition: opacity 240ms ease; }
+  .dock-toggle > svg { transition: transform 300ms var(--ease-out); }
+}
+.dock-toggle {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  height: 40px;
+  min-height: 40px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+.dock-toggle:hover:not(:disabled) { background: transparent; }
+.dock-toggle strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; font-size: 14px; font-weight: 500; }
+.dock-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 12px; }
+.dock-toggle > svg { flex: none; color: var(--text-secondary); }
+.conversation-dock[data-expanded="true"] .dock-toggle > svg { transform: rotate(180deg); }
+.conversation-dock .messages { padding: 8px 4px 16px; gap: 16px; }
+.conversation-dock[data-expanded="false"] .messages { opacity: 0; }
+.conversation-dock .chat-input { padding: 0; flex: none; border: 0; }
+.conversation-dock .composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 8px 5px 12px;
+}
+.conversation-dock .composer textarea { min-height: 30px; height: 30px; line-height: 22px; padding: 4px 0; }
+.conversation-dock .composer-bottom { margin: 0; gap: 6px; }
+.conversation-dock .composer > .attachment-list { grid-column: 1 / -1; max-height: 54px; overflow: auto; }
+
+.conversation-dock .message.user { align-self: flex-end; max-width: 85%; }
+
+.workspace-overview, .workspace-stack { display: grid; gap: 20px; align-items: start; min-width: 0; }
+.workspace-stack { align-content: start; }
+.agent-canvas .workspace-content { max-width: 1580px; }
+.agent-canvas .workspace-section { box-shadow: 0 8px 18px -14px rgb(0 0 0 / 48%); }
+@container workspace (min-width: 800px) {
+  .workspace-overview { grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); }
+  .workspace-support .workspace-section { padding: 20px; }
+  .workspace-support .social-grid { grid-template-columns: repeat(auto-fit, minmax(55px, 1fr)); gap: 12px 4px; }
+  .workspace-support .section-head { flex-wrap: wrap; gap: 6px 12px; }
+}
+@media (max-width: 640px) {
+  .conversation-dock { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+}
+
+.agent-header:has(.identity-channels) { display: grid; grid-template-columns: auto minmax(0,1fr) auto; gap: 16px; align-items: center; }
+.identity-channels { min-width: 0; max-width: 100%; }
+.identity-channels .social-grid { display: flex; justify-content: flex-end; gap: 2px; overflow-x: auto; }
+.identity-channels .social-item { flex: none; }
+.identity-channels .social-trigger { width: 32px; height: 36px; min-height: 36px; padding: 4px; }
+.identity-channels .social-symbol { margin: 0; }
+.identity-channels .social-trigger[data-state="needs_auth"] .social-state,
+.identity-channels .social-trigger[data-state="restricted"] .social-state { color: var(--canvas); background: var(--warning); }
+.agent-header:has(.identity-channels) .agent-actions { margin: 0; justify-self: start; }
+@container workspace (min-width:800px) {
+  .workspace-overview { grid-template-columns: minmax(0,1.1fr) minmax(0,1fr); }
+}
+@container workspace (max-width:970px) {
+  .agent-header:has(.identity-channels) { grid-template-columns: auto minmax(0,1fr); gap: 8px 16px; }
+  .identity-channels { grid-column: 2; grid-row: 1; justify-self: end; }
+  .agent-header:has(.identity-channels) .agent-actions { grid-column: 1 / -1; }
+  .identity-channels .social-grid { justify-content: safe flex-end; }
+}
+.conversation-dock { padding-inline: 0; }
+.dock-tray { margin-inline: 0; padding-inline: 0; }
+.conversation-dock .dock-toggle, .conversation-dock .messages { padding-inline: 16px; }
+.conversation-dock .chat-input { padding-inline: 16px; }
+.conversation-dock .message-content .bubble { max-width: none; }
+
+.results-stack { display: grid; align-content: start; gap: 20px; min-width: 0; }
+@container workspace (max-width:799px) {
+  .workspace-overview > .results-stack { display: contents; }
+  .workspace-overview .results-stack > :nth-child(2) { order: 2; }
+}
+.identity-channels .channel-add { border: 1px dashed var(--line); width: 32px; height: 32px; min-height: 32px; align-self: center; margin-left: 3px; flex: none; color: var(--text-secondary); position: sticky; right: 0; background: var(--surface); }
+.channel-picker { display: grid; gap: 4px; }
+.channel-picker button { display: flex; justify-content: flex-start; gap: 12px; padding: 8px 12px; background: var(--surface); border: 0; }
+.channel-picker small { margin-left:auto; color:var(--text-muted); }
+.pixel-install-snippet { display: grid; gap: 8px; }
+.pixel-install-snippet > div { display: flex; justify-content: space-between; align-items: center; }
+.pixel-install-snippet > div, .pixel-copy-actions { flex-wrap: wrap; gap: 8px; }
+.pixel-copy-actions { display: flex; }
+.pixel-install-snippet strong { font-size: 14px; font-weight: 500; }
+.pixel-install-snippet .pixel-code { min-height: 76px; }
+.pixel-site a { color: var(--focus); font-size: 12px; margin-left: 8px; }
+.pixel-detect-result svg { color: var(--data); }
+
+/* Results and execution each occupy a complete workspace row. */
+.agent-canvas .workspace-overview { grid-template-columns: minmax(0, 1fr); }
+.workspace-overview > .group-execution { padding: 0; border: 0; background: none; box-shadow: none; }

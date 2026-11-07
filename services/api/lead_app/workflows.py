@@ -11,6 +11,26 @@ RETRY = RetryPolicy(
     maximum_attempts=3,
 )
 
+# Preserve the timer recorded by supervisors running before pressure-aware pacing.
+LEGACY_CYCLE_GAP_SECONDS = 480
+
+
+@workflow.defn
+class AnalyticsIngestWorkflow:
+    @workflow.run
+    async def run(self, args: dict):
+        for _ in range(100):
+            result = await workflow.execute_activity(
+                "process_analytics_ingest",
+                args,
+                start_to_close_timeout=timedelta(seconds=45),
+                retry_policy=RETRY,
+            )
+            if result.get("state") != "pending":
+                return result
+            await workflow.sleep(result.get("delay", 2))
+        workflow.continue_as_new(args)
+
 
 @workflow.defn
 class ChatWorkflow:
@@ -175,6 +195,7 @@ class SupervisorWorkflow:
     @workflow.run
     async def run(self, aid: str, pending_cycle: str | None = None):
         recover = workflow.patched("supervisor-transient-recovery-v1")
+        stage_heartbeat = workflow.patched("community-stage-heartbeat-v1")
         for _ in range(100):
             self.changed = False
             pending_cycle = pending_cycle or str(workflow.uuid4())
@@ -182,7 +203,11 @@ class SupervisorWorkflow:
                 result = await workflow.execute_activity(
                     "autonomous_cycle",
                     {"agent_id": aid, "cycle_id": pending_cycle},
-                    start_to_close_timeout=timedelta(minutes=4),
+                    # 东京主机的 CPU 突发额度耗尽时单轮运营循环会慢数倍，
+                    # 4 分钟超时会导致活动超时重试堆叠、CPU 需求倍增。
+                    # 提高到 20 分钟让限速下单轮循环能真正跑完，而不是无限重试。
+                    start_to_close_timeout=timedelta(minutes=20),
+                    heartbeat_timeout=timedelta(minutes=2) if stage_heartbeat else None,
                     retry_policy=RETRY,
                 )
                 pending_cycle = None
@@ -194,9 +219,15 @@ class SupervisorWorkflow:
                 "archived"
             ):
                 return
+            # A replaying run can memoize the old patch branch until continue-as-new.
+            # Fresh activity results explicitly opt that same run into the new timer.
+            if result.get("cadence_version") == 1 or workflow.patched("supervisor-pressure-aware-cadence-v1"):
+                delay = max(1, int(result.get("delay", 60)))
+            else:
+                delay = max(int(result.get("delay", 0)), LEGACY_CYCLE_GAP_SECONDS)
             try:
                 await workflow.wait_condition(
-                    lambda: self.changed, timeout=timedelta(seconds=result["delay"])
+                    lambda: self.changed, timeout=timedelta(seconds=delay)
                 )
             except asyncio.TimeoutError:
                 pass

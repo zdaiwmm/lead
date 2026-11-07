@@ -139,7 +139,7 @@ def telegram_content():
         name="Telegram",
         target="自有广播频道",
         maturity_days=7,
-        cadence="先按每周 3 条的总节奏轮换三套方案；每天最多 3 条且不超过账号实际授权。",
+        cadence="按需求证据和反馈安排发布，复用有效内容。",
         setup=[
             "核对已有业务事实与品牌资料",
             "用户完成本人登录和必要验证",

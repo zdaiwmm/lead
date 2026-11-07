@@ -2,10 +2,11 @@
 
 import asyncio
 import ipaddress
+import re
 import socket
 import time
 from functools import lru_cache
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urldefrag, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -68,23 +69,63 @@ def resolve_public(url):
     return p, sorted(addresses)[0]
 
 
-async def fetch_product(url):
+def product_links(soup, url):
+    """Prefer first-party pages describing actual products over generic navigation."""
+    root = urlsplit(url).hostname.removeprefix("www.")
+    ranked = {}
+    for anchor in soup.select("a[href]"):
+        try:
+            link = urldefrag(urljoin(url, anchor["href"]))[0]
+            parsed = urlsplit(link)
+            host = parsed.hostname or ""
+            if (
+                parsed.scheme not in ("http", "https")
+                or parsed.username
+                or parsed.password
+                or not (host == root or host.endswith("." + root))
+                or link == urldefrag(url)[0]
+                or len(link) > 2000
+            ):
+                continue
+            label = (parsed.path + " " + anchor.get_text(" ", strip=True)).lower()
+            for priority, pattern in enumerate(
+                (
+                    r"features?|products?|功能|产品",
+                    r"docs?|help|guide|文档|指南|帮助",
+                    r"solutions?|customers?|case-stud|方案|案例",
+                )
+            ):
+                if re.search(pattern, label) or (
+                    priority == 1 and host.startswith(("docs.", "help."))
+                ):
+                    ranked[link] = min(priority, ranked.get(link, priority))
+                    break
+        except ValueError:
+            continue
+    return sorted(ranked, key=ranked.get)[:3]
+
+
+async def pinned_get(client, url):
+    p, ip = await asyncio.to_thread(resolve_public, url)
+    authority = ("[" + ip + "]") if ":" in ip else ip
+    pinned = p._replace(
+        netloc=authority + (":" + str(p.port) if p.port else "")
+    ).geturl()
+    request = client.build_request(
+        "GET",
+        pinned,
+        headers={"Host": p.hostname, "User-Agent": "lead-product-reader/1.0"},
+    )
+    request.extensions["sni_hostname"] = p.hostname
+    return await client.send(request, stream=True)
+
+
+async def fetch_product(url, *, discover_links=False):
     async with httpx.AsyncClient(
         timeout=15, follow_redirects=False, trust_env=False
     ) as client:
         for _ in range(4):
-            p, ip = await asyncio.to_thread(resolve_public, url)
-            authority = ("[" + ip + "]") if ":" in ip else ip
-            pinned = p._replace(
-                netloc=authority + (":" + str(p.port) if p.port else "")
-            ).geturl()
-            request = client.build_request(
-                "GET",
-                pinned,
-                headers={"Host": p.hostname, "User-Agent": "lead-product-reader/1.0"},
-            )
-            request.extensions["sni_hostname"] = p.hostname
-            response = await client.send(request, stream=True)
+            response = await pinned_get(client, url)
             try:
                 if response.status_code in (301, 302, 303, 307, 308):
                     url = urljoin(url, response.headers.get("location", ""))
@@ -101,9 +142,11 @@ async def fetch_product(url):
                     if len(data) > 2_000_000:
                         raise ValueError("网页内容过大")
                 soup = BeautifulSoup(bytes(data), "html.parser")
+                links = product_links(soup, url) if discover_links else []
                 for tag in soup(["script", "style", "nav", "footer"]):
                     tag.decompose()
                 return {
+                    **({"links": links} if discover_links else {}),
                     "url": url,
                     "title": soup.title.get_text() if soup.title else "",
                     "text": soup.get_text(" ", strip=True)[:18000],

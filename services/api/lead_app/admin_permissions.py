@@ -171,7 +171,7 @@ def workbench_permission(method, path):
         if path.endswith("/analytics"):
             return "analytics.manage"  # includes the public website write key
         return None
-    if re.fullmatch(r"/api/agents(?:/setup)?", path):
+    if re.fullmatch(r"/api/agents(?:/setup(?:/analyze|/confirm)?)?", path):
         return "agents.create"
     if not path.startswith("/api/agents/"):
         return None

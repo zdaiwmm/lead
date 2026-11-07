@@ -225,6 +225,8 @@ async def validate_id_token(raw, cfg, discovery, nonce):
 
 @router.get("/api/auth/login")
 async def begin_login():
+    if auth_mode() == "local_owner":
+        return RedirectResponse("/", status_code=303)
     cfg = settings()
     try:
         discovery = await metadata(cfg)

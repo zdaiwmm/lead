@@ -209,7 +209,7 @@ def store_target(aid, account_id, observed, *, notify=True):
                         "target_name": target["display_name"],
                         "allowed_actions": ["publish", "upload_media"],
                         "formats": list(spec.formats),
-                        "limits": {"publish_per_day": 3, "read_others": False},
+                        "limits": {"publish_per_day": None if spec.platform == "telegram" else 3, "read_others": False},
                         "expected_authorization_version": a["authorization_version"],
                     }
                 ),
@@ -223,7 +223,7 @@ def store_target(aid, account_id, observed, *, notify=True):
             "assistant",
             "已核对「"
             + target["display_name"]
-            + "」的操作权限。授权后只在此目标发布文字及可用的图片、视频，每天最多 3 条。",
+            + "」的操作权限。授权后只在此目标发布文字及可用的图片、视频。",
             cards=[
                 {
                     "type": "authorize",
@@ -271,9 +271,10 @@ def probe_in_tx(
             }
         )
     marker = "lead-verify-" + secrets.token_hex(6)
+    label = "lead connection check" if target["verified_permissions"].get("channel_language") == "en" else "lead 连接验证"
     publication = {
-        "body": "lead 连接验证 · " + marker,
-        "title": "lead 连接验证 " + marker,
+        "body": label + " · " + marker,
+        "title": label + " " + marker,
         "marker": marker,
         "media": media,
         "made_for_kids": made_for_kids,
@@ -287,6 +288,12 @@ def probe_in_tx(
         "grant_id": str(grant_id),
         "expected_authorization_version": authorization_version,
     }
+    if one(
+        c,
+        "SELECT lead.owner_browser_pilot_allowed(%s,%s) allowed",
+        (target["id"], grant_id),
+    )["allowed"]:
+        payload["owner_browser_pilot"] = True
     card = one(
         c,
         "INSERT INTO lead.interaction_cards(tenant_id,agent_id,type,payload,expires_at) VALUES(%s,%s,'verify_publish',%s,now()+interval '1 day') RETURNING *",
@@ -429,6 +436,15 @@ def accept_card(
                     ],
                 )
         elif card["type"] == "verify_publish":
+            pilot = bool(
+                one(
+                    c,
+                    "SELECT lead.owner_browser_pilot_allowed(%s,%s) allowed",
+                    (target["id"], payload["grant_id"]),
+                )["allowed"]
+            )
+            if payload.get("owner_browser_pilot") and not pilot:
+                raise ValueError("本次浏览器验收授权已过期、暂停或变化")
             if a["authorization_version"] != payload["expected_authorization_version"]:
                 raise ValueError("目标授权已变化")
             if not one(
@@ -455,7 +471,7 @@ def accept_card(
             validate(target["platform"], payload, records)
             c.execute(
                 "UPDATE lead.agents SET desired_state=%s,health_state='queued',control_version=control_version+1 WHERE id=%s",
-                (a["desired_state"] if delegation_id else "draft", aid),
+                (a["desired_state"] if delegation_id or pilot else "draft", aid),
             )
             task = one(
                 c,

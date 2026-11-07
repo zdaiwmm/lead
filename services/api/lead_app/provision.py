@@ -114,6 +114,10 @@ def provision_security(conn):
         "REVOKE INSERT,UPDATE,DELETE ON lead.recovery_observations FROM lead_runtime"
     )
     conn.execute("REVOKE DELETE ON ALL TABLES IN SCHEMA lead FROM lead_runtime")
+    # Rebuildable snapshots may be replaced only within their forced Agent scope.
+    conn.execute(
+        "GRANT DELETE ON lead.analytics_geo_rollups,lead.analytics_rollups,lead.analytics_audience,lead.analytics_report_dirty TO lead_runtime"
+    )
     conn.execute(
         "REVOKE UPDATE ON lead.agent_revisions,lead.business_profiles,lead.content_items FROM lead_runtime"
     )
@@ -145,6 +149,68 @@ def provision_security(conn):
     conn.execute(
         "REVOKE ALL ON lead.proxy_pool,lead.proxy_assignments,lead.recovery_cases FROM lead_runtime,lead_auth"
     )
+    # Raw analytics payloads and IPs are available only to a scoped, leased processor.
+    # This role has no permissive identity-resolver policy on these tables.
+    conn.execute(
+        "GRANT SELECT ON lead.analytics_ingest_events,lead.analytics_event_payloads,lead.analytics_event_network TO lead_identity_owner"
+    )
+    conn.execute(
+        "REVOKE SELECT,UPDATE,DELETE ON lead.analytics_event_payloads,lead.analytics_event_network FROM lead_runtime"
+    )
+    conn.execute("REVOKE UPDATE ON lead.analytics_clean_events FROM lead_runtime")
+    conn.execute("REVOKE UPDATE,DELETE ON lead.analytics_clicks FROM lead_runtime")
+    conn.execute("REVOKE ALL ON lead.analytics_event_archives FROM lead_runtime")
+    conn.execute("GRANT SELECT ON lead.analytics_event_archives TO lead_runtime")
+    conn.execute(
+        "REVOKE INSERT,UPDATE,DELETE ON lead.analytics_receipt_tombstones FROM lead_runtime"
+    )
+    if not conn.execute(
+        "SELECT 1 FROM pg_roles WHERE rolname='lead_analytics_maintenance'"
+    ).fetchone():
+        conn.execute(
+            "CREATE ROLE lead_analytics_maintenance NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS"
+        )
+    conn.execute("GRANT lead_analytics_maintenance TO CURRENT_USER")
+    conn.execute("GRANT USAGE ON SCHEMA lead TO lead_analytics_maintenance")
+    conn.execute(
+        "REVOKE ALL ON lead.analytics_ingest_events,lead.analytics_event_payloads,lead.analytics_event_network,lead.analytics_clean_events,lead.analytics_event_archives,lead.analytics_receipt_tombstones,lead.analytics_clicks,lead.analytics_limit_buckets,lead.analytics_limit_counters,lead.outbox_events,lead.pixel_touchpoints,lead.pixel_receipts FROM lead_analytics_maintenance"
+    )
+    conn.execute(
+        "GRANT SELECT ON lead.analytics_ingest_events,lead.analytics_event_payloads,lead.analytics_event_network,lead.analytics_clean_events,lead.analytics_event_archives,lead.analytics_receipt_tombstones,lead.analytics_limit_buckets,lead.analytics_limit_counters,lead.outbox_events TO lead_analytics_maintenance"
+    )
+    conn.execute(
+        "GRANT DELETE ON lead.analytics_ingest_events,lead.analytics_event_payloads,lead.analytics_event_network,lead.analytics_clean_events,lead.analytics_limit_buckets,lead.analytics_limit_counters,lead.outbox_events TO lead_analytics_maintenance"
+    )
+    conn.execute(
+        "GRANT UPDATE ON lead.analytics_ingest_events,lead.analytics_event_payloads,lead.analytics_clean_events,lead.outbox_events TO lead_analytics_maintenance"
+    )
+    conn.execute("GRANT SELECT ON lead.analytics_clicks TO lead_analytics_maintenance")
+    conn.execute(
+        "GRANT UPDATE(country,geo) ON lead.analytics_clicks TO lead_analytics_maintenance"
+    )
+    conn.execute(
+        "GRANT SELECT,INSERT,UPDATE ON lead.analytics_report_dirty TO lead_analytics_maintenance"
+    )
+    # Bounded row locking needs UPDATE on one column, without allowing IP/UA edits.
+    conn.execute(
+        "GRANT UPDATE(expires_at) ON lead.analytics_event_network TO lead_analytics_maintenance"
+    )
+    conn.execute(
+        "GRANT INSERT ON lead.analytics_event_archives,lead.analytics_receipt_tombstones TO lead_analytics_maintenance"
+    )
+    for function in (
+        "analytics_processing_payload(uuid,uuid)",
+        "analytics_processing_network(uuid,uuid)",
+    ):
+        conn.execute(
+            sql.SQL("ALTER FUNCTION lead." + function + " OWNER TO lead_identity_owner")
+        )
+        conn.execute(
+            sql.SQL("REVOKE EXECUTE ON FUNCTION lead." + function + " FROM PUBLIC")
+        )
+        conn.execute(
+            sql.SQL("GRANT EXECUTE ON FUNCTION lead." + function + " TO lead_runtime")
+        )
 
 
 def provision(conn):

@@ -1,0 +1,25 @@
+// Evidence and calendar boundaries for the read-only board model.
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+const ts = require('../apps/web/node_modules/typescript');
+const vm = require('node:vm');
+const source = fs.readFileSync(require.resolve('../apps/web/app/operating-plan-model.ts'), 'utf8');
+const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+const exportsForModel = {};
+vm.runInNewContext(code, { exports: exportsForModel });
+const { visibleWork, todayWork, laneFor, synthetic, timestamp, workNote } = exportsForModel;
+const base = { id: 'work', title: '原发布', stage: 'distribution', state: 'done', completed_today: true };
+assert.equal(visibleWork(base).state, 'reconciling');
+assert.equal(laneFor(visibleWork(base)), 'running');
+assert.equal(visibleWork({ ...base, receipt: 'external-confirmed' }).state, 'done');
+assert.equal(laneFor(visibleWork({ ...base, state: 'waiting', receipt: 'under-review' })), 'waiting');
+assert.equal(todayWork([{ ...base, stage: 'content', completed_today: false }]).length, 0);
+assert.equal(todayWork([{ ...base, receipt: 'confirmed', completed_today: true }]).length, 1);
+assert.equal(synthetic({ ...base, id: 'distribute:source' }), true);
+assert.equal(laneFor({ ...base, state: 'blocked' }), 'waiting');
+assert.equal(laneFor({ ...base, state: 'canceled' }), 'canceled');
+assert.equal(todayWork(Array.from({ length: 100 }, (_, i) => ({ ...base, id: String(i), state: 'ready' }))).length, 100);
+assert.match(timestamp('2026-11-02T17:00:00Z', 'Asia/Shanghai'), /11\/3.*01:00/);
+assert.doesNotMatch(workNote({ ...base, state: 'ready', scheduled_at: '2026-11-02T01:00:00Z' }, 'Asia/Shanghai', '2026-11-03T02:00:00Z'), /后检查/);
+assert.match(workNote({ ...base, state: 'waiting', scheduled_at: '2026-11-03T05:00:00Z' }, 'Asia/Shanghai', '2026-11-03T02:00:00Z'), /后检查/);
+console.log('13 board evidence, timezone, carry-over and continuous-queue checks passed.');

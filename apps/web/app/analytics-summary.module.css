@@ -1,0 +1,267 @@
+.summary {
+  min-width: 0;
+}
+.filters {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 24px 0;
+}
+.filters label {
+  display: grid;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  min-width: 0;
+  flex: 1 1 130px;
+}
+.filters input,
+.filters select {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  color-scheme: dark;
+}
+.filters button {
+  height: 40px;
+}
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px 16px;
+  margin: 28px 0 16px;
+}
+.metrics dt,
+.healthMetrics dt {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.metrics dd {
+  margin: 0;
+  font-size: 28px;
+  line-height: 34px;
+  font-weight: 450;
+  font-variant-numeric: tabular-nums;
+}
+.metrics .unknown {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+.definition,
+.updated {
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--text-muted);
+}
+.definition button {
+  margin-left: 8px;
+}
+.coverage {
+  color: var(--text-secondary);
+  line-height: 24px;
+  font-size: 13px;
+  margin-top: 16px;
+}
+.coverage button {
+  margin-left: 8px;
+}
+.chart {
+  margin: 28px 0;
+}
+.chart svg {
+  display: block;
+  width: 100%;
+  margin-top: 16px;
+}
+.chart text {
+  font-size: 11px;
+  fill: var(--text-muted);
+}
+.subhead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 24px 0 12px;
+}
+.subhead h3 {
+  font-size: 14px;
+  font-weight: 500;
+  margin: 0;
+}
+.subhead span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.chartEmpty,
+.empty {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 22px;
+  padding: 16px 0;
+}
+.chartEmpty {
+  min-height: 100px;
+  display: flex;
+  align-items: center;
+}
+.scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+.scroll table {
+  width: 100%;
+  min-width: 420px;
+  border-collapse: collapse;
+  white-space: nowrap;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.scroll th,
+.scroll td {
+  text-align: right;
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 400;
+}
+.scroll th:first-child {
+  text-align: left;
+  padding-left: 0;
+}
+.scroll thead th {
+  color: var(--text-muted);
+}
+.scroll tbody th {
+  color: var(--text-secondary);
+}
+.revenue {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px 20px;
+  margin: 24px 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.revenue strong {
+  color: var(--text);
+  font-weight: 450;
+  font-variant-numeric: tabular-nums;
+}
+.updated {
+  margin-top: 20px;
+}
+.error {
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 22px;
+}
+.error button {
+  margin-left: 12px;
+}
+.skeleton {
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.health {
+  min-width: 0;
+}
+.healthMetrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.healthMetrics dd {
+  margin: 0;
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+}
+.health > button {
+  margin-top: 16px;
+}
+.failure {
+  display: flex;
+  gap: 16px;
+  align-items: start;
+  justify-content: space-between;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+.failure strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+.failure span,
+.failure code {
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.failure p {
+  font-size: 13px;
+  line-height: 22px;
+  margin: 10px 0;
+}
+.failure button {
+  flex-shrink: 0;
+}
+@media (max-width: 600px) {
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .healthMetrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .filters label {
+    flex-basis: 120px;
+  }
+}
+
+.policy {
+  margin: 24px 0;
+  padding: 20px 0;
+  border-block: 1px solid var(--line);
+}
+.policy summary {
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.policy form {
+  margin-top: 20px;
+}
+.policyFields {
+  border: 0;
+  padding: 0;
+  margin: 0 0 20px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.policyFields label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.policyFields input {
+  width: 100%;
+  min-width: 0;
+}
+@media (max-width: 600px) {
+  .policyFields {
+    grid-template-columns: 1fr;
+  }
+}

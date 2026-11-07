@@ -28,8 +28,13 @@ export default function AccountBrowser({
   verifyLabel?: string;
 }) {
   const [state, setState] = useState("opening");
-  const [image, setImage] = useState("");
+  const [image, setImage] = useState<{
+    url: string;
+    width: number;
+    height: number;
+  } | null>(null);
   const [error, setError] = useState("");
+  const [frameError, setFrameError] = useState("");
   const [verifying, setVerifying] = useState(false);
   const [closing, setClosing] = useState(false);
   const [retry, setRetry] = useState(0);
@@ -38,8 +43,20 @@ export default function AccountBrowser({
   const viewport = useRef<HTMLDivElement>(null);
   const keyboard = useRef<HTMLTextAreaElement>(null);
   const imageUrl = useRef("");
+  const frameTag = useRef("");
   const mounted = useRef(false);
-  const frameBusy = useRef(false);
+  const takeover = useRef("");
+  const lastInput = useRef(0);
+  const nextFrame = useRef(0);
+  const expire = useCallback(() => {
+    active.current = false;
+    queue.current = [];
+    setFrameError("");
+    setError("接管已结束，点击重试可重新连接专属浏览器");
+    setState("failed");
+    setLatency(null);
+  }, []);
+  const preview = useRef(false);
   const frameController = useRef<AbortController | null>(null);
   const queue = useRef<Row[]>([]);
   const draining = useRef(false);
@@ -53,66 +70,161 @@ export default function AccountBrowser({
     null,
   );
   const closeButton = useRef<HTMLButtonElement>(null);
+  const readFrame = useCallback(
+    async (
+      response: Response,
+      controller: AbortController,
+      started: number,
+      compact: boolean,
+    ) => {
+      const current = () =>
+        mounted.current &&
+        active.current &&
+        !stopping.current &&
+        !controller.signal.aborted;
+      if (!current()) return;
+      if (!response.ok && response.status !== 304) {
+        const failure = await response.json().catch(() => ({}));
+        if (!current()) return;
+        if (failure.detail === "接管已过期") {
+          expire();
+          return;
+        }
+        if (failure.code === "workspace_changed") window.location.reload();
+        if (response.status === 401)
+          window.dispatchEvent(
+            new CustomEvent("lead:session-expired", {
+              detail: failure.login_url || "/api/auth/login",
+            }),
+          );
+        throw Error(failure.detail || "画面连接中断，请刷新重试");
+      }
+      if (response.status !== 204 && response.status !== 304) {
+        const blob = await response.blob();
+        if (!current()) return;
+        frameTag.current =
+          response.headers.get(compact ? "x-lead-frame-tag" : "etag") || "";
+        preview.current = compact;
+        const url = URL.createObjectURL(blob);
+        const previous = imageUrl.current;
+        imageUrl.current = url;
+        setImage({
+          url,
+          width: Number(response.headers.get("x-lead-frame-width")),
+          height: Number(response.headers.get("x-lead-frame-height")),
+        });
+        if (previous) URL.revokeObjectURL(previous);
+      }
+      setFrameError("");
+      setLatency(Math.round(performance.now() - started));
+    },
+    [expire],
+  );
+
   const shot = useCallback(async () => {
     if (
       !mounted.current ||
       !active.current ||
-      frameBusy.current ||
+      frameController.current ||
       stopping.current
     )
       return;
-    frameBusy.current = true;
     const controller = new AbortController();
     frameController.current = controller;
+    const started = performance.now();
+    const compact = !!imageUrl.current && started - lastInput.current < 1800;
+    const headers = workspaceHeaders();
+    if (frameTag.current && (compact || !preview.current))
+      headers[compact ? "X-Lead-Frame-Tag" : "If-None-Match"] =
+        frameTag.current;
+    const url = compact
+      ? `/browser-control/${aid}?takeover=${takeover.current}`
+      : `/api/agents/${aid}/browser/screenshot?format=jpeg&takeover=${takeover.current}`;
     try {
-      const started = performance.now();
-      const response = await fetch(
-        `/api/agents/${aid}/browser/screenshot?format=jpeg`,
-        {
-          headers: workspaceHeaders(),
-          cache: "no-store",
-          signal: controller.signal,
-        },
-      );
-      if (!response.ok) throw Error("画面连接中断，请刷新重试");
-      const blob = await response.blob();
-      if (!mounted.current || stopping.current) return;
-      const url = URL.createObjectURL(blob);
-      const previous = imageUrl.current;
-      imageUrl.current = url;
-      setImage(url);
-      setLatency(Math.round(performance.now() - started));
-      if (previous) URL.revokeObjectURL(previous);
+      const response = await fetch(url, {
+        headers,
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      await readFrame(response, controller, started, compact);
     } catch (e) {
       if (mounted.current && !controller.signal.aborted)
-        setError((e as Error).message);
+        setFrameError((e as Error).message);
     } finally {
-      frameBusy.current = false;
+      if (frameController.current === controller) {
+        frameController.current = null;
+        nextFrame.current =
+          performance.now() +
+          (performance.now() - lastInput.current < 1800 ? 30 : 800);
+      }
     }
-  }, [aid]);
+  }, [aid, readFrame]);
+
   async function drain() {
     if (draining.current || !active.current || stopping.current) return;
     draining.current = true;
+    frameController.current?.abort();
+    const controller = new AbortController();
+    frameController.current = controller;
     try {
-      while (queue.current.length && mounted.current && !stopping.current) {
+      while (
+        queue.current.length &&
+        active.current &&
+        !controller.signal.aborted
+      ) {
         const command = queue.current.shift()!;
-        await api(`/agents/${aid}/browser/input`, command);
+        const body = { ...command, takeover: takeover.current };
+        // While catching up, send queued input in order; only its latest result needs a picture.
+        if (queue.current.length) {
+          await api(`/agents/${aid}/browser/input`, body, controller.signal);
+          continue;
+        }
+        const started = performance.now();
+        const response = await fetch(
+          `/browser-control/${aid}?takeover=${takeover.current}`,
+          {
+            method: "POST",
+            cache: "no-store",
+            signal: controller.signal,
+            headers: {
+              ...workspaceHeaders(),
+              "Content-Type": "application/json",
+              "X-Lead-Request": "1",
+              "X-Lead-Frame-Tag": frameTag.current,
+            },
+            body: JSON.stringify(body),
+          },
+        );
+        await readFrame(response, controller, started, true);
       }
-      await shot();
     } catch (e) {
-      queue.current = [];
-      if (mounted.current) setError((e as Error).message);
+      if (!controller.signal.aborted) {
+        queue.current = [];
+        if ((e as Error).message === "接管已过期") expire();
+        else setError((e as Error).message);
+      }
     } finally {
+      if (frameController.current === controller)
+        frameController.current = null;
       draining.current = false;
+      nextFrame.current = performance.now();
       if (queue.current.length && mounted.current && !stopping.current)
         inputTimer.current = setTimeout(drain, 0);
     }
   }
   function input(command: Row) {
     if (!active.current || stopping.current) return;
+    lastInput.current = performance.now();
     const previous = queue.current.at(-1);
     if (command.kind === "text" && previous?.kind === "text")
       previous.text += command.text;
+    else if (
+      command.kind === "scroll" &&
+      previous?.kind === "scroll" &&
+      Math.sign(command.y) === Math.sign(previous.y) &&
+      Math.abs(previous.y + command.y) <= 800
+    )
+      previous.y += command.y;
     else queue.current.push(command);
     if (inputTimer.current) clearTimeout(inputTimer.current);
     inputTimer.current = setTimeout(drain, command.kind === "text" ? 35 : 0);
@@ -151,6 +263,12 @@ export default function AccountBrowser({
     document.body.style.overflow = "hidden";
     closeButton.current?.focus();
     let canceled = false;
+    frameTag.current = "";
+    preview.current = false;
+    imageUrl.current = "";
+    setImage(null);
+    setFrameError("");
+    setLatency(null);
     setState("opening");
     setError("");
     const key = `${aid}:${platform}:${retry}`;
@@ -160,8 +278,10 @@ export default function AccountBrowser({
         promise: api(`/agents/${aid}/connect`, { platform }),
       };
     connection.current.promise
-      .then(async () => {
+      .then(async (session) => {
         if (canceled) return;
+        takeover.current = session.takeover_id;
+        lastInput.current = performance.now();
         active.current = true;
         setState("ready");
         await shot();
@@ -173,9 +293,14 @@ export default function AccountBrowser({
         }
       });
     const poll = setInterval(() => {
-      if (!document.hidden && !draining.current && !queue.current.length)
+      if (
+        !document.hidden &&
+        !draining.current &&
+        !queue.current.length &&
+        performance.now() >= nextFrame.current
+      )
         shot();
-    }, 800);
+    }, 60);
     return () => {
       canceled = true;
       mounted.current = false;
@@ -184,6 +309,9 @@ export default function AccountBrowser({
       frameController.current?.abort();
       if (inputTimer.current) clearTimeout(inputTimer.current);
       if (scrollTimer.current) clearTimeout(scrollTimer.current);
+      scrollTimer.current = null;
+      scrollDelta.current = 0;
+      queue.current = [];
       if (imageUrl.current) URL.revokeObjectURL(imageUrl.current);
       document.body.style.overflow = previousOverflow;
       previousFocus?.focus();
@@ -195,14 +323,15 @@ export default function AccountBrowser({
     function wheel(event: WheelEvent) {
       event.preventDefault();
       scrollDelta.current += event.deltaY * (event.deltaMode === 1 ? 20 : 1);
-      if (scrollTimer.current) clearTimeout(scrollTimer.current);
+      if (scrollTimer.current) return;
       scrollTimer.current = setTimeout(() => {
+        scrollTimer.current = null;
         input({
           kind: "scroll",
           y: Math.max(-800, Math.min(800, scrollDelta.current)),
         });
         scrollDelta.current = 0;
-      }, 70);
+      }, 24);
     }
     target.addEventListener("wheel", wheel, { passive: false });
     return () => target.removeEventListener("wheel", wheel);
@@ -316,9 +445,9 @@ export default function AccountBrowser({
             刷新画面
           </button>
         </div>
-        {error && (
+        {(error || frameError) && (
           <div className="browser-error" role="alert">
-            <span>{error}</span>
+            <span>{error || frameError}</span>
             <button
               onClick={() => {
                 setError("");
@@ -333,7 +462,7 @@ export default function AccountBrowser({
           {image && state === "ready" ? (
             <img
               draggable={false}
-              src={image}
+              src={image.url}
               alt={`${name} 登录页面。点击输入框后可直接输入，支持滚轮滚动。`}
               onPointerDown={(e) => {
                 e.preventDefault();
@@ -341,10 +470,12 @@ export default function AccountBrowser({
                 input({
                   kind: "click",
                   x:
-                    ((e.clientX - rect.left) * e.currentTarget.naturalWidth) /
+                    ((e.clientX - rect.left) *
+                      (image.width || e.currentTarget.naturalWidth)) /
                     rect.width,
                   y:
-                    ((e.clientY - rect.top) * e.currentTarget.naturalHeight) /
+                    ((e.clientY - rect.top) *
+                      (image.height || e.currentTarget.naturalHeight)) /
                     rect.height,
                 });
                 keyboard.current?.focus({ preventScroll: true });
@@ -425,9 +556,15 @@ export default function AccountBrowser({
         </div>
         <footer className="account-browser-footer">
           <span>
-            <i className={`dot ${state === "ready" ? "green" : ""}`} />
+            <i
+              className={`dot ${state === "ready" && image && !frameError ? "green" : ""}`}
+            />
             {state === "ready"
-              ? "实时连接"
+              ? frameError
+                ? "正在恢复画面"
+                : image
+                  ? "实时连接"
+                  : "正在取帧"
               : state === "failed"
                 ? "未连接"
                 : "连接中"}

@@ -233,7 +233,7 @@ def default_body(c, key):
         platform=platform,
         name="Telegram",
         target="自有广播频道",
-        cadence="每天最多 3 条，以实际授权上限为准。",
+        cadence="按需求证据、渠道窗口和实际授权安排发布。",
         setup=["核对业务资料、账号身份及目标频道"],
         plans=[
             StrategyPlan(

@@ -130,12 +130,12 @@ export default function UsagePanel({
           </small>
         </div>
         <div>
-          <dt>今日额度</dt>
+          <dt>{budget?.acquisition_uncapped ? "今日用量" : "今日额度"}</dt>
           <dd>
             {spent?.toLocaleString() ?? "—"}
-            <span className="muted"> / {limit?.toLocaleString() ?? "—"}</span>
+            <span className="muted"> / {budget?.acquisition_uncapped ? "不限额" : limit?.toLocaleString() ?? "—"}</span>
           </dd>
-          <small className="quota-line">
+          {!budget?.acquisition_uncapped && <small className="quota-line">
             <progress
               aria-label="今日 Token 额度使用比例"
               max={Math.max(1, limit ?? 1)}
@@ -146,7 +146,7 @@ export default function UsagePanel({
               : limit === 0
                 ? "已关闭"
                 : "—"}
-          </small>
+          </small>}
         </div>
         <div>
           <dt>浏览器运行</dt>
@@ -171,7 +171,7 @@ export default function UsagePanel({
                 {dialogError}
               </p>
             )}
-            {!readOnly && canManageBudget && (
+            {!readOnly && canManageBudget && !budget?.acquisition_uncapped && (
               <section className="settings-group">
                 <div className="settings-group-heading">
                   <h3>额度设置</h3>

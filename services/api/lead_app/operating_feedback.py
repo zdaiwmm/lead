@@ -25,23 +25,33 @@ def enqueue(
     source_review_id=None,
     target_id=None,
     work_key="",
+    platform=None,
 ):
     # One open item per source version and work type; reviews attach to that item.
     scope = {
         "business_profile_id": str(business["id"]),
         "config_revision": agent["config_revision"],
         "control_version": agent["control_version"],
+        "progress_version": 1,
     }
+    if kind in ("journey", "opportunities") and not work_key:
+        from .operating_progress import environment_key
+
+        work_key = "environment:" + environment_key(c, agent, business)
+    if platform:
+        scope["platform"] = platform
+        work_key = f"{platform}:{work_key}"
     old = one(
         c,
         """SELECT id FROM lead.tasks WHERE type=%s AND (state IN ('planned','running') OR
       (state='failed' AND (coalesce((result->>'attempts')::integer,0)<2 OR completed_at>now()-interval '6 hours')))
-      AND input->>'business_profile_id'=%s AND input->>'config_revision'=%s
-      AND coalesce(input->>'target_id','')=%s AND coalesce(input->>'work_key','')=%s ORDER BY created_at DESC LIMIT 1""",
+      AND input->>'progress_version'='1' AND input->>'business_profile_id'=%s AND input->>'config_revision'=%s
+      AND input->>'control_version'=%s AND coalesce(input->>'target_id','')=%s AND coalesce(input->>'work_key','')=%s ORDER BY created_at DESC LIMIT 1""",
         (
             "operating." + kind,
             scope["business_profile_id"],
             str(scope["config_revision"]),
+            str(scope["control_version"]),
             str(target_id or ""),
             work_key,
         ),
@@ -57,8 +67,8 @@ def enqueue(
     old = one(
         c,
         """SELECT id FROM lead.tasks WHERE type=%s AND state='succeeded' AND input->>'business_profile_id'=%s
-      AND input->>'config_revision'=%s AND coalesce(input->>'target_id','')=%s AND coalesce(input->>'work_key','')=%s
-      AND completed_at>now()-interval '6 hours' ORDER BY completed_at DESC LIMIT 1""",
+      AND input->>'progress_version'='1' AND input->>'config_revision'=%s AND coalesce(input->>'target_id','')=%s AND coalesce(input->>'work_key','')=%s
+      AND (completed_at>now()-interval '6 hours' OR type NOT IN ('operating.journey','operating.opportunities')) ORDER BY completed_at DESC LIMIT 1""",
         (
             "operating." + kind,
             scope["business_profile_id"],
@@ -92,18 +102,40 @@ def enqueue(
             j(payload),
         ),
     )
+    coalesce_environment_work(c, scope)
     return tid
+
+
+def coalesce_environment_work(c, scope):
+    """Supersede only unstarted reviews of the same target/environment question."""
+    c.execute(
+        """WITH pending AS (
+          SELECT id,row_number() OVER(PARTITION BY type,coalesce(input->>'target_id','')
+            ORDER BY created_at DESC,id DESC) AS position
+          FROM lead.tasks WHERE state='planned' AND type IN ('operating.journey','operating.opportunities')
+            AND input->>'progress_version'='1' AND input->>'business_profile_id'=%s
+            AND input->>'config_revision'=%s AND input->>'work_key' LIKE 'environment:%%')
+        UPDATE lead.tasks t SET state='canceled',completed_at=now(),result=coalesce(result,'{}'::jsonb) || %s
+        FROM pending p WHERE t.id=p.id AND p.position>1""",
+        (
+            scope["business_profile_id"],
+            str(scope["config_revision"]),
+            j({"reason": "superseded_environment", "not_a_business_outcome": True}),
+        ),
+    )
 
 
 def review(c, aid, agent, business):
     from .domain import metrics
     from .operating_contract import configuration
+    from .operating_plans import EVENT_NAMES, acquisition
     from .operating_playbooks import planning_context
 
     measured = metrics(c)
+    acquired = acquisition(c, agent, business, datetime.now(timezone.utc))
     targets = all_rows(
         c,
-        "SELECT t.id AS target_id,s.platform FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id WHERE t.state='active' AND s.state='connected'",
+        "SELECT t.id AS target_id,s.platform,t.verified_permissions FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id WHERE t.state='active' AND s.state='connected'",
     )
     contexts = planning_context(c, targets, business, agent["config_revision"])
     # Existing target-scoped feedback already excludes probes, immature windows,
@@ -131,6 +163,7 @@ def review(c, aid, agent, business):
         "metrics": measured,
         "targets": observations,
         "goal": configuration(agent, business),
+        "acquisition": acquired,
     }
     key = fingerprint(basis)
     previous = one(
@@ -141,36 +174,30 @@ def review(c, aid, agent, business):
         return previous["body"]
     rid = uid()
     successors = []
-    contract = basis["goal"]
-    aligned = not contract["objective_status"] == "user_defined" or (
-        contract.get("objective_event") is not None
-        and contract["objective_event"] == measured.get("conversion_objective")
-    )
-    if (
-        measured["coverage"] != "connected"
-        or measured["conversion_coverage"] != "connected"
-        or not aligned
-    ):
+    if acquired.get("clicks_only"):
+        decision, reason = "traffic_mode", "按实际发布后同帖龄的产品短链点击安排探索、回访和后续分发。"
+        observations = {}
+    elif not acquired["conversion_optimization"]:
         decision, reason = (
-            "measurement_required",
-            "回传覆盖或经营目标的事件映射尚未完整，效果保持未知；准备具体接入与核对任务。",
-        )
-        successors.append(
-            enqueue(
-                c, aid, agent, business, "measurement", reason, source_review_id=rid
-            )
+            "traffic_mode",
+            "回传或目标事件尚未完整，平台展示接入状态；Agent 继续内容、分发和引流，不重复研究接入。",
         )
     else:
         decision, reason = (
             "observing",
             "保留当前目标口径，等待可比较的成熟观察；其他独立工作继续。",
         )
+    platforms = {str(t["target_id"]): t["platform"] for t in targets}
     for target, observed in observations.items():
         stats = observed.get("stats", [])
+        objective = observed.get("objective", measured.get("conversion_objective"))
+        aligned = acquired["objective_ready"] and acquired[
+            "objective_event"
+        ] == EVENT_NAMES.get(objective, objective)
         if (
             observed["state"] == "provisional_preference"
             and aligned
-            and measured["conversion_coverage"] == "connected"
+            and observed.get("coverage") == "connected"
         ):
             # This remains a provisional operational recommendation, not causal lift.
             successors.append(
@@ -183,6 +210,7 @@ def review(c, aid, agent, business):
                     "成熟观察支持暂定主方案，准备同目标的后续排期与挑战方案。",
                     source_review_id=rid,
                     target_id=target,
+                    platform=platforms.get(target),
                 )
             )
         elif observed.get("coverage") == "connected" and any(
@@ -199,13 +227,10 @@ def review(c, aid, agent, business):
                         "成熟内容尚无可归因访问，核对新的受众触达入口。",
                         source_review_id=rid,
                         target_id=target,
+                        platform=platforms.get(target),
                     )
                 )
-            elif (
-                aligned
-                and measured["conversion_coverage"] == "connected"
-                and not sum(s.get("outcomes", 0) for s in stats)
-            ):
+            elif aligned and not sum(s.get("outcomes", 0) for s in stats):
                 successors.append(
                     enqueue(
                         c,
@@ -216,6 +241,7 @@ def review(c, aid, agent, business):
                         "已有成熟访问但尚无目标完成，检查承接；这只是待验证线索。",
                         source_review_id=rid,
                         target_id=target,
+                        platform=platforms.get(target),
                     )
                 )
     body = {
@@ -228,6 +254,7 @@ def review(c, aid, agent, business):
         "decision": decision,
         "reason": reason,
         "measurement": measured,
+        "acquisition": acquired,
         "target_observations": observations,
         "next_task_ids": list(dict.fromkeys(successors)),
         "conclusion": "依据实际覆盖和成熟窗口的运营观察，不推定因果或缺失的业务结果。",
@@ -249,6 +276,8 @@ def after_task(c, aid, task, result):
     business = one(
         c, "SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1"
     )
+    if task["input"].get("experiment_id"):
+        return result  # Trial state owns the next action.
     kind = task["input"]["kind"]
     follow = {
         "measurement": "journey",
@@ -256,7 +285,16 @@ def after_task(c, aid, task, result):
         "opportunities": "strategy",
         "validate": "strategy",
     }.get(kind)
-    if follow and result.get("status") != "unchanged":
+    if (
+        follow
+        and result.get("status") != "unchanged"
+        and (kind == "measurement" or result.get("new_evidence_keys"))
+    ):
+        key = ""
+        if follow == "strategy":
+            key = "evidence:" + fingerprint(sorted(result["new_evidence_keys"]))
+            if task["input"].get("work_key", "").startswith("alternatives:"):
+                key = "alternatives:" + key
         tid = enqueue(
             c,
             aid,
@@ -266,7 +304,8 @@ def after_task(c, aid, task, result):
             "根据已完成的" + kind + "继续验证独立路径。",
             source_review_id=task["input"].get("latest_review_id")
             or task["input"].get("source_review_id"),
-            work_key="evidence:" + str(task["id"]) if follow == "strategy" else "",
+            platform=task["input"].get("platform"),
+            work_key=key,
         )
         result["next_task_id"] = tid
         if follow == "strategy":
@@ -281,16 +320,15 @@ def after_task(c, aid, task, result):
 
 
 def reconcile_handoffs(c, aid, agent, business, review_id):
-    """A successful branch can hand off even when its sibling is cooling down.
-
-    Reconcile committed artifacts after a reload/lost handoff, without repeating
-    their model call or mutating their reviewed content.
-    """
+    """Recover a lost handoff only for committed, genuinely new evidence."""
     completed = all_rows(
         c,
-        """SELECT id,input,result FROM lead.tasks WHERE type='operating.journey' AND state='succeeded'
-      AND result->>'status'='observed' AND input->>'business_profile_id'=%s AND input->>'config_revision'=%s
-      AND input->>'control_version'=%s AND completed_at>now()-interval '6 hours' ORDER BY completed_at DESC LIMIT 4""",
+        """SELECT id,input,result FROM lead.tasks
+      WHERE type IN ('operating.journey','operating.opportunities','operating.validate')
+      AND state='succeeded' AND result->>'status'='observed'
+      AND input->>'progress_version'='1' AND input->>'business_profile_id'=%s
+      AND input->>'config_revision'=%s AND input->>'control_version'=%s
+      AND NOT (input ? 'experiment_id') AND NOT (result ? 'next_task_id') AND result->'new_evidence_keys'<>'[]'::jsonb""",
         (
             str(business["id"]),
             str(agent["config_revision"]),
@@ -298,59 +336,7 @@ def reconcile_handoffs(c, aid, agent, business, review_id):
         ),
     )
     for task in completed:
-        if task["result"].get("strategy_task_id"):
-            continue
-        tid = enqueue(
-            c,
-            aid,
-            agent,
-            business,
-            "strategy",
-            "已有实际承接观察，可独立比较替代路径，不等待其他研究分支恢复。",
-            source_review_id=review_id,
-        )
+        result = after_task(c, aid, task, task["result"])
         c.execute(
-            "UPDATE lead.tasks SET input=input || %s WHERE id=%s",
-            (j({"evidence_task_id": str(task["id"])}), tid),
+            "UPDATE lead.tasks SET result=%s WHERE id=%s", (j(result), task["id"])
         )
-        c.execute(
-            "UPDATE lead.tasks SET result=result || %s WHERE id=%s",
-            (j({"strategy_task_id": tid}), task["id"]),
-        )
-    from .operating_followups import reconcile
-
-    # A completed research report must not point backwards to a strategy which
-    # predates its evidence. Repair only the linkage, never rerun the research.
-    stale = all_rows(
-        c,
-        """SELECT t.id,t.input FROM lead.tasks t LEFT JOIN lead.tasks n ON n.id=(t.result->>'next_task_id')::uuid
-      WHERE t.type='operating.opportunities' AND t.state='succeeded' AND t.result->>'status'='observed'
-      AND t.input->>'business_profile_id'=%s AND t.input->>'config_revision'=%s AND t.input->>'control_version'=%s
-      AND t.completed_at>now()-interval '6 hours' AND (n.id IS NULL OR (n.state='succeeded' AND n.completed_at<t.completed_at))""",
-        (
-            str(business["id"]),
-            str(agent["config_revision"]),
-            str(agent["control_version"]),
-        ),
-    )
-    for task in stale:
-        tid = enqueue(
-            c,
-            aid,
-            agent,
-            business,
-            "strategy",
-            "用新完成的研究证据重新评估下一步，保留原研究报告。",
-            source_review_id=review_id,
-            work_key="evidence:" + str(task["id"]),
-        )
-        c.execute(
-            "UPDATE lead.tasks SET result=result || %s WHERE id=%s",
-            (j({"next_task_id": tid}), task["id"]),
-        )
-        c.execute(
-            "UPDATE lead.tasks SET input=input || %s WHERE id=%s",
-            (j({"required_evidence_task_id": str(task["id"])}), tid),
-        )
-
-    reconcile(c, aid, agent, business, review_id)

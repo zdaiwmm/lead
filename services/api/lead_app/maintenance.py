@@ -25,6 +25,7 @@ class Maintenance:
         self.stop = asyncio.Event()
         self.job_state = {}
         self.children = set()
+        self.profile_retry_at = {}
         self.folder = STATE / "backups/managed"
         self.keyfile = Path(
             env().get("LEAD_BACKUP_KEY_FILE") or STATE / "keys/backup.key"
@@ -124,12 +125,16 @@ class Maintenance:
                 for aid in await asyncio.to_thread(self.due, "profile"):
                     if self.stop.is_set():
                         break
+                    if time.monotonic() < self.profile_retry_at.get(aid, 0):
+                        continue
                     # Temporary busy/safe-point failures are retried; no user
                     # login or daily approval is requested by this scheduler.
                     try:
                         await self.backup("profile", aid)
                     except Exception:
+                        self.profile_retry_at[aid] = time.monotonic() + 300
                         continue
+                    self.profile_retry_at.pop(aid, None)
             except Exception as error:
                 self.job_state["profile"] = "failed:" + type(error).__name__
             await self.pause(60)
@@ -151,6 +156,11 @@ class Maintenance:
                         "code": "backup.offsite",
                         "severity": "critical",
                     }
+                if self.job_state.get("analytics", "").startswith("failed:"):
+                    alerts["analytics.retention.failed"] = {
+                        "code": "analytics.retention.failed",
+                        "severity": "critical",
+                    }
                 sample["alerts"] = list(alerts.values())
                 sample["backup_jobs"] = dict(self.job_state)
                 atomic_json(STATE / "ops-status.json", sample)
@@ -165,6 +175,11 @@ class Maintenance:
         for name in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(name, self.stop.set)
         jobs = [asyncio.create_task(self.monitor_loop())]
+        jobs.append(asyncio.create_task(self.acceptance_loop()))
+        jobs.append(asyncio.create_task(self.delivery_loop()))
+        jobs.append(asyncio.create_task(self.progress_loop()))
+
+        jobs.append(asyncio.create_task(self.analytics_loop()))
         if env().get("LEAD_BACKUP_AUTO", "1") == "1":
             jobs.extend(
                 (
@@ -179,6 +194,49 @@ class Maintenance:
         for job in jobs:
             job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
+
+    async def acceptance_loop(self):
+        from .acceptance import sample_active
+
+        while not self.stop.is_set():
+            try:
+                await asyncio.to_thread(sample_active)
+            except Exception:
+                pass  # Per-run errors are persisted; never take monitoring down.
+            await self.pause(10)
+
+    async def delivery_loop(self):
+        from .publication_delivery import review_pending
+
+        while not self.stop.is_set():
+            try:
+                await review_pending()
+                self.job_state["delivery"] = "ready"
+            except Exception as error:
+                self.job_state["delivery"] = "failed:" + type(error).__name__
+            await self.pause(30)
+
+    async def analytics_loop(self):
+        from .analytics_retention import maintain_all
+
+        while not self.stop.is_set():
+            try:
+                await asyncio.to_thread(maintain_all)
+                self.job_state["analytics"] = "ready"
+            except Exception as error:
+                self.job_state["analytics"] = "failed:" + type(error).__name__
+            await self.pause(60)
+
+    async def progress_loop(self):
+        from .community_progress import maintain
+
+        while not self.stop.is_set():
+            try:
+                await asyncio.to_thread(maintain)
+                self.job_state["progress"] = "ready"
+            except Exception as error:
+                self.job_state["progress"] = "failed:" + type(error).__name__
+            await self.pause(60)
 
 
 if __name__ == "__main__":

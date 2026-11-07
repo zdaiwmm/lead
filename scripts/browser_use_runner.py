@@ -8,24 +8,32 @@ import asyncio
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 from browser_use import ActionResult, Agent, Browser, ChatDeepSeek, ChatOpenAI, Tools
 
 
+@dataclass
 class LeadDeepSeek(ChatDeepSeek):
+    reasoning_effort: str | None = None
+
     def _request_kwargs(self):
         # DeepSeek's flash alias defaults to thinking too, while browser-use's
         # current adapter only recognizes explicit v4 model names.
         return {
             **super()._request_kwargs(),
-            "extra_body": {"thinking": {"type": "disabled"}},
+            "extra_body": {
+                "thinking": {"type": "enabled" if self.thinking else "disabled"}
+            },
+            **({"reasoning_effort": self.reasoning_effort} if self.thinking else {}),
         }
 
 
 def research_llm(data, model_timeout, provider_http):
     model = data["model"]
+    effort = data.get("reasoning_effort")
     output_limit = max(256, min(8000, int(data.get("max_output_tokens", 4000))))
     common = {
         "model": model["model"],
@@ -41,10 +49,13 @@ def research_llm(data, model_timeout, provider_http):
             max_completion_tokens=output_limit,
             temperature=None,
             frequency_penalty=None,
-            reasoning_effort=None,
+            reasoning_effort=effort,
+            reasoning_models=[model["model"]] if effort else [],
         )
     return LeadDeepSeek(
         **common,
+        thinking=effort not in (None, "none"),
+        reasoning_effort=effort,
         max_tokens=output_limit,
         client_params={"max_retries": 0, "http_client": provider_http},
     )

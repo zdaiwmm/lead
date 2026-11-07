@@ -14,7 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .db import all_rows, audit, j, one, require_agent, tx
 from .pixel_catalog import catalog
@@ -26,6 +26,14 @@ EVENT_ID = r"^[A-Za-z0-9:_.-]{1,128}$"
 RESERVED = {"pageview", "engagement", "identify"}
 PROPERTIES = {
     "order_id",
+    "content_name",
+    "content_category",
+    "content_ids",
+    "content_type",
+    "contents",
+    "num_items",
+    "predicted_ltv",
+    "status",
     "value",
     "currency",
     "action",
@@ -65,6 +73,53 @@ def report(aid: UUID):
     }
 
 
+def pixel_installed(c, conn):
+    if not conn or conn["state"] != "verified" or not conn.get("last_pageview_at"):
+        return False
+    from .admin_controls import attribution
+
+    policy, _ = attribution(c, str(conn["agent_id"]))
+    return conn["last_pageview_at"] > datetime.now(timezone.utc) - timedelta(
+        hours=policy["freshness_hours"]
+    )
+
+
+@router.get("/api/agents/{aid}/analytics/setup-state")
+def setup_state(aid: UUID):
+    with tx(str(aid)) as c:
+        require_agent(c, str(aid))
+        conn = one(
+            c,
+            """SELECT id,agent_id,site_host,state,embedded_at,onboarding_completed_at,last_pageview_at,last_received_at
+          FROM lead.analytics_connections WHERE provider='lead_site' AND state<>'disconnected'
+          ORDER BY selected_at DESC,created_at DESC LIMIT 1""",
+        )
+        counts = one(c, """SELECT count(*) AS total,count(*) FILTER (WHERE EXISTS (
+            SELECT 1 FROM lead.pixel_receipts p WHERE p.connection_id=d.connection_id
+            AND p.scope_key<>'live' AND p.event_name=d.name AND p.definition_revision=d.revision
+            AND p.counted)) AS tested FROM lead.pixel_definitions d WHERE connection_id=%s""",
+            (conn["id"],)) if conn else {"total": 0, "tested": 0}
+        installed = pixel_installed(c, conn)
+    return {
+        "agent_id": str(aid),
+        "connection": conn,
+        "pixel": {
+            "installed": installed,
+            "event_counts": counts,
+            "embedded": bool(conn and conn["embedded_at"]),
+            "completed": bool(conn and conn["onboarding_completed_at"]),
+            "catalog": [],
+            "events": [],
+            "report": {
+                "visitors": None,
+                "sessions": None,
+                "event_count": None,
+                "events": [],
+            },
+        },
+    }
+
+
 class DefinitionInput(BaseModel):
     connection_id: UUID
     name: str = Field(pattern=NAME)
@@ -93,6 +148,8 @@ class AttributionSnapshot(BaseModel):
     anonymous_id: UUID | None = None
     session_id: UUID | None = None
     touchpoint_id: UUID | None = None
+    click_id: UUID | None = None
+    click_token: str | None = Field(default=None, max_length=1024)
     test_code: str | None = Field(default=None, max_length=100)
 
 
@@ -104,28 +161,88 @@ class TestControl(BaseModel):
 
 
 class PixelEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     event_id: str = Field(pattern=EVENT_ID)
     event_name: str = Field(pattern=NAME)
     anonymous_id: UUID | None = None
     session_id: UUID | None = None
     user_id: str | None = Field(default=None, min_length=1, max_length=128)
     occurred_at: datetime | None = None
+    conversion_id: str | None = Field(default=None, min_length=1, max_length=128)
     properties: dict = Field(default_factory=dict)
     touchpoint_id: UUID | None = None
+    click_id: UUID | None = None
+    click_token: str | None = Field(default=None, max_length=1024)
     test_code: str | None = Field(default=None, max_length=100)
 
     @field_validator("properties")
     @classmethod
     def properties_only(cls, value):
-        if set(value) - PROPERTIES or len(json.dumps(value, ensure_ascii=False)) > 4000:
+        if (
+            set(value) - PROPERTIES
+            or len(json.dumps(value, ensure_ascii=False, allow_nan=False)) > 4000
+        ):
             raise ValueError("事件字段不支持或内容过长")
         if any(
             not isinstance(v, (str, int, float, bool, type(None)))
-            for v in value.values()
+            for k, v in value.items()
+            if k not in {"content_ids", "contents"}
         ):
             raise ValueError("事件字段必须为简单值")
         if any(isinstance(v, float) and not math.isfinite(v) for v in value.values()):
             raise ValueError("事件字段数值无效")
+        for key in ("value", "predicted_ltv"):
+            if key in value and (
+                isinstance(value[key], bool)
+                or not isinstance(value[key], (int, float))
+                or not 0 <= value[key] <= 1e12
+            ):
+                raise ValueError("金额必须为有限的非负数值")
+        if "currency" in value and not re.fullmatch(
+            r"[A-Z]{3}", str(value["currency"])
+        ):
+            raise ValueError("币种必须使用三位大写代码")
+        if "content_type" in value and value["content_type"] not in (
+            "product",
+            "product_group",
+        ):
+            raise ValueError("商品类型无效")
+        if "content_ids" in value and (
+            not isinstance(value["content_ids"], list)
+            or len(value["content_ids"]) > 100
+            or any(
+                not isinstance(v, str) or not 1 <= len(v) <= 128
+                for v in value["content_ids"]
+            )
+        ):
+            raise ValueError("商品编号必须为字符串数组")
+        if "num_items" in value and (
+            type(value["num_items"]) is not int
+            or not 0 <= value["num_items"] <= 1000000
+        ):
+            raise ValueError("商品数量必须为非负整数")
+        if "contents" in value:
+            if not isinstance(value["contents"], list) or len(value["contents"]) > 100:
+                raise ValueError("商品明细必须为数组")
+            for item in value["contents"]:
+                if (
+                    not isinstance(item, dict)
+                    or set(item) - {"id", "quantity", "item_price"}
+                    or not isinstance(item.get("id"), str)
+                    or not 1 <= len(item["id"]) <= 128
+                    or type(item.get("quantity")) is not int
+                    or not 1 <= item["quantity"] <= 1000000
+                    or (
+                        "item_price" in item
+                        and (
+                            isinstance(item["item_price"], bool)
+                            or not isinstance(item["item_price"], (int, float))
+                            or not 0 <= item["item_price"] <= 1e12
+                        )
+                    )
+                ):
+                    raise ValueError("商品明细字段无效")
         return value
 
 
@@ -146,7 +263,14 @@ class ServerEvent(PixelEvent):
             return self
         if source.connection_id != self.connection_id:
             raise ValueError("归因快照不属于此网站连接")
-        for name in ("anonymous_id", "session_id", "touchpoint_id", "test_code"):
+        for name in (
+            "anonymous_id",
+            "session_id",
+            "touchpoint_id",
+            "test_code",
+            "click_id",
+            "click_token",
+        ):
             value, saved = getattr(self, name), getattr(source, name)
             if value is not None and saved is not None and value != saved:
                 raise ValueError("回传字段与订单保存的归因快照不一致")
@@ -257,16 +381,7 @@ def configuration(c, conn):
     """,
         ("site:" + str(conn["id"]),),
     )
-    from .admin_controls import attribution
-
-    policy, _ = attribution(c, str(conn["agent_id"]))
-    last = conn.get("last_pageview_at") or conn.get("last_received_at")
-    installed = bool(
-        conn["state"] == "verified"
-        and last
-        and last
-        > datetime.now(timezone.utc) - timedelta(hours=policy["freshness_hours"])
-    )
+    installed = pixel_installed(c, conn)
     return {
         "catalog": catalog(),
         "events": definitions,
@@ -628,8 +743,19 @@ def user_key(cid, value):
     )
 
 
-def receive(c, conn, body, trust, visit=None, touch=None, test=None):
-    now = datetime.now(timezone.utc)
+def receive(
+    c,
+    conn,
+    body,
+    trust,
+    visit=None,
+    touch=None,
+    test=None,
+    *,
+    received_at=None,
+    frozen=None,
+):
+    now = received_at or datetime.now(timezone.utc)
     occurred = body.occurred_at or now
     if (
         occurred.tzinfo is None
@@ -637,14 +763,20 @@ def receive(c, conn, body, trust, visit=None, touch=None, test=None):
         or occurred < now - timedelta(days=30)
     ):
         raise HTTPException(422, "事件发生时间必须包含时区且在近 30 天内")
-    fingerprint = hashlib.sha256(
-        json.dumps(
-            body.model_dump(
-                mode="json", exclude={"key", "url", "ref", "lead_attribution"}
-            ),
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
+    fingerprint_body = body.model_dump(
+        mode="json", exclude={"key", "url", "ref", "lead_attribution", "click_token"}
+    )
+    if fingerprint_body.get("conversion_id") is None:
+        fingerprint_body.pop("conversion_id", None)
+    if fingerprint_body.get("click_id") is None:
+        fingerprint_body.pop("click_id", None)
+    fingerprint = (
+        frozen["receipt_fingerprint"]
+        if frozen is not None
+        else hashlib.sha256(
+            json.dumps(fingerprint_body, sort_keys=True).encode()
+        ).hexdigest()
+    )
     scope = str(test["id"]) if test else "live"
     old = one(
         c,
@@ -655,10 +787,14 @@ def receive(c, conn, body, trust, visit=None, touch=None, test=None):
         if old["payload_sha256"] != fingerprint:
             raise HTTPException(409, "事件编号已用于不同内容")
         return {"ok": True, "duplicate": True, "id": old["duplicate_of"] or old["id"]}
-    definition = one(
-        c,
-        "SELECT * FROM lead.pixel_definitions WHERE connection_id=%s AND name=%s",
-        (conn["id"], body.event_name),
+    definition = (
+        frozen["definition"]
+        if frozen is not None
+        else one(
+            c,
+            "SELECT * FROM lead.pixel_definitions WHERE connection_id=%s AND name=%s",
+            (conn["id"], body.event_name),
+        )
     )
     basic = body.event_name in ("PageView", "Engagement", "Identify")
     if not basic and (
@@ -672,8 +808,12 @@ def receive(c, conn, body, trust, visit=None, touch=None, test=None):
         and test["definition_revisions"].get(body.event_name) != definition["revision"]
     ):
         raise HTTPException(422, "事件设置已变更或不在此测试会话中，请开始新的测试会话")
-    identity = user_key(conn["id"], body.user_id)
-    if not identity and body.anonymous_id and not test:
+    identity = (
+        frozen["identity_key"]
+        if frozen is not None
+        else user_key(conn["id"], body.user_id)
+    )
+    if frozen is None and not identity and body.anonymous_id and not test:
         binding = one(
             c,
             "SELECT user_key FROM lead.pixel_identities WHERE connection_id=%s AND anonymous_id=%s",
@@ -683,12 +823,15 @@ def receive(c, conn, body, trust, visit=None, touch=None, test=None):
     if (
         body.event_name in ("CompleteRegistration", "Activation", "Identify")
         and not identity
+        and not (body.event_name == "CompleteRegistration" and body.conversion_id)
     ):
         raise HTTPException(422, "此事件需要用户编号")
     properties = body.properties
     business = None
     if body.event_name == "CompleteRegistration":
-        business = identity
+        business = body.conversion_id or identity
+    elif body.event_name == "Lead":
+        business = body.conversion_id
     elif body.event_name == "Activation":
         if properties.get("rule_version") != f"activation-v{definition['revision']}":
             raise HTTPException(422, "有效使用规则版本不匹配")
@@ -738,6 +881,8 @@ def receive(c, conn, body, trust, visit=None, touch=None, test=None):
         if body.anonymous_id and body.anonymous_id != touch["anonymous_id"]:
             raise HTTPException(422, "来源触点与访客不匹配")
     if touch and not test:
+        if body.click_id and str(touch.get("click_id")) != str(body.click_id):
+            raise HTTPException(422, "触点与点击凭证不匹配")
         window = touch["attribution_policy"]["attribution_window_days"]
         if (
             not touch["occurred_at"]
@@ -745,6 +890,16 @@ def receive(c, conn, body, trust, visit=None, touch=None, test=None):
             <= touch["occurred_at"] + timedelta(days=window)
         ):
             touch = None
+    from .analytics_clicks import eligible
+
+    click = frozen.get("click") if frozen and not test else None
+    attributed_click = (
+        touch.get("click_id")
+        if touch
+        else click["id"]
+        if eligible(click, occurred)
+        else None
+    )
     prior = (
         one(
             c,
@@ -769,8 +924,8 @@ def receive(c, conn, body, trust, visit=None, touch=None, test=None):
         c,
         """INSERT INTO lead.pixel_receipts(tenant_id,agent_id,connection_id,event_id,event_name,scope_key,
         anonymous_id,user_key,business_key,touchpoint_id,visit_session_id,definition_revision,trust_level,
-        counted,duplicate_of,payload_sha256,occurred_at,value,currency)
-        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+        counted,duplicate_of,payload_sha256,occurred_at,value,currency,click_id)
+        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
         (
             current_tenant(),
             conn["agent_id"],
@@ -791,6 +946,7 @@ def receive(c, conn, body, trust, visit=None, touch=None, test=None):
             occurred,
             properties.get("value") if body.event_name == "Purchase" else None,
             properties.get("currency") if body.event_name == "Purchase" else None,
+            attributed_click,
         ),
     )
     if test and not basic:
@@ -806,115 +962,160 @@ def receive(c, conn, body, trust, visit=None, touch=None, test=None):
 
 
 def browser_receive(conn, body: BrowserEvent):
+    with tx(str(conn["agent_id"])) as c:
+        result = browser_process(c, conn, body)
+    return JSONResponse(
+        jsonable_encoder(result),
+        headers={"Access-Control-Allow-Origin": conn["site_host"], "Vary": "Origin"},
+    )
+
+
+def browser_process(c, conn, body: BrowserEvent, *, received_at=None, frozen=None):
+    """Project one accepted event inside its caller's atomic processing transaction."""
     if not body.anonymous_id or not body.session_id:
         raise HTTPException(422, "缺少匿名访客或会话编号")
     aid, cid = str(conn["agent_id"]), str(conn["id"])
-    with tx(aid) as c:
-        c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (cid,))
-        test = test_scope(c, conn, body)
-        from .admin_controls import attribution
+    observed = received_at or datetime.now(timezone.utc)
+    c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (cid,))
+    test = frozen["test"] if frozen is not None else test_scope(c, conn, body)
+    from .admin_controls import attribution
 
-        policy, version = attribution(c, aid)
-        source = "pixel-test:" + str(test["id"]) if test else "site:" + cid
-        visit = one(
-            c,
-            "SELECT * FROM lead.visit_sessions WHERE source=%s AND source_session_id=%s",
-            (source, str(body.session_id)),
-        )
-        link = (
+    policy, version = (
+        (frozen["policy"], frozen["policy_version"])
+        if frozen is not None
+        else attribution(c, aid)
+    )
+    source = "pixel-test:" + str(test["id"]) if test else "site:" + cid
+    visit = one(
+        c,
+        "SELECT * FROM lead.visit_sessions WHERE source=%s AND source_session_id=%s",
+        (source, str(body.session_id)),
+    )
+    link = (
+        frozen["link"]
+        if frozen is not None
+        else (
             one(
                 c,
                 """SELECT id FROM lead.tracking_links WHERE public_code=%s AND state='active'
-            AND agent_id=%s AND allowed_host=%s""",
+        AND agent_id=%s AND allowed_host=%s""",
                 (body.ref, aid, urlsplit(conn["site_host"]).hostname),
             )
             if body.ref and not test
             else None
         )
-        if not visit:
-            visit = one(
+    )
+    if not visit:
+        visit = one(
+            c,
+            """INSERT INTO lead.visit_sessions(tenant_id,agent_id,tracking_link_id,source,source_session_id,
+            anonymous_id,trust_level,qualified,rule_version,started_at,last_seen_at,attribution_policy,attribution_version)
+            VALUES(%s,%s,%s,%s,%s,%s,'client_observed',false,'engaged-v1',%s,%s,%s,%s) RETURNING *""",
+            (
+                current_tenant(),
+                aid,
+                link["id"] if link else None,
+                source,
+                str(body.session_id),
+                body.anonymous_id,
+                observed,
+                observed,
+                j(policy),
+                version,
+            ),
+        )
+    elif visit.get("anonymous_id") and visit["anonymous_id"] != body.anonymous_id:
+        raise HTTPException(409, "会话与访客不匹配")
+    touch = None
+    if not test:
+        click = frozen.get("click") if frozen else None
+        touch = one(
+            c,
+            """SELECT * FROM lead.pixel_touchpoints WHERE connection_id=%s AND anonymous_id=%s
+            AND occurred_at>=%s-make_interval(days=>%s) AND occurred_at<=%s ORDER BY occurred_at DESC,id DESC LIMIT 1""",
+            (
+                cid,
+                body.anonymous_id,
+                body.occurred_at or observed,
+                policy["attribution_window_days"],
+                body.occurred_at or observed,
+            ),
+        )
+        if click:
+            from .analytics_clicks import eligible
+
+            touch = one(
                 c,
-                """INSERT INTO lead.visit_sessions(tenant_id,agent_id,tracking_link_id,source,source_session_id,
-                anonymous_id,trust_level,qualified,rule_version,started_at,last_seen_at,attribution_policy,attribution_version)
-                VALUES(%s,%s,%s,%s,%s,%s,'client_observed',false,'engaged-v1',now(),now(),%s,%s) RETURNING *""",
+                "SELECT * FROM lead.pixel_touchpoints WHERE connection_id=%s AND anonymous_id=%s AND click_id=%s",
+                (cid, body.anonymous_id, click["id"]),
+            )
+            if not eligible(click, body.occurred_at or observed):
+                link, touch = None, None
+        if link and (
+            not touch
+            or str(touch["tracking_link_id"]) != str(link["id"])
+            or (not click and touch["visit_session_id"] != visit["id"])
+        ):
+            touch = one(
+                c,
+                """INSERT INTO lead.pixel_touchpoints(tenant_id,agent_id,connection_id,visit_session_id,
+                tracking_link_id,anonymous_id,attribution_policy,attribution_version,occurred_at,click_id)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,LEAST(%s,%s),%s) RETURNING *""",
                 (
                     current_tenant(),
                     aid,
-                    link["id"] if link else None,
-                    source,
-                    str(body.session_id),
-                    body.anonymous_id,
-                    j(policy),
-                    version,
-                ),
-            )
-        elif visit.get("anonymous_id") and visit["anonymous_id"] != body.anonymous_id:
-            raise HTTPException(409, "会话与访客不匹配")
-        touch = None
-        if not test:
-            touch = one(
-                c,
-                """SELECT * FROM lead.pixel_touchpoints WHERE connection_id=%s AND anonymous_id=%s
-                AND occurred_at>=now()-make_interval(days=>%s) ORDER BY occurred_at DESC,id DESC LIMIT 1""",
-                (cid, body.anonymous_id, policy["attribution_window_days"]),
-            )
-            if link and (
-                not touch
-                or touch["tracking_link_id"] != link["id"]
-                or touch["visit_session_id"] != visit["id"]
-            ):
-                touch = one(
-                    c,
-                    """INSERT INTO lead.pixel_touchpoints(tenant_id,agent_id,connection_id,visit_session_id,
-                    tracking_link_id,anonymous_id,attribution_policy,attribution_version,occurred_at)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,LEAST(%s,now())) RETURNING *""",
-                    (
-                        current_tenant(),
-                        aid,
-                        cid,
-                        visit["id"],
-                        link["id"],
-                        body.anonymous_id,
-                        j(policy),
-                        version,
-                        body.occurred_at or datetime.now(timezone.utc),
-                    ),
-                )
-            # An explicit invalid marker must never borrow an earlier valid source.
-            if body.ref and not link:
-                touch = None
-        result = receive(c, conn, body, "client_observed", visit, touch, test)
-        if body.event_name == "PageView":
-            c.execute(
-                "UPDATE lead.analytics_connections SET state='verified',last_pageview_at=now(),last_received_at=now() WHERE id=%s",
-                (cid,),
-            )
-        if body.event_name == "Engagement":
-            elapsed = (datetime.now(timezone.utc) - visit["started_at"]).total_seconds()
-            c.execute(
-                "UPDATE lead.visit_sessions SET qualified=qualified OR %s,last_seen_at=now() WHERE id=%s",
-                (
-                    elapsed >= visit["attribution_policy"]["engagement_seconds"],
+                    cid,
                     visit["id"],
+                    link["id"],
+                    body.anonymous_id,
+                    j(click["attribution_policy"] if click else policy),
+                    click["attribution_version"] if click else version,
+                    click["occurred_at"] if click else body.occurred_at or observed,
+                    observed,
+                    click["id"] if click else None,
                 ),
             )
-        context = {
-            "connection_id": cid,
-            "session_id": str(body.session_id),
-            "anonymous_id": str(body.anonymous_id),
-            "touchpoint_id": str(touch["id"]) if touch else None,
-            "test_code": body.test_code if test else None,
-        }
-    return JSONResponse(
-        jsonable_encoder(
-            {
-                **result,
-                "attribution": context,
-                "engagement_seconds": policy["engagement_seconds"],
-            }
-        ),
-        headers={"Access-Control-Allow-Origin": conn["site_host"], "Vary": "Origin"},
+        # An explicit invalid marker must never borrow an earlier valid source.
+        if body.ref and not link:
+            touch = None
+    result = receive(
+        c,
+        conn,
+        body,
+        "client_observed",
+        visit,
+        touch,
+        test,
+        received_at=observed,
+        frozen=frozen,
     )
+    if body.event_name == "PageView":
+        c.execute(
+            "UPDATE lead.analytics_connections SET state='verified',last_pageview_at=now(),last_received_at=now() WHERE id=%s",
+            (cid,),
+        )
+    if body.event_name == "Engagement":
+        elapsed = (observed - visit["started_at"]).total_seconds()
+        c.execute(
+            "UPDATE lead.visit_sessions SET qualified=qualified OR %s,last_seen_at=now() WHERE id=%s",
+            (
+                elapsed >= visit["attribution_policy"]["engagement_seconds"],
+                visit["id"],
+            ),
+        )
+    context = {
+        "connection_id": cid,
+        "session_id": str(body.session_id),
+        "anonymous_id": str(body.anonymous_id),
+        "touchpoint_id": str(touch["id"]) if touch else None,
+        "click_id": str(touch["click_id"]) if touch and touch.get("click_id") else None,
+        "test_code": body.test_code if test else None,
+    }
+    return {
+        **result,
+        "attribution": context,
+        "engagement_seconds": policy["engagement_seconds"],
+    }
 
 
 @router.post("/collect/server/events")
@@ -923,7 +1124,9 @@ def server_receive(body: ServerEvent, request: Request):
 
     credential = authenticate(request, body.connection_id)
     try:
-        return server_event(body, credential)
+        from .analytics_ingest import collect_server
+
+        return collect_server(body, credential, request)
     except HTTPException as error:
         record_test_failure(
             {**credential, "id": body.connection_id}, body, error.detail

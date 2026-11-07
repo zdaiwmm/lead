@@ -64,7 +64,7 @@ export default function ChannelCards({
                 {card.type === "authorize" ? card.title : card.target_name}
               </strong>
               {card.type === "authorize" ? (
-                <p>允许发布 · 每天最多 3 条</p>
+                <p>允许发布{state.payload?.limits?.publish_per_day != null ? ` · 每天最多 ${state.payload.limits.publish_per_day} 条` : ""}</p>
               ) : (
                 <>
                   <p className="channel-preview">

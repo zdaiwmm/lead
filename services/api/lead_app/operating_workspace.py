@@ -43,6 +43,8 @@ def zone_for(agent, business):
 
 def draft_pack(agent, business, channel, version):
     """Produce truthful copy/asset briefs before any social account exists."""
+    from .promotion import promoter_voice
+
     name = business.get("facts", {}).get("name") or agent["name"]
     site = business.get("product_url") or ""
     plans = []
@@ -79,7 +81,7 @@ def draft_pack(agent, business, channel, version):
             + " · "
             + description[:110]
             + ("…" if len(description) > 110 else ""),
-            "disclosure": "品牌官方内容，由 AI 运营助手维护。",
+            "disclosure": "" if promoter_voice(agent) else "交流频道内容，由 AI 助手维护。" if channel["platform"] == "telegram" else "品牌官方内容，由 AI 运营助手维护。",
             "status": "prepared_for_verified_account_setup",
         },
         "setup_steps": channel["setup"],
@@ -268,6 +270,7 @@ def weekly_review(c, aid, contexts, now=None):
                 target_id,
                 context["catalog_version"],
                 context["objective"],
+                context.get("event_version", ""),
                 context.get("business_profile_id", ""),
                 str(context.get("config_revision", "")),
             )
@@ -286,6 +289,7 @@ def weekly_review(c, aid, contexts, now=None):
             "platform": context["platform"],
             "catalog_version": context["catalog_version"],
             "objective": context["objective"],
+            "event_version": context.get("event_version", ""),
             "coverage": context.get("coverage"),
             "state": context["state"],
             "stats": context.get("stats", []),
@@ -357,7 +361,7 @@ def status(aid: UUID):
         )
         targets = all_rows(
             c,
-            "SELECT t.id AS target_id,s.platform FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id WHERE t.state='active' AND s.state='connected'",
+            "SELECT t.id AS target_id,s.platform,t.verified_permissions FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id WHERE t.state='active' AND s.state='connected'",
         )
         feedback = (
             planning_context(c, targets, business, agent["config_revision"])

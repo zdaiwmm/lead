@@ -3,6 +3,7 @@
 import ipaddress
 import json
 import os
+import re
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -48,6 +49,12 @@ def parse(value):
         port = p.port
     except ValueError:
         raise ValueError("出口地址不可用") from None
+    if p.scheme == "socks5+unix":
+        if not (p.netloc or p.query or p.fragment) and re.fullmatch(
+            r"/run/lead-egress/[a-zA-Z0-9_-]+\.sock", p.path
+        ):
+            return {"server": value}
+        raise ValueError("出口地址不可用")
     if (
         p.scheme not in ("http", "https", "socks5")
         or not p.hostname
@@ -64,10 +71,25 @@ def parse(value):
     return result
 
 
-def add(label, url, expected_ip, region=None, timezone=None, locale=None, expires=None):
+def add(
+    label,
+    url,
+    expected_ip,
+    region=None,
+    timezone=None,
+    locale=None,
+    expires=None,
+    agent_id=None,
+):
     address = ipaddress.ip_address(expected_ip)
     if not address.is_global:
         raise ValueError("出口需要可核验的固定公网地址")
+    if url == "bound-ipv6":
+        if address.version != 6 or address not in ipaddress.IPv6Network("2000::/3"):
+            raise ValueError("绑定出口需要公网 IPv6 地址")
+        upstream = {"server": "bound-ipv6", "source": str(address)}
+    else:
+        upstream = parse(url)
     if timezone:
         ZoneInfo(timezone)
     if region and (len(region) != 2 or not region.isalpha()):
@@ -75,7 +97,7 @@ def add(label, url, expected_ip, region=None, timezone=None, locale=None, expire
     identifier = str(uuid4())
     nonce = os.urandom(12)
     cipher = nonce + AESGCM(key()).encrypt(
-        nonce, json.dumps(parse(url)).encode(), identifier.encode()
+        nonce, json.dumps(upstream).encode(), identifier.encode()
     )
     # Store id with authenticated ciphertext so it cannot be moved to another row.
     envelope = identifier.encode() + b"\n" + cipher
@@ -93,6 +115,18 @@ def add(label, url, expected_ip, region=None, timezone=None, locale=None, expire
                 expires,
             ),
         )
+        if agent_id:
+            c.execute(
+                "SELECT set_config('app.tenant_id',lead.execution_agent_tenant(%s)::text,true),"
+                "set_config('app.agent_id',%s,true)",
+                (agent_id, str(agent_id)),
+            )
+            c.execute("SELECT lead.claim_proxy(%s)", (agent_id,))
+            if not c.execute(
+                "SELECT 1 FROM lead.proxy_assignments WHERE pool_id=%s AND agent_id=%s AND released_at IS NULL",
+                (identifier, agent_id),
+            ).fetchone():
+                raise ValueError("无法将新出口绑定到指定 Agent")
     return {"id": identifier, "label": label}
 
 

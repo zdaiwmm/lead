@@ -38,7 +38,7 @@ export default function OperatingPanel({ aid }: { aid: string }) {
   const load = useCallback(
     async (signal?: AbortSignal) => {
       try {
-        const next = await api(`/agents/${aid}/operations`);
+        const next = await api(`/agents/${aid}/operations`, undefined, signal);
         if (!signal?.aborted) {
           setData(next);
           setError("");

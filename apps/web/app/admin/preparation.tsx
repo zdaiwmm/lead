@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api-client";
 import { Row } from "./config-editor";
+import { Navigate } from "./navigation";
 
 function ContentPreview({ body }: { body: Row }) {
   return (
@@ -232,11 +233,7 @@ const stateNames: Row = {
   needs_attention: "需要处理",
   not_connected: "尚无近期数据",
 };
-export function Readiness({
-  navigate,
-}: {
-  navigate: (section: string) => void;
-}) {
+export function Readiness({ navigate }: { navigate: Navigate }) {
   const [data, setData] = useState<Row | null>(null),
     [error, setError] = useState(""),
     [query, setQuery] = useState("");
@@ -322,11 +319,22 @@ export function Readiness({
                         </span>
                         <p>{check.detail}</p>
                       </div>
-                      {check.section !== "workbench" && (
-                        <button onClick={() => navigate(check.section)}>
-                          管理配置
-                        </button>
-                      )}
+                      {check.state !== "ready" &&
+                        (check.section === "workbench" ? (
+                          <a href={`/?agent=${agent.id}`}>
+                            {check.code === "business"
+                              ? "补充业务介绍"
+                              : "前往工作台处理"}
+                          </a>
+                        ) : (
+                          <button
+                            onClick={() => navigate(check.section, agent.id)}
+                          >
+                            {check.code === "models"
+                              ? "选择可用模型"
+                              : "完善资料"}
+                          </button>
+                        ))}
                     </li>
                   ))}
                 </ul>
@@ -354,6 +362,12 @@ export function Readiness({
                 )}
               </section>
             ))}
+          {!!data.agents.length &&
+            !data.agents.some((a: Row) =>
+              a.name.toLowerCase().includes(query.toLowerCase()),
+            ) && (
+              <p className="admin-empty">没有匹配的 Agent，请换个名称查找。</p>
+            )}
           {!data.agents.length && (
             <p className="admin-empty">
               尚无 Agent。可以先填充通用资料，再从工作台创建。

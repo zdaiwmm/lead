@@ -63,6 +63,22 @@ END LOOP; END $$;
 CREATE INDEX IF NOT EXISTS activity_scope_time ON lead.activity(tenant_id,agent_id,created_at DESC);
 INSERT INTO lead.schema_versions(version) VALUES(1) ON CONFLICT DO NOTHING;
 
+CREATE OR REPLACE FUNCTION lead.owner_browser_pilot_allowed(p_target uuid,p_grant uuid DEFAULT NULL) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,lead AS $$
+ SELECT EXISTS(
+  SELECT 1 FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id AND s.agent_id=t.agent_id AND s.tenant_id=t.tenant_id
+  JOIN lead.agents a ON a.id=t.agent_id AND a.tenant_id=t.tenant_id
+  JOIN lead.authorization_grants g ON g.target_id=t.id AND g.agent_id=t.agent_id AND g.tenant_id=t.tenant_id AND g.revoked_at IS NULL
+  CROSS JOIN LATERAL (SELECT a.onboarding_state->'browser_pilots'->t.id::text AS body) pilot
+  WHERE t.id=p_target AND t.tenant_id=lead.ctx_tenant() AND t.agent_id=lead.ctx_agent() AND lead.member_agent_allowed(t.agent_id)
+   AND a.desired_state='running' AND s.platform='tiktok' AND s.state='connected' AND s.automation_enabled AND t.state='active'
+   AND (p_grant IS NULL OR g.id=p_grant) AND g.allowed_actions ? 'publish' AND g.allowed_actions ? 'upload_media'
+   AND pilot.body->>'authority'='workspace_owner' AND pilot.body->>'method'='browser' AND pilot.body->>'state'='active'
+   AND pilot.body->>'account_id'=s.id::text AND pilot.body->>'external_account_id'=s.external_account_id
+   AND pilot.body->>'target_id'=t.id::text AND pilot.body->>'grant_id'=g.id::text
+   AND (pilot.body->>'expires_at')::timestamptz>now()
+ );
+$$;
 CREATE OR REPLACE FUNCTION lead.confirm_channel_probe(p_action uuid) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,lead AS $$
 DECLARE target_uuid uuid; channel text; target_kind text; release text; format text; defaults jsonb;
@@ -74,7 +90,7 @@ BEGIN
  JOIN lead.social_accounts s ON s.id=at.account_id
  JOIN lead.authorization_grants g ON g.id=a.grant_id AND g.target_id=a.target_id AND g.revoked_at IS NULL
  JOIN lead.interaction_cards card ON card.id::text=t.input->>'key' AND card.tenant_id=a.tenant_id AND card.agent_id=a.agent_id
- JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.action_type='publish' AND pc.target_type=at.target_type AND pc.permission_state='approved'
+ JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.action_type='publish' AND pc.target_type=at.target_type AND (pc.permission_state='approved' OR (pc.permission_state='pending' AND lead.owner_browser_pilot_allowed(at.id,a.grant_id)))
  WHERE a.id=p_action AND a.tenant_id=lead.ctx_tenant() AND a.agent_id=lead.ctx_agent()
  AND a.state='confirmed' AND a.evidence_ref IS NOT NULL AND a.external_id IS NOT NULL
  AND t.type='connection.verify_publish' AND t.input->>'bootstrap_verification'='true' AND s.state='connected'
