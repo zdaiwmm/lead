@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import AnalyticsPanel, { PixelTask } from "./analytics-panel";
-import AnalyticsSummary, { useScopedData } from "./analytics-summary";
+import AnalyticsSummary, { trafficParams, useScopedData } from "./analytics-summary";
 import { socialNames } from "./social-icon";
 import PlatformFilter from "./platform-filter";
 import DialogPanel from "./dialog-panel";
@@ -20,15 +20,15 @@ export default function AgentResults({
   const pixel =
     pixelData && pixelData.agent_id === agent.id ? pixelData.pixel : null;
   const promotion = agent.onboarding_state?.promotion;
-  const [channel, setChannel] = useState("");
+  const [channel, setChannel] = useState("promotion");
   const [country, setCountry] = useState("");
   const [range, setRange] = useState(30);
   const [metric, setMetric] = useState("clicks");
   const [resumeEvent, setResumeEvent] = useState("");
   const [copied, setCopied] = useState(false);
   const [details, setDetails] = useState(false);
-  const query = new URLSearchParams();
-  if (channel) query.set("channel", channel);
+  const query = trafficParams(channel);
+  const scopeLabel = channel === "site" ? "全站" : channel === "unattributed" ? "未归因" : "推广";
   if (country) query.set("country", country);
   const { data, error, refresh } = useScopedData(
     agent.id,
@@ -45,8 +45,8 @@ export default function AgentResults({
   ];
   if (pixel?.installed)
     metrics.push(
-      ["pv", "站内访问PV"],
-      ["site_devices", "站内访客设备"],
+      ["pv", scopeLabel + "浏览 PV"],
+      ["site_devices", scopeLabel + "访客设备"],
       ...Object.entries(data?.events || {}).map(([k, v]) => [
         `event:${k}`,
         String(v),
@@ -85,7 +85,8 @@ export default function AgentResults({
             title="获客渠道"
             value={channel}
             options={[
-              ["", "全部渠道"],
+              ["promotion", "全部推广渠道"],
+              ["site", "全站流量"],
               ...Object.entries(socialNames),
               ["unattributed", "未归因"],
             ]}
@@ -220,6 +221,7 @@ export default function AgentResults({
           onClose={() => setDetails(false)}
         >
           <AnalyticsSummary
+            initialChannel={channel}
             aid={agent.id}
             readOnly={readOnly}
             promotion={{

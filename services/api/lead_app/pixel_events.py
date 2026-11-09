@@ -1005,6 +1005,12 @@ def browser_process(c, conn, body: BrowserEvent, *, received_at=None, frozen=Non
             else None
         )
     )
+    click = frozen.get("click") if frozen and not test else None
+    if click:
+        from .analytics_clicks import eligible
+
+        if not eligible(click, body.occurred_at or observed):
+            link = None
     if not visit:
         visit = one(
             c,
@@ -1028,7 +1034,6 @@ def browser_process(c, conn, body: BrowserEvent, *, received_at=None, frozen=Non
         raise HTTPException(409, "会话与访客不匹配")
     touch = None
     if not test:
-        click = frozen.get("click") if frozen else None
         touch = one(
             c,
             """SELECT * FROM lead.pixel_touchpoints WHERE connection_id=%s AND anonymous_id=%s
@@ -1042,15 +1047,13 @@ def browser_process(c, conn, body: BrowserEvent, *, received_at=None, frozen=Non
             ),
         )
         if click:
-            from .analytics_clicks import eligible
-
             touch = one(
                 c,
                 "SELECT * FROM lead.pixel_touchpoints WHERE connection_id=%s AND anonymous_id=%s AND click_id=%s",
                 (cid, body.anonymous_id, click["id"]),
             )
-            if not eligible(click, body.occurred_at or observed):
-                link, touch = None, None
+            if not link:
+                touch = None
         if link and (
             not touch
             or str(touch["tracking_link_id"]) != str(link["id"])

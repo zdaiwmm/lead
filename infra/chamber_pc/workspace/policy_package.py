@@ -20,7 +20,12 @@ def build():
     for name in API:
         fname=name+'.py';sub='services/api/lead_app/'+fname
         entries['app/'+fname]=(REPO/sub).read_bytes()
-    manifest=dict(build=build_id,base=BASE_BUILD,api=API,resident=TG,baselines=baselines)
+    for name in ("pixel.js", "pixel_events.py", "analytics_reporting.py", "domain.py"):
+        entries["app/"+name]=(REPO/"services/api/lead_app"/name).read_bytes()
+    for name in ("attribution_install.py", "attribution_probe.py"):
+        entries[name]=(HERE/name).read_bytes()
+    manifest=dict(build=build_id,base=BASE_BUILD,api=API,resident=TG,baselines=baselines,
+                  attribution_baselines=json.loads((HERE/'baselines.json').read_text())['attribution'])
     entries['manifest.json']=json.dumps(manifest).encode()
     for p in sorted(NEXT.rglob('*')):
         rel=p.relative_to(NEXT)

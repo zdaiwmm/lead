@@ -35,5 +35,20 @@
       "676d5b4f3df4dfbf2b6e3f1ed48a13d36f0864c9685f66f81b76c30c1a09012b",
       "8687afb128fdce7a87dd2b598f0c51716ab71e08c92da7404a79c19801cc5833"
     ]
+  },
+  "attribution": {
+    "analytics_reporting.py": [
+      "adfec0efc5371f710007d511453d640d689e7a3e91204d7b2bde2ed25517f1bb",
+      "e09a17896c76955e4a82d50e2a701a8db81a2cc1b1d8845226a4126e4a36e74b"
+    ],
+    "pixel.js": [
+      "c101d22b44a26517196867ac2146d08267fc60f0e1719f1702be87489c60f998"
+    ],
+    "pixel_events.py": [
+      "86214f79fd86760beb3388af6f37caabf583e71941b6b8e9f1f5fd417e65f3a5"
+    ],
+    "domain.py": [
+      "77f637e9b48ebfec0904cab3b66037d82e1f9bd37c5374b4e3715a768853681a"
+    ]
   }
 }

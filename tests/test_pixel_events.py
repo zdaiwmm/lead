@@ -510,7 +510,7 @@ def test_agent_report_recovery_and_freshness(pixel):
     from scripts.recover_agent_analytics import recover_scope
 
     aid, _, client, _, _, _ = pixel
-    path = f"/api/agents/{aid}/analytics/overview"
+    path = f"/api/agents/{aid}/analytics/overview?traffic=site"
     tenant = current_tenant()
     assert send(pixel).is_success
     today = client.get(path).json()["series"][-1]
@@ -554,7 +554,7 @@ def test_target_temporal_worker_processes_queued_event(pixel):
     try:
         for _ in range(45):
             assert worker.poll() is None
-            today = client.get(f"/api/agents/{aid}/analytics/overview").json()["series"][-1]
+            today = client.get(f"/api/agents/{aid}/analytics/overview?traffic=site").json()["series"][-1]
             if today.get("pv") == 1 and today["report_state"] == "current":
                 break
             time.sleep(1)
@@ -583,8 +583,61 @@ def test_two_clicks_one_device_and_one_business_event_in_isolated_agent(pixel):
     for _ in range(6):
         if not recover_scope(current_tenant(), aid, "live"):
             break
-    day=client.get(f"/api/agents/{aid}/analytics/overview").json()["series"][-1]
+    day=client.get(f"/api/agents/{aid}/analytics/overview?traffic=site").json()["series"][-1]
     assert (day["clicks"],day["devices"],day["pv"],day["site_devices"])==(2,1,1,1)
     with tx(aid) as c:
         counted=one(c,"SELECT count(*) AS n FROM lead.pixel_receipts WHERE connection_id=%s AND event_name='CompleteRegistration' AND counted AND scope_key='live'",(cid,))
         assert counted["n"]==1
+
+
+def test_acquisition_scope_separates_page_entries_from_window_conversions(pixel):
+    from urllib.parse import parse_qs, urlsplit
+
+    from scripts.recover_agent_analytics import recover_scope
+    from lead_app.analytics_ingest import scoped_tx
+    from lead_app.analytics_reporting import refresh_scope
+
+    aid, cid, client, _, markers, server = pixel
+    anonymous = uid()
+    tenant = current_tenant()
+    redirect = client.get("/r/" + markers[0], follow_redirects=False, headers={"User-Agent": "Mozilla/5.0"})
+    query = parse_qs(urlsplit(redirect.headers["location"]).query)
+    arrivals = [({}, uid()), ({"ref": markers[0], "click_token": query["lc"][0]}, uid()), ({}, uid())]
+    for entry, session in arrivals:
+        page = send(pixel, anonymous_id=anonymous, session_id=session, **entry)
+        assert page.status_code == 200, page.text
+        if entry:
+            internal = send(pixel, anonymous_id=anonymous, session_id=session)
+            assert internal.status_code == 200
+    # A direct return keeps an eligible order attribution snapshot. Its PV
+    # belongs to the current (direct) visit even with a historical touch.
+    context = page.json()["attribution"]
+    assert context["touchpoint_id"]
+    payment = {"connection_id": cid, "event_name": "Purchase", "event_id": uid(),
+               "lead_attribution": context, "properties": {"order_id": "delayed", "value": 8, "currency": "CNY"}}
+    for i in range(2):
+        result = client.post("/collect/server/events", headers={"Authorization": "Bearer " + server}, json=payment)
+        assert result.status_code == 200, result.text
+    organic = {**payment, "lead_attribution": None, "anonymous_id": uid(), "event_id": uid(),
+               "properties": {"order_id": "organic", "value": 12, "currency": "CNY"}}
+    result = client.post("/collect/server/events", headers={"Authorization": "Bearer " + server}, json=organic)
+    assert result.status_code == 200, result.text
+    assert recover_scope(tenant, aid, "live")
+    base = f"/api/agents/{aid}/analytics/"
+    for traffic, pages, revenue in [("promotion", 2, 8), ("site", 4, 20)]:
+        report = client.get(base+"summary", params={"traffic": traffic, "event_name": "Purchase"}).json()
+        assert report["summary"]["pv"] == pages and report["summary"]["visitors"] == 1
+        assert report["summary"]["conversions"] == (1 if traffic == "promotion" else 2)
+        assert sum(r["pv"] for r in report["countries"]) == pages
+        assert float(report["amounts"][0]["amount"]) == revenue
+        overview = client.get(base+"overview", params={"traffic": traffic}).json()["series"][-1]
+        assert (overview["clicks"], overview["pv"], overview["site_devices"]) == (1, pages, 1)
+    assert client.get(base+"overview").json()["series"][-1]["pv"] == 2
+    assert client.get(base+"overview?channel=unattributed").json()["series"][-1]["pv"] == 2
+    with scoped_tx(tenant, aid, "live") as c:
+        c.execute("UPDATE lead.analytics_report_days SET version='analytics-report-v1'")
+    assert client.get(base+"overview").json()["series"][-1]["pv"] is None
+    assert client.get(base+"summary?traffic=promotion").json()["summary"]["pv"] is None
+    assert len(refresh_scope(tenant, aid)) == 1
+    assert not refresh_scope(tenant, aid)
+    assert client.get(base+"overview").json()["series"][-1]["pv"] == 2

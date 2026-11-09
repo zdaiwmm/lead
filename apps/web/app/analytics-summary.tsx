@@ -19,6 +19,14 @@ const names: Record<string, string> = {
 };
 const channelName = (s: string) =>
   s === "unattributed" ? "未归因" : socialNames[s] || s;
+// One selection drives every query in the acquisition card and its details.
+export function trafficParams(selection: string) {
+  const site = selection === "site" || selection === "unattributed";
+  const params = new URLSearchParams({ traffic: site ? "site" : "promotion" });
+  if (selection !== "site" && selection !== "promotion")
+    params.set("channel", selection);
+  return params;
+}
 const num = (n: number | null | undefined) =>
   n == null ? "—" : n.toLocaleString("zh-CN");
 const money = (value: string) => {
@@ -153,33 +161,28 @@ export default function AnalyticsSummary({
   aid,
   readOnly,
   promotion,
+  initialChannel = "promotion",
   onSetup,
 }: {
   aid: string;
   readOnly: boolean;
   promotion: Row;
+  initialChannel?: string;
   onSetup: () => void;
 }) {
   const [range, setRange] = useState(dates),
-    [channel, setChannel] = useState(""),
+    [channel, setChannel] = useState(initialChannel),
     [health, setHealth] = useState(false);
-  const [choices, setChoices] = useState<{ aid: string; values: string[] }>({
-    aid,
-    values: [],
-  });
-  const params = new URLSearchParams({
-    start_date: range.start,
-    end_date: range.end,
-  });
-  if (channel) params.set("channel", channel);
+  const params = trafficParams(channel);
+  params.set("start_date", range.start);
+  params.set("end_date", range.end);
   const { data, error, loading, refresh } = useScopedData(
     aid,
     `/agents/${aid}/analytics/summary?${params}`,
   );
-  useEffect(() => {
-    if (data && !channel)
-      setChoices({ aid, values: data.channels.map((r: Row) => r.channel) });
-  }, [aid, data, channel]);
+  const channels = new Set([...Object.keys(socialNames),
+    ...(data?.channels || []).map((r: Row) => String(r.channel)), channel]);
+  for (const reserved of ["site", "promotion", "unattributed"]) channels.delete(reserved);
   const m = data?.summary || {},
     site = data?.coverage.site;
   const metric = site && m.pv != null ? "pv" : "clicks";
@@ -198,7 +201,7 @@ export default function AnalyticsSummary({
   const missing = (key: string) =>
     !data
       ? "正在读取"
-      : data.aggregation.unbuilt_days
+      : (data.aggregation.unbuilt_days || data.aggregation.outdated_days)
         ? "汇总中"
         : key === "conversions"
           ? data.coverage.server
@@ -244,8 +247,10 @@ export default function AnalyticsSummary({
         <label>
           来源渠道
           <select value={channel} onChange={(e) => setChannel(e.target.value)}>
-            <option value="">全部渠道</option>
-            {(choices.aid === aid ? choices.values : []).map((s) => (
+            <option value="promotion">全部推广渠道</option>
+            <option value="site">全站流量</option>
+            <option value="unattributed">未归因</option>
+            {Array.from(channels).map((s) => (
               <option key={s} value={s}>
                 {channelName(s)}
               </option>
@@ -289,7 +294,7 @@ export default function AnalyticsSummary({
             ))}
           </dl>
           <p className={styles.definition}>
-            北京时间统计，访客按浏览日期去重，会话计入首次接收日期。服务端转化目标：
+            浏览按本次访问来源统计，转化按归因窗口内的有效推广触点统计。北京时间按日去重访客。服务端转化目标为
             {names[data.conversion_event] || data.conversion_event}。
             <button className="text-button" onClick={() => setHealth(true)}>
               数据状态 <ArrowUpRight size={13} />
@@ -345,7 +350,7 @@ export default function AnalyticsSummary({
               </svg>
             ) : (
               <p className={styles.chartEmpty}>
-                {data.aggregation.unbuilt_days
+                {(data.aggregation.unbuilt_days || data.aggregation.outdated_days)
                   ? "正在汇总已接收的数据"
                   : m[metric] > 0
                     ? `所选范围已记录 ${num(m[metric])} 次${metric === "pv" ? "页面浏览" : "推广点击"}，更多日期有数据后展示趋势。`
@@ -444,7 +449,7 @@ export default function AnalyticsSummary({
           <p className={styles.updated} role="status">
             {data.aggregation.failed_days
               ? "部分日期汇总失败，可在数据状态中重试。"
-              : data.aggregation.pending_days
+              : data.aggregation.pending_days || data.aggregation.outdated_days
                 ? "数据更新中，已完成的统计继续保留。"
                 : "统计已更新"}{" "}
             · {stamp(data.aggregation.updated_at)}

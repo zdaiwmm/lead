@@ -122,3 +122,43 @@ def test_sdk_expiration_blocks_events_until_explicit_exit():
       await ctx.leadq('track','Lead',{});
       assert.equal(events.at(-1).test_code,null);
     """)
+
+
+def test_direct_entries_do_not_reuse_promotional_visits():
+    source = Path("services/api/lead_app/pixel.js").resolve()
+    script = r"""
+    const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/strict');
+    const code=fs.readFileSync(process.argv[1],'utf8');
+    function store(){const m=new Map();return {getItem:k=>m.get(k),setItem:(k,v)=>m.set(k,v)}}
+    const local=store(),tab=store(),site='https://site.example/';
+    const token='lc1.'+Buffer.from(JSON.stringify({id:'click1',exp:4102444800})).toString('base64url')+'.test';
+    let now=Date.now();class Clock extends Date{static now(){return now}}
+    async function load(path,referrer='',type='navigate',storage=tab){
+      const sent=[];const ctx={URL,Date:Clock,atob,crypto:require('node:crypto').webcrypto,
+        localStorage:local,sessionStorage:storage, location:{href:site+path},setInterval(){},addEventListener(){},
+        performance:{getEntriesByType:()=>[{type}]},
+        history:{replaceState(){},pushState(_a,_b,url){ctx.location.href=new URL(url,ctx.location.href).href}},
+        document:{referrer,currentScript:{src:site+'sdk',dataset:{connection:'c',key:'k'}}},
+        fetch:async(url,options)=>{sent.push(JSON.parse(options.body));return {ok:true,json:async()=>({attribution:{}})}}};
+      ctx.window=ctx;vm.createContext(ctx);vm.runInContext(code,ctx);await ctx.leadq('attribution');
+      return {first:sent[0],ctx,sent};
+    }
+    (async()=>{
+      const direct=(await load('')).first;
+      const landing=(await load('?lr=promo&lc='+token)).first;
+      assert(!direct.ref && !direct.click_token);assert.equal(landing.ref,'promo');
+      assert.notEqual(landing.session_id,direct.session_id);
+      const internal=await load('order',site);assert.equal(internal.first.session_id,landing.session_id);
+      assert.equal(internal.first.click_token,token);
+      internal.ctx.history.pushState(null,'','/account');await internal.ctx.leadq('attribution');
+      assert.equal(internal.sent.at(-1).session_id,landing.session_id);
+      const reload=await load('account','','reload');assert.equal(reload.first.session_id,landing.session_id);
+      const other=(await load('','','navigate',store())).first;assert(!other.ref && !other.click_token);
+      const again=(await load('')).first;assert(!again.ref && !again.click_token);
+      assert.notEqual(again.session_id,landing.session_id);assert.equal(again.anonymous_id,landing.anonymous_id);
+      const newPromo=await load('?lr=promo');now+=31*60*1000;
+      const expired=(await load('checkout',site+'?lr=promo')).first;
+      assert(!expired.ref && !expired.click_token);assert.notEqual(expired.session_id,newPromo.first.session_id);
+    })().catch(err=>{console.error(err);process.exitCode=1})
+    """
+    subprocess.run(["node", "-e", script, str(source)], check=True, timeout=10)

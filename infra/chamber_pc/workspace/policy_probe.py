@@ -16,7 +16,10 @@ def verify(aid):
     tenant=agent_tenant(aid)
     with service_scope(), tenant_scope(tenant,None):
         parsed=UUID(aid)
-        data=overview(parsed)['series'][-1]
+        # This compatibility probe compares the all-site view to all pixel receipts.
+        from lead_app.analytics_reporting import VERSION
+        kwargs = {} if VERSION == 'analytics-report-v1' else {'traffic': 'site'}
+        data=overview(parsed, **kwargs)['series'][-1]
         site=pixel_report(parsed)
         day=datetime.now(ZoneInfo('Asia/Shanghai')).replace(hour=0,minute=0,second=0,microsecond=0)
         with scoped_tx(tenant,aid,'live') as c:

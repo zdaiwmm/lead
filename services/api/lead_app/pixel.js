@@ -135,52 +135,78 @@
     if (["expired", "invalid"].includes(terminal) && !testing)
       throw Error("lead: 测试已过期或无效，请重新开始测试或明确结束测试后继续");
   }
+  // Anonymous identity spans visits; the entry source belongs to one tab visit.
+  const visitTimeout = 30 * 60 * 1000;
+  let visit = json("visit-v2");
+  let previousEntry;
+  function readEntry() {
+    const query = new URL(location.href).searchParams;
+    return {
+      ref: query.get("lr") || query.get("lead_ref"),
+      token: query.get("lc"),
+    };
+  }
+  function continuesDocument() {
+    const navigation = window.performance?.getEntriesByType?.("navigation")[0]?.type;
+    if (navigation === "reload") return true;
+    if (navigation === "back_forward" || !document.referrer) return false;
+    return new URL(document.referrer).origin === new URL(location.href).origin;
+  }
+  function updateVisit(page = false) {
+    const now = Date.now();
+    const fresh = visit && now - visit.at < visitTimeout;
+    const firstDocument = !previousEntry;
+    if (page || firstDocument) {
+      const entry = readEntry();
+      const tagged = Boolean(entry.ref || entry.token);
+      const external = firstDocument && !continuesDocument();
+      const previous = previousEntry || visit;
+      const changed = entry.token !== previous?.token || entry.ref !== previous?.ref;
+      const newPromotion = tagged && (external || changed);
+      if (!fresh || external || newPromotion) {
+        visit = { id: uuid(), ref: newPromotion ? entry.ref : null,
+          token: newPromotion ? entry.token : null };
+      }
+      previousEntry = entry;
+    } else if (!fresh) {
+      visit = { id: uuid(), ref: null, token: null };
+    }
+    visit.at = now;
+    write(temporary, "visit-v2", JSON.stringify(visit));
+    return visit;
+  }
   function session() {
     if (testing) {
-      if (Date.now() - testIdentity.at > 1800000) testIdentity.session = uuid();
+      if (Date.now() - testIdentity.at > visitTimeout) testIdentity.session = uuid();
       testIdentity.at = Date.now();
       write(temporary, "test-identity", JSON.stringify(testIdentity));
       return testIdentity.session;
     }
-    let value;
-    try {
-      value = JSON.parse(read(persistent, "session") || "null");
-    } catch {}
-    if (!value || Date.now() - value.at > 1800000)
-      value = { id: uuid(), at: Date.now() };
-    value.at = Date.now();
-    write(persistent, "session", JSON.stringify(value));
-    return value.id;
+    return updateVisit().id;
   }
-  let click = json("click");
   function clickProof() {
-    if (testing) return null;
-    const token = new URL(location.href).searchParams.get("lc");
-    if (token && token !== click?.token) {
-      try {
-        const proof = JSON.parse(
-          atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")),
-        );
-        click = { token, id: proof.id, exp: proof.exp };
-        write(temporary, "click", JSON.stringify(click));
-      } catch {
-        click = { token, id: null, exp: null };
+    if (testing || !visit?.token) return null;
+    try {
+      const proof = JSON.parse(
+        atob(visit.token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")),
+      );
+      if (proof.exp * 1000 <= Date.now()) {
+        visit.token = null;
+        visit.ref = null;
+        write(temporary, "visit-v2", JSON.stringify(visit));
+        return null;
       }
+      return { token: visit.token, id: proof.id };
+    } catch {
+      // The collector validates malformed proofs and never falls back to a marker.
+      return { token: visit.token };
     }
-    if (!token && click?.exp && click.exp * 1000 <= Date.now()) {
-      click = null;
-      write(temporary, "click", "");
-      write(temporary, "ref", "");
-    }
-    return click;
   }
   function reference() {
-    const query = new URL(location.href).searchParams,
-      value = query.get("lr") || query.get("lead_ref");
-    // Test navigation must not replace a real visitor's remembered source.
-    const name = testing ? "test-ref" : "ref";
-    if (value) write(temporary, name, value);
-    return value || read(temporary, name) || null;
+    if (!testing) return visit?.ref || null;
+    const value = readEntry().ref;
+    if (value) write(temporary, "test-ref", value);
+    return value || read(temporary, "test-ref") || null;
   }
   function snapshot() {
     assertNotExpired();
@@ -564,6 +590,8 @@
     engagementSent = false;
     attributionPending = true;
     const generation = ++pageGeneration;
+    captureTest();
+    if (!testing) updateVisit(true);
     const task = track("PageView");
     task.then(
       () => {
@@ -625,18 +653,16 @@
         anonymous = uuid();
         user = null;
         write(persistent, "did", anonymous);
-        write(persistent, "session", "");
+        visit = null;
+        write(temporary, "visit-v2", "");
         write(temporary, "user", "");
-        write(temporary, "ref", "");
-        write(temporary, "click", "");
-        click = null;
       }
       context = null;
       return pageview();
     }
     return Promise.reject(Error("lead: 不支持的命令"));
   }
-  leadq.version = "2.2";
+  leadq.version = "2.3";
   leadq.flush = flush;
   window.leadq = leadq;
   window.leadAttribution = snapshot;
