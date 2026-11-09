@@ -32,7 +32,7 @@ Python 3.11+、GitHub CLI 和可出站访问 GitHub 的 Unix 节点可以运行 
 
 **服务绑定**　永久 selector `current` 是指向同目录 SHA 名的相对符号链接。映像必须在引导时先挂载，两个版本在整个发布和恢复期间一直可用。使用既有 systemd 的 `BindReadOnlyPaths=`，让 API、collector、worker、browser、maintenance 单元把 `current/services` 绑定到 `/run/lead-home/bin/original/services`，Web 把 `current/web` 绑定到 `/run/lead-home/bin/web`。保留 Web 缓存的独立绑定。维护者须核对各单元 ExecStart、解释器、应用搜索路径、Web 工作目录和对持久目录的依赖。当前 PC 缺失的 lead 单元须先确定实际部署归属。全套单元和旧基线均验收后才能开放接单。
 
-**构建与取件**　Linux 推送 CI 从同一 checkout 完成前端构建后，由 `scripts/build_home_image.sh` 封装 services、Web 和运行依赖。节点在低权限账户下运行 `python3 scripts/prepare_home_image.py <SHA> <私有暂存目录>`。它复核 main 的 CI、run/attempt 和 GitHub 归档摘要，再读 SquashFS 中的 REVISION。产物过期或摘要不符会退出。特权安装阶段应从经独立核验的来源取得镜像摘要，在管理员私有目录内重新校验同一份镜像并以 ro,nodev,nosuid 挂载。普通账户的暂存目录不能直接作为活动镜像的后备文件。
+**构建与取件**　Linux 推送 CI 从同一 checkout 完成前端构建后，由 `scripts/build_home_image.sh` 封装 services、Web 和运行依赖。节点在低权限账户下运行 `python3 scripts/prepare_home_image.py <SHA> <私有暂存目录>`。它复核 main 的 CI、run/attempt 和 GitHub 归档摘要，再读 SquashFS 中的 REVISION。产物过期或摘要不符会退出。首次安装时将 home_mount_image.py 安装为受信任的 mount-image，将 prepare_home_image.py 和 request_home_release.py 安装到同一目录。节点调度器确认审批后，deploy 在缺少候选时调用该入口。它从 GitHub 公共 API 独立验证精确 main CI 及归档元数据，只用专属 lead-release-fetch 账户及该目录的受控 gh 下载。根账户在私有目录中验证同一份归档并创建永久只读 systemd mount 单元。镜像随原 lead-home-live.target 挂载。部署前本机裸仓库从固定的 GitHub 地址刷新 main 并再次核对祖先。
 
 **节点专用检查**　将受审阅的 `scripts/home_release_fence.py` 和 `scripts/home_verify_workflow.py` 分别安装为 `/usr/local/lib/lead-home-release/check-fence` 和 `verify-workflow`。两个入口使用该目录下只由管理员维护的 venv，依赖采用仓库固定的 psycopg、temporalio 版本。
 

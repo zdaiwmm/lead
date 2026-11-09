@@ -19,13 +19,15 @@ def api(resource, payload=None):
     return json.loads(output)
 
 
-def verified_run(sha):
+def verified_run(sha, *, get=None):
+    if get is None:
+        get = api
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ValueError("Expected a full commit SHA")
-    comparison = api(f"compare/{sha}...main")
+    comparison = get(f"compare/{sha}...main")
     if comparison["merge_base_commit"]["sha"] != sha:
         raise ValueError("Commit is outside main")
-    runs = api(
+    runs = get(
         f"actions/workflows/ci.yml/runs?branch=main&head_sha={sha}&per_page=100"
     )
     if runs["total_count"] > 100:
@@ -39,7 +41,7 @@ def verified_run(sha):
     run = max(candidates, key=lambda r: r["id"], default=None)
     if not run or (run["status"], run["conclusion"]) != ("completed", "success"):
         raise ValueError("Latest exact main CI has not passed")
-    jobs = api(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
+    jobs = get(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
     passed = {j["name"] for j in jobs["jobs"] if j["conclusion"] == "success"}
     if not {"backend", "frontend", "namespace"} <= passed:
         raise ValueError("Required verification jobs have not passed")

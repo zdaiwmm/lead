@@ -57,6 +57,9 @@ def image(sha):
     p = STORE / sha
     # A root-approved CI image, mounted read-only at its permanent name.
     require(p.resolve(strict=True) == p and p.stat().st_uid == 0, "untrusted release image")
+    require(run("findmnt", "-n", "-M", p, "-o", "FSTYPE") == "squashfs", "unexpected release filesystem")
+    require(all((p / name).resolve(strict=True) == p / name for name in ("services", "web", "REVISION")),
+            "image content is redirected")
     options = run("findmnt", "-n", "-M", p, "-o", "VFS-OPTIONS").split(",")
     require("ro" in options and (p / "REVISION").read_text().strip() == sha, "unsealed release image")
     return p
@@ -168,8 +171,13 @@ def deploy(sha):
         verify(old)
         if old == sha:
             return
+        if not (STORE / sha).is_mount():
+            run(TOOLS / "mount-image", sha, timeout=1800)
         image(sha)
         mirror = STORE / "lead.git"
+        run("git", "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "--git-dir", mirror,
+            "fetch", "--no-tags", "https://github.com/zdaiwmm/lead.git",
+            "+refs/heads/main:refs/heads/main", timeout=120)
         run("git", "--git-dir", mirror, "merge-base", "--is-ancestor", old, sha)
         run("git", "--git-dir", mirror, "merge-base", "--is-ancestor", sha, "refs/heads/main")
         # Reject schema, dependency, service configuration and runtime changes without a separate plan.

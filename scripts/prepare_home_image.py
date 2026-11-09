@@ -13,10 +13,10 @@ from pathlib import Path
 from request_home_release import REPO, api, verified_run
 
 
-def prepare(sha, destination):
-    ci = verified_run(sha)
+def prepare(sha, destination, *, get=api, download_command=("gh",)):
+    ci = verified_run(sha, get=get)
     name = f"lead-home-{sha}-{ci['run_attempt']}"
-    listing = api(f"actions/runs/{ci['id']}/artifacts?name={name}&per_page=2")
+    listing = get(f"actions/runs/{ci['id']}/artifacts?name={name}&per_page=2")
     matches = [a for a in listing["artifacts"] if a["name"] == name and not a["expired"]]
     if listing["total_count"] != 1 or len(matches) != 1:
         raise ValueError("Unique live build artifact required")
@@ -31,7 +31,7 @@ def prepare(sha, destination):
     with tempfile.TemporaryDirectory(dir=destination) as tmp:
         archive = Path(tmp, "download.zip")
         with archive.open("xb") as f:
-            subprocess.run(["gh", "api", f"repos/{REPO}/actions/artifacts/{artifact['id']}/zip"],
+            subprocess.run([*download_command, "api", f"repos/{REPO}/actions/artifacts/{artifact['id']}/zip"],
                            stdout=f, check=True)
         with archive.open("rb") as f:
             if "sha256:" + hashlib.file_digest(f, "sha256").hexdigest() != digest:
