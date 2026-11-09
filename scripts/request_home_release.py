@@ -1,0 +1,69 @@
+"""Issue a versioned release request after exact main CI and GitHub approval."""
+
+import json
+import os
+import re
+import subprocess
+from pathlib import Path
+
+REPO = "zdaiwmm/lead"
+
+
+def api(resource, payload=None):
+    args = ["gh", "api", f"repos/{REPO}/{resource}"]
+    if payload is not None:
+        args.extend(["--method", "POST", "--input", "-"])
+    output = subprocess.check_output(
+        args, input=json.dumps(payload) if payload is not None else None, text=True
+    )
+    return json.loads(output)
+
+
+def verified_run(sha):
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError("Expected a full commit SHA")
+    comparison = api(f"compare/{sha}...main")
+    if comparison["merge_base_commit"]["sha"] != sha:
+        raise ValueError("Commit is outside main")
+    runs = api(
+        f"actions/workflows/ci.yml/runs?branch=main&head_sha={sha}&per_page=100"
+    )
+    if runs["total_count"] > 100:
+        raise ValueError("CI listing incomplete")
+    candidates = [
+        run for run in runs["workflow_runs"]
+        if run["head_sha"] == sha and run["head_branch"] == "main"
+        and run["path"] == ".github/workflows/ci.yml"
+        and run["event"] in {"push", "workflow_dispatch"}
+    ]
+    run = max(candidates, key=lambda r: r["id"], default=None)
+    if not run or (run["status"], run["conclusion"]) != ("completed", "success"):
+        raise ValueError("Latest exact main CI has not passed")
+    jobs = api(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
+    passed = {j["name"] for j in jobs["jobs"] if j["conclusion"] == "success"}
+    if not {"backend", "frontend", "namespace"} <= passed:
+        raise ValueError("Required verification jobs have not passed")
+    return run
+
+
+def main():
+    sha = os.environ["APPROVED_SHA"]
+    run = verified_run(sha)
+    release = api("deployments", {
+        "ref": sha, "task": "lead-home-release", "auto_merge": False,
+        "environment": "home-production", "production_environment": True,
+        "required_contexts": [],
+        "description": "Approved version awaiting the home deployment agent",
+        "payload": {"schema": 1, "repository": REPO, "ci_run": run["id"],
+                    "ci_attempt": run["run_attempt"],
+                    "approval_run": int(os.environ["GITHUB_RUN_ID"])},
+    })
+    if release.get("sha") != sha or not isinstance(release.get("id"), int):
+        raise ValueError("Unresolved deployment request; inspect GitHub before retrying")
+    with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as file:
+        file.write(f"Home deployment request #{release['id']} for `{sha}` created. "
+                   "Check deployment statuses for the server result.\n")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,34 @@
+name: Approve a home release
+run-name: Home release ${{ inputs.sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full application commit approved for the home server
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: lead-home-release-request
+  cancel-in-progress: false
+jobs:
+  request:
+    if: github.repository == 'zdaiwmm/lead' && github.ref == 'refs/heads/main' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    environment: home-release-approval
+    permissions:
+      contents: read
+      actions: read
+      deployments: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify main CI and create a home deployment request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPROVED_SHA: ${{ inputs.sha }}
+        run: python3 scripts/request_home_release.py
