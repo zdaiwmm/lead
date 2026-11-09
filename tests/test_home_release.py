@@ -90,3 +90,14 @@ def test_receipt_download_is_bound_to_github_digest(receiver, monkeypatch):
     item["digest"] = "sha256:" + "0" * 64
     with pytest.raises(ValueError, match="digest"):
         receiver.read_receipt(7)
+
+
+
+def test_unstarted_backlog_cannot_skip_older_pending_request(receiver, tmp_path, monkeypatch):
+    replies = iter([[{"id": 12}, {"id": 11}], []])
+    monkeypatch.setattr(receiver, "api", lambda _: next(replies))
+    with pytest.raises(ValueError, match="backlog"):
+        receiver.check_backlog(tmp_path, 12)
+    monkeypatch.setattr(receiver, "api", lambda _: [{"id": 13}])
+    with pytest.raises(ValueError, match="newer"):
+        receiver.check_backlog(tmp_path, 12)

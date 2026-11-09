@@ -98,6 +98,27 @@ def finish(directory, hook, request_id, sha):
         raise ValueError("Node verification failed; inspect before the next release")
 
 
+def check_backlog(directory, request_id):
+    page = 1
+    while True:
+        rows = api("deployments?environment=home-production&task=lead-home-release"
+                   f"&per_page=100&page={page}")
+        if page == 1 and (not rows or rows[0]["id"] != request_id):
+            raise ValueError("A newer release arrived during preflight")
+        for row in rows:
+            previous = row["id"]
+            if previous == request_id:
+                continue
+            if (directory / f"{previous}.reported").is_file():
+                return
+            statuses = api(f"deployments/{previous}/statuses?per_page=1")
+            if not statuses or statuses[0]["state"] not in {"inactive", "success", "failure", "error"}:
+                raise ValueError("Multiple outstanding releases; reconcile the backlog")
+        if len(rows) < 100:
+            return
+        page += 1
+
+
 def poll(directory, hook):
     requests = api("deployments?environment=home-production&task=lead-home-release&per_page=1")
     if not requests:
@@ -146,6 +167,7 @@ def poll(directory, hook):
             raise ValueError("Node did not identify its current version")
         if live != sha and api(f"compare/{live}...{sha}")["merge_base_commit"]["sha"] != live:
             raise ValueError("Release would roll back or discard a divergent live version")
+        check_backlog(directory, request_id)
         save_record(marker, sha)
         report(request_id, "in_progress")
         if live != sha:
