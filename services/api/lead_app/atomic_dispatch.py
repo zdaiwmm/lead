@@ -43,9 +43,9 @@ def enqueue_channel_work(c, aid, agent, business):
             c,
             """INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,scheduled_at)
             SELECT %s,%s,'dispatch.channel','queued',%s,%s,now()
-            WHERE NOT EXISTS(SELECT 1 FROM lead.tasks WHERE workflow_id=%s)
+            WHERE NOT EXISTS(SELECT 1 FROM lead.tasks WHERE workflow_id IN (%s,%s))
             ON CONFLICT(workflow_id) DO NOTHING RETURNING id""",
-            (current_tenant(), aid, workflow_id, j(intent), workflow_id),
+            (current_tenant(), aid, workflow_id, j(intent), key, workflow_id),
         )
         if row:
             emit(c, aid, "dispatch.channel", {"task_id": str(row["id"])})

@@ -98,6 +98,16 @@
 
 自主工作筛选、评分及执行分派在 operating_kernel.py；SupervisorWorkflow、ChatWorkflow、PublishWorkflow 和 AnalyticsIngestWorkflow 在 workflows.py；事件派发在 worker.py。研究在 operating_work.py；发现及参与在 community_discovery.py 和 community_runtime.py；私信在 telegram_inbox.py；账号和受众在 account_setup.py、owned_audience.py；内容与素材在 content_backlog.py、creative_pipeline.py；发布、回执在 activities.py、publication_delivery.py、publication_recovery.py；采集、实验及跟进在 analytics_ingest.py、growth_experiments.py、operating_followups.py。以上路径均相对于 services/api/lead_app。
 
+### 后续动作分批 · 2026-11-10
+
+用户确认按原目录逐批实施。分支 codex/atomic-dispatch-read-batch 起点 6bc57ad。本批验证公开原文在模型不可用时能独立保存，另验证已提交采集事件的投递与已成熟日期的汇总能在独立执行位重叠。单 Agent 试点、同负载基线、目标去重和后续真实产出是扩大范围的前置条件。
+
+逐项代码入口见[动作入口与执行归属](atomic-dispatch-coverage.md)。LEAD_PARALLEL_READ_AGENT_IDS 为按 Agent 指定的新试点，默认空。公开原文检查点由原任务持有，返回后释放浏览器，报告继续走实际模型预留。分析投递与汇总使用两个不同执行位；日期行锁、事件租约、投递代数与账号发布入口各自保留。
+
+隔离 PostgreSQL 18 的固定工作集由一条已入账事件的成熟日汇总和另一条待投递事件组成。两个就绪入口均注入 150 ms 等待，交替对照各 12 轮，包含真实去重、入账、二次回放和最终日汇总，工作流传输使用受控替身。串行就绪等待 P95 为 157 ms，试点为 1.2 ms。每组混合工作集耗时中位数分别为 333 ms 和 175 ms。两组均产生 24 条唯一事实、12 个非空日期汇总、0 个模型 token。命令为 PYTHONPATH=services/api python tests/replay_atomic_reads.py，使用独立数据库和状态目录。以上时间只适用于该负载；线上真实群、模型和平台提交另行验收。
+
+另外对两个就绪步骤各注入 60 秒等待。一次串行对照耗时 120.06 秒，试点 60.04 秒，两组均完成两条唯一事件、一个非空日期汇总及重复投递核对，模型 token 为零。
+
 ## 本次实施记录
 
 用户于 2026-11-09 确认实施、验证后合并发布，并观察 Chamber 的运营进展。源仓库为 zdaiwmm/lead，分支 codex/atomic-dispatch，从 GitHub main 的 c801390 开始。家庭生产 Worker 在首次只读核对时挂载 87d151a96b4ae4142a4c1bdc61b579dbac9509de。发布和业务验收以设备实际回报为准。
@@ -108,11 +118,3 @@
 通用调度将审查后的候选互斥集合记入 operating.decision 的 parallel_shadow。保守处理可能转入原生检索的复合发现步骤。独立执行首批接入单渠道底稿，试点使用 LEAD_PARALLEL_AGENT_IDS 的精确 Agent ID 列表；未列入者保留原入口。每个平台绑定业务版本、渠道版本、控制版本和稳定业务键，独立的 lead-offline 队列只占一个后台执行位。业务产物和完成记录同事务写入。实际模型开销超过预留时保留账本和后续付费拦截，允许继续执行无模型步骤。
 
 未验证项包括家庭节点上线、Chamber 设备适配接入与跨业务吞吐门槛。Chamber 的设备账户与运行配置留在其受控节点。
-
-### 后续动作分批 · 2026-11-10
-
-用户确认按原目录逐批实施。分支 codex/atomic-dispatch-read-batch 起点 6bc57ad。本批验证公开原文在模型不可用时能独立保存，另验证已提交采集事件的投递与已成熟日期的汇总能在独立执行位重叠。单 Agent 试点、同负载基线、目标去重和后续真实产出是扩大范围的前置条件。
-
-逐项代码入口见[动作入口与执行归属](atomic-dispatch-coverage.md)。LEAD_PARALLEL_READ_AGENT_IDS 为按 Agent 指定的新试点，默认空。公开原文检查点由原任务持有，返回后释放浏览器，报告继续走实际模型预留。分析投递与汇总使用两个不同执行位；日期行锁、事件租约、投递代数与账号发布入口各自保留。
-
-隔离 PostgreSQL 18 的固定工作集由一条已入账事件的成熟日汇总和另一条待投递事件组成。两个就绪入口均注入 150 ms 等待，交替对照各 12 轮，包含真实去重、入账、二次回放和最终日汇总，工作流传输使用受控替身。串行就绪等待 P95 为 157 ms，试点为 1.2 ms。每组混合工作集耗时中位数分别为 333 ms 和 175 ms。两组均产生 24 条唯一事实、12 个非空日期汇总、0 个模型 token。命令为 PYTHONPATH=services/api python tests/replay_atomic_reads.py，使用独立数据库和状态目录。以上时间只适用于该负载；线上真实群、模型和平台提交另行验收。
