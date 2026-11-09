@@ -622,6 +622,10 @@ def test_acquisition_scope_separates_page_entries_from_window_conversions(pixel)
                "properties": {"order_id": "organic", "value": 12, "currency": "CNY"}}
     result = client.post("/collect/server/events", headers={"Authorization": "Bearer " + server}, json=organic)
     assert result.status_code == 200, result.text
+    details = client.get(f"/api/agents/{aid}/analytics/report").json()
+    assert details["report_traffic"] == "promotion"
+    assert details["pixel"]["report"]["event_count"] == 1
+    assert details["pixel"]["report"]["sessions"] == 1
     assert recover_scope(tenant, aid, "live")
     base = f"/api/agents/{aid}/analytics/"
     for traffic, pages, revenue in [("promotion", 2, 8), ("site", 4, 20)]:

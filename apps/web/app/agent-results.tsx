@@ -28,7 +28,6 @@ export default function AgentResults({
   const [copied, setCopied] = useState(false);
   const [details, setDetails] = useState(false);
   const query = trafficParams(channel);
-  const scopeLabel = channel === "site" ? "全站" : channel === "unattributed" ? "未归因" : "推广";
   if (country) query.set("country", country);
   const { data, error, refresh } = useScopedData(
     agent.id,
@@ -45,8 +44,8 @@ export default function AgentResults({
   ];
   if (pixel?.installed)
     metrics.push(
-      ["pv", scopeLabel + "浏览 PV"],
-      ["site_devices", scopeLabel + "访客设备"],
+      ["pv", "推广浏览 PV"],
+      ["site_devices", "推广访客设备"],
       ...Object.entries(data?.events || {}).map(([k, v]) => [
         `event:${k}`,
         String(v),
@@ -86,9 +85,7 @@ export default function AgentResults({
             value={channel}
             options={[
               ["promotion", "全部推广渠道"],
-              ["site", "全站流量"],
               ...Object.entries(socialNames),
-              ["unattributed", "未归因"],
             ]}
             onChange={(next) => {
               setChannel(next);

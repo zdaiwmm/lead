@@ -21,9 +21,8 @@ const channelName = (s: string) =>
   s === "unattributed" ? "未归因" : socialNames[s] || s;
 // One selection drives every query in the acquisition card and its details.
 export function trafficParams(selection: string) {
-  const site = selection === "site" || selection === "unattributed";
-  const params = new URLSearchParams({ traffic: site ? "site" : "promotion" });
-  if (selection !== "site" && selection !== "promotion")
+  const params = new URLSearchParams({ traffic: "promotion" });
+  if (selection !== "promotion")
     params.set("channel", selection);
   return params;
 }
@@ -248,8 +247,6 @@ export default function AnalyticsSummary({
           来源渠道
           <select value={channel} onChange={(e) => setChannel(e.target.value)}>
             <option value="promotion">全部推广渠道</option>
-            <option value="site">全站流量</option>
-            <option value="unattributed">未归因</option>
             {Array.from(channels).map((s) => (
               <option key={s} value={s}>
                 {channelName(s)}

@@ -78,7 +78,7 @@ export default function AnalyticsPanel({
     let value: Row;
     if (!currentTask.current)
       value = await api("/agents/" + aid + "/analytics/setup-state");
-    else if (readOnlyProp)
+    else if (readOnlyProp || requestedTask === "details")
       value = await api("/agents/" + aid + "/analytics/report");
     else {
       try {
@@ -629,10 +629,11 @@ export default function AnalyticsPanel({
       </button>
     );
   } else if (task === "details") {
+    const report = data?.agent_id === aid && data.report_traffic === "promotion" ? pixel?.report : null;
     title = "事件明细";
     content = (
       <div className="pixel-task">
-        <p className="muted small">近 30 天 · 正式数据</p>
+        <p className="muted small">近 30 天 · Agent 推广事件</p>
         <table className="pixel-event-table">
           <thead>
             <tr>
@@ -644,7 +645,7 @@ export default function AnalyticsPanel({
             </tr>
           </thead>
           <tbody>
-            {(pixel?.report.events || []).map((e: Row) => (
+            {(report?.events || []).map((e: Row) => (
               <tr key={e.name}>
                 <td>
                   {e.label}
@@ -672,8 +673,8 @@ export default function AnalyticsPanel({
             ))}
           </tbody>
         </table>
-        {pixel?.report.event_count == null && (
-          <p className="pixel-task-hint">暂无正式事件数据</p>
+        {report?.event_count == null && (
+          <p className="pixel-task-hint">{report ? "暂无推广事件" : "正在读取推广事件…"}</p>
         )}
         <section className="pixel-stat-rules">
           <h3>统计口径</h3>
