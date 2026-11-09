@@ -1,14 +1,14 @@
 """Poll GitHub from the single home release node; default to read-only inspection."""
 
 import argparse
-from datetime import UTC, datetime, timedelta
 import fcntl
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import tempfile
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from request_home_release import REPO, api, verified_run
 
