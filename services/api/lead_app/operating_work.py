@@ -442,7 +442,9 @@ async def strategy_report(aid, task, agent, business, context):
     }
 
 
-async def execute(aid, task):
+async def execute(aid, task, *, observation_only=False):
+    if observation_only and task["input"]["kind"] not in {"journey", "validate"}:
+        raise ValueError("unsupported public observation step")
     from .domain import metrics
 
     kind = task["input"]["kind"]
@@ -761,6 +763,8 @@ async def execute(aid, task):
                         task["id"],
                     ),
                 )
+        if observation_only:
+            return {"status": "observation_checkpoint"}
         from .operating_feedback import fingerprint
 
         if any(

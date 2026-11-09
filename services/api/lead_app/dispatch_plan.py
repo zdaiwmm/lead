@@ -16,7 +16,12 @@ def resources(choice):
     if kind == "operating.strategy":
         return WorkResources(frozenset({"model", "strategy"}))
     if kind in {"operating.journey", "operating.validate", "operating.opportunities"}:
-        return WorkResources(frozenset({"public_browser", "model"}))
+        # ResearchPage.command serializes on this agent's browser Actor even
+        # for a public page. A source-only checkpoint does not need a model.
+        slots = {"public_browser", "login_session"}
+        if not choice.read_source:
+            slots.add("model")
+        return WorkResources(frozenset(slots))
     if kind == "content":
         return WorkResources(frozenset({"model", "render", "content_inventory"}))
     if kind == "audience" or kind == "community_progress":

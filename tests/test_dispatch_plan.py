@@ -147,3 +147,11 @@ def test_model_wait_keeps_discovery_cursor_and_does_not_spend_retry():
             }
     finally:
         domain.set_control(aid, "archive")
+
+
+def test_source_only_work_leaves_model_free_and_reserves_the_real_actor():
+    read = choice("operating.journey")
+    read.read_source = True
+    assert [row["key"] for row in shadow_batch([read, choice("audience"), choice("operating.strategy")])] == [
+        "operating.journey", "operating.strategy"
+    ]

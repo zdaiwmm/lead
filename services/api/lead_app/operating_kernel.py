@@ -37,6 +37,7 @@ class Candidate:
     experiment_id: str | None = None
     delivery_ready: bool = False
     community_operation: dict | None = None
+    read_source: bool = False
 
 
 def blocked(c, *, community_worker=False):
@@ -286,7 +287,16 @@ def candidates(c, aid, agent, business, now=None):
             if not community_operation:
                 return
             paid_step = community_operation["paid"]
+        from .atomic_dispatch import read_batch_enabled
+
+        # The initial journey/validation read needs no model. Once we have
+        # evidence, the report remains subject to the original model gates.
+        read_source = (kind in {"operating.journey", "operating.validate"}
+                       and read_batch_enabled(aid) and task is not None
+                       and not (task.get("result") or {}).get("observation_checkpoint"))
         request_units = None
+        if read_source:
+            paid_step, request_units = False, 0
         if kind == "community_discovery":
             checkpoint = one(c, """SELECT result FROM lead.tasks WHERE type='community.discover'
                 AND state='running' AND input->>'checkpoint_version'='2'
@@ -315,7 +325,7 @@ def candidates(c, aid, agent, business, now=None):
                     )
         if request_units is not None:
             rating = assess(
-                admission, kind, priority + boost, task, request_units=request_units
+                admission, kind, priority + boost, task, request_units=request_units, paid_step=paid_step
             )
         elif pilot or kind == "community_discovery":
             rating = assess(
@@ -353,6 +363,7 @@ def candidates(c, aid, agent, business, now=None):
                 experiment_id,
                 delivery_ready,
                 community_operation,
+                read_source,
             )
         )
 
@@ -594,7 +605,8 @@ async def run_work(aid, candidate, operating_plan=None):
             (j({**(task["result"] or {}), "attempts": attempts}), task["id"]),
         )
     try:
-        result = await asyncio.wait_for(execute(aid, task), timeout=190)
+        work = execute(aid, task, observation_only=True) if candidate.read_source else execute(aid, task)
+        result = await asyncio.wait_for(work, timeout=190)
         with tx(aid) as c:
             current = one(
                 c, "SELECT * FROM lead.agents WHERE id=%s FOR NO KEY UPDATE", (aid,)
@@ -614,6 +626,13 @@ async def run_work(aid, candidate, operating_plan=None):
                     (j({"reason": "configuration_changed"}), task["id"]),
                 )
                 return {"delay": 30, "reason": "configuration_changed"}
+            if candidate.read_source and result.get("status") == "observation_checkpoint":
+                # The original task owns both phases. Its evidence survives a
+                # restart between browser close and this scheduling transition.
+                c.execute("""UPDATE lead.tasks SET state='planned',scheduled_at=now(),
+                    result=result || %s WHERE id=%s AND state='running'""",
+                    (j({"attempts": attempts - 1}), task["id"]))
+                return {"delay":1, "reason":"public_observation_ready", "operating_task_id":str(task["id"])}
             result.update(
                 {
                     "attempts": attempts,

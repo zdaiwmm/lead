@@ -247,7 +247,7 @@ def refresh_scope(tenant, agent, scope="live", limit=7):
                 row = one(
                     c,
                     """SELECT * FROM lead.analytics_report_dirty WHERE state='pending' AND next_attempt_at<=now()
-                    ORDER BY day DESC LIMIT 1 FOR UPDATE SKIP LOCKED""",
+                    ORDER BY next_attempt_at,changed_at,day LIMIT 1 FOR UPDATE SKIP LOCKED""",
                 )
                 if not row:
                     break
