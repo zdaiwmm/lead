@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import AnalyticsPanel, { PixelTask } from "./analytics-panel";
-import AnalyticsSummary, { useScopedData } from "./analytics-summary";
+import AnalyticsSummary, { trafficParams, useScopedData } from "./analytics-summary";
 import { socialNames } from "./social-icon";
 import PlatformFilter from "./platform-filter";
 import DialogPanel from "./dialog-panel";
@@ -20,15 +20,14 @@ export default function AgentResults({
   const pixel =
     pixelData && pixelData.agent_id === agent.id ? pixelData.pixel : null;
   const promotion = agent.onboarding_state?.promotion;
-  const [channel, setChannel] = useState("");
+  const [channel, setChannel] = useState("promotion");
   const [country, setCountry] = useState("");
   const [range, setRange] = useState(30);
   const [metric, setMetric] = useState("clicks");
   const [resumeEvent, setResumeEvent] = useState("");
   const [copied, setCopied] = useState(false);
   const [details, setDetails] = useState(false);
-  const query = new URLSearchParams();
-  if (channel) query.set("channel", channel);
+  const query = trafficParams(channel);
   if (country) query.set("country", country);
   const { data, error, refresh } = useScopedData(
     agent.id,
@@ -36,14 +35,17 @@ export default function AgentResults({
   );
   const rows: Row[] = (data?.series || []).slice(-range);
   const today = rows.at(-1);
+  const updatedAt = today?.updated_at ? new Date(today.updated_at).toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai", hour12: false,
+  }) : null;
   const metrics = [
     ["clicks", "推广点击 PV"],
     ["devices", "点击设备数"],
   ];
   if (pixel?.installed)
     metrics.push(
-      ["pv", "站内访问PV"],
-      ["site_devices", "站内访客设备"],
+      ["pv", "推广浏览 PV"],
+      ["site_devices", "推广访客设备"],
       ...Object.entries(data?.events || {}).map(([k, v]) => [
         `event:${k}`,
         String(v),
@@ -82,9 +84,8 @@ export default function AgentResults({
             title="获客渠道"
             value={channel}
             options={[
-              ["", "全部渠道"],
+              ["promotion", "全部推广渠道"],
               ...Object.entries(socialNames),
-              ["unattributed", "未归因"],
             ]}
             onChange={(next) => {
               setChannel(next);
@@ -139,11 +140,15 @@ export default function AgentResults({
               <span>{n} · 今日</span>
               <strong>
                 {value(today, k)?.toLocaleString("zh-CN") ??
-                  (k === "devices" && today?.clicks > 0 ? "未采集" : "—")}
+                  (today?.report_state === "failed" ? "待恢复" : today?.report_state === "pending" ? "待汇总" : today ? "未采集" : "—")}
               </strong>
             </button>
           ))}
       </div>
+      {today && (updatedAt || today.report_state === "pending" || today.report_state === "failed") &&
+        <small role="status">{today.report_state === "failed" ? "部分数据处理失败" :
+          today.report_state === "pending" ? "有数据待汇总" : "汇总完成"}
+          {updatedAt && ` · 最近汇总 ${updatedAt}`}</small>}
       </div><div>
       <div className={styles.chartHead}>
         <span>{metrics.find(([k]) => k === selected)?.[1]}趋势</span>
@@ -213,6 +218,7 @@ export default function AgentResults({
           onClose={() => setDetails(false)}
         >
           <AnalyticsSummary
+            initialChannel={channel}
             aid={agent.id}
             readOnly={readOnly}
             promotion={{

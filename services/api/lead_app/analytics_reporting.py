@@ -7,6 +7,7 @@ acknowledges the date. A concurrent source write leaves a new dirty notification
 
 import logging
 from datetime import date, datetime, time, timedelta
+from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -19,7 +20,10 @@ from .scope import current_tenant, principal
 
 router = APIRouter()
 TZ = ZoneInfo("Asia/Shanghai")
-VERSION = "analytics-report-v1"
+VERSION = "analytics-report-v2"
+Traffic = Literal["promotion", "site"]
+CHANNEL_FILTER = """ AND (%(channel)s::text IS NULL OR channel=%(channel)s)
+    AND (%(traffic)s='site' OR channel<>'unattributed')"""
 BASIC = ("PageView", "Engagement", "Identify", "VisitSession", "ShortLinkClick")
 OBJECTIVES = {
     "signup": "CompleteRegistration",
@@ -45,7 +49,10 @@ WITH visits AS (
   FROM lead.pixel_receipts p LEFT JOIN lead.pixel_touchpoints t
     ON (t.tenant_id,t.agent_id,t.id)=(p.tenant_id,p.agent_id,p.touchpoint_id)
   LEFT JOIN lead.analytics_clicks click ON (click.tenant_id,click.agent_id,click.id)=(p.tenant_id,p.agent_id,p.click_id)
-  LEFT JOIN lead.tracking_links l ON (l.tenant_id,l.agent_id,l.id)=(p.tenant_id,p.agent_id,coalesce(t.tracking_link_id,click.tracking_link_id))
+  LEFT JOIN lead.visit_sessions v ON (v.tenant_id,v.agent_id,v.id)=(p.tenant_id,p.agent_id,p.visit_session_id)
+  LEFT JOIN lead.tracking_links l ON (l.tenant_id,l.agent_id,l.id)=(p.tenant_id,p.agent_id,
+    CASE WHEN p.event_name IN ('PageView','Engagement','Identify') THEN v.tracking_link_id
+         ELSE coalesce(t.tracking_link_id,click.tracking_link_id) END)
   WHERE p.tenant_id=lead.ctx_tenant() AND p.agent_id=lead.ctx_agent() AND p.scope_key=%(scope)s
     AND p.occurred_at>=%(start)s AND p.occurred_at<%(end)s
 ), legacy AS (
@@ -211,7 +218,7 @@ def materialized_metrics(c, objective):
             c,
             """SELECT coalesce(sum(clicks),0)::bigint AS clicks,
           coalesce(sum(attributed_sessions),0)::bigint AS visits,coalesce(sum(qualified_visits),0)::bigint AS qualified,
-          coalesce(sum(server_counted) FILTER(WHERE event_name=%s),0)::bigint AS conversions
+          coalesce(sum(server_counted) FILTER(WHERE event_name=%s AND channel<>'unattributed'),0)::bigint AS conversions
           FROM lead.analytics_rollups WHERE grain='day' AND day BETWEEN %s AND %s""",
             (OBJECTIVES[objective], start, end),
         )
@@ -221,6 +228,17 @@ def materialized_metrics(c, objective):
 
 def refresh_scope(tenant, agent, scope="live", limit=7):
     completed = []
+    # Reuse the existing queue and retry policy for previously built days.
+    # Commit scheduling separately so a failed rebuild does not lose its job.
+    with scoped_tx(tenant, agent, scope) as c:
+        c.execute(
+            """INSERT INTO lead.analytics_report_dirty(tenant_id,agent_id,scope_key,day)
+               SELECT tenant_id,agent_id,scope_key,day FROM lead.analytics_report_days d
+               WHERE version='analytics-report-v1' AND NOT EXISTS (
+                   SELECT 1 FROM lead.analytics_report_dirty q WHERE q.day=d.day)
+               ORDER BY day DESC LIMIT %s ON CONFLICT DO NOTHING""",
+            (limit,),
+        )
     for _ in range(limit):
         day = None
         try:
@@ -274,12 +292,9 @@ def require_scope(c, aid, scope):
     return agent
 
 
-def _filters(channel, event_name):
-    return " AND (%(channel)s::text IS NULL OR channel=%(channel)s)"
-
-
 def read_report(
-    c, aid, start_date, end_date, scope, grain="day", channel=None, event_name=None
+    c, aid, start_date, end_date, scope, grain="day", channel=None, event_name=None,
+    traffic: Traffic = "site",
 ):
     from .admin_controls import attribution
     from .analytics import promotion_settings
@@ -293,13 +308,12 @@ def read_report(
         "start": start_date,
         "end": end_date,
         "grain": grain,
+        "traffic": traffic,
         "channel": channel,
         "event": event_name,
         "objective": objective,
     }
-    where = " WHERE grain='day' AND day BETWEEN %(start)s AND %(end)s" + _filters(
-        channel, event_name
-    )
+    where = " WHERE grain='day' AND day BETWEEN %(start)s AND %(end)s" + CHANNEL_FILTER
     fields = """coalesce(sum(clicks),0)::bigint AS clicks,coalesce(sum(pv),0)::bigint AS pv,
       coalesce(sum(sessions),0)::bigint AS sessions,coalesce(sum(attributed_sessions),0)::bigint AS attributed_sessions,
       coalesce(sum(qualified_visits),0)::bigint AS qualified_visits,
@@ -311,7 +325,7 @@ def read_report(
         c,
         """SELECT count(DISTINCT identity_key) FILTER(WHERE kind='visitor') AS visitors
       FROM lead.analytics_audience WHERE grain='day' AND day BETWEEN %(start)s AND %(end)s
-      AND (%(channel)s::text IS NULL OR channel=%(channel)s)""",
+      """ + CHANNEL_FILTER,
         args,
     )
     coverage = one(
@@ -335,6 +349,10 @@ def read_report(
       min(changed_at) AS oldest_change_at FROM lead.analytics_report_dirty q WHERE day BETWEEN %s AND %s""",
         (start_date, end_date),
     )
+    outdated = one(
+        c, "SELECT count(*) AS n FROM lead.analytics_report_days WHERE day BETWEEN %s AND %s AND version<>%s",
+        (start_date, end_date, VERSION),
+    )["n"]
     last = one(
         c,
         "SELECT max(refreshed_at) AS updated_at FROM lead.analytics_report_days WHERE day BETWEEN %s AND %s",
@@ -349,7 +367,7 @@ def read_report(
             summary[key] = None
     if not server:
         summary["conversions"] = None
-    if progress["unbuilt_days"]:
+    if progress["unbuilt_days"] or outdated:
         summary = {key: None for key in summary}
     series = all_rows(
         c,
@@ -358,7 +376,7 @@ def read_report(
       sum(server_counted) FILTER(WHERE event_name=%(objective)s)::bigint AS conversions,
       sum(unknown_pv)::bigint AS unknown_pv FROM lead.analytics_rollups
       WHERE grain=%(grain)s AND day BETWEEN %(start)s AND %(end)s"""
-        + _filters(channel, event_name)
+        + CHANNEL_FILTER
         + " GROUP BY bucket ORDER BY bucket",
         args,
     )
@@ -403,7 +421,7 @@ def read_report(
         c,
         """SELECT substring(kind from 7) AS name,count(DISTINCT identity_key) AS n FROM lead.analytics_audience
       WHERE grain='day' AND day BETWEEN %(start)s AND %(end)s AND kind LIKE 'event:%%'
-      AND (%(channel)s::text IS NULL OR channel=%(channel)s) GROUP BY kind""",
+      """ + CHANNEL_FILTER + " GROUP BY kind",
         args,
     )
     for item in events:
@@ -426,7 +444,7 @@ def read_report(
         """SELECT country,sum(clicks)::bigint AS clicks,sum(pv)::bigint AS pv,
       coalesce(sum(server_conversions) FILTER(WHERE event_name=%(objective)s),0)::bigint AS conversions
       FROM lead.analytics_geo_rollups WHERE day BETWEEN %(start)s AND %(end)s
-        AND (%(channel)s::text IS NULL OR channel=%(channel)s)
+        """ + CHANNEL_FILTER + """
       GROUP BY country ORDER BY sum(clicks)+sum(pv)+sum(server_conversions) DESC,country""",
         args,
     )
@@ -442,12 +460,13 @@ def read_report(
         "grain": grain,
         "version": VERSION,
         "summary": summary,
-        "series": series,
-        "channels": channels,
-        "countries": countries,
+        "traffic": traffic,
+        "series": [] if outdated else series,
+        "channels": [] if outdated else channels,
+        "countries": [] if outdated else countries,
         "geography": geo_status(),
-        "events": events,
-        "amounts": amounts,
+        "events": [] if outdated else events,
+        "amounts": [] if outdated else amounts,
         "coverage": {
             "site": site,
             "server": server,
@@ -456,7 +475,8 @@ def read_report(
         "aggregation": {
             **progress,
             "updated_at": last,
-            "ready": progress["pending_days"] == 0,
+            "outdated_days": outdated,
+            "ready": not (progress["pending_days"] or outdated),
         },
         "conversion_event": objective,
         "promotion": promotion_settings(c, agent),
@@ -473,6 +493,7 @@ def summary(
     grain: str = "day",
     channel: str | None = None,
     event_name: str | None = None,
+    traffic: Traffic = "site",
 ):
     scope_key = canonical_scope(scope_key)
     start_date, end_date = bounds(start_date, end_date)
@@ -480,7 +501,7 @@ def summary(
         raise HTTPException(422, "统计粒度无效")
     with scoped_tx(current_tenant(), str(aid), scope_key) as c:
         return read_report(
-            c, str(aid), start_date, end_date, scope_key, grain, channel, event_name
+            c, str(aid), start_date, end_date, scope_key, grain, channel, event_name, traffic
         )
 
 
@@ -526,13 +547,18 @@ def rebuild(aid: UUID, body: Rebuild):
 
 
 @router.get("/api/agents/{aid}/analytics/overview")
-def overview(aid: UUID, channel: str | None = None, country: str | None = None):
+def overview(
+    aid: UUID, channel: str | None = None, country: str | None = None,
+    traffic: Traffic | None = None,
+):
     """Daily live snapshots for the compact workspace card, in Beijing time."""
     from .pixel_events import pixel_installed
 
     start, end = bounds(None, None)
-    args = {"start": start, "end": end, "channel": channel, "country": country}
-    window = "day BETWEEN %(start)s AND %(end)s AND (%(channel)s::text IS NULL OR channel=%(channel)s)"
+    # Older clients can still explicitly request the unattributed channel.
+    traffic = traffic or ("site" if channel == "unattributed" else "promotion")
+    args = {"start": start, "end": end, "channel": channel, "country": country, "traffic": traffic}
+    window = "day BETWEEN %(start)s AND %(end)s" + CHANNEL_FILTER
     with scoped_tx(current_tenant(), str(aid), "live") as c:
         require_scope(c, str(aid), "live")
         connection = one(c, """SELECT agent_id,state,last_pageview_at FROM lead.analytics_connections
@@ -556,7 +582,16 @@ def overview(aid: UUID, channel: str | None = None, country: str | None = None):
             + window + " AND (%(country)s::text IS NULL OR kind='site_device:'||%(country)s) GROUP BY day",
             args,
         ) if installed else []
-        pending = all_rows(c, "SELECT day FROM lead.analytics_report_dirty q WHERE day BETWEEN %(start)s AND %(end)s AND NOT EXISTS (SELECT 1 FROM lead.analytics_report_days d WHERE d.day=q.day)", args)
+        status = all_rows(c, """WITH ingest AS (
+                SELECT (received_at AT TIME ZONE 'Asia/Shanghai')::date AS day,
+                    bool_or(state='failed') AS failed
+                FROM lead.analytics_ingest_events WHERE state IN ('pending','failed')
+                  AND received_at >= (%(start)s::date::timestamp AT TIME ZONE 'Asia/Shanghai')
+                  AND received_at < ((%(end)s::date+1)::timestamp AT TIME ZONE 'Asia/Shanghai')
+                GROUP BY 1)
+            SELECT day, d.refreshed_at, d.version, q.state AS rebuild_state, i.failed AS ingest_failed
+            FROM lead.analytics_report_days d FULL JOIN lead.analytics_report_dirty q USING(day)
+            FULL JOIN ingest i USING(day) WHERE day BETWEEN %(start)s AND %(end)s""", args)
         definitions = all_rows(c, "SELECT name,label FROM lead.pixel_definitions")
     rows = {(start + timedelta(days=i)): {"clicks": 0, "pv": 0, "visitors": 0, "events": {}} for i in range((end - start).days + 1)}
     labels = {r["name"]: r["label"] for r in definitions}
@@ -581,8 +616,24 @@ def overview(aid: UUID, channel: str | None = None, country: str | None = None):
         rows[r["day"]]["visitors"] = r["n"]
     device_counts = {r["day"]: r["n"] for r in devices}
     site_counts = {r["day"]: None if r["missing"] else r["n"] for r in site_devices}
-    unavailable = {r["day"] for r in pending}
+    statuses = {r["day"]: r for r in status}
+    unavailable = {r["day"] for r in status if not r["refreshed_at"] and
+                   (r["rebuild_state"] or r["ingest_failed"] is not None)}
     for day, row in rows.items():
+        snapshot = statuses.get(day) or {}
+        row["updated_at"] = snapshot.get("refreshed_at")
+        if snapshot.get("version") and snapshot["version"] != VERSION:
+            unavailable.add(day)
+            row["report_state"] = "pending"
+        elif day == end and not snapshot:
+            unavailable.add(day)
+            row["report_state"] = "unmeasured"
+        elif snapshot.get("rebuild_state") == "failed" or snapshot.get("ingest_failed"):
+            row["report_state"] = "failed"
+        elif snapshot.get("rebuild_state") or snapshot.get("ingest_failed") is False:
+            row["report_state"] = "pending"
+        else:
+            row["report_state"] = "current"
         if not installed or day in unavailable:
             row["pv"] = None
             row["site_devices"] = None
