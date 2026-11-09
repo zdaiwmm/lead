@@ -66,3 +66,13 @@ def test_receipt_must_match_approved_request_id(receiver, tmp_path):
         pytest.raises(ValueError, match="Mismatch"),
     ):
         receiver.approved(request)
+
+
+def test_completed_request_does_not_need_expired_approval_artifacts(receiver, tmp_path):
+    request = dict(id=123, sha="a" * 40)
+    with (
+        patch.object(receiver, "api", side_effect=[[request], [{"state": "success"}]]),
+        patch.object(receiver, "approved") as approval,
+    ):
+        receiver.poll(tmp_path, "/unused")
+        approval.assert_not_called()

@@ -60,11 +60,11 @@ def poll(directory, hook):
     request = requests[0]
     request_id, sha = request["id"], request["sha"]
     print(f"Latest home deployment #{request_id}, SHA {sha}")
-    if not approved(request) or hook is None:
-        return
     statuses = api(f"deployments/{request_id}/statuses?per_page=1")
     remote = statuses[0]["state"] if statuses else None
     if remote in {"success", "inactive", "failure", "error"}:
+        return
+    if not approved(request) or hook is None:
         return
     marker = directory / f"{request_id}.started"
     if not marker.exists():
