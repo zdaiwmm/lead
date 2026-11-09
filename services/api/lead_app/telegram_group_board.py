@@ -1,5 +1,7 @@
 """Read-only Telegram group acquisition card for the agent workspace."""
 
+from datetime import datetime, timedelta
+
 from .community_growth import discovery_config
 from .db import all_rows, one
 
@@ -60,9 +62,12 @@ WITH candidate AS (
   ORDER BY metric,key,at DESC
 ), numbered AS (
   SELECT *,row_number() OVER (PARTITION BY metric ORDER BY at DESC,key) AS n FROM daily
-)
+), totals AS (
 SELECT metric,count(*) AS total,jsonb_agg(jsonb_build_object('name',name,'at',at,'detail',detail)
   ORDER BY n) FILTER (WHERE n<=50) AS records FROM numbered GROUP BY metric
+)
+SELECT totals.*, latest.admitted_at FROM (SELECT max(at) AS admitted_at FROM candidate) latest
+LEFT JOIN totals ON true
 """
 
 
@@ -75,6 +80,68 @@ def task_action(row):
     if row["join_state"] in ("unknown", "dispatching", "pending_approval"):
         return f"核对「{name}」的入群结果"
     return f"跟进「{name}」的群内活动"
+
+
+def clock_value(value):
+    if isinstance(value, datetime):
+        return value if value.tzinfo else None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else None
+
+
+def resident_activity(agent, work, now):
+    state = agent["onboarding_state"].get("telegram_executor")
+    if not isinstance(state, dict) or not state.get("mode"):
+        return None
+    heartbeat = clock_value(state.get("heartbeat_at"))
+    # The dedicated executor publishes a heartbeat every 30 seconds.
+    fresh = bool(heartbeat and now - timedelta(minutes=2) <= heartbeat <= now + timedelta(seconds=30))
+    discovery = next((row for row in work if row["type"] == "community.discover"
+                      and row["state"] == "running"), None)
+    native = discovery and discovery["phase"] == "native_collect"
+    search_after = clock_value(state.get("native_search_after")) if native else None
+    sleeping = search_after is not None and search_after > now
+    action = state.get("action")
+    if agent["desired_state"] != "running":
+        current, upcoming = "运营未启动或已暂停", "恢复运营后重新排期"
+    elif not fresh:
+        current, upcoming = "执行器心跳未更新", "等待执行器重新报告状态"
+    elif action in {"discover", "checking"} or state.get("discovery_action") == "running":
+        current = "正在检查执行条件" if action == "checking" else "正在推进找群研究"
+        upcoming = None
+    elif action not in {None, "waiting", "readonly_wait", "no_due_task"}:
+        active = next((row for row in work if row["type"] == "community.engage"
+                       and row["state"] == "running"), None)
+        current = task_action(active) if active else "正在处理社群任务"
+        upcoming = None
+    elif state.get("last_result") == "backup_not_ready":
+        current, upcoming = "等待备份就绪", "下次调度时复查备份"
+    elif sleeping:
+        current, upcoming = "等待 Telegram 原生搜索冷却", "冷却结束后复查原生搜索"
+    else:
+        current, upcoming = "等待下一次调度检查", None
+    write_hold = None
+    if fresh and agent["desired_state"] == "running" and state.get("writes_enabled") is False:
+        if state.get("account_status") == "undetermined":
+            write_hold = "尚未核实 Telegram 官方账号状态，入群和发言已暂停"
+        elif state.get("account_status") == "limited":
+            write_hold = "Telegram 官方状态显示账号受限，入群和发言已暂停"
+        else:
+            write_hold = "执行器当前只读，入群和发言已暂停"
+    needs_status = (fresh and agent["desired_state"] == "running" and state.get("writes_enabled") is False
+                    and state.get("account_status") == "undetermined" and state["mode"] == "production")
+    return {
+        "current": current, "next": upcoming, "write_hold": write_hold,
+        "owner": "请用已绑定账号向 Telegram 官方 @SpamBot 发送 /start，等待状态回复。" if needs_status else None,
+        "heartbeat_at": heartbeat, "next_check_at": clock_value(state.get("next_check_at")) if fresh else None,
+        "native_search_after": search_after if sleeping and fresh else None,
+        "discovery": {key: discovery[key] for key in
+                      ("phase", "native_cursor", "query_count", "source_count", "checkpoint_at")}
+                     if discovery else None,
+    }
 
 
 def progress(c, aid, now):
@@ -177,11 +244,16 @@ def report(c, agent, day, now):
     if not config.enabled:
         return None
     args = {"aid": agent["id"], "day": day, "now": now}
+    receipts = all_rows(c, METRICS, args)
     metrics = {row["metric"]: {"count": row["total"], "records": row["records"]}
-               for row in all_rows(c, METRICS, args)}
+               for row in receipts if row["metric"]}
     work = all_rows(c, """
         SELECT type,state,input#>>'{candidate,name}' AS name,result->>'reply_state' AS reply_state,
-          result->>'join_state' AS join_state, result#>>'{outcome,reason}' AS reason
+          result->>'join_state' AS join_state, result#>>'{outcome,reason}' AS reason,
+          result->>'phase' AS phase, result->'native_cursor' AS native_cursor,
+          CASE WHEN jsonb_typeof(input->'native_queries')='array' THEN jsonb_array_length(input->'native_queries') END AS query_count,
+          CASE WHEN jsonb_typeof(result->'sources')='array' THEN jsonb_array_length(result->'sources') END AS source_count,
+          result#>>'{checkpoint,at}' AS checkpoint_at
         FROM lead.tasks WHERE agent_id=%s AND type IN ('community.engage','community.discover')
           AND state IN ('running','reconciling','queued','planned','waiting_user')
         ORDER BY CASE state WHEN 'running' THEN 0 WHEN 'reconciling' THEN 1 ELSE 2 END,
@@ -232,7 +304,19 @@ def report(c, agent, day, now):
                 "blocked_targets": sum(s.get("peer") != "*" for s in scopes),
                 "blocked_accounts": sum(s.get("peer") == "*" for s in scopes),
                 "next_check_at": min((s["read_after"] for s in scopes if s.get("read_after")), default=None)}
-    return {"autonomy": autonomy, "execution": execution(c, agent["id"], day, now), "progress": progress(c, agent["id"], now), "promotion_visits": visits["visits"], "metrics": metrics, "at": now, "current": current,
+    # A device can finish a discovery without refreshing the generic progress snapshot.
+    # Keep first admission across day boundaries, even when today's count is zero.
+    admitted = receipts[0]["admitted_at"]
+    previous = clock_value(autonomy["last_progress_at"])
+    if admitted and (not previous or admitted > previous):
+        autonomy.update(last_progress_at=admitted, progress_label="新增合格候选")
+    resident = resident_activity(agent, work, now)
+    if resident:
+        current = resident["current"]
+        next_action = resident["next"] or next_action
+        if accounts["ready"] and resident["owner"]:
+            owner = resident["owner"] if not owner else f"{owner} {resident['owner']}"
+    return {"resident": resident, "autonomy": autonomy, "execution": execution(c, agent["id"], day, now), "progress": progress(c, agent["id"], now), "promotion_visits": visits["visits"], "metrics": metrics, "at": now, "current": current,
             "next": ("恢复运营后重新排期" if paused else next_action or "暂无已排定的下一项社群行动"),
             "constraint": f"「{latest['name']}」{latest['reason']}" if latest else None,
             "owner": owner}

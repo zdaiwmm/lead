@@ -10,6 +10,12 @@ type GroupRecord = { name: string; at: string; detail?: string };
 type Totals = { count: number; records: GroupRecord[] };
 type Board = {
   metrics: Record<string, Totals>;
+  resident?: {
+    heartbeat_at: string | null; next_check_at: string | null;
+    native_search_after: string | null; write_hold: string | null;
+    discovery: {phase: string | null; native_cursor: number | null; query_count: number | null;
+      source_count: number | null; checkpoint_at: string | null} | null;
+  } | null;
   autonomy?: { last_progress_at: string | null; progress_label: string; blocked_targets: number; blocked_accounts: number; next_check_at: string | null };
   execution?: {
     totals: Record<string, number>;
@@ -45,6 +51,17 @@ export default function TelegramGroupCard({ board, zone, history }: { board: Boa
   const metric = metrics.find(([key]) => key === selected);
   const records = metric && board.metrics[metric[0]];
   const clock = new Intl.DateTimeFormat("zh-CN", { timeZone: zone, month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit",hour12:false });
+  const deviceClock = new Intl.DateTimeFormat("zh-CN", {timeZone: zone, month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false});
+  const resident = board.resident;
+  const search = resident?.discovery;
+  const phases: Record<string, string> = {native_collect: "原生搜索", collect: "读取公开来源",
+    hybrid_collect: "检索公开来源", assess: "评估候选群", plan_queries: "规划查询"};
+  function localTime(value: string | null | undefined) {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? deviceClock.format(date) : null;
+  }
   return <div className={styles.deck}><article className={styles.card}>
     <header className={styles.head}><div className={styles.identity}><span className={styles.icon}><SocialIcon platform="telegram" connected size={20}/></span><div><small>Telegram</small><h3>找群获客</h3></div></div>
       <button className="text-button" onClick={history}><History size={14}/>工作记录</button></header>
@@ -66,6 +83,18 @@ export default function TelegramGroupCard({ board, zone, history }: { board: Boa
         {board.autonomy.blocked_targets} 个群、{board.autonomy.blocked_accounts} 个账号等待恢复，其他独立工作继续。
         {board.autonomy.next_check_at && <> 下次只读检查：{clock.format(new Date(board.autonomy.next_check_at))}。</>}
       </p>}
+    </section>}
+    {resident && <section aria-label="设备执行进度">
+      {search && <p className={styles.note}><b>研究检查点</b><span>{phases[search.phase || ""] || "找群研究"}
+        {search.native_cursor != null && <> · 原生查询已处理 {search.native_cursor}{search.query_count != null && `/${search.query_count}`} 项</>}
+        {search.source_count != null && <> · 已保存 {search.source_count} 个来源</>}
+        {localTime(search.checkpoint_at) && <> · {localTime(search.checkpoint_at)}</>}
+      </span></p>}
+      {board.current !== "运营未启动或已暂停" && <p className={styles.note}><b>执行器心跳</b><span>{localTime(resident.heartbeat_at) || "尚未收到"}
+        {localTime(resident.next_check_at) && <> · 调度复查 {localTime(resident.next_check_at)}</>}
+        {localTime(resident.native_search_after) && <> · 最早可搜索 {localTime(resident.native_search_after)}</>}
+      </span></p>}
+      {resident.write_hold && <p className={styles.note}><b>账号写入</b><span>{resident.write_hold}</span></p>}
     </section>}
     <div className={styles.note}><b>最近卡点</b><span>{board.constraint || "今日暂无已记录的受阻原因。"}</span></div>
     <div className={styles.flow}><div><small><CircleDot/>当前行动</small><p>{board.current}</p></div><div><small><ArrowRight/>下一步行动</small><p>{board.next}</p></div><div><small><Hand/>需要你协助</small><p>{board.owner || "暂无待办"}</p></div></div>

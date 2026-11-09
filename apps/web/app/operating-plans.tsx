@@ -156,6 +156,10 @@ export default function OperatingPlans({
     if (activeRead.current) return;
     const controller = new AbortController();
     activeRead.current = controller;
+    const timeout = window.setTimeout(() => {
+      controller.abort();
+      if (activeRead.current === controller) setError("读取今日执行超时，将自动重试。");
+    }, 90000);
     lastRead.current = Date.now();
     setLoading(true);
     try {
@@ -167,6 +171,7 @@ export default function OperatingPlans({
     } catch (e) {
       if (!controller.signal.aborted) setError((e as Error).message);
     } finally {
+      window.clearTimeout(timeout);
       if (activeRead.current === controller) {
         activeRead.current = null;
         setLoading(false);
@@ -189,6 +194,10 @@ export default function OperatingPlans({
       clearTimeout(update);
       update = setTimeout(() => void load(), Math.max(500, 10000 - (Date.now() - lastRead.current)));
     };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("lead:updated", changed);
     return () => {
       activeRead.current?.abort();
@@ -196,6 +205,7 @@ export default function OperatingPlans({
       detailRead.current?.abort();
       clearInterval(timer);
       clearTimeout(update);
+      document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("lead:updated", changed);
     };
   }, [aid, load]);
@@ -325,7 +335,7 @@ export default function OperatingPlans({
                 <Compass size={13} aria-hidden="true"/>获客策略<ChevronRight size={12} aria-hidden="true"/>
               </button>
             </div>
-            {data.telegram_group_board ? <small>{timestamp(data.telegram_group_board.at, zone)} · {zone}</small> : <ChainTools
+            {data.telegram_group_board ? <small>最近同步 {new Date(data.telegram_group_board.at).toLocaleTimeString("zh-CN", {timeZone: zone, hour12: false})} · {zone}</small> : <ChainTools
               aid={aid}
               today={day.period}
               platform={platform}
