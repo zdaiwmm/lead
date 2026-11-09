@@ -1159,7 +1159,7 @@ async def advance(aid):
                 short_names = [name for name in extras if len(name.split()) <= 3]
                 extras = short_names or extras[:2]
             native_cursor = saved.get("native_cursor", 0)
-            priority_terms = CHAMBER_TOPICS if chamber_campaign(a) else demand_queries(config.topics)
+            priority_terms = CHAMBER_TOPICS if chamber_campaign(a) else demand_queries(config.topics or [business.get("description") or ""])
             need_terms = {term.casefold() for term in priority_terms}
             needs = [
                 query

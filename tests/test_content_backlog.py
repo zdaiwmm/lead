@@ -13,7 +13,8 @@ FACT = "Seka supports long-form translation with glossary and style settings."
 
 
 @pytest.fixture
-def agent(monkeypatch):
+def agent(monkeypatch, local_model_settings):
+    monkeypatch.setenv("LEAD_COLLECTOR_URL", "https://links.example")
     monkeypatch.setattr(domain, "emit", lambda *a, **k: None)
     aid = domain.create_agent()
     with tx(aid) as c:
@@ -28,6 +29,17 @@ def agent(monkeypatch):
             (current_tenant(), aid, profile["id"], uid()),
         )
     return aid
+
+
+@pytest.fixture
+def pending_target(agent):
+    # Setup has found the owned channel, but publication verification is still pending.
+    with tx(agent) as c:
+        c.execute("""INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,
+            external_target_id,display_name,canonical_url,verified_permissions,state)
+            SELECT tenant_id,agent_id,id,'channel','-91','Fixture','https://t.me/fixture','{}','active'
+            FROM lead.social_accounts""")
+    return agent
 
 
 @pytest.fixture
@@ -187,12 +199,13 @@ async def test_daily_new_task_cap_allows_bounded_retry_of_original_task(
 
 @pytest.mark.asyncio
 async def test_product_cycle_prepares_content_and_schedules_next_step_without_research(
-    agent, author
+    pending_target, author
 ):
+    agent = pending_target
     result = await activities.autonomous_cycle({"agent_id": agent, "cycle_id": uid()})
     assert 5 <= result["delay"] <= 30
     detail = domain.agent_detail(agent)
-    assert len(detail["operating_workflow"]["ready_content"]) == 1
+    assert len(detail["operating_workflow"]["ready_content"]) == 1, result
     assert detail["operating_workflow"]["next_check_at"]
     assert detail["onboarding_state"]["operating_schedule"]["next_content_at"]
 
@@ -264,8 +277,9 @@ async def test_verified_channel_schedules_prepared_content_once(
     reason="isolated Temporal content workflow",
 )
 async def test_product_timer_fills_content_reserve_without_external_wakeup(
-    agent, author, monkeypatch
+    pending_target, author, monkeypatch
 ):
+    agent = pending_target
     from lead_app.temporal_client import connect
     from lead_app.workflows import SupervisorWorkflow
     from temporalio import activity

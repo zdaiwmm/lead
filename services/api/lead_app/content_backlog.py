@@ -13,6 +13,7 @@ from .operating_contract import configuration
 from .promotion import PROMOTER_VOICE, promoter_voice
 from .scope import current_tenant
 
+DAILY_TASK_LIMIT = 12
 RESERVE_PER_CHANNEL = 3
 PREPARE_INTERVAL_SECONDS = 30
 
@@ -32,6 +33,14 @@ def ready(c, business_id, revision):
         AND result->>'status'='ready' ORDER BY created_at LIMIT 36""",
         (str(business_id), str(revision)),
     )
+
+
+def new_task_deadline(c):
+    # Existing work can retry while the rolling new-task allowance is exhausted.
+    row = one(c, """SELECT created_at + interval '24 hours' AS deadline
+        FROM lead.tasks WHERE type='content.prepare' AND created_at>now()-interval '24 hours'
+        ORDER BY created_at DESC OFFSET %s LIMIT 1""", (DAILY_TASK_LIMIT - 1,))
+    return row["deadline"] if row else None
 
 
 def reserve(aid, operating_plan=None):
@@ -77,6 +86,7 @@ def reserve(aid, operating_plan=None):
         from .operating_admission import assess, context
 
         admission = context(c, aid, business)
+        capped_until = new_task_deadline(c)
         for account in accounts:
             platform = account["platform"]
             if (
@@ -106,6 +116,8 @@ def reserve(aid, operating_plan=None):
                 ),
                 None,
             )
+            if not retry and capped_until:
+                continue
             if not assess(admission, "content", 65, retry)["allowed"]:
                 continue
             if retry:
@@ -378,6 +390,7 @@ def next_due(c, agent, now=None):
     if running and max(running) > now:
         return max(running)
     due = []
+    capped_until = new_task_deadline(c)
     for platform in platforms:
         name = platform["platform"]
         if sum(d["input"]["platform"] == name for d in stock) >= RESERVE_PER_CHANNEL:
@@ -389,6 +402,10 @@ def next_due(c, agent, now=None):
             if row["state"] == "failed"
         ]
         deadline = max(retries) if retries and max(retries) > now else now
+        retryable = any(row["state"] in ("running", "failed") and
+                        (row["result"] or {}).get("attempts", 1) < 3 for row in previous)
+        if capped_until and not retryable:
+            deadline = max(deadline, capped_until)
         if previous:
             deadline = max(
                 deadline,

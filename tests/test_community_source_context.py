@@ -52,7 +52,7 @@ def test_daily_discovery_cannot_replace_an_unresolved_or_rejected_application(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("has_reply", [False, True])
-async def test_unresolved_join_application_yields_but_uncertain_message_does_not(
+async def test_unknown_join_or_send_is_only_reconciled_and_deferred(
     monkeypatch, has_reply
 ):
     for module in (domain, community_growth):
@@ -95,7 +95,7 @@ async def test_unresolved_join_application_yields_but_uncertain_message_does_not
         raise ConnectionError("fixture temporary service loss")
 
     result = await community_runtime.community_cycle(aid, unavailable)
-    assert calls == ["reply" if has_reply else "join"]
+    assert calls == ["receipt"]
     assert result["delay"] == (300 if has_reply else 1)
     with tx(aid) as c:
         current = one(
@@ -104,14 +104,12 @@ async def test_unresolved_join_application_yields_but_uncertain_message_does_not
             (task["id"],),
         )
         assert current["input"] == original
-        assert current["state"] == ("running" if has_reply else "succeeded")
-        if not has_reply:
-            assert current["result"]["join_state"] == "unknown"
-            assert current["result"]["outcome"]["state"] == "pending_verification"
-            assert current["completed_at"] is not None
-    if not has_reply:
-        assert await community_runtime.community_cycle(aid, unavailable) is None
-        assert calls == ["join"]
+        assert current["state"] == "reconciling" and current["completed_at"] is None
+        assert current["result"]["reply_state" if has_reply else "join_state"] == "unknown"
+        assert current["result"]["receipt_review_after"]
+    # A missing native receipt leaves the original action fenced across cycles.
+    assert await community_runtime.community_cycle(aid, unavailable) is None
+    assert calls == ["receipt"]
 
 
 @pytest.mark.asyncio
