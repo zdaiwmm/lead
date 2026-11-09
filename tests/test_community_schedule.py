@@ -60,6 +60,10 @@ def test_channel_wait_cannot_delay_review_and_heartbeat(agent):
     now = datetime.now(timezone.utc)
     with tx(agent) as c:
         discovery(c, agent, now - timedelta(hours=3))
+        account = one(c, """INSERT INTO lead.social_accounts
+            (tenant_id, agent_id, profile_id, platform, state, automation_enabled, external_account_id)
+            SELECT tenant_id,agent_id,id,'telegram','connected',true,%s FROM lead.browser_profiles
+            WHERE agent_id=%s RETURNING id,external_account_id""", (uid(),agent))
         row = one(
             c,
             "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at,completed_at) VALUES(%s,%s,'community.engage','succeeded',%s,%s,%s,now(),%s) RETURNING id",
@@ -70,7 +74,8 @@ def test_channel_wait_cannot_delay_review_and_heartbeat(agent):
                 j(
                     {
                         "candidate": {"telegram_url": "https://t.me/readers_fixture"},
-                        "external_account_id": "fixture",
+                        "external_account_id": account["external_account_id"],
+                        "account_id": str(account["id"]),
                     }
                 ),
                 j(
@@ -96,6 +101,9 @@ def test_channel_wait_cannot_delay_review_and_heartbeat(agent):
         assert datetime.fromisoformat(schedule["next_discovery_at"]) == now + timedelta(
             hours=21
         )
+        c.execute("UPDATE lead.social_accounts SET external_account_id=%s WHERE id=%s", (uid(),account["id"]))
+        assert community_schedule.next_membership_review(c) is None
+        c.execute("UPDATE lead.social_accounts SET external_account_id=%s WHERE id=%s", (account["external_account_id"],account["id"]))
         c.execute(
             "UPDATE lead.tasks SET result=jsonb_set(result,'{history_observation,joined}','false') WHERE id=%s",
             (row["id"],),

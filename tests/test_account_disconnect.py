@@ -466,3 +466,25 @@ async def test_release_then_verify_another_telegram_login_through_native_gateway
             )
         finally:
             await page.close()
+
+
+def test_disconnected_community_receipts_stay_with_original_identity(bound):
+    aid, account, _, observed = bound
+    receipt = {"join_state": "confirmed", "reply_state": "unknown", "target_id": "-123"}
+    with tx(aid) as c:
+        ids = [
+            one(c, """INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at)
+                VALUES(%s,%s,'community.engage','reconciling',%s,%s,%s,now()) RETURNING id""",
+                (current_tenant(), aid, uid(), j({"account_id": str(account["id"]),
+                    "external_account_id": identity}), j(receipt)))["id"]
+            for identity in (observed["external_account_id"], "unrelated")
+        ]
+    channels.disconnect_account(aid, account["id"], account["verified_at"])
+    channels.disconnect_account(aid, account["id"], account["verified_at"])
+    channels.store_account(aid, "telegram", {"external_account_id": "replacement", "display_name": "新账号"})
+    with tx(aid) as c:
+        archived = one(c, "SELECT state,result FROM lead.tasks WHERE id=%s", (ids[0],))
+        assert archived["state"] == "canceled"
+        assert archived["result"]["archived_receipt"]["result"] == receipt
+        assert "reply_state" not in archived["result"] and "join_state" not in archived["result"]
+        assert one(c, "SELECT state FROM lead.tasks WHERE id=%s", (ids[1],))["state"] == "reconciling"

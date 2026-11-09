@@ -80,6 +80,9 @@ def next_membership_review(c, *, repair_legacy=False, focus=False, exit_restrict
         SELECT t.*,coalesce(t.result->>'target_id',m.result->>'target_id',lower(t.input#>>'{candidate,telegram_url}')) AS peer
         FROM lead.tasks t LEFT JOIN lead.tasks m ON m.id::text=t.input->>'membership_task_id'
         WHERE t.type='community.engage'
+          AND EXISTS (SELECT FROM lead.social_accounts s WHERE s.agent_id=t.agent_id
+                      AND s.id::text=t.input->>'account_id' AND s.external_account_id=t.input->>'external_account_id'
+                      AND s.state='connected' AND s.automation_enabled)
     ), latest AS (
         SELECT DISTINCT ON (input->>'external_account_id',peer) * FROM history
         ORDER BY input->>'external_account_id',peer,created_at DESC,id DESC
