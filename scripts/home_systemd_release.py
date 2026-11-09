@@ -239,6 +239,26 @@ def maintenance_window(old, sha):
             run("systemctl", "start", "lead-home-live.path", "lead-home-ingress.socket")
 
 
+# These node tools were deployed and verified independently of the application image.
+# A later app commit may include their historical diff even when every blob is identical.
+MAINTENANCE_REVISION = "5684637c5015a3ec1b511aafb5cd39447b90eda9"
+MAINTENANCE_FILES = {
+    "infra/systemd/lead-home-site-fence@.service", "scripts/home_live_maintenance.py",
+    "scripts/home_release_operator.py", "scripts/home_systemd_release.py",
+    "scripts/home_verify_workflow.py", "scripts/poll_home_release.py",
+}
+
+
+def reviewed_maintenance_files(mirror, sha, extra):
+    paths = extra & MAINTENANCE_FILES
+    if not paths or not (TOOLS / "home_live_maintenance.py").is_file():
+        return set()
+    # Preserve the separate frame compatibility check for other versions of the hook.
+    changed = run("git", "--git-dir", mirror, "diff", "--no-renames", "--name-only",
+                  "-z", MAINTENANCE_REVISION, sha, "--", *sorted(paths))
+    return paths - set(changed.split("\0"))
+
+
 def deploy(sha):
     require(os.geteuid() == 0, "trusted node dispatcher required")
     safe_layout()
@@ -266,6 +286,7 @@ def deploy(sha):
         allowed = ("services/api/lead_app/", "apps/web/app/", "apps/web/public/", "docs/", "tests/", ".github/")
         extra = {name for name in changes.split("\0") if name and not name.startswith(allowed)
                  and name not in ("README.md", "AGENTS.md")}
+        extra -= reviewed_maintenance_files(mirror, sha, extra)
         if extra:
             # The frame subsystem was already installed from this reviewed commit.
             # Only accept its EXACT reviewed blobs, and attest the installed components.
