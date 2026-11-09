@@ -79,9 +79,14 @@ def verify_workflow(sha, invocation):
 LOCK = """SET LOCAL lock_timeout='4s';
 LOCK TABLE lead.agents,lead.tasks,lead.actions,lead.browser_runs,lead.chat_jobs,lead.takeover_sessions,
 lead.social_accounts,lead.account_targets,lead.authorization_grants,lead.interaction_cards IN SHARE ROW EXCLUSIVE MODE;"""
-BUSY = """EXISTS(SELECT FROM lead.tasks WHERE state IN ('running','queued') OR type='community.engage' AND
+BUSY = """EXISTS(SELECT FROM lead.tasks t WHERE state IN ('running','queued') OR type='community.engage' AND
         (result->>'join_state' IN ('unknown','dispatching') OR result->>'reply_state' IN ('unknown','dispatching')
-         OR result->>'leave_state' IN ('unconfirmed','dispatching'))) OR
+         OR result->>'leave_state' IN ('unconfirmed','dispatching')) AND NOT (
+                t.state IN ('succeeded','failed','canceled') AND EXISTS(
+                    SELECT FROM lead.social_accounts s WHERE s.id::text=t.input->>'account_id' AND s.agent_id=t.agent_id
+                    AND s.state='connected' AND s.external_account_id<>t.input->>'external_account_id')
+                AND NOT EXISTS(SELECT FROM lead.social_accounts s WHERE s.agent_id=t.agent_id AND s.state='connected'
+                    AND s.external_account_id=t.input->>'external_account_id'))) OR
     EXISTS(SELECT FROM lead.actions WHERE state IN ('dispatching','unknown','prepared')) OR
     EXISTS(SELECT FROM lead.browser_runs WHERE state='running') OR
     EXISTS(SELECT FROM lead.chat_jobs WHERE status IN ('pending','processing')) OR

@@ -25,10 +25,16 @@ def check_discovery_handoff(c, agent, account):
     blocked = one(c, """SELECT 1 WHERE EXISTS(SELECT FROM lead.takeover_sessions WHERE agent_id=%s
         AND state IN ('requested','active','ending') AND expires_at>now())
         OR EXISTS(SELECT FROM lead.actions WHERE agent_id=%s AND state IN ('prepared','dispatching','unknown'))
-        OR EXISTS(SELECT FROM lead.tasks WHERE agent_id=%s AND type='community.engage' AND
-          (state IN ('queued','running','reconciling') OR result->>'reply_state' IN ('dispatching','unknown')
-           OR result->>'join_state' IN ('dispatching','unknown') OR result->>'leave_state' IN ('dispatching','unconfirmed')))""",
-        (aid, aid, aid))
+        OR EXISTS(SELECT FROM lead.tasks t WHERE agent_id=%s AND type='community.engage' AND
+          (state IN ('queued','running','reconciling') OR
+           ((result->>'reply_state' IN ('dispatching','unknown') OR result->>'join_state' IN ('dispatching','unknown')
+             OR result->>'leave_state' IN ('dispatching','unconfirmed')) AND NOT (
+               t.state IN ('succeeded','failed','canceled') AND EXISTS(
+                 SELECT FROM lead.social_accounts s WHERE s.agent_id=t.agent_id AND s.id::text=t.input->>'account_id'
+                 AND s.external_account_id=%s AND s.state='connected' AND s.external_account_id<>t.input->>'external_account_id')
+               AND NOT EXISTS(SELECT FROM lead.social_accounts s WHERE s.agent_id=t.agent_id AND s.state='connected'
+                 AND s.external_account_id=t.input->>'external_account_id')))))""",
+        (aid, aid, aid, account))
     if blocked:
         return True
     versions = [agent["control_version"], agent["config_revision"], agent["authorization_version"]]

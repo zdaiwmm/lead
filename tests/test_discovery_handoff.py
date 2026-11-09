@@ -106,3 +106,22 @@ def test_release_process_stops_renewing_its_request(tables):
         '{home_discovery_drain,until}',to_jsonb(now()-interval '1 second'))""")
     assert not idle_boundary(c)
     assert c.execute("SELECT id,state FROM tasks").fetchall() == [{"id":4,"state":"running"}]
+
+
+@pytest.mark.parametrize("original,should_park", [("replaced", True), ("acct", False), (None, False)])
+def test_terminal_receipt_stays_bound_to_its_original_account(tables, original, should_park):
+    c, sha = tables, "c"*40
+    c.execute("""INSERT INTO tasks(id,agent_id,type,state,input,result) VALUES(9,1,'community.engage',
+        'succeeded',%s,'{"leave_state":"unconfirmed"}')""", (j({"external_account_id": original, "account_id":"3"}),))
+    site.request_discovery_drain(sha)
+    assert idle_boundary(c)
+    state = c.execute("SELECT state FROM tasks WHERE id=4").fetchone()["state"]
+    assert (state == "planned") is should_park
+    if should_park:
+        site.maintenance("hold", sha)
+        site.maintenance("restore", sha)
+        assert not idle_boundary(c)
+        assert c.execute("SELECT result FROM tasks WHERE id=9").fetchone()["result"] == {"leave_state":"unconfirmed"}
+    else:
+        with pytest.raises(psycopg.errors.RaiseException, match="waiting for active work"):
+            site.maintenance("hold", sha)
