@@ -193,8 +193,7 @@ def refresh_observations(c, aid, agent, business, now):
     from .operating_feedback import enqueue
 
     exhausted_search = summary["batches"] >= 2 and not summary["candidates"]
-    conversation_only = summary["touches"] >= 2 and not summary["placements"]
-    if exhausted_search or conversation_only:
+    if exhausted_search:
         summary["next_action"] = "切换公开讨论或目录来源，优先核验原帖和参与入口"
         enqueue(
             c,

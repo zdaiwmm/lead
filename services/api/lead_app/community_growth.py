@@ -85,6 +85,7 @@ class GrowthConfig(BaseModel):
     profile_bio: str = Field(default="", max_length=70)
     allow_leave_restricted: bool = False
     allow_join: bool = True
+    review_replies_only: bool = False
     allow_reply: bool = True
     allow_promotion: bool = True
 
