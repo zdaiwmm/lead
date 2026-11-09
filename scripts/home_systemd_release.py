@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 VAULT = Path("/srv/lead-prod-vault")
@@ -38,7 +39,7 @@ def run(*args, timeout=30):
 
 
 def unit(role):
-    return f"lead-home-{role}.service"
+    return role if role.endswith(".service") else f"lead-home-{role}.service"
 
 
 def property_of(role, prop):
@@ -83,6 +84,14 @@ def bound_tree(proc, target):
     return proc / "root" / target.relative_to("/")
 
 
+def application_roles():
+    if (TOOLS / "home_live_maintenance.py").is_file():
+        # These processes also bind current/services at process start. The separately
+        # pinned Telegram executor owns another tree and keeps its original scope.
+        return ROLES | {"browser-status": SERVICES, "lead-chamber-analytics.service": SERVICES}
+    return ROLES
+
+
 def current():
     safe_layout()
     # The selector is only a lookup hint. Every running process must see the immutable image.
@@ -90,7 +99,7 @@ def current():
     require(link.is_symlink(), "no attested live release selector")
     sha = os.readlink(link)
     release = image(sha)
-    for role, target in ROLES.items():
+    for role, target in application_roles().items():
         proc = process(role)
         root = bound_tree(proc, target)
         require(root.samefile(release / target.name), f"{role} runs a different image")
@@ -107,7 +116,7 @@ def probe(role, url):
 FRAME_SERVICE = "lead-frame-fast-live.service"
 
 
-def verify_frames(release):
+def verify_frames(release, *, running_web=None):
     bundle = release / "home-browser-frames"
     if not bundle.is_dir():
         return  # Earlier release images did not ship the site components.
@@ -115,7 +124,7 @@ def verify_frames(release):
     pid = run("systemctl", "show", FRAME_SERVICE, "-p", "MainPID", "--value")
     require(pid.isdecimal() and int(pid) > 1, "frame service unavailable")
     proc = Path("/proc", pid)
-    require(bound_tree(proc, WEB).samefile(release / "web"), "stale frame dependencies")
+    require(bound_tree(proc, WEB).samefile(running_web or release / "web"), "stale frame dependencies")
     script = proc / "root/run/lead-home/frame.cjs"
     require(script.read_bytes() == (bundle / "frame-live.cjs").read_bytes(), "frame encoder drift")
     unit_file = Path(run("systemctl", "show", FRAME_SERVICE, "-p", "FragmentPath", "--value"))
@@ -128,24 +137,28 @@ def verify_frames(release):
             "frame process changed during verification")
 
 
-def verify(sha, *, fenced=False):
+def verify(sha, *, fenced=False, require_idle=True):
     require(current() == sha, "running SHA mismatch")
     verify_frames(STORE / sha)
     intake = run("systemctl", "show", "lead-home-ingress.socket", "-p", "ActiveState", "--value")
     require(intake == ("inactive" if fenced else "active"), "unexpected ingress state")
     for role in ("db", "temporal"):
         process(role)
-    health = json.loads(probe("api", "http://127.0.0.1:8088/api/health"))
+    site = TOOLS / "home_live_maintenance.py"
+    health = json.loads(run(site, "health") if site.is_file() else probe("api", "http://127.0.0.1:8088/api/health"))
     require(all(health.get(key) is True for key in ("database", "worker", "browser")),
             "API dependencies unavailable")
-    if fenced:
+    if fenced and require_idle:
         require(health.get("active_profiles") == 0, "browser profiles still in use")
     probe("web", "http://127.0.0.1:3100/")
     # Site-owned read-only check of durable Temporal and the isolated synthetic receipt.
     # Bind its evidence to this worker invocation so an older success cannot be reused.
     invocation = property_of("worker", "InvocationID")
     require(re.fullmatch("[0-9a-f]{32}", invocation), "worker invocation unavailable")
-    run(TOOLS / "verify-workflow", sha, invocation)
+    if site.is_file():
+        run(site, "workflow", sha, invocation, timeout=40)
+    else:
+        run(TOOLS / "verify-workflow", sha, invocation)
     require(property_of("worker", "InvocationID") == invocation, "worker changed during verification")
     require(current() == sha, "release changed during verification")
 
@@ -163,7 +176,7 @@ def select(sha):
 
 
 def restart_and_verify(sha):
-    units = [unit(role) for role in ROLES]
+    units = [unit(role) for role in application_roles()]
     # A bind mount follows current at process startup, including when rolling back.
     if run("systemctl", "show", FRAME_SERVICE, "-p", "LoadState", "--value") == "loaded":
         units.append(FRAME_SERVICE)
@@ -187,6 +200,43 @@ def replace_release(old, new):
         select(old)
         restart_and_verify(old)
         raise Refused("candidate failed; previous release independently verified") from None
+
+
+@contextmanager
+def maintenance_window(old, sha):
+    """Quiesce the live site without cancelling tasks or reissuing authorizations."""
+    site = TOOLS / "home_live_maintenance.py"
+    if not site.is_file():
+        yield f"lead-home-release-fence@{old}-{sha}.service", [TOOLS / "check-fence"]
+        return
+    fence = f"lead-home-site-fence@{old}-{sha}.service"
+    deadline = time.monotonic() + 3600
+    while run(site, "ready") != "idle":
+        require(time.monotonic() < deadline, "active work still running; intake untouched")
+        time.sleep(15)
+    run("systemctl", "stop", "lead-home-live.path")
+    try:
+        run("systemctl", "stop", "lead-home-ingress.socket", "lead-home-ingress.service")
+        run(site, "hold", sha)
+        deadline = time.monotonic() + 150
+        while json.loads(run(site, "health"))["active_profiles"]:
+            require(time.monotonic() < deadline, "existing profiles did not drain")
+            time.sleep(3)
+        yield fence, [site, "fence"]
+    finally:
+        # An uncertain switch or an independently held lock needs reconciliation.
+        # Never reopen intake or resume scheduling on an unverified revision.
+        state = run("systemctl", "show", fence, "-p", "ActiveState", "--value")
+        if state in ("inactive", "failed") and current() in (old, sha):
+            intake = run("systemctl", "show", "lead-home-ingress.socket", "-p", "ActiveState", "--value")
+            revision = current()
+            if intake == "active":
+                verify(revision)
+            else:
+                # During a refused/aborted drain a profile may legitimately still be open.
+                verify(revision, fenced=True, require_idle=False)
+            run(site, "restore", sha)
+            run("systemctl", "start", "lead-home-live.path", "lead-home-ingress.socket")
 
 
 def deploy(sha):
@@ -214,31 +264,45 @@ def deploy(sha):
         # Reject schema, dependency, service configuration and runtime changes without a separate plan.
         changes = run("git", "--git-dir", mirror, "diff", "--no-renames", "--name-only", "-z", old, sha)
         allowed = ("services/api/lead_app/", "apps/web/app/", "apps/web/public/", "docs/", "tests/", ".github/")
-        require(all(name.startswith(allowed) or name in ("README.md", "AGENTS.md")
-                    for name in changes.split("\0") if name), "release requires separate compatibility review")
+        extra = {name for name in changes.split("\0") if name and not name.startswith(allowed)
+                 and name not in ("README.md", "AGENTS.md")}
+        if extra:
+            # The frame subsystem was already installed from this reviewed commit.
+            # Only accept its EXACT reviewed blobs, and attest the installed components.
+            reviewed = "c8013909ab22a0ea3da15b5bfae7c70443fdca6a"
+            frame_files = {"infra/home-browser-frames/" + name for name in
+                           ("frame-live.cjs", FRAME_SERVICE, "location.conf", "upstream.conf")}
+            compatible = frame_files | {"scripts/build_home_image.sh", "scripts/home_systemd_release.py",
+                                        "scripts/request_home_release.py"}
+            require(extra <= compatible and (STORE / sha / "home-browser-frames").is_dir(),
+                    "release requires separate compatibility review")
+            run("git", "--git-dir", mirror, "diff", "--exit-code", reviewed, sha, "--", *sorted(extra))
+            verify_frames(image(sha), running_web=image(old) / "web")
         # The node's maintenance fence outlives this process. It must remain held across recovery.
-        fence = f"lead-home-release-fence@{old}-{sha}.service"
-        run("systemctl", "start", fence)
-        run(TOOLS / "check-fence", old, sha)
-        # Stop both the listener and existing accepted connections. Health probes use loopback.
-        # On interruption the independent guard stays up and intake stays closed.
-        run("systemctl", "stop", "lead-home-ingress.socket", "lead-home-ingress.service")
-        try:
-            verify(old, fenced=True)
-            run("systemctl", "start", "lead-pc-local-backup.service", timeout=1800)
-            run(TOOLS / "check-fence", old, sha)
-            require(current() == old, "baseline changed before activation")
-            replace_release(old, sha)
-        except Exception:
-            # Only a positively reverified baseline can take traffic again automatically.
-            verify(old, fenced=True)
-            run(TOOLS / "check-fence", old, sha)
+        with maintenance_window(old, sha) as (fence, check):
+            run("systemctl", "start", fence)
+            run(*check, old, sha)
+            # Stop both the listener and existing accepted connections. Health probes use loopback.
+            # On interruption the independent guard stays up and intake stays closed.
+            run("systemctl", "stop", "lead-home-ingress.socket", "lead-home-ingress.service")
+            try:
+                verify(old, fenced=True)
+                run("systemctl", "start", "lead-pc-local-backup.service", timeout=1800)
+                run(*check, old, sha)
+                require(current() == old, "baseline changed before activation")
+                replace_release(old, sha)
+            except Exception:
+                # Only a positively reverified baseline can take traffic again automatically.
+                verify(old, fenced=True)
+                run(*check, old, sha)
+                run("systemctl", "stop", fence)
+                if not (TOOLS / "home_live_maintenance.py").is_file():
+                    run("systemctl", "start", "lead-home-ingress.socket")
+                raise
+            run(*check, old, sha)
             run("systemctl", "stop", fence)
-            run("systemctl", "start", "lead-home-ingress.socket")
-            raise
-        run(TOOLS / "check-fence", old, sha)
-        run("systemctl", "stop", fence)
-        run("systemctl", "start", "lead-home-ingress.socket")
+            if not (TOOLS / "home_live_maintenance.py").is_file():
+                run("systemctl", "start", "lead-home-ingress.socket")
         verify(sha)
 
 

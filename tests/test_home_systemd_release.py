@@ -197,3 +197,16 @@ def test_code_archive_is_content_addressed_and_private(hook, tmp_path, monkeypat
     with tarfile.open(fileobj=io.BytesIO(archives[0].read_bytes())) as bundle:
         assert bundle.extractfile("objects/test").read() == b"code-only"
         assert json.load(bundle.extractfile("manifest.json"))["unit"]["files"] == {"service.py": "test"}
+
+
+def test_attended_node_rejects_other_revision_or_mismatched_response(hook, monkeypatch):
+    import io
+
+    module = importlib.import_module("poll_home_release")
+    sha = "a" * 40
+    host = module.AttendedHost(sha)
+    with pytest.raises(ValueError, match="another revision"):
+        host.call("deploy", "b" * 40)
+    monkeypatch.setattr(module.sys, "stdin", io.StringIO('{"ok":true,"operation":"deploy","sha":"wrong"}\n'))
+    with pytest.raises(ValueError, match="acknowledgement mismatch"):
+        host.call("verify", sha)
