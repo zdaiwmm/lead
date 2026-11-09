@@ -1,0 +1,23 @@
+[Unit]
+Description=Lead private browser frame encoding
+PartOf=lead-home-live.target
+Requires=lead-home-net.service
+After=lead-home-net.service
+JoinsNamespaceOf=lead-home-net.service
+RequiresMountsFor=/srv/lead-prod-vault/lead-git-releases/current/web
+[Service]
+User=lead-home-web
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+TemporaryFileSystem=/srv:ro /run/lead-home:ro
+BindReadOnlyPaths=/srv/lead-prod-vault/lead-home-live/bin/node/bin/node:/run/lead-home/bin/node/bin/node
+BindReadOnlyPaths=/srv/lead-prod-vault/lead-git-releases/current/web:/run/lead-home/bin/web
+BindReadOnlyPaths=/srv/lead-prod-vault/lead-onboard-87d151a/perf/frame-live.cjs:/run/lead-home/frame.cjs
+Environment=UV_THREADPOOL_SIZE=4
+ExecStart=/run/lead-home/bin/node/bin/node /run/lead-home/frame.cjs
+Restart=on-failure
+LimitCORE=0
+MemoryMax=512M

@@ -101,3 +101,21 @@ def test_unstarted_backlog_cannot_skip_older_pending_request(receiver, tmp_path,
     monkeypatch.setattr(receiver, "api", lambda _: [{"id": 13}])
     with pytest.raises(ValueError, match="newer"):
         receiver.check_backlog(tmp_path, 12)
+
+
+def test_request_needs_the_actual_main_pr_merge_result(receiver, monkeypatch):
+    requests = importlib.import_module("request_home_release")
+    sha = "a" * 40
+    monkeypatch.setenv("APPROVED_SHA", sha)
+    monkeypatch.setattr(requests, "verified_run", lambda _: {"id": 7, "run_attempt": 1})
+    base = {"ref": "main", "repo": {"full_name": requests.REPO}}
+    unrelated = {"base": base, "merged_at": "today", "merge_commit_sha": "b" * 40}
+    open_pr = {**unrelated, "merged_at": None, "merge_commit_sha": sha}
+
+    def read(path):
+        assert path == f"commits/{sha}/pulls?per_page=100"
+        return [unrelated, open_pr]
+
+    monkeypatch.setattr(requests, "api", read)
+    with pytest.raises(ValueError, match="merged PR"):
+        requests.main()

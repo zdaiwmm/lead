@@ -2,7 +2,7 @@
 
 在 GitHub Actions 的 **Approve a home release** 选择 main，输入已确认的完整应用 SHA。审批环境 home-release-approval 应限制仅 main，要求仓库所有者审核。主机只需主动向 GitHub 出站访问。公共仓库的任意 CI 作业都在 GitHub 托管节点运行。
 
-工作流检查提交属于 main，同一 SHA 的最新主线 CI 成功且 backend、frontend、namespace 三个任务均通过。在 home-production 创建 task 为 lead-home-release 的 Deployment，记录精确 SHA、CI run/attempt 和审批运行。工作流绿色仅表示请求已登记。线上状态由节点独立上报。
+工作流检查提交是合入本仓库 main 的 PR 合并结果，同一 SHA 的最新主线 CI 成功且 backend、frontend、namespace 三个任务均通过。在 home-production 创建 task 为 lead-home-release 的 Deployment，记录精确 SHA、CI run/attempt 和审批运行。工作流绿色仅表示请求已登记。线上状态由节点独立上报。
 
 ## 已运行节点的接入约定
 
@@ -43,3 +43,40 @@ Python 3.11+、GitHub CLI 和可出站访问 GitHub 的 Unix 节点可以运行 
 **接单与恢复**　先运行 `current` 和 `verify <完整 SHA>`。前者只在系统各应用进程实际看到同一只读镜像且没有未知代码覆盖时输出 SHA。调度端运行前文的 `poll_home_release.py`，只需节点出站访问。可使用 infra/systemd/lead-home-release-poll.service 和同名 timer。受信控制器、hook 及请求日志由 root 持有；所有 gh 网络子进程先清空环境、放弃附加组并降权到独立 lead-release-fetch 身份。该身份只持有单仓库 contents/actions 只读、deployments 读写权限，无 sudo 或应用数据访问权。归档由控制器核对 GitHub 摘要后直接读取固定 JSON 成员。初次主机纳管并通过 current / verify 前保持 timer 禁用。启用前用临时部署验证回传权限。应用更新会等待已有的本地备份及恢复验证单元完成，原子切换 selector，再重启纳管的应用单元。验收失败时恢复上次镜像并重新检查。数据恢复使用节点原有的隔离恢复流程；此 hook 不运行迁移。进程中断、回退失败或运行版本不一致时保留镜像和请求记录，维护者核对各 PID 后继续。
 
 隔离回归可执行 `python -m pytest --noconftest -q tests/test_home_release.py tests/test_home_systemd_release.py`。测试使用临时目录和合成版本。首发还需以真实的只读镜像、挂载命名空间、备份、维护锁和独立工作流回执完成整链演练。
+
+## 先合并，再部署
+
+每次生产变更先在独立分支实现，推送 PR，在候选提交的 CI 通过后合入 main。应用、主机脚本、systemd 单元和站点路由遵循同一顺序。部署设备从指定 GitHub 仓库刷新 main，核对获批 SHA 已在 main 历史内、该 SHA 的主线 CI 成功，再使用该次构建的发布包。检查现网进程、编码服务和入口规则；遇到线上已有、仓库缺失的必要改动，先补 PR 并重新确定发布基线。再次部署时仍需本次目标环境和精确 SHA 的授权。
+
+## 家庭入口画面编码
+
+仓库目录 `infra/home-browser-frames/` 随同一提交的 Linux CI 发布包写入镜像 `home-browser-frames/`。服务复用镜像 `web/node_modules/sharp` 的锁定依赖。以下步骤面向已有 lead-home-net、Web 服务和加密卷的家庭节点。首次安装或变更主机配置走已授权的维护窗口。
+
+1. 从获批 SHA 的只读挂载中取出这四个文件。比较编码器、单元和现网站点规则。当前单元中的 `lead-onboard-87d151a/perf` 是既有主机路径，后续发布仍以本次获批镜像中的文件为来源。
+2. 首次安装时使用下列命令（以管理员身份，`SHA` 设为获批完整提交，`current` 已指向该版本）。已有服务在文件一致时可直接核对。替换已有文件前先保存当前版本和站点配置。
+
+   ```sh
+   set -eu
+   store=/srv/lead-prod-vault/lead-git-releases
+   bundle="$store/$SHA/home-browser-frames"
+   test "$(cat "$store/$SHA/REVISION")" = "$SHA"
+   test "$(readlink "$store/current")" = "$SHA"
+   dest=/srv/lead-prod-vault/lead-onboard-87d151a/perf
+   install -d -m 0700 "$dest"
+   install -m 0644 "$bundle/frame-live.cjs" "$dest/frame-live.cjs"
+   install -m 0644 "$bundle/lead-frame-fast-live.service" /etc/systemd/system/
+   systemctl daemon-reload
+   systemctl add-wants lead-home-live.target lead-frame-fast-live.service
+   systemctl restart lead-frame-fast-live.service
+   ```
+
+3. 将 `upstream.conf` 的内容放入家庭 Nginx 的 `http` 作用域，将 `location.conf` 的内容放入已有的 `shui.click` 服务块内，保留其他入口和鉴权设置。每段只安装一次。该主机的 Nginx 使用单文件只读绑定；保留原配置文件 inode，将已审阅配置写入后在服务命名空间运行 `nginx -t`。通过才平滑重载；语法失败时还原原配置。常用核验命令如下。
+
+   ```sh
+   pid=$(systemctl show lead-home-edge -p MainPID --value)
+   nsenter -t "$pid" -m -n -- /run/lead-home/bin/nginx -p /tmp/ -t -c /run/lead-home/nginx.conf
+   systemctl kill --kill-whom=main -s HUP lead-home-edge
+   systemctl is-active lead-frame-fast-live
+   ```
+
+4. 切换或回退应用镜像时，编码器需随 Web 重启以重新绑定 `current/web` 的依赖。用发布包比对实际编码器字节和单元，检查 Nginx 的两段规则。未登录访问取图应返回 401；正常编码路径带有 `Server-Timing`。用隔离工作室和独立浏览器资料测试登录页及点击；同源支持 AVIF 的客户端应收到私有响应、原始坐标尺寸。生产验收留存 SHA、回读和服务状态。回退编码服务时先还原入口规则并平滑重载，确认请求已回到原 Web 服务，再停止编码器；保留浏览器及工作室数据。

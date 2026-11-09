@@ -7,14 +7,15 @@ output=${2:?new output file required}
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 [[ $(git rev-parse HEAD) == "$sha" ]]
-git diff --quiet "$sha" -- services apps/web
+git diff --quiet "$sha" -- services apps/web infra/home-browser-frames
 test -s apps/web/.next/BUILD_ID
 test -d apps/web/node_modules/next
 stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
-git archive "$sha" services apps/web | tar -x -C "$stage"
+git archive "$sha" services apps/web infra/home-browser-frames | tar -x -C "$stage"
 mv "$stage/apps/web" "$stage/web"
-rmdir "$stage/apps"
+mv "$stage/infra/home-browser-frames" "$stage/home-browser-frames"
+rmdir "$stage/apps" "$stage/infra"
 cp -a apps/web/.next apps/web/node_modules "$stage/web/"
 rm -rf -- "$stage/web/.next/cache"
 mkdir -p "$stage/web/.next/cache"

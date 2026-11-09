@@ -64,11 +64,27 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      - name: Reproduce home browser frames with synthetic images
+        run: |
+          if ! command -v nginx >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y nginx-light
+          fi
+          sudo unshare --mount --net --propagation private bash -eu -c '
+            ip link set lo up
+            mount -t tmpfs tmpfs /run
+            mkdir -p /run/lead-home/bin/web
+            mount --bind "$PWD" /run/lead-home/bin/web
+            "$1" ../../tests/home_browser_frames.cjs ../../infra/home-browser-frames
+          ' bash "$(command -v node)"
       - name: Package the tested Linux application
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
           sudo apt-get install -y squashfs-tools
           ../../scripts/build_home_image.sh "$GITHUB_SHA" "$RUNNER_TEMP/lead.squashfs"
+          for file in ../../infra/home-browser-frames/*; do
+            unsquashfs -cat "$RUNNER_TEMP/lead.squashfs" "home-browser-frames/${file##*/}" | cmp "$file" -
+          done
       - name: Retain the exact release image
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

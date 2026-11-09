@@ -62,6 +62,11 @@ def verified_run(sha, *, get=None):
 def main():
     sha = os.environ["APPROVED_SHA"]
     run = verified_run(sha)
+    prs = api(f"commits/{sha}/pulls?per_page=100")
+    merged = next((pr for pr in prs if pr["merged_at"] and pr["merge_commit_sha"] == sha
+                   and pr["base"]["ref"] == "main" and pr["base"]["repo"]["full_name"] == REPO), None)
+    if merged is None:
+        raise ValueError("Release SHA must be the result of a merged PR into main")
     release = api("deployments", {
         "ref": sha, "task": "lead-home-release", "auto_merge": False,
         "environment": "home-production", "production_environment": True,
@@ -77,7 +82,7 @@ def main():
                "ci_attempt": run["run_attempt"], "approval_run": int(os.environ["GITHUB_RUN_ID"])}
     Path(os.environ["RUNNER_TEMP"], "lead-home-request.json").write_text(json.dumps(receipt))
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as file:
-        file.write(f"Home deployment request #{release['id']} for `{sha}` created. "
+        file.write(f"Home deployment request #{release['id']} for `{sha}` (merged PR #{merged['number']}) created. "
                    "Check deployment statuses for the server result.\n")
 
 
