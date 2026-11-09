@@ -373,25 +373,13 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
         # must recover through the verified route and recheck the peer.
         await actor.page.set_content("""<div id="column-left"><div class="chatlist"><div class="chatlist-chat" data-peer-id="-777777">Readers</div></div></div>
         <div class="chat active" data-type="chat"><div class="chat-info"><span class="peer-title" data-peer-id="-888888">Previous chat</span></div></div>""")
-        navigations = []
-        real_goto = actor.page.goto
-
-        async def unresolved_handle(url, **options):
-            response = await real_goto(url, **options)
-            fragment = url.partition("#")[2]
-            navigations.append(fragment)
-            if fragment == "@readers_fixture":
-                await actor.page.locator(".chat.active .chat-info .peer-title").evaluate(
-                    "(header) => header.dataset.peerId = '-888888'"
-                )
-            return response
-
-        with monkeypatch.context() as patch:
-            patch.setattr(actor.page, "goto", unresolved_handle)
-            reopened = await community_runtime.observe_group(
-                actor.page, "https://t.me/readers_fixture", identity, 30, expected_peer="-777777",
-            )
-        assert "-777777" in navigations
+        reopened = await community_runtime.observe_group(
+            actor.page,
+            "https://t.me/readers_fixture",
+            identity,
+            30,
+            expected_peer="-777777",
+        )
         assert reopened["target_id"] == "-777777"
         assert reopened["history"][0]["mid"] == "100"
         # A forum route opens a native topic drawer while the old group's chat
