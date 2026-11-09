@@ -125,7 +125,7 @@ async def test_every_platform_native_media_upload_and_publish_contract(
     aid, actor = context
     page = actor.page
     site = FixtureSite(platform)
-    await page.route("https://**/*", site.route)
+    await page.context.route("https://**/*", site.route)
     if platform == "facebook":
         await page.context.add_cookies(
             [{"name": "c_user", "value": "10001", "url": "https://www.facebook.com"}]

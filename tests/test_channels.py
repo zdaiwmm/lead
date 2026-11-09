@@ -216,7 +216,7 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
     localStorage.setItem('user_auth',JSON.stringify({id:'11111'}));
     function render(){document.getElementById('bubbles').replaceChildren();JSON.parse(localStorage.getItem('fixture_posts')||'[]').forEach((body,i)=>{const el=document.createElement('div');el.className='bubble';el.dataset.mid=String(100+i);const msg=document.createElement('div');msg.className='message';msg.textContent=body;el.append(msg);document.getElementById('bubbles').append(el)});}
     const editor=document.querySelector('.input-message-input');function send(){const posts=JSON.parse(localStorage.getItem('fixture_posts')||'[]');posts.push(editor.textContent);localStorage.setItem('fixture_posts',JSON.stringify(posts));editor.textContent='';render()};
-    render();document.querySelector('.btn-send').onclick=send;editor.onkeydown=e=>{if(e.key!=='Enter')return;e.preventDefault();localStorage.setItem('keyboard_continuations',String(Number(localStorage.getItem('keyboard_continuations')||0)+1));if(!location.search.includes('swallowed'))send()};
+    render();document.querySelector('.btn-send').onclick=()=>{if(localStorage.getItem('swallow_send')){localStorage.setItem('swallowed_clicks',String(Number(localStorage.getItem('swallowed_clicks')||0)+1));return}send()};editor.onkeydown=e=>{if(e.key!=='Enter')return;e.preventDefault();localStorage.setItem('keyboard_continuations',String(Number(localStorage.getItem('keyboard_continuations')||0)+1));if(!location.search.includes('swallowed'))send()};
     </script>""".replace("PEER", peer).replace(
         "ACCOUNT", account["external_account_id"]
     )
@@ -262,7 +262,7 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
                 )
         if failure == "continuation_swallowed":
             await actor.page.evaluate(
-                "history.replaceState(null,'',location.pathname+'?account=2&swallowed=1'+location.hash)"
+                "localStorage.setItem('swallow_send','1')"
             )
         monkeypatch.setattr(telegram, "receipt", original)
         monkeypatch.setattr(telegram, "submit", submit)
@@ -273,7 +273,7 @@ async def test_telegram_adapter_preserves_account_slot_and_reconciles_without_re
                 "state"
             ] == "unknown"
             assert await actor.page.evaluate(
-                "localStorage.getItem('keyboard_continuations')"
+                "localStorage.getItem('swallowed_clicks')"
             ) == ("1" if failure == "continuation_swallowed" else None)
             with tx(aid) as c:
                 assert one(c, "SELECT count(*) AS n FROM lead.action_attempts")[

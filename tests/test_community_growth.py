@@ -11,14 +11,13 @@ def test_strategy_persists_limits_without_granting_community_access(monkeypatch)
     assert growth.get_strategy(aid)["config"]["enabled"] is False
     result = growth.set_strategy(aid, {"enabled": True, "topics": ["EPUB 阅读"]})
     assert result["config"]["enabled"]
-    assert result["config"]["max_promotions_per_week"] == 1
+    assert result["config"]["allow_proactive_post"] is False
     assert not result["participation"]["proactive_AI_introduction"]
     assert result["participation"]["disclose_brand_when_promoting"]
     assert result["participation"]["truthful_identity_answers"]
     with tx(aid) as c:
         assert not one(c, "SELECT id FROM lead.authorization_grants")
-    with pytest.raises(ValidationError):
-        growth.GrowthConfig(enabled=True, max_replies_per_day=1000)
+    assert not growth.GrowthConfig(enabled=True, max_replies_per_day=0).allow_reply
     with pytest.raises(ValidationError):
         growth.GrowthConfig(enabled=True, conceal_ai=True)
 

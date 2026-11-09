@@ -174,7 +174,7 @@ def test_promotion_configuration_versions_and_fences_old_queue(agent):
     )
 
 
-def test_channel_rows_are_connected_scoped_and_measure_real_events(agent):
+def test_channel_rows_are_connected_scoped_and_measure_real_events(agent, process_pending_clicks):
     client = owner_client()
     cid = uid()
     marker = new_marker("telegram")
@@ -198,6 +198,7 @@ def test_channel_rows_are_connected_scoped_and_measure_real_events(agent):
     client.get(
         "/r/" + marker, headers={"User-Agent": "previewbot"}, follow_redirects=False
     )
+    process_pending_clicks(agent)
     sid = uid()
     event = {
         "key": token("analytics:" + cid),
@@ -269,8 +270,9 @@ def test_channel_rows_are_connected_scoped_and_measure_real_events(agent):
 
 @pytest.mark.asyncio
 async def test_autonomous_promotion_uses_configured_destination_and_short_source(
-    publishing_agent, monkeypatch
+    publishing_agent, monkeypatch, local_model_settings
 ):
+    monkeypatch.setenv("LEAD_COLLECTOR_URL", "https://links.example")
     from lead_app import activities
     from lead_app.adapters.catalog import SPECS
     from lead_app.model import ContentDecision
@@ -324,7 +326,7 @@ async def test_autonomous_promotion_uses_configured_destination_and_short_source
         link = one(c, "SELECT * FROM lead.tracking_links")
         assert link["destination_url"] == destination
         assert link["platform"] == "telegram" and link["public_code"].startswith("tg_")
-        assert task["input"]["link"] == attributed_url(destination, link["public_code"])
+        assert task["input"]["link"] == "https://links.example/r/" + link["public_code"]
         assert task["input"]["body"].count(task["input"]["link"]) == 1
         assert "site.example" not in task["input"]["body"]
         for probe in (False, True):

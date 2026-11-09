@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
-from lead_app import db, domain, recovery
+from lead_app import db_pool, domain, recovery
 from lead_app.backups import digest
 from lead_app.config import BROWSER_BUILD, BROWSER_SDK, STATE, database_kwargs
 from psycopg import sql
@@ -37,10 +37,7 @@ async def test_cutover_requires_fenced_source_reviews_and_installs_new_profile(
                 )
             )
         upgrade({**owner, "dbname": source})
-        runtime_kwargs = database_kwargs()
-        monkeypatch.setattr(
-            db, "database_kwargs", lambda: {**runtime_kwargs, "dbname": source}
-        )
+        monkeypatch.setenv("LEAD_DB_NAME", source)
         monkeypatch.setattr(domain, "emit", lambda *a, **k: None)
         aid = domain.create_agent()
         domain.connect_lab(aid)
@@ -52,6 +49,7 @@ async def test_cutover_requires_fenced_source_reviews_and_installs_new_profile(
                 "UPDATE lead.browser_profiles SET engine_version=%s,sdk_version=%s,state='stopped' WHERE agent_id=%s",
                 (BROWSER_BUILD, BROWSER_SDK, aid),
             )
+        db_pool.close_all()
         with psycopg.connect(**owner, autocommit=True) as c:
             c.execute(
                 sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
@@ -138,7 +136,8 @@ async def test_cutover_requires_fenced_source_reviews_and_installs_new_profile(
                 == "recovery_required"
             )
     finally:
-        monkeypatch.setattr(db, "database_kwargs", database_kwargs)
+        db_pool.close_all()
+        monkeypatch.delenv("LEAD_DB_NAME", raising=False)
         with psycopg.connect(**owner, autocommit=True) as c:
             for name in (target, source):
                 if c.execute(
