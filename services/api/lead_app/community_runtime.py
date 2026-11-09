@@ -1535,7 +1535,12 @@ async def browser_step(actor, task_id, operation):
                     ),
                 )
             with tx(actor.aid) as c:
-                guard(actor, c, task)
+                _, latest_config = guard(actor, c, task)
+                if latest_config.review_replies_only or not latest_config.allow_reply or (
+                    publication["promote"] and not latest_config.allow_promotion
+                ) or (publication.get("standalone") and not latest_config.allow_proactive_post):
+                    c.execute("UPDATE lead.tasks SET result=result - 'reply_dispatched_at' - 'reply_state' WHERE id=%s", (task_id,))
+                    return {"state": "blocked", "reason": "提交前社群委托已变化"}
                 await telegram.fill(actor.page, body)
                 await telegram.submit(actor.page)
         else:
@@ -2259,8 +2264,6 @@ async def community_cycle(aid, rpc, selection=None):
             business["acquisition_strategy"] = strategy
             if chamber_campaign(a):
                 business["priority_scenarios"] = CHAMBER_BRIEF
-                if config.allow_proactive_post:
-                    business["priority_scenarios"] += "各场景中有真实受众的相关广告群也可加入并主动展示；广告密度只决定内容形式。"
             business["independent_promoter"] = promoter_voice(a)
             business["brand"] = business.get("brand") or a["name"]
             business["promotion_url"] = configuration(a, business)["destination_url"]
@@ -2569,7 +2572,9 @@ async def community_cycle(aid, rpc, selection=None):
                         task_id=task["id"],
                     )
                 return {"delay": 1, "reason": "community_history_search"}
-            if decision.feedback_kind in ("courtesy", "declined") and decision.reply_to_mid == decision.feedback_mid and decision.reply_to_mid:
+            if getattr(decision, "placement", None) == "skip":
+                outcome = {"state": "skipped", "reason": decision.reason}
+            elif decision.feedback_kind in ("courtesy", "declined") and decision.reply_to_mid == decision.feedback_mid and decision.reply_to_mid:
                 outcome = {"state": "skipped", "reason": "对方已结束这次对话"}
             elif (
                 observed["kind"] != "discussion"
@@ -2602,7 +2607,8 @@ async def community_cycle(aid, rpc, selection=None):
                 )
                 if outcome["state"] == "confirmed":
                     return {"delay": 1, "reason": "community_joined"}
-            elif standalone and (decision.placement != "advertising_group" or not ad_permission(
+            elif getattr(decision, "placement", None) in ("topic_post", "advertising_group") and (
+                not standalone or decision.placement != "advertising_group" or not ad_permission(
                 task["input"]["candidate"], observed.get("description"), decision.promotion_rule_quote
             )):
                 outcome = {"state": "skipped", "reason": "普通讨论群不开题推广；广告位须有明确许可"}
