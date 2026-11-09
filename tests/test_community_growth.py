@@ -173,13 +173,14 @@ def test_contextual_promotion_checks_affiliation_invitation_and_product_link():
         promotion_invited=True,
         promote=True,
         reply_to_mid="123",
-        body="我负责 Seka 的社群运营，可以从术语表开始。https://seka.one",
+        invitation_quote=original["body"],
+        body="我负责 Seka 的社群运营，可以从术语表开始。",
         reason="用户询问术语表工具，社群允许产品介绍。",
     )
     assert valid_reply(decision, original, business)
     for body in (
-        "Sou da equipe Seka. Podemos ajudar com o glossário. https://seka.one",
-        "Я из команды Seka. Начните с глоссария. https://seka.one",
+        "Sou da equipe Seka. Podemos ajudar com o glossário.",
+        "Я из команды Seka. Начните с глоссария.",
     ):
         assert valid_reply(
             decision.model_copy(update={"body": body}), original, business
