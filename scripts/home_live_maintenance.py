@@ -9,6 +9,7 @@ import runpy
 import secrets
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 SITE = Path("/srv/lead-prod-vault/lead-onboard-87d151a")
@@ -41,12 +42,18 @@ def health():
     site_sql(f"""INSERT INTO lead.auth_sessions(secret_sha256,tenant_id,issuer,subject,expires_at)
         VALUES('{digest}','{tenant}','{issuer}','{subject}',now()+interval '30 seconds')""")
     try:
-        result = subprocess.run(["nsenter", "-t", pid, "-n", "--", "curl", "-q", "-fsS", "--max-time", "8",
-                                 "--noproxy", "*", "-K", "-", "http://127.0.0.1:8088/api/health"],
-                                input=f'cookie = "lead_session={secret}"\n', text=True, capture_output=True, check=True)
-        if property_of("api", "MainPID") != pid:
-            raise ValueError("API restarted during check")
-        return json.loads(result.stdout)
+        for attempt in range(4):
+            result = subprocess.run(["nsenter", "-t", pid, "-n", "--", "curl", "-q", "-fsS", "--max-time", "5",
+                                     "--noproxy", "*", "-K", "-", "http://127.0.0.1:8088/api/health"],
+                                    input=f'cookie = "lead_session={secret}"\n', text=True, capture_output=True)
+            if property_of("api", "MainPID") != pid:
+                raise ValueError("API restarted during check")
+            data = json.loads(result.stdout) if result.returncode == 0 else {}
+            if all(data.get(key) is True for key in ("database", "worker", "browser")):
+                return {key: data[key] for key in ("database", "worker", "browser", "active_profiles")}
+            if attempt < 3:
+                time.sleep(1)
+        raise ValueError("authenticated dependency check failed")
     finally:
         site_sql(f"DELETE FROM lead.auth_sessions WHERE secret_sha256='{digest}'")
 
@@ -115,7 +122,10 @@ def main(args):
     if os.geteuid() != 0:
         raise ValueError("root required")
     if args == ["ready"]:
-        print("busy" if site_sql("SELECT " + BUSY) == "t" else "idle")
+        busy = site_sql("SELECT " + BUSY)
+        if busy not in ("t", "f"):
+            raise ValueError("cannot determine whether work is active")
+        print("busy" if busy == "t" else "idle")
         return
     if args == ["health"]:
         print(json.dumps(health()))
