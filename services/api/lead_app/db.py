@@ -1,4 +1,5 @@
 import json
+import time
 from contextlib import contextmanager
 from uuid import UUID, uuid4
 
@@ -19,6 +20,29 @@ def j(value):
     return Jsonb(value)
 
 
+def connect_runtime():
+    """Retry transient direct connections only, before a transaction exists."""
+    delays = (0.1, 0.3, 0.6)
+    for attempt in range(len(delays) + 1):
+        try:
+            return psycopg.connect(**database_kwargs(), row_factory=dict_row)
+        except psycopg.OperationalError as error:
+            code = error.sqlstate
+            # libpq may return no SQLSTATE during startup, including for bad
+            # credentials. Only retry recognizable transport failures then.
+            if code:
+                transient = code.startswith("08") or code in {"57P01", "57P02", "57P03", "53300"}
+            else:
+                transient = any(reason in str(error).lower() for reason in (
+                    "connection refused", "connection closed", "server closed the connection",
+                    "connection reset", "timeout expired", "connection timed out",
+                    "temporary failure in name resolution",
+                ))
+            if not transient or attempt == len(delays):
+                raise
+            time.sleep(delays[attempt])
+
+
 @contextmanager
 def tx(agent_id=None, tenant_id=None, *, pooled=True):
     from .scope import tenant_scope, trusted_execution
@@ -35,7 +59,7 @@ def tx(agent_id=None, tenant_id=None, *, pooled=True):
     connection = (
         pool().connection()
         if pooled
-        else psycopg.connect(**database_kwargs(), row_factory=dict_row)
+        else connect_runtime()
     )
     with (
         tenant_scope(tenant_id),

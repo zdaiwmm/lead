@@ -61,7 +61,7 @@ def report(aid: UUID):
             """SELECT * FROM lead.analytics_connections WHERE provider='lead_site'
             AND state<>'disconnected' ORDER BY selected_at DESC,created_at DESC LIMIT 1""",
         )
-        pixel = configuration(c, conn)
+        pixel = configuration(c, conn, promotion_only=True)
     return {
         "agent_id": str(aid),
         "connection": {
@@ -70,6 +70,7 @@ def report(aid: UUID):
         if conn
         else None,
         "pixel": pixel,
+        "report_traffic": "promotion",
     }
 
 
@@ -296,7 +297,7 @@ def seed(c, conn):
         )
 
 
-def configuration(c, conn):
+def configuration(c, conn, *, promotion_only=False):
     if not conn:
         return {
             "catalog": catalog(),
@@ -328,12 +329,15 @@ def configuration(c, conn):
         WITH events AS (
           SELECT event_name,user_key,anonymous_id::text AS anonymous_id,occurred_at
           FROM lead.pixel_receipts WHERE connection_id=%s AND scope_key='live' AND counted
+            AND (NOT %s OR touchpoint_id IS NOT NULL OR click_id IS NOT NULL)
             AND event_name NOT IN ('PageView','Engagement','Identify') AND occurred_at>now()-interval '30 days'
           UNION ALL
           SELECT CASE type WHEN 'signup' THEN 'CompleteRegistration' WHEN 'lead' THEN 'Lead'
              WHEN 'trial' THEN 'StartTrial' WHEN 'purchase' THEN 'Purchase' ELSE type END,
              NULL,NULL,occurred_at FROM lead.conversion_events legacy
           WHERE connection_id=%s AND occurred_at>now()-interval '30 days'
+            AND (NOT %s OR EXISTS(SELECT 1 FROM lead.visit_sessions v WHERE v.id=legacy.visit_session_id
+                 AND v.tenant_id=legacy.tenant_id AND v.agent_id=legacy.agent_id AND v.tracking_link_id IS NOT NULL))
             AND NOT EXISTS(SELECT 1 FROM lead.pixel_receipts p WHERE p.connection_id=legacy.connection_id
               AND p.scope_key='live' AND p.event_id=legacy.source_event_id)
         )
@@ -342,7 +346,7 @@ def configuration(c, conn):
             ELSE count(DISTINCT coalesce(user_key,'anon:'||anonymous_id)) END AS users,
           max(occurred_at) AS last_occurred_at FROM events GROUP BY event_name
     """,
-        (conn["id"], conn["id"]),
+        (conn["id"], promotion_only, conn["id"], promotion_only),
     )
     by_name = {r["event_name"]: r for r in rows}
     report = []
@@ -378,8 +382,9 @@ def configuration(c, conn):
         SELECT count(*) AS sessions,count(DISTINCT anonymous_id) AS visitors,
           count(*) FILTER(WHERE anonymous_id IS NULL) AS unknown_visitors
         FROM lead.visit_sessions WHERE source=%s AND started_at>now()-interval '30 days'
+          AND (NOT %s OR tracking_link_id IS NOT NULL)
     """,
-        ("site:" + str(conn["id"]),),
+        ("site:" + str(conn["id"]), promotion_only),
     )
     installed = pixel_installed(c, conn)
     return {
@@ -1005,6 +1010,12 @@ def browser_process(c, conn, body: BrowserEvent, *, received_at=None, frozen=Non
             else None
         )
     )
+    click = frozen.get("click") if frozen and not test else None
+    if click:
+        from .analytics_clicks import eligible
+
+        if not eligible(click, body.occurred_at or observed):
+            link = None
     if not visit:
         visit = one(
             c,
@@ -1028,7 +1039,6 @@ def browser_process(c, conn, body: BrowserEvent, *, received_at=None, frozen=Non
         raise HTTPException(409, "会话与访客不匹配")
     touch = None
     if not test:
-        click = frozen.get("click") if frozen else None
         touch = one(
             c,
             """SELECT * FROM lead.pixel_touchpoints WHERE connection_id=%s AND anonymous_id=%s
@@ -1042,15 +1052,13 @@ def browser_process(c, conn, body: BrowserEvent, *, received_at=None, frozen=Non
             ),
         )
         if click:
-            from .analytics_clicks import eligible
-
             touch = one(
                 c,
                 "SELECT * FROM lead.pixel_touchpoints WHERE connection_id=%s AND anonymous_id=%s AND click_id=%s",
                 (cid, body.anonymous_id, click["id"]),
             )
-            if not eligible(click, body.occurred_at or observed):
-                link, touch = None, None
+            if not link:
+                touch = None
         if link and (
             not touch
             or str(touch["tracking_link_id"]) != str(link["id"])

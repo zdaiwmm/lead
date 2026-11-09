@@ -412,7 +412,7 @@ def metrics(c):
         )["n"]
         conversions = one(
             c,
-            "SELECT count(*) AS n FROM lead.conversion_events WHERE trust_level='server_verified' AND occurred_at>now()-interval '30 days' AND type=%s",
+            "SELECT count(*) AS n FROM lead.conversion_events e JOIN lead.visit_sessions v ON v.id=e.visit_session_id WHERE v.tracking_link_id IS NOT NULL AND e.trust_level='server_verified' AND e.occurred_at>now()-interval '30 days' AND e.type=%s",
             (policy["objective"],),
         )["n"]
         # New event receipts preserve the older server-verified objective contract.
@@ -426,7 +426,7 @@ def metrics(c):
             c,
             """SELECT count(*) AS n FROM lead.pixel_receipts p
                WHERE p.scope_key='live' AND p.counted AND p.trust_level='server_verified'
-                 AND p.touchpoint_id IS NOT NULL AND p.occurred_at>now()-interval '30 days'
+                 AND (p.touchpoint_id IS NOT NULL OR p.click_id IS NOT NULL) AND p.occurred_at>now()-interval '30 days'
                  AND p.event_name=%s AND NOT EXISTS(
                    SELECT 1 FROM lead.conversion_events old
                    WHERE old.connection_id=p.connection_id AND old.source_event_id=p.event_id)""",
