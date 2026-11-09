@@ -39,7 +39,7 @@ def run(*args, timeout=30):
 
 
 def unit(role):
-    return f"lead-home-{role}.service"
+    return role if role.endswith(".service") else f"lead-home-{role}.service"
 
 
 def property_of(role, prop):
@@ -84,6 +84,14 @@ def bound_tree(proc, target):
     return proc / "root" / target.relative_to("/")
 
 
+def application_roles():
+    if (TOOLS / "home_live_maintenance.py").is_file():
+        # These processes also bind current/services at process start. The separately
+        # pinned Telegram executor owns another tree and keeps its original scope.
+        return ROLES | {"browser-status": SERVICES, "lead-chamber-analytics.service": SERVICES}
+    return ROLES
+
+
 def current():
     safe_layout()
     # The selector is only a lookup hint. Every running process must see the immutable image.
@@ -91,7 +99,7 @@ def current():
     require(link.is_symlink(), "no attested live release selector")
     sha = os.readlink(link)
     release = image(sha)
-    for role, target in ROLES.items():
+    for role, target in application_roles().items():
         proc = process(role)
         root = bound_tree(proc, target)
         require(root.samefile(release / target.name), f"{role} runs a different image")
@@ -168,7 +176,7 @@ def select(sha):
 
 
 def restart_and_verify(sha):
-    units = [unit(role) for role in ROLES]
+    units = [unit(role) for role in application_roles()]
     # A bind mount follows current at process startup, including when rolling back.
     if run("systemctl", "show", FRAME_SERVICE, "-p", "LoadState", "--value") == "loaded":
         units.append(FRAME_SERVICE)
