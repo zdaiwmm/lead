@@ -210,3 +210,28 @@ def test_attended_node_rejects_other_revision_or_mismatched_response(hook, monke
     monkeypatch.setattr(module.sys, "stdin", io.StringIO('{"ok":true,"operation":"deploy","sha":"wrong"}\n'))
     with pytest.raises(ValueError, match="acknowledgement mismatch"):
         host.call("verify", sha)
+
+
+def test_only_reviewed_maintenance_blobs_are_accepted(hook, monkeypatch, tmp_path):
+    # A node tool changed in the repo must still pass a separate compatibility review.
+    monkeypatch.setattr(hook, "TOOLS", tmp_path)
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+    for name in hook.MAINTENANCE_FILES:
+        path = repo / name
+        path.parent.mkdir(exist_ok=True, parents=True)
+        path.write_text("reviewed\n")
+    git("add", ".")
+    git("-c", "user.name=fixture", "-c", "user.email=test@example.test", "commit", "-qm", "baseline")
+    monkeypatch.setattr(hook, "MAINTENANCE_REVISION", git("rev-parse", "HEAD"))
+    extra = hook.MAINTENANCE_FILES | {"infra/migrations/unrelated.sql"}
+    assert not hook.reviewed_maintenance_files(repo / ".git", "HEAD", extra)
+    (tmp_path / "home_live_maintenance.py").touch()
+    assert hook.reviewed_maintenance_files(repo / ".git", "HEAD", extra) == hook.MAINTENANCE_FILES
+    (repo / "scripts/poll_home_release.py").write_text("changed\n")
+    git("add", ".")
+    git("-c", "user.name=fixture", "-c", "user.email=test@example.test", "commit", "-qm", "new tool")
+    assert hook.reviewed_maintenance_files(repo / ".git", "HEAD", extra) == (
+        hook.MAINTENANCE_FILES - {"scripts/poll_home_release.py"})
