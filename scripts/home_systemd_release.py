@@ -104,8 +104,33 @@ def probe(role, url):
                "--silent", "--fail", "--max-time", "4", url)
 
 
+FRAME_SERVICE = "lead-frame-fast-live.service"
+
+
+def verify_frames(release):
+    bundle = release / "home-browser-frames"
+    if not bundle.is_dir():
+        return  # Earlier release images did not ship the site components.
+    require(run("systemctl", "is-enabled", FRAME_SERVICE) == "enabled", "frame service not enabled")
+    pid = run("systemctl", "show", FRAME_SERVICE, "-p", "MainPID", "--value")
+    require(pid.isdecimal() and int(pid) > 1, "frame service unavailable")
+    proc = Path("/proc", pid)
+    require(bound_tree(proc, WEB).samefile(release / "web"), "stale frame dependencies")
+    script = proc / "root/run/lead-home/frame.cjs"
+    require(script.read_bytes() == (bundle / "frame-live.cjs").read_bytes(), "frame encoder drift")
+    unit_file = Path(run("systemctl", "show", FRAME_SERVICE, "-p", "FragmentPath", "--value"))
+    require(unit_file.read_bytes() == (bundle / FRAME_SERVICE).read_bytes(), "frame unit drift")
+    edge = process("edge") / "root/run/lead-home/nginx.conf"
+    site = " ".join(edge.read_text().split())
+    for fragment in ("upstream.conf", "location.conf"):
+        require(" ".join((bundle / fragment).read_text().split()) in site, "frame route drift")
+    require(pid == run("systemctl", "show", FRAME_SERVICE, "-p", "MainPID", "--value"),
+            "frame process changed during verification")
+
+
 def verify(sha, *, fenced=False):
     require(current() == sha, "running SHA mismatch")
+    verify_frames(STORE / sha)
     intake = run("systemctl", "show", "lead-home-ingress.socket", "-p", "ActiveState", "--value")
     require(intake == ("inactive" if fenced else "active"), "unexpected ingress state")
     for role in ("db", "temporal"):
@@ -138,7 +163,11 @@ def select(sha):
 
 
 def restart_and_verify(sha):
-    run("systemctl", "restart", *(unit(role) for role in ROLES), timeout=180)
+    units = [unit(role) for role in ROLES]
+    # A bind mount follows current at process startup, including when rolling back.
+    if run("systemctl", "show", FRAME_SERVICE, "-p", "LoadState", "--value") == "loaded":
+        units.append(FRAME_SERVICE)
+    run("systemctl", "restart", *units, timeout=180)
     deadline = time.monotonic() + 90
     while True:
         try:
