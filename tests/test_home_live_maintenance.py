@@ -14,7 +14,7 @@ def test_pause_and_restore_without_redelegating(monkeypatch):
         for name in ("tasks", "actions", "browser_runs", "chat_jobs", "takeover_sessions",
                      "social_accounts", "account_targets", "authorization_grants", "interaction_cards"):
             c.execute(psycopg.sql.SQL("""CREATE TEMP TABLE {} (id int,agent_id int,state text,status text,
-                type text,payload jsonb,expires_at timestamptz,external_account_id text,automation_enabled bool)"""
+                type text,input jsonb,result jsonb,payload jsonb,expires_at timestamptz,external_account_id text,automation_enabled bool)"""
                                       ).format(psycopg.sql.Identifier(name)))
         def sql(query):
             try:

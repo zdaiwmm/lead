@@ -79,7 +79,9 @@ def verify_workflow(sha, invocation):
 LOCK = """SET LOCAL lock_timeout='4s';
 LOCK TABLE lead.agents,lead.tasks,lead.actions,lead.browser_runs,lead.chat_jobs,lead.takeover_sessions,
 lead.social_accounts,lead.account_targets,lead.authorization_grants,lead.interaction_cards IN SHARE ROW EXCLUSIVE MODE;"""
-BUSY = """EXISTS(SELECT FROM lead.tasks WHERE state IN ('running','queued')) OR
+BUSY = """EXISTS(SELECT FROM lead.tasks WHERE state IN ('running','queued') OR type='community.engage' AND
+        (result->>'join_state' IN ('unknown','dispatching') OR result->>'reply_state' IN ('unknown','dispatching')
+         OR result->>'leave_state' IN ('unconfirmed','dispatching'))) OR
     EXISTS(SELECT FROM lead.actions WHERE state IN ('dispatching','unknown','prepared')) OR
     EXISTS(SELECT FROM lead.browser_runs WHERE state='running') OR
     EXISTS(SELECT FROM lead.chat_jobs WHERE status IN ('pending','processing')) OR
@@ -94,6 +96,22 @@ FINGERPRINT = """jsonb_build_object('control',a.control_version,'config',a.confi
                    FROM lead.interaction_cards WHERE agent_id=a.id AND type='manage_community'))"""
 
 
+def request_discovery_drain(sha):
+    # Expiry releases unacknowledged requests and lets the owning lane recover
+    # if the release process exits before obtaining its durable maintenance hold.
+    site_sql(f"""UPDATE lead.agents a SET onboarding_state=onboarding_state ||
+        jsonb_build_object('home_discovery_drain',jsonb_build_object('sha','{sha}','until',now()+interval '3 minutes'))
+        WHERE desired_state='running' AND NOT onboarding_state ? '{KEY}'
+          AND (NOT onboarding_state ? 'home_discovery_drain' OR
+               (onboarding_state#>>'{{home_discovery_drain,until}}')::timestamptz<=now() OR
+               (onboarding_state#>>'{{home_discovery_drain,sha}}'='{sha}' AND
+                (onboarding_state#>>'{{home_discovery_drain,until}}')::timestamptz<now()+interval '2 minutes'))
+          AND onboarding_state#>>'{{telegram_executor,discovery_handoff_version}}'='1'
+          AND EXISTS(SELECT FROM lead.tasks t WHERE t.agent_id=a.id AND t.type='community.discover'
+              AND (t.state='running' AND t.result->>'phase'='native_collect'
+                   OR t.state='planned' AND t.input#>>'{{discovery_handoff,sha}}'='{sha}'))""")
+
+
 def maintenance(action, sha):
     # The same transaction journals the original authorization fingerprint and changes only
     # scheduling intent. No domain pause/resume action (which cancels tasks/redelegates) runs.
@@ -101,6 +119,12 @@ def maintenance(action, sha):
         query = f"""DO $$ BEGIN
         IF EXISTS(SELECT FROM lead.agents WHERE onboarding_state ? '{KEY}' AND
            onboarding_state#>>'{{{KEY},sha}}' IS DISTINCT FROM '{sha}') THEN RAISE EXCEPTION 'other maintenance'; END IF;
+        IF EXISTS(SELECT FROM lead.tasks t JOIN lead.agents a ON a.id=t.agent_id
+           WHERE t.type='community.discover' AND t.state='planned' AND t.input ? 'discovery_handoff'
+             AND (t.input#>>'{{discovery_handoff,sha}}' IS DISTINCT FROM '{sha}'
+                  OR t.input#>'{{discovery_handoff,versions}}' IS DISTINCT FROM
+                      jsonb_build_array(a.control_version,a.config_revision,a.authorization_version)))
+        THEN RAISE EXCEPTION 'discovery checkpoint changed'; END IF;
         IF {BUSY} THEN RAISE EXCEPTION 'waiting for active work'; END IF;
         END $$;
         UPDATE lead.agents a SET desired_state='paused',onboarding_state=onboarding_state ||
@@ -113,7 +137,7 @@ def maintenance(action, sha):
              OR onboarding_state#>'{{{KEY},before}}' IS DISTINCT FROM {FINGERPRINT}))
         THEN RAISE EXCEPTION 'state changed during maintenance'; END IF;
         END $$;
-        UPDATE lead.agents SET desired_state='running',onboarding_state=onboarding_state-'{KEY}'
+        UPDATE lead.agents SET desired_state='running',onboarding_state=onboarding_state-'{KEY}'-'home_discovery_drain'
         WHERE onboarding_state#>>'{{{KEY},sha}}'='{sha}';"""
     site_sql("BEGIN;" + LOCK + query + "COMMIT;")
 
@@ -121,7 +145,9 @@ def maintenance(action, sha):
 def main(args):
     if os.geteuid() != 0:
         raise ValueError("root required")
-    if args == ["ready"]:
+    if args == ["ready"] or (len(args) == 2 and args[0] == "ready" and re.fullmatch("[a-f0-9]{40}", args[1])):
+        if len(args) == 2:
+            request_discovery_drain(args[1])
         busy = site_sql("SELECT " + BUSY)
         if busy not in ("t", "f"):
             raise ValueError("cannot determine whether work is active")

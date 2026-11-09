@@ -211,7 +211,7 @@ def maintenance_window(old, sha):
         return
     fence = f"lead-home-site-fence@{old}-{sha}.service"
     deadline = time.monotonic() + 3600
-    while run(site, "ready") != "idle":
+    while run(site, "ready", sha) != "idle":
         require(time.monotonic() < deadline, "active work still running; intake untouched")
         time.sleep(15)
     run("systemctl", "stop", "lead-home-live.path")
@@ -256,7 +256,15 @@ def reviewed_maintenance_files(mirror, sha, extra):
     # Preserve the separate frame compatibility check for other versions of the hook.
     changed = run("git", "--git-dir", mirror, "diff", "--no-renames", "--name-only",
                   "-z", MAINTENANCE_REVISION, sha, "--", *sorted(paths))
-    return paths - set(changed.split("\0"))
+    historical = paths - set(changed.split("\0"))
+    # These two scripts may already have been upgraded by the node operator.
+    # Compare the candidate blob with the independently installed tool bytes.
+    for name in (paths - historical) & {"scripts/home_systemd_release.py", "scripts/home_live_maintenance.py"}:
+        installed = TOOLS / Path(name).name
+        if installed.is_file() and run("git", "hash-object", "--no-filters", installed) == run(
+                "git", "--git-dir", mirror, "rev-parse", f"{sha}:{name}"):
+            historical.add(name)
+    return historical
 
 
 def deploy(sha):
