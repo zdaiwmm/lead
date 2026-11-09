@@ -59,3 +59,27 @@ def reclaim_test_profiles(monkeypatch, verification_scope):
                     shutil.rmtree(storage)
         except (OSError, LookupError):
             pass
+
+
+@pytest.fixture
+def local_model_settings(monkeypatch):
+    for provider in ("OPENAI", "DEEPSEEK"):
+        monkeypatch.setenv(provider + "_API_KEY", "fixture-only")
+        monkeypatch.setenv(provider + "_BASE_URL", "http://127.0.0.1:1")
+
+
+@pytest.fixture
+def process_pending_clicks():
+    from lead_app.analytics_ingest import process_ingest, scoped_tx, work_args
+    from lead_app.scope import current_tenant
+
+    def process(aid):
+        with scoped_tx(current_tenant(), aid, "live") as conn:
+            pending = conn.execute(
+                "SELECT * FROM lead.analytics_ingest_events WHERE state='pending'"
+            ).fetchall()
+        assert pending
+        for item in pending:
+            assert process_ingest(work_args(item))["state"] == "processed"
+
+    return process

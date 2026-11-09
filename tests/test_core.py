@@ -464,7 +464,7 @@ async def test_deepseek_wire_format(monkeypatch, agent, settings_version):
             )
 
 
-def test_analytics_attribution_is_separate_from_clicks(agent):
+def test_analytics_attribution_is_separate_from_clicks(agent, process_pending_clicks):
     cid = uid()
     code = uid().replace("-", "")[:16]
     with tx(agent) as c:
@@ -479,6 +479,7 @@ def test_analytics_attribution_is_separate_from_clicks(agent):
     with TestClient(app) as c:
         r = c.get("/r/" + code, follow_redirects=False)
         assert r.status_code == 302 and "lead_ref=" + code in r.headers["location"]
+        process_pending_clicks(agent)
         with tx(agent) as db:
             m = domain.metrics(db)
             assert m["clicks"] == 1 and m["visits"] is None

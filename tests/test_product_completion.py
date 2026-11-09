@@ -192,8 +192,9 @@ async def test_large_export_has_explicit_scoped_parts(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_maintenance_wake_respects_schedule_and_missing_facts_ask_once(
-    monkeypatch,
+    monkeypatch, local_model_settings,
 ):
+    monkeypatch.setenv("LEAD_COLLECTOR_URL", "https://links.example")
     from lead_app import activities
     from lead_app.config import TENANT
     from lead_app.model import ContentDecision
@@ -219,11 +220,13 @@ async def test_maintenance_wake_respects_schedule_and_missing_facts_ask_once(
         )
 
     monkeypatch.setattr(activities, "run_model", ask)
-    await activities.autonomous_cycle({"agent_id": aid, "cycle_id": str(uuid4())})
-    again = await activities.autonomous_cycle(
-        {"agent_id": aid, "cycle_id": str(uuid4())}
+    with tx(aid) as c:
+        target = str(one(c, "SELECT id FROM lead.account_targets")["id"])
+    await activities.autonomous_cycle({"agent_id": aid, "cycle_id": str(uuid4()), "target_id": target})
+    again = await activities._publication_cycle(
+        {"agent_id": aid, "cycle_id": str(uuid4()), "target_id": target}
     )
-    assert again["reason"] == "awaiting_business_information" and len(calls) == 1
+    assert again["reason"] == "awaiting_business_information" and len(calls) == 1, (again, calls)
     assert (
         sum(
             m["content"]["text"] == "主要面向哪类客户？"
@@ -247,9 +250,9 @@ async def test_maintenance_wake_respects_schedule_and_missing_facts_ask_once(
         )
 
     monkeypatch.setattr(activities, "run_model", review)
-    await activities.autonomous_cycle({"agent_id": aid, "cycle_id": str(uuid4())})
-    woke = await activities.autonomous_cycle(
-        {"agent_id": aid, "cycle_id": str(uuid4())}
+    await activities._publication_cycle({"agent_id": aid, "cycle_id": str(uuid4()), "target_id": target})
+    woke = await activities._publication_cycle(
+        {"agent_id": aid, "cycle_id": str(uuid4()), "target_id": target}
     )
     assert (
         woke["reason"] == "scheduled"

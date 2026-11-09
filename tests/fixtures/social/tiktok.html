@@ -35,7 +35,7 @@ document.querySelectorAll('input[type=file]').forEach(input=>input.addEventListe
  for(const file of input.files){
    const bytes=await file.arrayBuffer();const digest=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(b=>b.toString(16).padStart(2,'0')).join('');
    uploaded.push({name:file.name,type:file.type,size:file.size,sha256:digest});form.append('files',file);
-   const preview=document.createElement(file.type.startsWith('video/')?'video':'img');preview.src=URL.createObjectURL(file);preview.dataset.mediaPreview='true';if(preview.tagName==='VIDEO'){preview.preload='metadata';preview.addEventListener('loadedmetadata',()=>preview.dataset.decoded='true');}previews.append(preview);
+   const preview=document.createElement(file.type.startsWith('video/')?'video':'img');preview.src=URL.createObjectURL(file);preview.dataset.mediaPreview='true';if(preview.tagName==='VIDEO'){preview.preload='metadata';preview.addEventListener('loadedmetadata',()=>preview.dataset.decoded='true');}previews.append(preview, document.createTextNode(file.name));
  }
  await fetch('/__fixture/upload',{method:'POST',body:form});
  progress.hidden=true;finals.forEach(button=>{button.disabled=false;button.setAttribute('aria-disabled','false')});

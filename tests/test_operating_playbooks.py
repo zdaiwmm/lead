@@ -98,19 +98,20 @@ def test_formats_and_telegram_scope_do_not_expand_execution(monkeypatch):
     )
 
 
-def test_business_example_is_host_scoped_and_does_not_mutate_catalog(monkeypatch):
-    monkeypatch.setattr(pb, "evidence", lambda *a: ([], "not_ready"))
-    target = {"platform": "facebook", "target_id": uid(), "available_formats": ["text"]}
-    business = {"id": uid(), "facts": {}, "product_url": "https://seka.one"}
-    context = pb.planning_context(None, [target], business, 1)[target["target_id"]]
-    assert context["destination_url"] == "https://seka.one/translate"
-    assert "EPUB" in context["selected_plan"]["first_batch"][0]
-    assert "sample" not in pb.channel_for("facebook")["plans"][0]
-    business["product_url"] = "https://seka.one.evil.example"
-    assert (
-        "destination_url"
-        not in pb.planning_context(None, [target], business, 1)[target["target_id"]]
-    )
+def test_business_example_is_host_scoped_and_does_not_mutate_catalog(agent):
+    from lead_app.admin_content import library
+
+    aid, _, _ = agent
+    key = "strategies/facebook/" + aid
+    with tx(aid) as c:
+        entries = {e["key"]: e for e in library(c)["entries"]}
+        specific = entries[key]["body"]["plans"][0]
+        assert specific["destination_path"] == "/translate"
+        assert "EPUB" in specific["first_batch"][0]
+        assert not entries["strategies/facebook"]["body"]["plans"][0].get("destination_path")
+        c.execute("""INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,description,product_url)
+            VALUES(%s,%s,2,'Different site','https://seka.one.evil.example')""", (current_tenant(), aid))
+        assert key not in {e["key"] for e in library(c)["entries"]}
 
 
 @pytest.fixture
@@ -272,8 +273,9 @@ def test_read_only_endpoint_is_authenticated_and_agent_scoped(agent):
 
 @pytest.mark.asyncio
 async def test_planner_receives_selected_playbook_and_preserves_decision_evidence(
-    agent, monkeypatch
+    agent, monkeypatch, local_model_settings
 ):
+    monkeypatch.setenv("LEAD_COLLECTOR_URL", "https://links.example")
     from lead_app import activities
     from lead_app.model import ContentDecision
 

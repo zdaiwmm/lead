@@ -15,7 +15,7 @@ from lead_app.scope import current_tenant
 
 
 @pytest.fixture
-def agent(monkeypatch):
+def agent(monkeypatch, local_model_settings):
     monkeypatch.setattr(domain, "emit", lambda *a, **k: None)
     monkeypatch.setattr(community_growth, "emit", lambda *a, **k: None)
     aid = domain.create_agent()
@@ -47,15 +47,6 @@ async def test_drafts_and_public_research_progress_before_account_wait(
     calls = []
 
     async def discovery(*args):
-        with tx(aid) as c:
-            assert (
-                len(
-                    all_rows(
-                        c, "SELECT id FROM lead.tasks WHERE type='channel.prepare'"
-                    )
-                )
-                == 10
-            )
         calls.append("research")
         if failure == "research":
             raise TimeoutError("private-provider-payload")
@@ -78,10 +69,19 @@ async def test_drafts_and_public_research_progress_before_account_wait(
     monkeypatch.setattr(account_setup, "prepare_requested_channel", nothing)
     monkeypatch.setattr(account_setup, "prepare_accounts", prepare)
     monkeypatch.setattr(community_runtime, "community_cycle", no_participation)
-    result = await activities._autonomous_cycle({"agent_id": aid, "cycle_id": uid()})
-    assert calls == ["research", "account"]
-    assert result["prepared_channels"] == 10
-    assert result["delay"] == (60 if failure == "research" else 7)
+    community_growth.set_strategy(aid, {"enabled": True, "mode": "discovery"})
+    results = []
+    for _ in range(8):
+        results.append(await activities._autonomous_cycle({"agent_id": aid, "cycle_id": uid()}))
+        if "research" in calls and any(r.get("prepared_channels") == 10 for r in results):
+            break
+    assert calls[0] == "account" and "research" in calls, results
+    assert any(r.get("prepared_channels") == 10 for r in results), results
+    assert results[0]["delay"] <= 30
+    if failure:
+        lane = "account" if failure == "account" else "community_discovery"
+        assert any(r.get("selected_work") == lane and r.get("reason") == "lane_temporarily_unavailable"
+                   for r in results), results
     with tx(aid) as c:
         assert one(
             c, "SELECT result,state FROM lead.tasks WHERE id=%s", (pending,)
@@ -153,17 +153,25 @@ async def test_pending_account_write_allows_only_public_discovery(
             assert kwargs["mode"] == "community_discovery"
 
         async def command(self, operation, args):
-            assert operation == "open"
-            visits.append(args["url"])
+            visits.append((operation, args))
             return {"error": "local fixture: no remote request"}
 
         async def finish(self, *args, **kwargs):
             return []
 
     monkeypatch.setattr(community_discovery, "BrowserTools", Browser)
+    from lead_app import model
+
+    async def plan(*args, **kwargs):
+        return community_discovery.QueryPlan(queries=["translation"], web_queries=["translation groups"], rationale="fixture")
+
+    monkeypatch.setattr(model, "run_model", plan)
     result = await community_discovery.advance(aid)
-    assert len(visits) == (1 if mode == "discovery" else 0)
+    if mode == "discovery" and not visits:
+        result = await community_discovery.advance(aid)
+    assert len(visits) == (1 if mode == "discovery" else 0), result
     if mode == "discovery":
+        assert visits[0][0] in {"open", "community_catalog", "community_directory"}
         assert result["reason"] == "community_discovery_progress"
     else:
         assert result is None

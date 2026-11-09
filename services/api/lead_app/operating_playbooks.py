@@ -112,6 +112,7 @@ def recommend(channel, stats, coverage, available_formats=None):
     )
     if (
         coverage == "connected"
+        and len(rows) == len(channel["plans"])
         and len(rows) > 1
         and enough
         and sum(s["outcomes"] for s in rows) >= settings["min_outcomes"]
