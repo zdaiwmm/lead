@@ -26,7 +26,7 @@ jobs:
             sleep 1
           done
           .venv/bin/python scripts/migrate.py
-      - run: .venv/bin/ruff check services scripts tests infra/migrations
+      - run: .venv/bin/ruff check services scripts tests infra/migrations infra/chamber_pc/prepare_release.py
       - run: .venv/bin/python scripts/check_repository.py
       - name: Native Linux browser and namespace prerequisites
         run: |
@@ -46,7 +46,7 @@ jobs:
             sleep 1
           done
       - name: Database, media and authorization tests
-        run: LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_WORKFLOW_TESTS=1 .venv/bin/pytest -q --junitxml=.state/ci-tests.xml
+        run: LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_WORKFLOW_TESTS=1 .venv/bin/pytest -q tests infra/chamber_pc/resident/test_target_operations.py --junitxml=.state/ci-tests.xml
       - if: always() && hashFiles('.state/infra.env') != ''
         run: docker compose --env-file .state/infra.env -f infra/compose.yaml down
   frontend:
@@ -65,6 +65,22 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      - name: Package the Chamber workspace built from this push
+        if: github.event_name == 'push'
+        working-directory: infra/chamber_pc/workspace
+        run: |
+          python3 policy_package.py
+          mkdir -p "$RUNNER_TEMP/chamber-workspace"
+          cp policy.tar.gz policy.SHA256 "$RUNNER_TEMP/chamber-workspace/"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/chamber-workspace/REVISION"
+      - name: Upload workspace candidate
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: chamber-workspace-${{ github.sha }}
+          path: ${{ runner.temp }}/chamber-workspace/
+          if-no-files-found: error
+          overwrite: true
   namespace:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
