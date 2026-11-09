@@ -156,6 +156,7 @@ async def test_short_model_request_has_no_hidden_transport_retry_and_closes(
     monkeypatch.setattr(model, "OpenAIProvider", lambda **k: object())
     monkeypatch.setattr(model, "DeepSeekChatModel", lambda *a, **k: object())
     monkeypatch.setattr(model, "Agent", Agent)
+    monkeypatch.setattr("lead_app.model_backoff.recovered", lambda *a: None)
     monkeypatch.setattr(model, "reserve", lambda *a: "reservation")
     monkeypatch.setattr(model, "settle", lambda *a, **k: captured.update(settlement=k))
     if fail:
@@ -296,8 +297,8 @@ async def test_hybrid_discovery_uses_dom_evidence_instead_of_model_links(
     with tx(aid) as c:
         task = one(
             c,
-            "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at) VALUES(%s,%s,'community.discover','running',%s,'{}',%s,now()) RETURNING *",
-            (current_tenant(), aid, "fixture:" + uid(), j(saved)),
+            "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at) VALUES(%s,%s,'community.discover','running',%s,%s,%s,now()) RETURNING *",
+            (current_tenant(), aid, "fixture:" + uid(), j({"topics": ["reading", "translation", "bilingual ebook"]}), j(saved)),
         )
     rid = research.begin_run(
         aid, "fixture public exploration", mode="community_discovery"

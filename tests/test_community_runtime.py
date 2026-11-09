@@ -216,8 +216,8 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
             )
         submit = telegram.submit
 
-        async def lose_ack(page):
-            await submit(page)
+        async def lose_ack(page, **kwargs):
+            await submit(page, **kwargs)
             raise ConnectionError("ack lost")
 
         monkeypatch.setattr(telegram, "submit", lose_ack)
@@ -292,6 +292,18 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
         async def model_timeout(*args, **kwargs):
             raise TimeoutError("isolated provider timeout")
 
+        # A transport failure arms both the account/peer cooldown and the task timer.
+        # Exercise the due read-only recovery before simulating the next model failure.
+        with tx(aid) as c:
+            assert one(c, """SELECT (result->>'receipt_review_after')::timestamptz>now() AS cooling
+                FROM lead.tasks WHERE id=%s""", (pending["id"],))["cooling"]
+            c.execute("""UPDATE lead.memory_entries SET body=body || %s
+                WHERE body->>'type'='community_target_health' AND body->>'task_id'=%s""",
+                (j({"read_after":"2000-01-01T00:00:00+00:00","write_after":"2000-01-01T00:00:00+00:00"}), str(pending["id"])))
+            c.execute("""UPDATE lead.tasks SET result=result-'receipt_review_after'-'retry_after' WHERE id=%s""", (pending["id"],))
+        probe = await community_runtime.community_cycle(aid, fixture_rpc,
+            selection={"kind": "diagnose", "task_id": str(pending["id"])})
+        assert probe["reason"] == "community_target_recovered"
         monkeypatch.setattr(model, "run_model", model_timeout)
         await community_runtime.community_cycle(aid, fixture_rpc)
         with tx(aid) as c:
@@ -486,6 +498,11 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
             "https://www.google.com/goto?url=fixture", search_redirect
         )
         await research.context.route("https://t.me/**", reject_destination)
+        # Both fixture pages are fulfilled locally; no external DNS or proxy is needed.
+        async def validate_fixture_url(url):
+            assert url in {"https://www.google.com/goto?url=fixture", "https://example.org/maintainer-fixture"}
+
+        monkeypatch.setattr(actor.forward_proxy, "validate_url", validate_fixture_url)
         resolved = await research.command(
             "open", {"url": "https://www.google.com/goto?url=fixture"}, uid()
         )
@@ -554,9 +571,8 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
             assert lost["input"]["membership_task_id"] == str(task["id"])
             assert "失去成员身份" in lost["result"]["outcome"]["reason"]
         assert await actor.page.evaluate("localStorage.getItem('join_count')") == "1"
-        # A swallowed native click leaves the entire draft in the client. Only
-        # a later empty scoped search + unchanged server baseline permits one
-        # continuation; an acknowledged/lost-receipt send above never retries.
+        # A swallowed click and a lost acknowledgement are indistinguishable.
+        # An empty search cannot authorize a second submit of the saved intent.
         question = "How can I keep names stable in a new EPUB?"
         continuation_body = "For the new EPUB question, record names in one glossary before translating."
         await actor.page.goto(
@@ -616,18 +632,18 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
                 await community_runtime.browser_step(
                     actor, str(continuation["id"]), "reply"
                 )
-            )["state"] == "confirmed"
+            )["state"] == "unknown"
             assert (
                 await community_runtime.browser_step(
                     actor, str(continuation["id"]), "reply"
                 )
-            )["state"] == "confirmed"
+            )["state"] == "unknown"
         assert (
             await actor.page.evaluate("localStorage.getItem('swallowed_clicks')") == "1"
         )
         assert json.loads(
             await actor.page.evaluate("localStorage.getItem('posts')")
-        ) == [body, continuation_body]
+        ) == [body]
         # Native approval requests are a distinct durable result, never a
         # confirmed membership or a reason to block the remaining research.
         await actor.page.goto(
@@ -681,87 +697,31 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
                 "UPDATE lead.tasks SET result=result || %s WHERE id=%s",
                 (j({"join_state": "unknown"}), approval["id"]),
             )
-        reconciled = []
+        selection = {"kind": "receipt", "task_id": str(approval["id"])}
+        reads = []
+        async def receipt_rpc(path, data):
+            assert data == {"task_id": str(approval["id"]), "operation": "receipt"}
+            reads.append(data["operation"])
+            return await community_runtime.browser_step(actor, data["task_id"], data["operation"])
 
-        async def reconcile_rpc(path, data):
-            reconciled.append(data["operation"])
-            if data["operation"] == "join":
-                return {"state": "unknown", "reason": "fixture delayed acknowledgement"}
-            return await community_runtime.browser_step(
-                actor, data["task_id"], data["operation"]
-            )
-
-        assert (await community_runtime.community_cycle(aid, reconcile_rpc))[
-            "delay"
-        ] == 1
-        assert reconciled == ["observe", "join"]
+        await community_runtime.community_cycle(aid, receipt_rpc, selection=selection)
         with tx(aid) as c:
-            result = one(
-                c, "SELECT state,result FROM lead.tasks WHERE id=%s", (approval["id"],)
-            )
-            assert (
-                result["state"] == "succeeded"
-                and result["result"]["join_state"] == "unknown"
-            )
-            assert result["result"]["outcome"]["state"] == "pending_verification"
-            assert result["result"]["join_reconciliation"]["controls"] == [
-                "CANCEL REQUEST"
-            ]
-            c.execute(
-                "UPDATE lead.tasks SET state='succeeded',completed_at=now(),result=result || %s WHERE id=%s",
-                (j({"join_checked_at": "2000-01-01T00:00:00+00:00"}), approval["id"]),
-            )
-
-        async def confirmed_request_rpc(path, data):
-            assert data["operation"] == "join"
-            return await community_runtime.browser_step(
-                actor, data["task_id"], data["operation"]
-            )
-
-        assert (await community_runtime.community_cycle(aid, confirmed_request_rpc))[
-            "delay"
-        ] == 1
+            current = one(c, "SELECT state,result FROM lead.tasks WHERE id=%s", (approval["id"],))
+            assert current["state"] == "succeeded"
+            assert current["result"]["join_state"] == current["result"]["outcome"]["state"] == "pending_approval"
+            assert current["result"]["receipt_observation"]["membership"]["controls"] == ["CANCEL REQUEST"]
+            c.execute("UPDATE lead.tasks SET result=result || %s WHERE id=%s",
+                      (j({"approval_review_after":"2000-01-01T00:00:00+00:00"}), approval["id"]))
+            from lead_app.community_schedule import next_join_check
+            assert next_join_check(c)["id"] == approval["id"]
+        await actor.page.evaluate("document.querySelector('.chat-input-control-button').remove()")
+        await community_runtime.community_cycle(aid, receipt_rpc, selection=selection)
         with tx(aid) as c:
-            assert (
-                one(
-                    c,
-                    "SELECT result->>'join_state' AS state FROM lead.tasks WHERE id=%s",
-                    (approval["id"],),
-                )["state"]
-                == "pending_approval"
-            )
-            c.execute(
-                "UPDATE lead.tasks SET result=result || %s WHERE id=%s",
-                (j({"join_checked_at": "2000-01-01T00:00:00+00:00"}), approval["id"]),
-            )
-        # A timer-driven read of the same request notices the later approval.
-        await actor.page.evaluate(
-            "document.querySelector('.chat-input-control-button').remove()"
-        )
-
-        async def approval_rpc(path, data):
-            assert (
-                data["task_id"] == str(approval["id"]) and data["operation"] == "join"
-            )
-            return await community_runtime.browser_step(
-                actor, data["task_id"], data["operation"]
-            )
-
-        assert (await community_runtime.community_cycle(aid, approval_rpc))[
-            "reason"
-        ] == "community_joined"
-        with tx(aid) as c:
-            assert (
-                one(
-                    c,
-                    "SELECT result->>'join_state' AS state FROM lead.tasks WHERE id=%s",
-                    (approval["id"],),
-                )["state"]
-                == "confirmed"
-            )
+            current = one(c, "SELECT result FROM lead.tasks WHERE id=%s", (approval["id"],))
+            assert current["result"]["join_state"] == "confirmed"
+        assert reads == ["receipt", "receipt"]
         assert await actor.page.evaluate("localStorage.getItem('apply_count')") == "1"
-        # A click with no accepted native request may continue once only after
-        # reloading the server-backed group state under the same identity.
+        # An unconfirmed application is also read-only across repeated checks.
         retry_html = html.replace(
             '<button id="join">Join Group</button>',
             '<div class="chat-input-control-button"><button id="join">Apply to Join Group</button></div>',
@@ -810,41 +770,13 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
                     "fixture:" + uid(),
                 ),
             )
-        assert (await community_runtime.browser_step(actor, str(retry["id"]), "join"))[
-            "state"
-        ] == "pending_approval"
-        assert (await community_runtime.browser_step(actor, str(retry["id"]), "join"))[
-            "state"
-        ] == "pending_approval"
-        assert (
-            await actor.page.evaluate(
-                "localStorage.getItem('application_continuation_count')"
-            )
-            == "1"
-        )
+        for _ in range(2):
+            outcome = await community_runtime.browser_step(actor, str(retry["id"]), "join")
+            assert outcome["state"] == "unknown"
+        assert await actor.page.evaluate("localStorage.getItem('application_continuation_count')") is None
         with tx(aid) as c:
-            assert (
-                one(c, "SELECT result FROM lead.tasks WHERE id=%s", (retry["id"],))[
-                    "result"
-                ]["join_ui_continuation"]["server_state_refreshed"]
-                is True
-            )
-            c.execute(
-                "UPDATE lead.tasks SET result=result || %s WHERE id=%s",
-                (j({"join_state": "unknown"}), retry["id"]),
-            )
-        await actor.page.evaluate(
-            "document.querySelector('.chat-input-control-button').textContent='APPLY TO JOIN GROUP'"
-        )
-        assert (await community_runtime.browser_step(actor, str(retry["id"]), "join"))[
-            "state"
-        ] == "unknown"
-        assert (
-            await actor.page.evaluate(
-                "localStorage.getItem('application_continuation_count')"
-            )
-            == "1"
-        )
+            saved = one(c, "SELECT result FROM lead.tasks WHERE id=%s", (retry["id"],))["result"]
+            assert saved["join_state"] == "unknown" and "join_ui_continuation" not in saved
         domain.set_control(aid, "pause")
         with pytest.raises(ValueError):
             await community_runtime.browser_step(actor, str(task["id"]), "reply")

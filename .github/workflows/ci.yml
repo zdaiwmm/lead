@@ -34,8 +34,7 @@ jobs:
           sudo apt-get install -y bubblewrap fonts-noto-cjk
           .venv/bin/playwright install-deps firefox chromium
           .venv/bin/playwright install chromium
-          .venv/bin/camoufox fetch official/156.0.1-beta.36
-          .venv/bin/camoufox set official/156.0.1-beta.36
+          .venv/bin/python scripts/ci_install_camoufox.py
           # This ephemeral runner permits user namespaces for the bwrap boundary.
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

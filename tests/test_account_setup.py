@@ -54,7 +54,7 @@ def test_resume_requires_login_but_not_a_preexisting_channel(connected):
         )
         assert delegation["state"] == "accepted"
         assert delegation["payload"]["limits"] == {
-            "publish_per_day": 3,
+            "publish_per_day": None,
             "read_others": False,
         }
     domain.set_control(aid, "pause")
@@ -446,7 +446,7 @@ async def test_fresh_launch_uses_a_new_durable_command_and_correlates_probe(conn
     assert (await account_setup.prepare_requested_channel(aid, rpc))[
         "reason"
     ] == "account_verifying"
-    assert await account_setup.prepare_requested_channel(aid, rpc) is None
+    assert (await account_setup.prepare_requested_channel(aid, rpc))["reason"] == "finishing_existing_task"
     assert len(calls) == 1
     status = account_setup.launch_status(aid, launch["task_id"])
     assert status["result"]["acceptance_state"] == "awaiting_verification"

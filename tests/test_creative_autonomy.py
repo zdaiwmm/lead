@@ -311,8 +311,9 @@ def isolated_automation_database(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_autonomous_cycle_creates_missing_media_then_queues_one_native_post(
-    isolated_automation_database, monkeypatch
+    isolated_automation_database, monkeypatch, local_model_settings
 ):
+    monkeypatch.setenv("LEAD_COLLECTOR_URL", "https://links.example")
     from lead_app import activities
     from lead_app.adapters.catalog import SPECS
     from lead_app.model import ContentDecision
