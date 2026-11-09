@@ -22,7 +22,11 @@ BUSY = """SELECT EXISTS (SELECT FROM lead.agents WHERE desired_state NOT IN ('dr
     OR EXISTS (SELECT FROM lead.profile_leases WHERE state IN ('held','uncertain'))
     OR EXISTS (SELECT FROM lead.profile_maintenance WHERE state='active' AND expires_at>now())
     OR EXISTS (SELECT FROM lead.chat_jobs WHERE status IN ('pending','processing'))
-    OR EXISTS (SELECT FROM lead.tasks WHERE state IN ('queued','running','reconciling'))
+    OR EXISTS (SELECT FROM lead.tasks WHERE state IN ('queued','running')
+        OR (state='reconciling' AND NOT coalesce(
+            type='community.engage' AND input->>'account_id' <> '' AND input->>'external_account_id' <> ''
+            AND (result->>'join_state' IN ('pending_approval','dispatching','unknown')
+                 OR result->>'reply_state' IN ('dispatching','unknown')), false)))
     OR EXISTS (SELECT FROM lead.notification_deliveries WHERE state IN ('sending','unknown'))
     OR EXISTS (SELECT FROM lead.takeover_sessions WHERE state IN ('requested','active','ending')
                AND expires_at>now())"""

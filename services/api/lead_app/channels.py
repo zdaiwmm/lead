@@ -4,6 +4,7 @@ import secrets
 
 import psycopg
 
+from .account_receipts import archive_account_receipts
 from .adapters.catalog import SPECS, validate
 from .db import append_message, audit, emit, j, one, record, require_agent, tx
 from .scope import current_tenant
@@ -22,6 +23,8 @@ def disconnect_account(aid, account_id, expected_verified_at):
             raise LookupError("社媒账号不存在")
         if account["verified_at"] != expected_verified_at:
             raise ValueError("账号连接已更新，请刷新后重新确认解除绑定")
+        if account["platform"] == "telegram":
+            archive_account_receipts(c, aid, account["id"], account["external_account_id"])
         if account["state"] == "disconnected":
             return {"ok": True, "duplicate": True}
         c.execute(
@@ -98,6 +101,8 @@ def store_account(
             account["external_account_id"]
             and account["external_account_id"] != observed["external_account_id"]
         ):
+            if platform == "telegram":
+                archive_account_receipts(c, aid, account["id"], account["external_account_id"])
             c.execute(
                 "UPDATE lead.authorization_grants SET revoked_at=now() WHERE target_id IN (SELECT id FROM lead.account_targets WHERE account_id=%s) AND revoked_at IS NULL",
                 (account["id"],),
