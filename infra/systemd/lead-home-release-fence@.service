@@ -1,0 +1,17 @@
+[Unit]
+Description=Lead release maintenance fence for %i
+After=lead-home-db.service
+Requires=lead-home-db.service
+
+[Service]
+Type=notify
+User=lead-release-fence
+Group=lead-release-fence
+Environment=PGSERVICEFILE=/etc/lead-home-release/pg_service.conf
+ExecStart=/usr/local/lib/lead-home-release/check-fence --hold %i
+TimeoutStartSec=15
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX

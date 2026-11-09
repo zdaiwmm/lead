@@ -101,8 +101,10 @@ def probe(role, url):
                "--silent", "--fail", "--max-time", "4", url)
 
 
-def verify(sha):
+def verify(sha, *, fenced=False):
     require(current() == sha, "running SHA mismatch")
+    intake = run("systemctl", "show", "lead-home-ingress.socket", "-p", "ActiveState", "--value")
+    require(intake == ("inactive" if fenced else "active"), "unexpected ingress state")
     for role in ("db", "temporal"):
         process(role)
     health = json.loads(probe("api", "http://127.0.0.1:8088/api/health"))
@@ -135,7 +137,7 @@ def restart_and_verify(sha):
     deadline = time.monotonic() + 90
     while True:
         try:
-            verify(sha)
+            verify(sha, fenced=True)
             return
         except (Refused, OSError, ValueError, subprocess.SubprocessError):
             if time.monotonic() >= deadline:
@@ -176,11 +178,29 @@ def deploy(sha):
         require(all(name.startswith(allowed) or name in ("README.md", "AGENTS.md")
                     for name in changes.split("\0") if name), "release requires separate compatibility review")
         # The node's maintenance fence outlives this process. It must remain held across recovery.
+        fence = f"lead-home-release-fence@{old}-{sha}.service"
+        run("systemctl", "start", fence)
         run(TOOLS / "check-fence", old, sha)
-        run("systemctl", "start", "lead-pc-local-backup.service", timeout=1800)
+        # Stop both the listener and existing accepted connections. Health probes use loopback.
+        # On interruption the independent guard stays up and intake stays closed.
+        run("systemctl", "stop", "lead-home-ingress.socket", "lead-home-ingress.service")
+        try:
+            verify(old, fenced=True)
+            run("systemctl", "start", "lead-pc-local-backup.service", timeout=1800)
+            run(TOOLS / "check-fence", old, sha)
+            require(current() == old, "baseline changed before activation")
+            replace_release(old, sha)
+        except Exception:
+            # Only a positively reverified baseline can take traffic again automatically.
+            verify(old, fenced=True)
+            run(TOOLS / "check-fence", old, sha)
+            run("systemctl", "stop", fence)
+            run("systemctl", "start", "lead-home-ingress.socket")
+            raise
         run(TOOLS / "check-fence", old, sha)
-        require(current() == old, "baseline changed before activation")
-        replace_release(old, sha)
+        run("systemctl", "stop", fence)
+        run("systemctl", "start", "lead-home-ingress.socket")
+        verify(sha)
 
 
 def main():

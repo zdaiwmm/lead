@@ -143,7 +143,7 @@ def test_deploy_path_checks_compatibility_and_skips_repeats(hook, monkeypatch):
     monkeypatch.setattr(hook, "current", lambda: (hook.STORE / "current").readlink().name)
     activations = []
 
-    def verify(sha):
+    def verify(sha, *, fenced=False):
         assert hook.current() == sha
 
     def restart(sha):
@@ -159,5 +159,41 @@ def test_deploy_path_checks_compatibility_and_skips_repeats(hook, monkeypatch):
     changes = "services/api/lead_app/app.py\0"
     hook.deploy(new)
     hook.deploy(new)
-    assert [("systemctl", "start", "lead-pc-local-backup.service")] == [c for c in commands if "start" in c]
+    assert [c[2] for c in commands if c[:2] == ("systemctl", "start")] == [
+        f"lead-home-release-fence@{'a' * 40}-{new}.service", "lead-pc-local-backup.service",
+        "lead-home-ingress.socket"
+    ]
     assert activations == [new] and hook.current() == new
+
+
+def test_code_archive_is_content_addressed_and_private(hook, tmp_path, monkeypatch):
+    import io
+    import json
+    import tarfile
+    from types import SimpleNamespace
+
+    inventory = importlib.import_module("home_code_inventory")
+    monkeypatch.setattr(inventory, "VAULT", tmp_path)
+    monkeypatch.setattr(inventory.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(inventory.subprocess, "check_output", lambda *a, **kw: str(tmp_path))
+    actual = Path.stat
+
+    def stat(path, **kwargs):
+        value = actual(path, **kwargs)
+        if path.name == "lead-code-inventory":
+            return SimpleNamespace(st_mode=value.st_mode, st_uid=0)
+        return value
+
+    monkeypatch.setattr(Path, "stat", stat)
+    def synthetic(bundle):
+        inventory.add_bytes(bundle, "objects/test", b"code-only")
+        return {"unit": {"files": {"service.py": "test"}}}
+    monkeypatch.setattr(inventory, "inventory", synthetic)
+    first = inventory.archive()
+    assert inventory.archive() == first
+    folder = tmp_path / "lead-code-inventory"
+    archives = list(folder.glob("*.tar"))
+    assert len(archives) == 1 and archives[0].stat().st_mode & 0o077 == 0
+    with tarfile.open(fileobj=io.BytesIO(archives[0].read_bytes())) as bundle:
+        assert bundle.extractfile("objects/test").read() == b"code-only"
+        assert json.load(bundle.extractfile("manifest.json"))["unit"]["files"] == {"service.py": "test"}

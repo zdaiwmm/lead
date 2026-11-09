@@ -32,10 +32,13 @@ Python 3.11+、GitHub CLI 和可出站访问 GitHub 的 Unix 节点可以运行 
 
 **服务绑定**　永久 selector `current` 是指向同目录 SHA 名的相对符号链接。映像必须在引导时先挂载，两个版本在整个发布和恢复期间一直可用。使用既有 systemd 的 `BindReadOnlyPaths=`，让 API、collector、worker、browser、maintenance 单元把 `current/services` 绑定到 `/run/lead-home/bin/original/services`，Web 把 `current/web` 绑定到 `/run/lead-home/bin/web`。保留 Web 缓存的独立绑定。维护者须核对各单元 ExecStart、解释器、应用搜索路径、Web 工作目录和对持久目录的依赖。当前 PC 缺失的 lead 单元须先确定实际部署归属。全套单元和旧基线均验收后才能开放接单。
 
-**节点专用检查**　维护账户在 `/usr/local/lib/lead-home-release/` 配置两个受信任的可执行入口。它们是接入点，此仓库没有可直接用于该 PC 的现成实现。
+**构建与取件**　Linux 推送 CI 从同一 checkout 完成前端构建后，由 `scripts/build_home_image.sh` 封装 services、Web 和运行依赖。节点在低权限账户下运行 `python3 scripts/prepare_home_image.py <SHA> <私有暂存目录>`。它复核 main 的 CI、run/attempt 和 GitHub 归档摘要，再读 SquashFS 中的 REVISION。产物过期或摘要不符会退出。特权安装阶段应从经独立核验的来源取得镜像摘要，在管理员私有目录内重新校验同一份镜像并以 ro,nodev,nosuid 挂载。普通账户的暂存目录不能直接作为活动镜像的后备文件。
 
-- `check-fence OLD NEW` 只读核对业务入口已停止接收新操作、未决任务和浏览器在安全点，并核对持续到恢复结束的维护锁。脚本在备份前后各执行一次。只检查一次活动数无法满足此约定。
-- `verify-workflow SHA WORKER_INVOCATION_ID` 只读核对持久 Temporal 的存储和当前 worker 那次启动所完成的隔离测试任务。合成任务应由节点验收进程在专用队列驱动，使用独立身份和测试数据。脚本以 0 表示通过，响应正文留在节点。任何入口缺失时不得以空脚本替代。
+**节点专用检查**　将受审阅的 `scripts/home_release_fence.py` 和 `scripts/home_verify_workflow.py` 分别安装为 `/usr/local/lib/lead-home-release/check-fence` 和 `verify-workflow`。两个入口使用该目录下只由管理员维护的 venv，依赖采用仓库固定的 psycopg、temporalio 版本。
+
+- 安装 `infra/systemd/lead-home-release-fence@.service`。独立 OS 与数据库身份名均为 `lead-release-fence`，使用节点私有 `/etc/lead-home-release/pg_service.conf` 中同名 libpq 服务，经 Unix socket 连接**专属 lead 库**。配置需能跨租户读取安全点并在脚本列出的表持有 SHARE 锁。无法完整读取或获取锁时检查拒绝放行。已有业务须排空。检查锁后，适配器关闭专属 ingress socket 及现有连接，通过 loopback 验收；切换或回退验收通过后重新开放 socket。首次纳管须确认该入口仅服务 lead。进程从取得锁到新版本验收结束一直持有独立数据库会话。重复持锁、尚在运行的任务、未决外部动作均拦截。发生异常时保留维护单元，管理员须先核对版本、任务、锁与访问入口，再决定恢复服务。
+- 将同一镜像的 REVISION 只读绑定到 worker 的 `/run/lead-home/release-revision`，在专属 worker 启用 `LEAD_HOME_RELEASE_PROBE=1`。worker 每次正常启动在独立的 per-invocation 队列执行无业务输入的合成任务，并返回它读取的 SHA 和 systemd InvocationID。验收端使用 `/etc/lead-home-release/temporal/` 内的 address、namespace、ca.pem、client.pem、client.key 连接同一持久 Temporal。使用独立只读 mTLS 身份，仅查询完成的工作流、运行 ID、队列与结果。verify 不创建任务。
+- 旧共享节点可先用 `scripts/home_code_inventory.py` 查看受控代码摘要。管理员用同一脚本的 `--archive` 在已挂载的加密卷内保存有效 Python 模块及已编译 JS/CSS/WASM 的原字节和逐服务映射。归档按内容去重、原子落盘，输出归档摘要。Web 构建的其余文件、服务配置、可恢复数据库及 Profile 仍按节点既有备份流程保留。
 
 **接单与恢复**　先运行 `current` 和 `verify <完整 SHA>`。前者只在系统各应用进程实际看到同一只读镜像且没有未知代码覆盖时输出 SHA。调度端运行前文的 `poll_home_release.py`，只需节点出站访问。GitHub 凭据留在低权限轮询账户，特权 hook 由固定的本机分派入口调用，限制参数与 PATH。启用前用临时部署验证回传权限。应用更新会等待已有的本地备份及恢复验证单元完成，原子切换 selector，再重启纳管的应用单元。验收失败时恢复上次镜像并重新检查。数据恢复使用节点原有的隔离恢复流程；此 hook 不运行迁移。进程中断、回退失败或运行版本不一致时保留镜像和请求记录，维护者核对各 PID 后继续。
 
