@@ -52,6 +52,35 @@ def report(request_id, state):
     })
 
 
+def save_record(path, value):
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
+        f.write(value)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(f.name, path)
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def finish(directory, hook, request_id, sha):
+    if (directory / f"{request_id}.started").read_text() != sha:
+        raise ValueError("Saved request does not match GitHub")
+    result = directory / f"{request_id}.result"
+    if not result.exists():
+        passed = subprocess.run([hook, "verify", sha], check=False).returncode == 0
+        save_record(result, "success" if passed else "error")
+    outcome = result.read_text()
+    if outcome not in {"success", "error"}:
+        raise ValueError("Invalid saved verification result")
+    report(request_id, outcome)
+    save_record(directory / f"{request_id}.reported", outcome)
+    if outcome == "error":
+        raise ValueError("Node verification failed; inspect before the next release")
+
+
 def poll(directory, hook):
     requests = api("deployments?environment=home-production&task=lead-home-release&per_page=1")
     if not requests:
@@ -62,41 +91,50 @@ def poll(directory, hook):
     print(f"Latest home deployment #{request_id}, SHA {sha}")
     statuses = api(f"deployments/{request_id}/statuses?per_page=1")
     remote = statuses[0]["state"] if statuses else None
-    if remote in {"success", "inactive", "failure", "error"}:
+    if hook is None:
+        if remote not in {"success", "inactive", "failure", "error"}:
+            approved(request)
         return
-    if not approved(request) or hook is None:
-        return
+    # Resolve a prior cutover first, even if GitHub now lists a newer request.
+    for previous in sorted(directory.glob("*.started")):
+        prior_id = int(previous.stem)
+        if prior_id != request_id and not previous.with_suffix(".reported").exists():
+            prior = api(f"deployments/{prior_id}")
+            if prior["sha"] != previous.read_text() or prior["id"] != prior_id:
+                raise ValueError("Prior deployment mismatch")
+            states = api(f"deployments/{prior_id}/statuses?per_page=1")
+            state = states[0]["state"] if states else None
+            if state in {"success", "inactive", "failure", "error"}:
+                save_record(previous.with_suffix(".reported"), state)
+            else:
+                finish(directory, hook, prior_id, prior["sha"])
+            return
     marker = directory / f"{request_id}.started"
+    if remote in {"success", "inactive", "failure", "error"}:
+        if marker.exists() and not marker.with_suffix(".reported").exists():
+            save_record(marker.with_suffix(".reported"), remote)
+        return
     if not marker.exists():
+        if not approved(request):
+            return
         if remote == "in_progress":
             raise ValueError("Another node started this request; inspect it first")
         if datetime.now(UTC) - datetime.fromisoformat(request["created_at"]) > timedelta(days=1):
             raise ValueError("Request is over 24 hours old; request fresh approval")
-        verified_run(sha)
+        ci = verified_run(sha)
+        if (ci["id"], ci["run_attempt"]) != (request["payload"]["ci_run"], request["payload"]["ci_attempt"]):
+            raise ValueError("Approved CI run or attempt changed")
         live = subprocess.check_output([hook, "current"], text=True).strip()
         if not re.fullmatch(r"[0-9a-f]{40}", live):
             raise ValueError("Node did not identify its current version")
         if live != sha and api(f"compare/{live}...{sha}")["merge_base_commit"]["sha"] != live:
             raise ValueError("Release would roll back or discard a divergent live version")
-        with marker.open("x") as file:
-            file.write(sha)
-            file.flush()
-            os.fsync(file.fileno())
-        # Persist the directory entry before calling a hook with side effects.
-        fd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        save_record(marker, sha)
         report(request_id, "in_progress")
         if live != sha:
             subprocess.run([hook, "deploy", sha], check=True)
     # An interrupted request resumes with an independent probe, never a new cutover.
-    if marker.read_text() != sha:
-        raise ValueError("Saved request does not match GitHub")
-    result = subprocess.run([hook, "verify", sha], check=False)
-    report(request_id, "success" if result.returncode == 0 else "error")
-    result.check_returncode()
+    finish(directory, hook, request_id, sha)
 
 
 def main():

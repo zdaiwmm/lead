@@ -23,7 +23,8 @@ def test_interrupted_deploy_resumes_by_verifying_only(receiver, tmp_path):
     hook.write_text('#!/bin/sh\necho "$1" >> "$OPS_LOG"\n'
                     f'case "$1" in current) echo {live};; deploy) exit 1;; esac\n')
     hook.chmod(0o700)
-    request = dict(id=123, sha=sha, created_at=datetime.now(UTC).isoformat())
+    request = dict(id=123, sha=sha, created_at=datetime.now(UTC).isoformat(),
+                   payload=dict(ci_run=7, ci_attempt=1))
 
     def api(path):
         if path.startswith("deployments?"):
@@ -36,7 +37,7 @@ def test_interrupted_deploy_resumes_by_verifying_only(receiver, tmp_path):
     with (
         patch.dict(os.environ, OPS_LOG=str(log)),
         patch.object(receiver, "api", side_effect=api),
-        patch.object(receiver, "verified_run"),
+        patch.object(receiver, "verified_run", return_value=dict(id=7, run_attempt=1)),
         patch.object(receiver, "approved", return_value=True),
         patch.object(receiver, "report") as report,
     ):
