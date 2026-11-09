@@ -127,6 +127,9 @@ def collect():
             latest = c.execute(
                 "SELECT id,started_at,completed_at,object_ref,size_bytes,manifest FROM lead.backup_records WHERE kind='database' AND state='verified' ORDER BY completed_at DESC LIMIT 1"
             ).fetchone()
+            from .backups import backup_policy
+
+            policy = backup_policy()
             if latest:
                 result["backup"] = {
                     "id": str(latest["id"]),
@@ -145,6 +148,11 @@ def collect():
                     "exists": False,
                     "offsite_verified": False,
                 }
+            result["backup"]["policy"] = policy
+            if policy == "verified_local":
+                result["backup"]["local_restore_verified"] = c.execute(
+                    "SELECT lead.local_restore_ready() AS ok"
+                ).fetchone()["ok"]
     except Exception:
         result["services"]["database"] = False
     return result

@@ -335,7 +335,7 @@ export default function OperatingPlans({
               open={openStage}
             />}
           </div>
-          {data.telegram_group_board ? <TelegramGroupCard board={data.telegram_group_board} zone={zone} history={()=>{setPlatform("telegram");setDialog("history")}}/> : <>
+          {data.telegram_group_board ? <TelegramGroupCard aid={aid} board={data.telegram_group_board} zone={zone} history={()=>{setPlatform("telegram");setDialog("history")}}/> : <>
           {activity && (
             <div className={styles.liveStatus} role="status" aria-label="Agent 当前状态" data-state={paused?"paused":reconciling?"reconciling":working?"running":"waiting"}>
               <strong><i aria-hidden="true"/>{paused?"已暂停":reconciling?"核对回执":working?"正在处理":"待命中"}</strong>

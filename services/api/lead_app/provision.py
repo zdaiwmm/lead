@@ -90,10 +90,10 @@ def provision_security(conn):
     conn.execute("REVOKE ALL ON lead.schema_versions FROM lead_runtime")
     conn.execute("REVOKE ALL ON lead.ops_alerts FROM lead_runtime")
     conn.execute(
-        "REVOKE EXECUTE ON FUNCTION lead.backup_ready(),lead.offsite_backup_ready(),lead.confirm_channel_probe(uuid),lead.confirm_telegram_probe(uuid) FROM PUBLIC"
+        "REVOKE EXECUTE ON FUNCTION lead.local_restore_ready(),lead.backup_ready(),lead.offsite_backup_ready(),lead.confirm_channel_probe(uuid),lead.confirm_telegram_probe(uuid) FROM PUBLIC"
     )
     conn.execute(
-        "GRANT EXECUTE ON FUNCTION lead.backup_ready(),lead.offsite_backup_ready(),lead.confirm_channel_probe(uuid),lead.confirm_telegram_probe(uuid) TO lead_runtime"
+        "GRANT EXECUTE ON FUNCTION lead.local_restore_ready(),lead.backup_ready(),lead.offsite_backup_ready(),lead.confirm_channel_probe(uuid),lead.confirm_telegram_probe(uuid) TO lead_runtime"
     )
     conn.execute(
         "REVOKE ALL ON lead.auth_sessions,lead.oauth_transactions FROM lead_runtime"

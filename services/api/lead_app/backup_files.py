@@ -5,8 +5,9 @@ import io
 import json
 import os
 import shutil
+import stat
 import tarfile
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path, PurePosixPath
 
 import psycopg
@@ -38,9 +39,22 @@ class HashingReader:
         return value
 
 
+def source_roots():
+    legacy = os.environ.get("LEAD_BACKUP_PREVIOUS_STATE_DIR")
+    return [STATE, Path(legacy)] if legacy and Path(legacy).is_absolute() else [STATE]
+
+
+def stored_relative(reference, roots):
+    path = Path(reference)
+    return next(
+        (path.relative_to(root) for root in roots if path.is_relative_to(root)), None
+    )
+
+
 def referenced_files(connection=None):
     files = {}
     missing_archived = 0
+    roots = source_roots()
     with (
         nullcontext(connection)
         if connection is not None
@@ -53,11 +67,10 @@ def referenced_files(connection=None):
                 ).format(col=sql.Identifier(column), table=sql.Identifier(table))
             ).fetchall()
             for row in rows:
-                path = Path(row["reference"])
-                try:
-                    relative = path.relative_to(STATE)
-                except ValueError:
+                relative = stored_relative(row["reference"], roots)
+                if relative is None:
                     continue  # Remote object references are not host file paths.
+                path = STATE / relative
                 if not relative.parts or relative.parts[0] not in (
                     "assets",
                     "evidence",
@@ -78,8 +91,34 @@ def referenced_files(connection=None):
     return files, missing_archived
 
 
-def capture(folder, key, identifier, managed=False, references=None):
-    from .backups import catalog, destination, digest, now
+@contextmanager
+def open_material(name):
+    """Open a regular immutable material through its original directory descriptors."""
+    relative = PurePosixPath(name)
+    if (relative.is_absolute() or ".." in relative.parts or len(relative.parts) < 2
+            or relative.parts[0] not in ("assets", "evidence")):
+        raise ValueError("资料路径超出备份范围")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent = os.open(STATE, directory_flags)
+    try:
+        for part in relative.parts[:-1]:
+            child = os.open(part, directory_flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        fd = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("资料必须是普通文件")
+            if os.geteuid() == 0 and info.st_nlink != 1:
+                raise ValueError("管理备份拒绝存在多条硬链接的资料")
+            yield stream
+    finally:
+        os.close(parent)
+
+
+def capture(folder, key, identifier, managed=False, references=None, *, record_archive=None):
+    from .backups import catalog, destination, now
 
     files, missing = references if references is not None else referenced_files()
     metadata = {
@@ -90,12 +129,16 @@ def capture(folder, key, identifier, managed=False, references=None):
     }
     manifest = {
         "source_root": str(STATE),
+        "source_roots": list(map(str, source_roots())),
         "missing_archived_references": missing,
-        "files": {
-            name: {"size": path.stat().st_size, "sha256": digest(path)}
-            for name, path in files.items()
-        },
+        "files": {},
     }
+    for name in files:
+        with open_material(name) as source:
+            manifest["files"][name] = {
+                "size": os.fstat(source.fileno()).st_size,
+                "sha256": hashlib.file_digest(source, "sha256").hexdigest(),
+            }
     path = destination(folder, identifier)
     with reserve_disk(
         sum(item["size"] for item in manifest["files"].values()) + 64 * 1024**2
@@ -108,11 +151,11 @@ def capture(folder, key, identifier, managed=False, references=None):
                 info.size = len(data)
                 info.mode = 0o600
                 archive.addfile(info, io.BytesIO(data))
-                for name, source in sorted(files.items()):
+                for name in sorted(files):
                     info = tarfile.TarInfo(name)
                     info.size = manifest["files"][name]["size"]
                     info.mode = 0o600
-                    with source.open("rb") as stream:
+                    with open_material(name) as stream:
                         hashed = HashingReader(stream)
                         archive.addfile(info, hashed)
                     if hashed.hash.hexdigest() != manifest["files"][name]["sha256"]:
@@ -121,7 +164,7 @@ def capture(folder, key, identifier, managed=False, references=None):
         except BaseException:
             writer.abort()
             raise
-    return catalog(
+    return (record_archive or catalog)(
         path,
         {**metadata, "files_count": len(files), "missing_archived_references": missing},
         key,
@@ -199,19 +242,22 @@ def install(manifest, files, connection):
             output.flush()
             os.fsync(output.fileno())
         installed += 1
-    original = Path(manifest["source_root"])
-    if original != STATE:
+    originals = [
+        Path(root) for root in manifest.get("source_roots", [manifest["source_root"]])
+    ]
+    if any(root != STATE for root in originals):
         for table, column in REFERENCES:
             for identifier, reference in connection.execute(
                 sql.SQL(
                     "SELECT id,{column} FROM lead.{table} WHERE {column} IS NOT NULL"
                 ).format(column=sql.Identifier(column), table=sql.Identifier(table))
             ).fetchall():
-                try:
-                    relative = Path(reference).relative_to(original)
-                except ValueError:
-                    continue
-                if relative.as_posix() not in files:
+                relative = stored_relative(reference, originals)
+                if (
+                    relative is None
+                    or relative.as_posix() not in files
+                    or Path(reference) == STATE / relative
+                ):
                     continue
                 connection.execute(
                     sql.SQL("UPDATE lead.{table} SET {column}=%s WHERE id=%s").format(

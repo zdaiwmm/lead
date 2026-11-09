@@ -556,7 +556,16 @@ def overview(aid: UUID, channel: str | None = None, country: str | None = None):
             + window + " AND (%(country)s::text IS NULL OR kind='site_device:'||%(country)s) GROUP BY day",
             args,
         ) if installed else []
-        pending = all_rows(c, "SELECT day FROM lead.analytics_report_dirty q WHERE day BETWEEN %(start)s AND %(end)s AND NOT EXISTS (SELECT 1 FROM lead.analytics_report_days d WHERE d.day=q.day)", args)
+        status = all_rows(c, """WITH ingest AS (
+                SELECT (received_at AT TIME ZONE 'Asia/Shanghai')::date AS day,
+                    bool_or(state='failed') AS failed
+                FROM lead.analytics_ingest_events WHERE state IN ('pending','failed')
+                  AND received_at >= (%(start)s::date::timestamp AT TIME ZONE 'Asia/Shanghai')
+                  AND received_at < ((%(end)s::date+1)::timestamp AT TIME ZONE 'Asia/Shanghai')
+                GROUP BY 1)
+            SELECT day, d.refreshed_at, q.state AS rebuild_state, i.failed AS ingest_failed
+            FROM lead.analytics_report_days d FULL JOIN lead.analytics_report_dirty q USING(day)
+            FULL JOIN ingest i USING(day) WHERE day BETWEEN %(start)s AND %(end)s""", args)
         definitions = all_rows(c, "SELECT name,label FROM lead.pixel_definitions")
     rows = {(start + timedelta(days=i)): {"clicks": 0, "pv": 0, "visitors": 0, "events": {}} for i in range((end - start).days + 1)}
     labels = {r["name"]: r["label"] for r in definitions}
@@ -581,8 +590,21 @@ def overview(aid: UUID, channel: str | None = None, country: str | None = None):
         rows[r["day"]]["visitors"] = r["n"]
     device_counts = {r["day"]: r["n"] for r in devices}
     site_counts = {r["day"]: None if r["missing"] else r["n"] for r in site_devices}
-    unavailable = {r["day"] for r in pending}
+    statuses = {r["day"]: r for r in status}
+    unavailable = {r["day"] for r in status if not r["refreshed_at"] and
+                   (r["rebuild_state"] or r["ingest_failed"] is not None)}
     for day, row in rows.items():
+        snapshot = statuses.get(day) or {}
+        row["updated_at"] = snapshot.get("refreshed_at")
+        if day == end and not snapshot:
+            unavailable.add(day)
+            row["report_state"] = "unmeasured"
+        elif snapshot.get("rebuild_state") == "failed" or snapshot.get("ingest_failed"):
+            row["report_state"] = "failed"
+        elif snapshot.get("rebuild_state") or snapshot.get("ingest_failed") is False:
+            row["report_state"] = "pending"
+        else:
+            row["report_state"] = "current"
         if not installed or day in unavailable:
             row["pv"] = None
             row["site_devices"] = None

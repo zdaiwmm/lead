@@ -149,9 +149,20 @@ class Maintenance:
                         "code": "backup.failed",
                         "severity": "critical",
                     }
-                if env().get("LEAD_DEPLOYMENT_MODE") == "production" and not sample.get(
-                    "backup", {}
-                ).get("offsite_verified"):
+                if (
+                    env().get("LEAD_DEPLOYMENT_MODE") == "production"
+                    and sample.get("backup", {}).get("policy") == "verified_local"
+                ):
+                    if not sample["backup"].get("local_restore_verified"):
+                        alerts["backup.local_restore"] = {
+                            "code": "backup.local_restore",
+                            "severity": "critical",
+                        }
+                elif env().get(
+                    "LEAD_DEPLOYMENT_MODE"
+                ) == "production" and not sample.get("backup", {}).get(
+                    "offsite_verified"
+                ):
                     alerts["backup.offsite"] = {
                         "code": "backup.offsite",
                         "severity": "critical",

@@ -41,6 +41,32 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def backup_policy():
+    policy = env().get("LEAD_BACKUP_POLICY") or "offsite"
+    if policy not in ("offsite", "verified_local"):
+        raise ValueError("备份策略配置无效")
+    return policy
+
+
+def write_backup_ready(c):
+    if backup_policy() == "verified_local":
+        return one(c, "SELECT lead.local_restore_ready() AS ready")["ready"]
+    return one(
+        c, "SELECT lead.backup_ready() AND lead.offsite_backup_ready() AS ready"
+    )["ready"]
+
+
+def verification_counts(c):
+    # Count inside the exported snapshot, so concurrent task progress cannot
+    # invalidate comparison to the independently restored database.
+    return {
+        name: c.execute(
+            sql.SQL("SELECT count(*) FROM lead.{} AS t").format(sql.Identifier(name))
+        ).fetchone()["count"]
+        for name in ("agents", "tasks", "actions", "social_accounts")
+    }
+
+
 def pg_command(tool, database):
     values = env()
     explicit = values.get("LEAD_" + tool.upper() + "_BIN")
@@ -96,14 +122,18 @@ def staging():
         yield Path(name)
 
 
-def catalog(path, metadata, key):
-    result = {
+def archive_metadata(path, metadata, key):
+    return {
         **metadata,
         "completed_at": now(),
         "cipher_sha256": digest(path),
         "size_bytes": Path(path).stat().st_size,
         "key_id": key_id(key),
     }
+
+
+def catalog(path, metadata, key):
+    result = archive_metadata(path, metadata, key)
     with psycopg.connect(**database_kwargs(True)) as c:
         c.execute(
             "INSERT INTO lead.backup_records(id,kind,agent_id,started_at,completed_at,cipher_sha256,key_id,size_bytes,object_ref,manifest) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -148,7 +178,7 @@ def backup_database(folder, key, managed=False):
         return _backup_database(folder, key, managed)
 
 
-def _backup_database(folder, key, managed):
+def _backup_database(folder, key, managed, *, record_archive=catalog):
     ensure_capacity(256)
     identifier = str(uuid4())
     database = database_kwargs(True)["dbname"]
@@ -178,6 +208,8 @@ def _backup_database(folder, key, managed):
             "id"
         ]
         command += ["--snapshot", snapshot_id]
+        if backup_policy() == "verified_local":
+            metadata["verification_counts"] = verification_counts(snapshot)
         references = referenced_files(snapshot)
         with tempfile.TemporaryFile() as errors:
             process = subprocess.Popen(
@@ -212,11 +244,12 @@ def _backup_database(folder, key, managed):
             metadata["files_snapshot_id"],
             managed=managed,
             references=references,
+            record_archive=record_archive,
         )
     except BaseException:
         path.unlink(missing_ok=True)
         raise
-    return catalog(
+    return record_archive(
         path, {**metadata, "files_snapshot_sha256": files["cipher_sha256"]}, key
     )
 

@@ -8,6 +8,7 @@ import asyncio
 import re
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+from playwright.async_api import Error as BrowserError
 from playwright.async_api import TimeoutError as BrowserTimeout
 
 
@@ -35,30 +36,56 @@ async def dismiss_intro(page):
         await tips.click(timeout=10000)
 
 
+async def _open_account_url(page, url):
+    """Web K can replace the initial navigation while activating its service worker."""
+    for attempt in range(2):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+            return
+        except BrowserError as exc:
+            message = str(exc).splitlines()[0]
+            if not any(text in message for text in (
+                "NS_BINDING_ABORTED", "ERR_ABORTED", "interrupted by another navigation",
+            )):
+                raise
+            wanted, current = urlsplit(url), urlsplit(page.url)
+            if (current.scheme, current.netloc, current.path, current.query) == (
+                wanted.scheme, wanted.netloc, wanted.path, wanted.query,
+            ):
+                return
+            if attempt:
+                raise
+
+
 async def open_account(page, expected_account):
     """Select a known login slot without exposing dialogs or message contents."""
     p = urlsplit(page.url)
-    if p.hostname != "web.telegram.org" or not p.path.startswith("/k/"):
-        await page.goto("https://web.telegram.org/k/", wait_until="domcontentloaded")
-    slot = await page.evaluate(
-        r"""expected => {
-      for(let i=1;i<=4;i++) {try {
-        const a=JSON.parse(localStorage.getItem('account'+i)||'null');
-        const old=i===1?JSON.parse(localStorage.getItem('user_auth')||'null'):null;
-        if(String(a?.userId||old?.id||'')===expected)return String(i);
-      } catch {}}
-      return null;
-    }""",
-        expected_account,
-    )
-    if not slot:
-        raise TelegramNeedsAuth("Telegram 登录已失效，请重新连接账号")
-    if parse_qs(urlsplit(page.url).query).get("account", ["1"])[0] != slot:
-        await page.goto(
-            "https://web.telegram.org/k/?account=" + slot,
-            wait_until="domcontentloaded",
-            timeout=35000,
+    if p.scheme != "https" or p.netloc != "web.telegram.org" or not p.path.startswith("/k/"):
+        await _open_account_url(page, "https://web.telegram.org/k/")
+    try:
+        handle = await page.wait_for_function(
+            r"""expected => {
+                if (location.origin !== 'https://web.telegram.org' || !location.pathname.startsWith('/k/')) return false;
+                for(let i=1;i<=4;i++) {try {
+                    const a=JSON.parse(localStorage.getItem('account'+i)||'null');
+                    const old=i===1?JSON.parse(localStorage.getItem('user_auth')||'null'):null;
+                    if(String(a?.userId||old?.id||'')===expected)return String(i);
+                } catch {}}
+                const ready=[...document.querySelectorAll('.chatlist,.chatlist-container,.auth-pages .page-sign')].some(el=>el.getClientRects().length);
+                return ready ? 'account_missing' : false;
+            }""",
+            arg=expected_account, timeout=25000,
         )
+    except BrowserTimeout as exc:
+        raise TelegramSetupBlocked("Telegram 页面未完成加载，账号状态待核验") from exc
+    try:
+        slot = await handle.json_value()
+    finally:
+        await handle.dispose()
+    if slot not in ("1", "2", "3", "4"):
+        raise TelegramNeedsAuth("Telegram 未找到绑定账号的登录会话")
+    if parse_qs(urlsplit(page.url).query).get("account", ["1"])[0] != slot:
+        await _open_account_url(page, "https://web.telegram.org/k/?account=" + slot)
     await (
         page.locator(".chatlist,.chatlist-container")
         .filter(visible=True)

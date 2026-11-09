@@ -36,6 +36,9 @@ export default function AgentResults({
   );
   const rows: Row[] = (data?.series || []).slice(-range);
   const today = rows.at(-1);
+  const updatedAt = today?.updated_at ? new Date(today.updated_at).toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai", hour12: false,
+  }) : null;
   const metrics = [
     ["clicks", "推广点击 PV"],
     ["devices", "点击设备数"],
@@ -139,11 +142,15 @@ export default function AgentResults({
               <span>{n} · 今日</span>
               <strong>
                 {value(today, k)?.toLocaleString("zh-CN") ??
-                  (k === "devices" && today?.clicks > 0 ? "未采集" : "—")}
+                  (today?.report_state === "failed" ? "待恢复" : today?.report_state === "pending" ? "待汇总" : today ? "未采集" : "—")}
               </strong>
             </button>
           ))}
       </div>
+      {today && (updatedAt || today.report_state === "pending" || today.report_state === "failed") &&
+        <small role="status">{today.report_state === "failed" ? "部分数据处理失败" :
+          today.report_state === "pending" ? "有数据待汇总" : "汇总完成"}
+          {updatedAt && ` · 最近汇总 ${updatedAt}`}</small>}
       </div><div>
       <div className={styles.chartHead}>
         <span>{metrics.find(([k]) => k === selected)?.[1]}趋势</span>

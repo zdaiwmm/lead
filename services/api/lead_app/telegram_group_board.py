@@ -6,15 +6,22 @@ from .db import all_rows, one
 # Membership is a stock, while candidate admission, joining, departure and
 # messages are daily flows. Exit reviews also update the original join task.
 # Count the review receipt once, on the day of the review.
-METRICS = """
-WITH candidate AS (
-  SELECT DISTINCT ON (url) url, coalesce(item->>'name', url) AS name, t.completed_at AS at
+METRICS = r"""
+WITH aliases AS (
+  SELECT lower(rtrim(input#>>'{candidate,telegram_url}','/')) AS url,min(result->>'target_id') AS peer
+  FROM lead.tasks WHERE agent_id=%(aid)s AND type='community.engage' AND result->>'target_id' ~ '^-[0-9]+$'
+    AND input#>>'{candidate,telegram_url}' ~* '^https://t\.me/[a-z0-9_]+/?$'
+  GROUP BY 1 HAVING count(DISTINCT result->>'target_id')=1
+), candidate AS (
+  SELECT DISTINCT ON (coalesce(a.peer,u.url)) coalesce(a.peer,u.url) AS url, coalesce(item->>'name', u.url) AS name, t.completed_at AS at
   FROM lead.tasks t CROSS JOIN LATERAL jsonb_array_elements(t.result->'candidates') item
-  CROSS JOIN LATERAL (SELECT lower(rtrim(item->>'telegram_url','/')) AS url) u
-  WHERE t.agent_id=%(aid)s AND t.type='community.discover' AND url IS NOT NULL
+  CROSS JOIN LATERAL (SELECT CASE WHEN item->>'telegram_url' ~* '^https://t\.me/[a-z0-9_]+/?$'
+    THEN lower(rtrim(item->>'telegram_url','/')) ELSE rtrim(item->>'telegram_url','/') END AS url) u
+  LEFT JOIN aliases a ON a.url=u.url
+  WHERE t.agent_id=%(aid)s AND t.type='community.discover' AND u.url IS NOT NULL
     AND t.completed_at<=%(now)s AND (t.input->>'chamber_campaign' IS DISTINCT FROM 'true'
       OR item->>'scenario_priority' IN ('1','2') OR item->>'selection_basis'='observe_recent_chat')
-  ORDER BY url, t.completed_at, t.id
+  ORDER BY coalesce(a.peer,u.url), t.completed_at, t.id
 ), inbox AS (
   SELECT DISTINCT ON (account, receipt) account, receipt, name, at
   FROM (
@@ -51,8 +58,9 @@ WITH candidate AS (
   WHERE r->>'leave_state'='confirmed' AND i ? 'membership_task_id'
   UNION ALL
   SELECT CASE WHEN i#>>'{reply,promote}'='true' THEN 'promotion' ELSE 'interaction' END,
-    nullif(r->>'reply_external_id',''),name,
-    coalesce((r->>'reply_dispatched_at')::timestamptz,completed_at),i#>>'{reply,body}'
+    CASE WHEN nullif(r->>'reply_external_id','') IS NOT NULL THEN
+        jsonb_build_array(coalesce(i->>'external_account_id',i->>'account_id'),r->>'reply_external_id')::text END,name,
+    coalesce((r->>'reply_confirmed_at')::timestamptz,(r->>'reply_dispatched_at')::timestamptz,completed_at),i#>>'{reply,body}'
   FROM work WHERE r->>'reply_state'='confirmed' AND i#>>'{reply,promote}' IN ('true','false')
 ), daily AS (
   SELECT DISTINCT ON (metric,key) metric,key,name,at,detail FROM receipts WHERE key IS NOT NULL
@@ -120,6 +128,7 @@ def execution(c, aid, day, now):
         count(DISTINCT coalesce(result->>'target_id',lower(input#>>'{candidate,telegram_url}')))
             FILTER (WHERE result ? 'history_observation' AND
                 coalesce((result->>'history_observed_at')::timestamptz,completed_at,created_at) BETWEEN %(day)s AND %(now)s) AS assessed,
+        max((result->>'history_observed_at')::timestamptz) AS last_observed_at,
         count(*) FILTER (WHERE result->>'join_submitted'='true' AND
             (result->>'join_dispatched_at')::timestamptz BETWEEN %(day)s AND %(now)s) AS joins_started,
         count(*) FILTER (WHERE result#>>'{draft_validation,state}'='accepted' AND
@@ -224,15 +233,56 @@ def report(c, agent, day, now):
           AND v.exclusion_reason IS NULL AND v.tracking_link_id::text IN (SELECT link FROM posted)
         """, args)
     business = agent["onboarding_state"].get("community_progress", {})
-    scopes = business.get("blocked_scopes", [])
+    scopes = all_rows(c, """SELECT body->>'peer' AS peer,body->>'error_code' AS error_code,
+                 (body->>'read_after')::timestamptz AS read_after FROM lead.memory_entries
+             WHERE agent_id=%s AND body->>'type'='community_target_health' AND body->>'state'='blocked'
+               AND deleted_at IS NULL""", (agent["id"],))
+    executor = agent["onboarding_state"].get("telegram_executor") or {}
+    if executor:
+        from datetime import datetime
+
+        stamp = executor.get("heartbeat_at")
+        executor = {**executor, "online": bool(stamp and (now-datetime.fromisoformat(stamp)).total_seconds() <= 120)}
+        if not paused:
+            labels = {"review":"回访已加入的群", "discover":"搜索并核验 Telegram 候选群",
+                      "candidate":"核验新候选", "receipt":"只读核对平台回执", "resume":"继续上次任务",
+                      "diagnose":"诊断目标群", "inventory":"只读核对入群申请", "checking":"核对账号状态",
+                      "waiting":"等待下次检查", "no_due_task":"等待任务到期", "readonly_wait":"等待读取任务到期",
+                      "backup_not_ready":"等待备份恢复验证", "acceptance_complete":"验收任务已结束"}
+            current = labels.get(executor.get("action"), "等待调度") if executor["online"] else "专用执行器心跳已过期"
+            next_action = "按到期时间巡群和核对回执" if not executor.get("writes_enabled") else "按到期时间处理群任务"
+            if executor.get("account_status") in ("limited", "undetermined"):
+                owner = ("Telegram 账号受限，等待官方解除限制。" if executor["account_status"] == "limited"
+                         else "Telegram 账号发言资格待核实。")
+
     if not owner and any(scope.get("error_code") == "authentication_required" for scope in scopes):
         owner = "受影响的 Telegram 账号需要重新登录，完成后系统会只读复查。"
     autonomy = {"last_progress_at": business.get("last_progress_at"),
                 "progress_label": {"qualified_candidate": "新增合格候选", "membership_confirmed": "确认加入群", "message_confirmed": "取得发言回执", "filtered_click": "获得有效点击"}.get(business.get("progress_kind"), "暂无已验证进展"),
                 "blocked_targets": sum(s.get("peer") != "*" for s in scopes),
                 "blocked_accounts": sum(s.get("peer") == "*" for s in scopes),
-                "next_check_at": min((s["read_after"] for s in scopes if s.get("read_after")), default=None)}
-    return {"autonomy": autonomy, "execution": execution(c, agent["id"], day, now), "progress": progress(c, agent["id"], now), "promotion_visits": visits["visits"], "metrics": metrics, "at": now, "current": current,
+                "next_check_at": min((s["read_after"] for s in scopes if s.get("read_after") and s["read_after"]>now), default=None)}
+    reviews = all_rows(c, """SELECT id,state,expires_at,payload->>'name' AS name,payload->>'kind' AS kind,
+        payload->>'mid' AS mid,payload->>'quote' AS quote,payload->>'url' AS url
+        FROM lead.interaction_cards WHERE agent_id=%(aid)s AND type='community_operator_review'
+        AND state IN ('pending','accepted') AND expires_at>%(now)s ORDER BY created_at DESC,id LIMIT 30""",args)
+    acquisition = one(c, """WITH posts AS (
+        SELECT DISTINCT result->>'target_id' AS peer,input#>>'{reply,tracking_link_id}' AS link
+        FROM lead.tasks WHERE agent_id=%(aid)s AND type='community.engage' AND result->>'reply_state'='confirmed'
+          AND result->>'reply_external_id' IS NOT NULL AND input#>>'{reply,tracking_link_id}' IS NOT NULL
+    ), arrivals AS (
+        SELECT DISTINCT post.peer,p.id,p.event_name FROM posts post JOIN lead.visit_sessions v
+            ON v.tracking_link_id::text=post.link AND v.agent_id=%(aid)s AND v.source='redirect' AND v.exclusion_reason IS NULL
+        JOIN lead.pixel_receipts p ON p.agent_id=v.agent_id AND p.tenant_id=v.tenant_id AND p.click_id::text=v.source_session_id
+        WHERE p.scope_key='live' AND p.counted AND p.occurred_at BETWEEN %(day)s AND %(now)s
+    ) SELECT (SELECT count(*) FROM lead.tasks WHERE agent_id=%(aid)s AND type='community.discover' AND state='succeeded'
+            AND completed_at BETWEEN %(day)s AND %(now)s AND jsonb_array_length(coalesce(result->'candidates','[]'))>0) AS batches,
+        (SELECT count(DISTINCT payload->>'peer') FROM lead.interaction_cards WHERE agent_id=%(aid)s
+            AND type='community_operator_review' AND state='accepted' AND payload?'approved_at'
+            AND (payload->>'approved_at')::timestamptz BETWEEN %(day)s AND %(now)s) AS reviewed_groups,
+        count(DISTINCT peer) FILTER (WHERE event_name='PageView') AS arrived_groups,
+        count(DISTINCT id) FILTER (WHERE event_name='Lead') AS lead_events FROM arrivals""",args)
+    return {"operator_reviews": reviews, "acquisition": acquisition, "executor": executor or None, "autonomy": autonomy, "execution": execution(c, agent["id"], day, now), "progress": progress(c, agent["id"], now), "promotion_visits": visits["visits"], "metrics": metrics, "at": now, "current": current,
             "next": ("恢复运营后重新排期" if paused else next_action or "暂无已排定的下一项社群行动"),
             "constraint": f"「{latest['name']}」{latest['reason']}" if latest else None,
             "owner": owner}

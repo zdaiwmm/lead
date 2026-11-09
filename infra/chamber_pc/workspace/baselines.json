@@ -1,0 +1,39 @@
+{
+  "previous_build": "Vf0O5xgw9h70b2FrbA4rL",
+  "workspace": {
+    "telegram_group_board.py": [
+      "676d5b4f3df4dfbf2b6e3f1ed48a13d36f0864c9685f66f81b76c30c1a09012b",
+      "8687afb128fdce7a87dd2b598f0c51716ab71e08c92da7404a79c19801cc5833"
+    ],
+    "analytics_reporting.py": [
+      "adfec0efc5371f710007d511453d640d689e7a3e91204d7b2bde2ed25517f1bb"
+    ]
+  },
+  "policy": {
+    "api": [
+      "e7f3cfd3f76acdaa9d8b04a8832c685667a1e26c6cfead430628dd774f33d1d7"
+    ],
+    "community_growth": [
+      "011516ddfcc12c7b8e140ba4752c24928b9701790c2ac160b7de6818785de361"
+    ],
+    "community_discovery": [
+      "da95b77d92a46af4e4dcc0b4a36df55a75d797168bddfbe227f2eb81d6c3c63a"
+    ],
+    "hybrid_research": [
+      "0f1b2538e0089a5cb0bcc2ec0b3949574ded30a6775458fe4181cdad23c070cd"
+    ],
+    "community_runtime": [
+      "0369be1d895a696e82539db92f0b07fdd41ebf4273437bfd82caff3c104fe56f",
+      "0369be1d895a696e82539db92f0b07fdd41ebf4273437bfd82caff3c104fe56f",
+      "42ccc56dccb93f64c4835b3b1d4133bff2b4c10069adfe767d4dfd0a35df4b7a"
+    ],
+    "model": [
+      "fc22af6495bd4985d4dd9cfbfb68f290aac1726c35ff4d476008e03ac17973cf"
+    ],
+    "telegram_group_board": [
+      "676d5b4f3df4dfbf2b6e3f1ed48a13d36f0864c9685f66f81b76c30c1a09012b",
+      "676d5b4f3df4dfbf2b6e3f1ed48a13d36f0864c9685f66f81b76c30c1a09012b",
+      "8687afb128fdce7a87dd2b598f0c51716ab71e08c92da7404a79c19801cc5833"
+    ]
+  }
+}

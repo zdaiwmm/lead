@@ -1,0 +1,16 @@
+[Unit]
+Description=PC Xray tunnel for the Lead OpenAI endpoint
+ConditionPathIsMountPoint=/srv/lead-prod-vault
+ConditionPathExists=/srv/lead-prod-vault/incoming/lead-model-xray/config.json
+
+[Service]
+Type=exec
+UMask=0077
+ExecStartPre=%h/.local/lib/lead-model-xray/v26.10.31/xray run -test -c /srv/lead-prod-vault/incoming/lead-model-xray/config.json
+ExecStart=%h/.local/lib/lead-model-xray/v26.10.31/xray run -c /srv/lead-prod-vault/incoming/lead-model-xray/config.json
+ExecStartPost=/usr/bin/python3 -ISB %h/.local/lib/lead-model-xray/xray_model_socket.py
+Restart=on-failure
+RestartSec=8
+
+[Install]
+WantedBy=default.target

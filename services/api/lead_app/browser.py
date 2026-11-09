@@ -351,13 +351,11 @@ class Actor:
             "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
         ):
             raise ValueError("环境正在备份，已停止提交")
-        if (
-            env().get("LEAD_DEPLOYMENT_MODE") == "production"
-            and not one(
-                c, "SELECT lead.backup_ready() AND lead.offsite_backup_ready() AS ready"
-            )["ready"]
-        ):
-            raise ValueError("数据库恢复点已过期，已停止新的发布")
+        if env().get("LEAD_DEPLOYMENT_MODE") == "production":
+            from .backups import write_backup_ready
+
+            if not write_backup_ready(c):
+                raise ValueError("数据库恢复点已过期，已停止新的发布")
         platform = action["intent"].get("platform")
         from .adapters.catalog import SPECS
 

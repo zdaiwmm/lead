@@ -504,3 +504,82 @@ def test_public_collection_fences_origins_keys_and_foreign_sources(pixel):
     assert TestClient(app).get(f"/api/agents/{aid}/analytics/report").status_code == 401
     report = client.get(f"/api/agents/{aid}/analytics/report").json()
     assert "snippet" not in report["connection"] and "server" not in report
+
+
+def test_agent_report_recovery_and_freshness(pixel):
+    from scripts.recover_agent_analytics import recover_scope
+
+    aid, _, client, _, _, _ = pixel
+    path = f"/api/agents/{aid}/analytics/overview"
+    tenant = current_tenant()
+    assert send(pixel).is_success
+    today = client.get(path).json()["series"][-1]
+    assert today["report_state"] == "pending" and today["pv"] is None
+    assert recover_scope(tenant, aid, "live") > 0
+    today = client.get(path).json()["series"][-1]
+    assert today["report_state"] == "current" and today["updated_at"]
+    assert today["pv"] == today["site_devices"] == 1 and today["clicks"] == 0
+    assert send(pixel).is_success
+    stale = client.get(path).json()["series"][-1]
+    assert stale["report_state"] == "pending" and stale["pv"] == 1
+    recover_scope(tenant, aid, "live")
+    assert recover_scope(tenant, aid, "live") == 0
+    assert client.get(path).json()["series"][-1]["pv"] == 2
+
+
+@pytest.mark.skipif(__import__("os").getenv("LEAD_WORKFLOW_TESTS") != "1", reason="isolated Temporal server required")
+def test_target_temporal_worker_processes_queued_event(pixel):
+    import os
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    from lead_app.analytics_ingest import admit_browser
+    from lead_app.pixel_events import BrowserEvent
+
+    aid, cid, client, _, _, _ = pixel
+    with tx(aid) as c:
+        conn = one(c, "SELECT * FROM lead.analytics_connections WHERE id=%s", (cid,))
+    body = BrowserEvent(key=token("analytics:"+cid), event_name="PageView", event_id=uid(),
+                        anonymous_id=uid(), session_id=uid(), url="https://site.example/")
+    event = admit_browser(conn, body, {"client_ip":None,"user_agent":"Fixture Browser"})
+    env = dict(os.environ, LEAD_ANALYTICS_TASK_QUEUE="lead-analytics-"+aid)
+    worker = subprocess.Popen([sys.executable, str(Path(__file__).parents[1]/"scripts/agent_analytics_temporal.py"),
+                               "--agent", aid], env=env)
+    try:
+        for _ in range(45):
+            assert worker.poll() is None
+            today = client.get(f"/api/agents/{aid}/analytics/overview").json()["series"][-1]
+            if today.get("pv") == 1 and today["report_state"] == "current":
+                break
+            time.sleep(1)
+        else:
+            pytest.fail("dedicated queue did not produce the expected snapshot")
+        from lead_app.analytics_ingest import scoped_tx
+
+        with scoped_tx(current_tenant(), aid, "live") as c:
+            assert one(c, "SELECT state FROM lead.analytics_ingest_events WHERE id=%s", (event["id"],))["state"] == "processed"
+    finally:
+        worker.terminate()
+        worker.wait(timeout=30)
+
+
+def test_two_clicks_one_device_and_one_business_event_in_isolated_agent(pixel):
+    from scripts.recover_agent_analytics import recover_scope
+    aid, cid, client, headers, markers, _ = pixel
+    for marker in markers:
+        response=client.get("/r/"+marker, follow_redirects=False, headers={"User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X) Chrome/132.0.0.0 Safari/537.36","Accept":"text/html"})
+        assert response.headers["X-Lead-Measurement"] == "accepted"
+    did, sid = uid(), uid()
+    assert send(pixel,anonymous_id=did,session_id=sid).is_success
+    event = {"event_id":uid(),"user_id":"fixture-member","anonymous_id":did,"session_id":sid}
+    assert send(pixel,"CompleteRegistration",**event).is_success
+    assert send(pixel,"CompleteRegistration",**event).is_success
+    for _ in range(6):
+        if not recover_scope(current_tenant(),aid,"live"):break
+    day=client.get(f"/api/agents/{aid}/analytics/overview").json()["series"][-1]
+    assert (day["clicks"],day["devices"],day["pv"],day["site_devices"])==(2,1,1,1)
+    with tx(aid) as c:
+        counted=one(c,"SELECT count(*) AS n FROM lead.pixel_receipts WHERE connection_id=%s AND event_name='CompleteRegistration' AND counted AND scope_key='live'",(cid,))
+        assert counted["n"]==1

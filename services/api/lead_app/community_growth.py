@@ -20,8 +20,6 @@ CHAMBER_BRIEF = (
     "工具展示和其他有真人的公开讨论，无需预先证明隐私需求。核实讨论群身份，不以订阅数冒充可触达成员。"
     "根据相同帖龄的独立短链有效点击调整分发，同时继续探索新场景。"
 )
-HOURLY_CANDIDATES = 30
-HOURLY_JOIN_ACTIONS = 8
 
 
 def chamber_scenario_priority(public_topic):
@@ -500,20 +498,17 @@ def campaign_progress(c, agent):
         ) SELECT count(*) FILTER (WHERE sent>now()-interval '1 hour') AS submitted,
                  count(*) FILTER (WHERE confirmed>now()-interval '1 hour') AS joined FROM receipts
         """, (str(agent["config_revision"]),))
-    return {"hours": hours, "candidate_goal": HOURLY_CANDIDATES,
-            "submission_goal": HOURLY_JOIN_ACTIONS, **counts, **actions}
+    return {"hours": hours, "candidate_goal": None, "submission_goal": None,
+            "historical_candidate_reference": 30, **counts, **actions}
 
 
 def search_interval(c, agent, config):
     from .growth_experiments import chamber_campaign, first_users
 
+    if chamber_campaign(agent):
+        return config.discovery_interval_hours
     if first_users(agent):
         window = campaign_progress(c, agent)
-        if chamber_campaign(agent):
-            behind = window["found"] < window["candidate_goal"] or (
-                config.allow_join and config.mode == "contextual_outreach" and window["submitted"] < window["submission_goal"]
-            )
-            return (10 if behind else 30) / 60
         behind = window["found"] < window["candidate_goal"] or (
             config.allow_join and config.mode == "contextual_outreach" and window["joined"] < window["joined_goal"]
         )

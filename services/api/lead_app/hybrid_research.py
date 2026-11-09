@@ -80,6 +80,9 @@ class HybridResearchPage(ResearchPage):
 
 
 async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=None):
+    from .community_runtime import CHAMBER_AGENT_ID
+    if mode == "community_discovery" and str(aid) == CHAMBER_AGENT_ID:
+        return {"error": "community_local_discovery_only", "sources": []}
     from .admin_settings import for_agent
     from .config import model_reference, resolve_model
 

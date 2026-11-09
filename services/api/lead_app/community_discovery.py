@@ -67,6 +67,8 @@ def broadcast_metadata(metadata):
 def hybrid_pending(payload, saved):
     from .hybrid_research import available
 
+    if payload.get("chamber_campaign"):
+        return False
     return bool(
         (
             payload.get("account_id")
@@ -448,9 +450,12 @@ def queue_repository_entries(saved, observed):
 
 async def hybrid_collect(aid, task, saved):
     from .hybrid_research import explore
+    from .community_runtime import CHAMBER_AGENT_ID
 
     # The model's answer is not link evidence. Use saved DOM anchors only.
-    if saved.get("hybrid_in_flight"):
+    if str(aid) == CHAMBER_AGENT_ID or task["input"].get("chamber_campaign"):
+        saved.update(phase="completed", candidates=[], hybrid_outcome="local_discovery_only", hybrid_in_flight=False)
+    elif saved.get("hybrid_in_flight"):
         saved.update(
             phase="completed",
             candidates=[],
@@ -629,9 +634,12 @@ async def advance(aid):
     from .community_growth import campaign_progress, search_interval
     from .community_search import QUERIES
     from .model import run_model
+    from .community_runtime import CHAMBER_AGENT_ID, local_community_decision
 
     with tx(aid) as c:
         a = require_agent(c, aid, True)
+        if str(aid) == CHAMBER_AGENT_ID or chamber_campaign(a):
+            run_model = local_community_decision
         config = discovery_config(c, a)
         if not config.enabled or a["desired_state"] != "running":
             return
@@ -1159,7 +1167,7 @@ async def advance(aid):
                 short_names = [name for name in extras if len(name.split()) <= 3]
                 extras = short_names or extras[:2]
             native_cursor = saved.get("native_cursor", 0)
-            priority_terms = CHAMBER_TOPICS if chamber_campaign(a) else demand_queries(config.topics)
+            priority_terms = CHAMBER_TOPICS if chamber_campaign(a) else demand_queries(config.topics or [business.get("description") or ""])
             need_terms = {term.casefold() for term in priority_terms}
             needs = [
                 query

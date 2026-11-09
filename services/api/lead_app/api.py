@@ -819,6 +819,21 @@ class CommunityResearchRequest(BaseModel):
     client_request_id: UUID
 
 
+class CommunityOperatorReview(BaseModel):
+    accept: bool
+    body: str = Field(default="", max_length=700)
+    permission: str = Field(default="", max_length=500)
+    minutes: int = Field(default=10, ge=1, le=30)
+    include_link: bool = False
+    rule_zone: str = Field(default="", max_length=64)
+
+
+@app.post("/api/agents/{aid}/community-growth/reviews/{cid}")
+def community_operator_review(aid: UUID, cid: UUID, body: CommunityOperatorReview):
+    from .community_runtime import approve_community_review
+    return approve_community_review(str(aid), str(cid), **body.model_dump())
+
+
 @app.post("/api/agents/{aid}/community-growth/research")
 def community_research_request(aid: UUID, body: CommunityResearchRequest):
     from .community_growth import request_research

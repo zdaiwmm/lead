@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ArrowRight, CircleDot, Hand, History } from "lucide-react";
+import CommunityOperatorReviews, { type CommunityReview } from "./community-operator-reviews";
 import DialogPanel from "./dialog-panel";
 import SocialIcon from "./social-icon";
 import styles from "./telegram-group-card.module.css";
@@ -9,10 +10,12 @@ import styles from "./telegram-group-card.module.css";
 type GroupRecord = { name: string; at: string; detail?: string };
 type Totals = { count: number; records: GroupRecord[] };
 type Board = {
+  operator_reviews?: CommunityReview[];
+  acquisition?: { batches: number; reviewed_groups: number; arrived_groups: number; lead_events: number };
   metrics: Record<string, Totals>;
   autonomy?: { last_progress_at: string | null; progress_label: string; blocked_targets: number; blocked_accounts: number; next_check_at: string | null };
   execution?: {
-    totals: Record<string, number>;
+    totals: Record<string, number> & { last_observed_at?: string };
     waiting: { name: string; state: string; checked_at: string | null; next_at: string | null; check_state: string | null; reason: string | null }[];
     gates: { rule: string; reason: string; count: number }[];
     timings: { phase: string; samples: number; average_seconds: number; p95_seconds: number; failures: number }[];
@@ -23,6 +26,7 @@ type Board = {
     arrived_at: string | null;
     delayed: boolean;
   };
+  executor?: { online: boolean; writes_enabled: boolean; account_status: string; next_check_at?: string; mode: string };
   current: string;
   next: string;
   constraint: string | null;
@@ -40,7 +44,7 @@ const metrics = [
   ["promotion", "发布软文", "只统计有发送回执的群内产品介绍，编辑原帖不会重复计数。"],
 ] as const;
 
-export default function TelegramGroupCard({ board, zone, history }: { board: Board; zone: string; history: () => void }) {
+export default function TelegramGroupCard({ aid, board, zone, history }: { aid: string; board: Board; zone: string; history: () => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const metric = metrics.find(([key]) => key === selected);
   const records = metric && board.metrics[metric[0]];
@@ -51,6 +55,14 @@ export default function TelegramGroupCard({ board, zone, history }: { board: Boa
     <div className={styles.metrics}>{metrics.map(([key,label]) => <button key={key} aria-haspopup="dialog" onClick={()=>setSelected(key)}>
       <span>{label}</span><strong>{(board.metrics[key]?.count??0).toLocaleString("zh-CN")}<small>{key==="interaction"||key==="inbox_reply"||key==="promotion"?" 条":" 个"}</small></strong>
     </button>)}</div>
+    {board.executor && <p className={styles.note} role="status">
+      <b>{board.executor.online ? "专用执行器在线" : "专用执行器失联"}</b>
+      <span>{board.executor.account_status === "limited" ? "账号受限 · 只读" :
+        board.executor.writes_enabled ? "已启用授权运营" : "只读巡群"}
+        {" · 今日已观察 "}{board.execution?.totals.assessed ?? 0} 个群
+        {board.execution?.totals.last_observed_at && <> · 最近观察 {clock.format(new Date(board.execution.totals.last_observed_at))}</>}
+        {board.executor.online && board.executor.next_check_at && <> · 下次检查 {clock.format(new Date(board.executor.next_check_at))}</>}
+      </span></p>}
     {board.progress && <section aria-label="社区进展">
       <div className={styles.flow}>
         <div><small>最近确认发帖或回复</small><p>{board.progress.confirmed_at ? clock.format(new Date(board.progress.confirmed_at)) : "暂无回执"}</p></div>
@@ -69,6 +81,8 @@ export default function TelegramGroupCard({ board, zone, history }: { board: Boa
     </section>}
     <div className={styles.note}><b>最近卡点</b><span>{board.constraint || "今日暂无已记录的受阻原因。"}</span></div>
     <div className={styles.flow}><div><small><CircleDot/>当前行动</small><p>{board.current}</p></div><div><small><ArrowRight/>下一步行动</small><p>{board.next}</p></div><div><small><Hand/>需要你协助</small><p>{board.owner || "暂无待办"}</p></div></div>
+    {board.acquisition && <p className={styles.note}>今日候选 {board.acquisition.batches} 批 · 运营确认 {board.acquisition.reviewed_groups} 个群 · 有到站的群 {board.acquisition.arrived_groups} 个 · 可归因咨询事件 {board.acquisition.lead_events} 条</p>}
+    <CommunityOperatorReviews aid={aid} items={board.operator_reviews ?? []} writable={Boolean(board.executor?.online && board.executor?.writes_enabled)}/>
     {board.execution && <details className={styles.execution}>
       <summary>执行进度与等待原因</summary>
       <dl className={styles.counts}>{[

@@ -402,3 +402,148 @@ def test_read_timeout_does_not_reopen_failed_writes(workspace):
         ) + timedelta(hours=1)
         community_health.observed(c, aid, task, observation)
         assert community_health.blocked(c, aid, task)["error_code"] == "send_failed"
+
+
+@pytest.mark.asyncio
+async def test_read_only_visit_advances_to_another_due_group(workspace):
+    aid, base = workspace
+    member = {"membership_origin": "existing", "join_state": "confirmed",
+              "history_observation": {"joined": True, "can_reply": True}}
+    with tx(aid) as c:
+        first = create_task(c, workspace, "-401", "succeeded", member, hours=9)
+        second = create_task(c, workspace, "-402", "succeeded", member, hours=8)
+        create_task(c, workspace, "-403", "running", {}, reply={"reply_to_mid": "100"})
+        owner = require_agent(c, aid)
+        config = community_growth.discovery_config(c, owner)
+        selected = community_selection.choose(c, owner, config, read_only=True)
+    assert selected["kind"] == "review" and not selected["paid"]
+    assert selected["membership_id"] == str(first["id"])
+    operations = []
+
+    async def observe(path, data):
+        operations.append(data["operation"])
+        now = datetime.now(timezone.utc).isoformat()
+        with tx(aid) as c:
+            c.execute("UPDATE lead.tasks SET result=coalesce(result,'{}') || %s WHERE id=%s",
+                      (j({"target_id": "-401", "history_observed_at": now, "history_observation": {
+                          "joined": True, "can_reply": True, "new_messages": 0}}), data["task_id"]))
+        return {"target_id": "-401", "joined": True, "can_reply": True}
+
+    result = await community_runtime.community_cycle(aid, observe, selection=selected)
+    assert operations == ["observe"]
+    assert result["reason"] == "community_readonly_observed"
+    with tx(aid) as c:
+        selected = community_selection.choose(c, owner, config, read_only=True)
+        assert selected["membership_id"] == str(second["id"])
+
+
+def test_standalone_permission_is_bound_to_group_evidence():
+    candidate = {"evidence_id": "fixture", "rules_quote": "Members may showcase their projects here."}
+    quote = candidate["rules_quote"]
+    observed = {"description": "", "history": [{"mid": "4", "own": False}]}
+    assert community_runtime.placement_evidence(candidate, observed, quote, "4")
+    assert not community_runtime.placement_evidence(candidate, observed, "Ads welcome")
+    assert not community_runtime.placement_evidence(candidate, observed, quote, "8")
+    assert not community_runtime.placement_evidence(candidate, dict(observed, description="No ads"), quote)
+
+
+@pytest.mark.parametrize("variant,reopens", [
+    ("bound_read", True), ("platform_wait", False), ("uncertain_write", False),
+    ("rate_limited", False), ("verification", False), ("new_failure", False),
+    ("target_hold", False), ("custom_wait", False),
+])
+def test_successful_probe_reopens_only_legacy_account_read_hold(workspace, variant, reopens):
+    aid, base = workspace
+    last_read = datetime.now(timezone.utc) - timedelta(minutes=10)
+    fault = {"error_code": "rate_limited" if variant == "rate_limited" else "browser_error",
+             "retry_after": 600 if variant == "platform_wait" else None,
+             "write_may_have_happened": variant == "uncertain_write"}
+    state = {
+        "type": community_health.TYPE, "state": "blocked", "account": base["external_account_id"],
+        "peer": "-701" if variant == "target_hold" else "*", "error_code": fault["error_code"],
+        "urls": ["https://t.me/fixture701"] if variant == "target_hold" else [],
+        "fault": fault, "last_read_at": last_read.isoformat(),
+        "last_failure_at": (last_read + timedelta(minutes=1 if variant == "new_failure" else -1)).isoformat(),
+        "last_permission_evidence": {"joined": True, "can_reply": True, "verification_required": variant == "verification"},
+        "read_after": (last_read + timedelta(hours=5 if variant == "custom_wait" else 6)).isoformat(),
+        "write_after": (last_read + timedelta(hours=2)).isoformat(),
+    }
+    with tx(aid) as c:
+        member = create_task(c, workspace, "-701", "succeeded", {"join_state": "confirmed",
+            "membership_origin": "existing"}, hours=7)
+        owner = require_agent(c, aid)
+        config = community_growth.discovery_config(c, owner)
+        key = uid()
+        community_health._save(c, aid, key, state)
+        for _ in range(2):
+            selected = community_selection.choose(c, owner, config, read_only=True)
+            assert (selected is not None) == reopens
+            if reopens:
+                assert selected["kind"] == "review" and selected["task_id"] == str(member["id"])
+            record = one(c, "SELECT body FROM lead.memory_entries WHERE id=%s", (key,))["body"]
+            assert record == {**state, "read_after": state["last_read_at"] if reopens else state["read_after"]}
+            assert community_health.blocked(c, aid, member, write=True)
+
+
+@pytest.mark.parametrize("variant,expects_probe", [
+    ("receipt_timeout", True), ("future_read_after", False), ("explicit_platform_wait", False),
+    ("unverified_membership", False), ("already_probed", False),
+])
+def test_recovering_account_reads_a_known_group_before_retrying_old_receipt(workspace, variant, expects_probe):
+    aid, base = workspace
+    now = datetime.now(timezone.utc)
+    with tx(aid) as c:
+        reliable = create_task(c, workspace, "-731", "succeeded", {
+            "join_state": "confirmed", "membership_origin": "existing",
+            "history_observed_at": (now - timedelta(minutes=8)).isoformat(),
+            "history_observation": {"joined": variant != "unverified_membership", "new_messages": 0},
+        }, hours=1)
+        receipt = create_task(c, workspace, "-732", "reconciling", {"join_state": "unknown"}, hours=3)
+        hold = {
+            "type": community_health.TYPE, "account": base["external_account_id"], "peer": "*", "urls": [],
+            "state": "blocked", "task_id": str(receipt["id"]), "error_code": "navigation_timeout",
+            "fault": {"stage": "receipt", "retry_after": 600 if variant == "explicit_platform_wait" else None,
+                      "write_may_have_happened": True},
+            "last_failure_at": (now - timedelta(minutes=6)).isoformat(),
+            "read_after": (now + timedelta(minutes=4 if variant == "future_read_after" else -1)).isoformat(),
+            "write_after": (now + timedelta(hours=2)).isoformat(),
+        }
+        if variant == "already_probed":
+            hold["last_read_at"] = (now - timedelta(minutes=2)).isoformat()
+        community_health._save(c, aid, uid(), hold)
+        owner = require_agent(c, aid)
+        config = community_growth.discovery_config(c, owner)
+        op = community_selection.choose(c, owner, config, read_only=True)
+        assert bool(op and op["kind"] == "review") == expects_probe
+        if expects_probe:
+            assert op["task_id"] == str(reliable["id"]) and op["read_only"] and not op["paid"]
+        assert community_health.blocked(c, aid, reliable, write=True)
+        assert one(c, "SELECT state FROM lead.tasks WHERE id=%s", (receipt["id"],))["state"] == "reconciling"
+
+
+@pytest.mark.asyncio
+async def test_recovered_readonly_task_leaves_diagnostics(workspace):
+    aid, _ = workspace
+    now = datetime.now(timezone.utc)
+    with tx(aid) as c:
+        t = create_task(c, workspace, "-601", "failed", {"history_observation":{
+            "joined":True,"can_reply":True}}, hours=8)
+        c.execute("UPDATE lead.tasks SET input=input || %s WHERE id=%s", (j({"observation_only":True}),t["id"]))
+        community_health.failed(c, aid, t, {"error_code":"navigation_timeout","stage":"observe",
+                                          "retryable":True,"scope":"target"}, occurred_at=now-timedelta(hours=8))
+        owner = require_agent(c, aid)
+        config = community_growth.discovery_config(c, owner)
+        op = community_selection.choose(c, owner, config, read_only=True)
+    assert op["kind"] == "diagnose"
+
+    async def observe(path, data):
+        assert data["operation"] == "observe"
+        with tx(aid) as c:
+            c.execute("UPDATE lead.tasks SET result=result||%s WHERE id=%s", (j({"history_observed_at":now.isoformat()}),t["id"]))
+        return {"target_id":"-601", "joined":True, "can_reply":True}
+
+    result = await community_runtime.community_cycle(aid, observe, selection=op)
+    assert result["reason"] == "community_readonly_observed"
+    with tx(aid) as c:
+        assert community_health.get(c, aid, t)["state"] == "healthy"
+        assert community_selection.choose(c, owner, config, read_only=True) is None

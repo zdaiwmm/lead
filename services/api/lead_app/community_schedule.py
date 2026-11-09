@@ -294,12 +294,12 @@ def completed(aid, result, now=None, *, respect_delay=False, resource_delay=0):
             ),
         )
         c.execute(
-            """UPDATE lead.agents SET heartbeat_at=now(),health_state=CASE
+            """UPDATE lead.agents SET heartbeat_at=greatest(heartbeat_at,%s,clock_timestamp()),health_state=CASE
               WHEN desired_state<>'running' THEN health_state
               WHEN health_state IN ('queued','working','ready') THEN CASE
                 WHEN EXISTS(SELECT 1 FROM lead.tasks WHERE state IN ('queued','running','reconciling')) THEN 'working'
                 ELSE 'ready' END ELSE health_state END WHERE id=%s""",
-            (aid,),
+            (now, aid),
         )
     return {
         **result,

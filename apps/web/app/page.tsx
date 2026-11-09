@@ -56,6 +56,12 @@ const names: Row = {
   planned: "待执行",
 };
 function status(a: Row) {
+  const executor = a.onboarding_state?.telegram_executor;
+  if (a.desired_state === "running" && executor) {
+    if (!executor.heartbeat_at || Date.now() - Date.parse(executor.heartbeat_at) > 120000) return "专用执行器失联";
+    if (executor.account_status === "limited") return "账号受限 · 只读巡群";
+    if (!executor.writes_enabled) return "只读运营";
+  }
   const kernel = a.onboarding_state?.operating_kernel;
   if (a.desired_state === "running" && kernel?.last_result?.idle) {
     return "持续运营，等待下一项工作";
@@ -76,6 +82,7 @@ export default function Lead() {
   const [current, setCurrent] = useState<string | null>(null);
   const [detail, setDetail] = useState<Row | null>(null);
   const [health, setHealth] = useState<Row | null>(null);
+  const [connection, setConnection] = useState<"connecting" | "online" | "offline">("connecting");
   const [ready, setReady] = useState(false);
   const [loginUrl, setLoginUrl] = useState("");
   const [user, setUser] = useState<Row | null>(null);
@@ -94,44 +101,49 @@ export default function Lead() {
   const sendKey = useRef<string | null>(null);
   const selected = useRef<string | null>(null);
   selected.current = current;
-  const refresh = useCallback(async () => {
-    const identity = await api("/auth/me");
+  const refresh = useCallback(async (signal = AbortSignal.timeout(12000)) => {
+    const identity = await api("/auth/me", undefined, signal);
     if (getWorkspace() && getWorkspace() !== identity.tenant_id) {
       window.location.reload();
       return;
     }
     setWorkspace(identity.tenant_id);
     setUser(identity);
-    const [a, h] = await Promise.all([api("/agents"), api("/health")]);
-    setAgents(a);
-    setHealth(h);
+    setAgents(await api("/agents", undefined, signal));
     const id = selected.current;
     if (id) {
-      const d = await api("/agents/" + id);
+      const d = await api("/agents/" + id, undefined, signal);
       if (id === selected.current) setDetail(d);
     }
   }, []);
   useEffect(() => {
-    let active = true;
-    api("/session", {})
-      .then(async (session) => {
-        if (!active) return;
+    const cancel = new AbortController();
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    async function initialize() {
+      const signal = AbortSignal.any([cancel.signal, AbortSignal.timeout(12000)]);
+      try {
+        const session = await api("/session", {}, signal);
         if (session.login_url) {
           setLoginUrl(session.login_url);
           return;
         }
-        await refresh();
-        if (active) {
-          setReady(true);
-          const saved = new URLSearchParams(window.location.search).get(
-            "agent",
-          );
-          if (saved && /^[a-f0-9-]{36}$/.test(saved)) select(saved);
-        }
-      })
-      .catch((e) => setError(e.message));
+        await refresh(signal);
+        if (cancel.signal.aborted) return;
+        setError("");
+        setReady(true);
+        const saved = new URLSearchParams(window.location.search).get("agent");
+        if (saved && /^[a-f0-9-]{36}$/.test(saved)) void select(saved);
+      } catch (e) {
+        if (cancel.signal.aborted) return;
+        setConnection("offline");
+        setError(e instanceof Error ? e.message : "工作台连接中断");
+        retry = setTimeout(initialize, 15000);
+      }
+    }
+    void initialize();
     return () => {
-      active = false;
+      cancel.abort();
+      clearTimeout(retry);
     };
   }, [refresh]);
   useEffect(() => {
@@ -142,6 +154,33 @@ export default function Lead() {
     window.addEventListener("lead:session-expired", expired);
     return () => window.removeEventListener("lead:session-expired", expired);
   }, []);
+  useEffect(() => {
+    if (!user?.tenant_id || loginUrl) return;
+    const controller = new AbortController();
+    let pending = false;
+    async function check() {
+      if (pending) return;
+      pending = true;
+      try {
+        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]);
+        const result = await api("/health", undefined, signal);
+        if (!controller.signal.aborted) {
+          setHealth(result);
+          setConnection("online");
+        }
+      } catch {
+        if (!controller.signal.aborted) setConnection("offline");
+      } finally {
+        pending = false;
+      }
+    }
+    void check();
+    const interval = setInterval(check, 15000);
+    return () => {
+      controller.abort();
+      clearInterval(interval);
+    };
+  }, [loginUrl, user?.tenant_id]);
   useEffect(() => {
     if (!ready) return;
     const events = new EventSource("/api/events");
@@ -498,7 +537,7 @@ export default function Lead() {
           <div className="local">
             <span
               className={
-                "dot " + (health?.worker && health?.browser ? "green" : "")
+                "dot " + (connection === "online" ? "green" : "")
               }
             />
             本地工作空间
@@ -534,8 +573,8 @@ export default function Lead() {
             )}
           </span>
           <span className="top-right">
-            {health?.worker ? "服务已连接" : "正在连接服务"}
-            <span className={"dot " + (health?.worker ? "green" : "")} />
+            {connection === "online" ? "服务已连接" : connection === "offline" ? "服务连接中断" : "正在连接服务"}
+            <span className={"dot " + (connection === "online" ? "green" : "")} />
           </span>
         </header>
         {error && (
@@ -679,7 +718,7 @@ export default function Lead() {
                   <h2>运行服务</h2>
                   {[
                     ["database", "数据库"],
-                    ["worker", "任务调度"],
+                    ["worker", "共享任务调度"],
                     ["browser", "浏览器"],
                   ].map(([k, label]) => (
                     <div className="setting-row" key={k}>

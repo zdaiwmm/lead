@@ -216,6 +216,14 @@ async def run_model(
     purpose=None,
     workspace_models=None,
 ):
+    from .community_runtime import CHAMBER_AGENT_ID, local_community_decision
+    if str(agent_id) == CHAMBER_AGENT_ID and (
+        getattr(output, "__module__", "").startswith("lead_app.community_")
+        or isinstance(prompt, dict) and any(k in prompt for k in (
+            "community", "candidate", "observed_links", "actual_outcomes", "previously_assessed_groups",
+            "search_feedback", "rejected_candidates", "recent_posts", "verified_public_source"))
+    ):
+        return await local_community_decision(output,prompt)
     config = {"provider": "deepseek", **model_config()}
     settings = None
     settings_version = "models/builtin@0"
