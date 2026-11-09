@@ -238,7 +238,7 @@ def test_only_reviewed_maintenance_blobs_are_accepted(hook, monkeypatch, tmp_pat
 
 
 def test_installed_handoff_tool_requires_exact_candidate_bytes(hook, tmp_path, monkeypatch):
-    import subprocess
+    monkeypatch.setattr(hook, "TOOLS", tmp_path)
 
     repo = tmp_path / "handoff"
     repo.mkdir()
