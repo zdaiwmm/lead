@@ -64,6 +64,20 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      - name: Package the tested Linux application
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: |
+          sudo apt-get install -y squashfs-tools
+          ../../scripts/build_home_image.sh "$GITHUB_SHA" "$RUNNER_TEMP/lead.squashfs"
+      - name: Retain the exact release image
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lead-home-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lead.squashfs
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
   namespace:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -75,5 +89,9 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - run: docker build --secret id=lead_ca,src=/etc/ssl/certs/ca-certificates.crt -f infra/namespace-test.Dockerfile -t lead-namespace-test:ci .
+      - name: Independent systemd image and recovery drill
+        run: |
+          sudo apt-get install -y squashfs-tools
+          sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/home_mount_drill.py
       - name: Rootless isolated transport contract
         run: docker run --rm --network none --cap-drop ALL --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined lead-namespace-test:ci

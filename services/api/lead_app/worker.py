@@ -140,6 +140,18 @@ async def deliver_workspace(client, tenant, configured, key_was_configured):
             await run_db(ack_outbox, aid, e["id"])
 
 
+def release_fenced():
+    # Admission remains enforced by PostgreSQL. Avoid queueing ordinary outbox updates
+    # behind the guardian while systemd verifies the newly started worker.
+    with tx() as conn:
+        return one(conn, """SELECT EXISTS (
+            SELECT FROM pg_locks l JOIN pg_stat_activity a ON l.pid=a.pid
+            WHERE l.database=a.datid AND a.datname=current_database()
+              AND a.usename='lead-release-fence' AND starts_with(a.application_name,'lead-release-')
+              AND l.relation='lead.agents'::regclass AND l.mode='ShareLock' AND l.granted
+        ) AS held""")["held"]
+
+
 async def publish_outbox(client):
     poll_seconds = max(1, float(env().get("LEAD_OUTBOX_POLL_SECONDS") or 1))
     configured_workspaces = set()
@@ -157,9 +169,14 @@ async def publish_outbox(client):
             async with notification_slots:
                 await dispatch(limit=5)
 
+    use_release_probe = env().get("LEAD_HOME_RELEASE_PROBE") == "1"
     credential_state = None
     while True:
         try:
+            if use_release_probe and await asyncio.to_thread(release_fenced):
+                (STATE / "worker-heartbeat").write_text(str(time.time()))
+                await asyncio.sleep(poll_seconds)
+                continue
             configured = any_model_configured()
             current_credentials = tuple(
                 bool(model_config(provider)["key"])
@@ -261,6 +278,10 @@ async def main():
         await stack.enter_async_context(worker)
         if env().get("LEAD_ANALYTICS_DEDICATED") != "1":
             await stack.enter_async_context(analytics_worker)
+        if env().get("LEAD_HOME_RELEASE_PROBE") == "1":
+            from .home_release_probe import prove_boot
+
+            await prove_boot(client)
         delivery = asyncio.create_task(publish_outbox(client))
         try:
             await stop.wait()

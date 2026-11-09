@@ -1,0 +1,11 @@
+[Unit]
+Description=Poll GitHub from the designated lead home node
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=20s
+Unit=lead-home-release-poll.service
+
+[Install]
+WantedBy=timers.target
