@@ -593,9 +593,10 @@ def test_two_clicks_one_device_and_one_business_event_in_isolated_agent(pixel):
 def test_acquisition_scope_separates_page_entries_from_window_conversions(pixel):
     from urllib.parse import parse_qs, urlsplit
 
-    from scripts.recover_agent_analytics import recover_scope
     from lead_app.analytics_ingest import scoped_tx
     from lead_app.analytics_reporting import refresh_scope
+
+    from scripts.recover_agent_analytics import recover_scope
 
     aid, cid, client, _, markers, server = pixel
     anonymous = uid()
