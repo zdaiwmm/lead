@@ -231,10 +231,13 @@ def test_budget_admission_is_atomic_and_unknown_usage_stays_reserved(
         )
 
 
-def test_budget_records_actual_overrun_and_pauses(agent, monkeypatch):
+def test_budget_overrun_blocks_further_calls_and_preserves_agent_control(agent, monkeypatch):
     from lead_app import budget
 
     monkeypatch.setattr(budget, "env", lambda: {"LEAD_DAILY_TOKEN_LIMIT": "20"})
+    with tx(agent) as c:
+        c.execute("UPDATE lead.agents SET desired_state='running' WHERE id=%s", (agent,))
+        control = one(c, "SELECT control_version FROM lead.agents")["control_version"]
     rid = budget.reserve(agent, uid(), 15)
     budget.settle(agent, rid, actual=25)
     with tx(agent) as c:
@@ -242,10 +245,12 @@ def test_budget_records_actual_overrun_and_pauses(agent, monkeypatch):
             "reserved_units": 0,
             "spent_units": 25,
         }
-        assert (
-            one(c, "SELECT desired_state FROM lead.agents")["desired_state"] == "paused"
-        )
+        assert one(c, "SELECT desired_state,control_version FROM lead.agents") == {
+            "desired_state": "running", "control_version": control,
+        }
         assert one(c, "SELECT units FROM lead.usage_events")["units"] == 25
+    with pytest.raises(budget.BudgetExceeded):
+        budget.reserve(agent, uid(), 1)
 
 
 @pytest.mark.asyncio

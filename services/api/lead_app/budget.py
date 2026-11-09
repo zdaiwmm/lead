@@ -231,9 +231,8 @@ def settle(
                 reservation_id,
             ),
         )
-        period = one(
-            c,
-            "UPDATE lead.budget_periods SET reserved_units=reserved_units-%s,spent_units=spent_units+%s WHERE id=%s RETURNING spent_units,limit_units",
+        c.execute(
+            "UPDATE lead.budget_periods SET reserved_units=reserved_units-%s,spent_units=spent_units+%s WHERE id=%s",
             (0 if incomplete else r["units"], actual or 0, r["period_id"]),
         )
         if actual is not None:
@@ -253,9 +252,4 @@ def settle(
                     measured.get("rate_version") or "unpriced",
                     j(measured),
                 ),
-            )
-        if period["spent_units"] > period["limit_units"]:
-            c.execute(
-                "UPDATE lead.agents SET desired_state='paused',health_state='needs_attention',control_version=control_version+1 WHERE id=%s",
-                (aid,),
             )

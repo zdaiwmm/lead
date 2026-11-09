@@ -116,36 +116,40 @@ def prepare_workspace(aid, platform):
         )
         if not business or not business["description"].strip():
             raise ValueError("请先保存业务介绍")
-        channel, version = channel_config(c, aid, platform)
-        pack = draft_pack(agent, business, channel, version)
-        fingerprint = hashlib.sha256(
-            json.dumps(pack, sort_keys=True, default=str).encode()
-        ).hexdigest()
-        # Calendar preview changes with time; identity is the versioned source, not that preview.
-        key = f"channel-prepare:{aid}:{business['id']}:{agent['config_revision']}:{platform}:{version}"
-        old = one(c, "SELECT id,result FROM lead.tasks WHERE workflow_id=%s", (key,))
-        if old:
-            return {"id": str(old["id"]), **old["result"], "duplicate": True}
-        job_id = uid()
-        c.execute(
-            "INSERT INTO lead.tasks(id,tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at,started_at,completed_at) VALUES(%s,%s,%s,'channel.prepare','succeeded',%s,%s,%s,now(),now(),now())",
-            (
-                job_id,
-                current_tenant(),
-                aid,
-                key,
-                j({"platform": platform, "source_fingerprint": fingerprint}),
-                j(pack),
-            ),
-        )
-        record(
-            c,
+        return save_workspace(c, aid, agent, business, platform)
+
+
+def save_workspace(c, aid, agent, business, platform):
+    channel, version = channel_config(c, aid, platform)
+    pack = draft_pack(agent, business, channel, version)
+    fingerprint = hashlib.sha256(
+        json.dumps(pack, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    # Calendar preview changes with time; identity is the versioned source, not that preview.
+    key = f"channel-prepare:{aid}:{business['id']}:{agent['config_revision']}:{platform}:{version}"
+    old = one(c, "SELECT id,result FROM lead.tasks WHERE workflow_id=%s", (key,))
+    if old:
+        return {"id": str(old["id"]), **old["result"], "duplicate": True}
+    job_id = uid()
+    c.execute(
+        "INSERT INTO lead.tasks(id,tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at,started_at,completed_at) VALUES(%s,%s,%s,'channel.prepare','succeeded',%s,%s,%s,now(),now(),now())",
+        (
+            job_id,
+            current_tenant(),
             aid,
-            "已备齐渠道运营底稿",
-            channel["name"] + " · " + str(len(pack["plans"])) + " 套方案和账号资料草稿",
-            task_id=job_id,
-        )
-        return {"id": job_id, **pack, "duplicate": False}
+            key,
+            j({"platform": platform, "source_fingerprint": fingerprint}),
+            j(pack),
+        ),
+    )
+    record(
+        c,
+        aid,
+        "已备齐渠道运营底稿",
+        channel["name"] + " · " + str(len(pack["plans"])) + " 套方案和账号资料草稿",
+        task_id=job_id,
+    )
+    return {"id": job_id, **pack, "duplicate": False}
 
 
 def prepare_all(aid, *, continue_on_error=False):
