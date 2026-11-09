@@ -103,3 +103,129 @@ def test_production_uses_per_opportunity_grants_with_optional_pilot_list(monkeyp
     monkeypatch.delenv("LEAD_TG_PILOT_PEERS",raising=False)
     monkeypatch.setenv("LEAD_TG_DELIVERY_MODE","readonly")
     assert not resident.pilot_allows("-71")
+
+
+@pytest.mark.asyncio
+async def test_login_handoff_works_without_a_bound_account(monkeypatch):
+    import asyncio
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from uuid import uuid4
+
+    import httpx
+
+    gateway = resident.ChamberGateway()
+    actor = SimpleNamespace(disconnected=False)
+    state = {'desired_state': 'paused'}
+    monkeypatch.setattr(resident, 'tx', lambda aid: nullcontext())
+    monkeypatch.setattr(resident, 'require_agent', lambda c, aid: state)
+    monkeypatch.setattr(resident, 'bound_account', Mock(side_effect=AssertionError('login requires binding')))
+    monkeypatch.setattr(resident, 'require_original_profile', Mock())
+    opened = AsyncMock(return_value={'session_id': str(uuid4())})
+    monkeypatch.setattr(resident.browser, 'open_browser', opened)
+    monkeypatch.setattr(resident.browser, 'screenshot', AsyncMock(return_value='frame'))
+    monkeypatch.setattr(resident.browser, 'user_input', AsyncMock(return_value={'ok': True}))
+    inspect = AsyncMock(return_value={'external_account_id': '42'})
+    monkeypatch.setattr(resident.browser, 'inspect_account', inspect)
+    monkeypatch.setitem(resident.browser.gateway.actors, resident.AID, actor)
+    check = Mock()
+    monkeypatch.setattr(resident.browser, 'require_takeover', check)
+
+    prefix = '/agents/' + resident.AID
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url='http://test') as client:
+        body = {'platform': 'telegram'}
+        assert (await client.post(prefix+'/open', json=body)).status_code == 403
+        client.headers['Authorization'] = 'Bearer ' + resident.browser.internal_token()
+        assert (await client.get('/health')).json()['ok']
+        assert (await client.post('/agents/'+str(uuid4())+'/open', json=body)).status_code == 403
+        assert (await client.post(prefix+'/publish', json={})).status_code == 403
+        assert (await client.post(prefix+'/open', json={'platform':'lab'})).status_code == 403
+        opened.assert_not_awaited()
+        state['desired_state'] = 'running'
+        assert (await client.post(prefix+'/open', json=body)).status_code == 409
+        state['desired_state'] = 'paused'
+        gateway.handoff.clear()
+        async with gateway.owner:
+            opening = asyncio.create_task(client.post(prefix+'/open', json=body))
+            await asyncio.wait_for(gateway.handoff.wait(), 1)
+            opened.assert_not_awaited()
+        assert (await opening).json() == opened.return_value
+        takeover = str(uuid4())
+        assert (await client.get(prefix+'/screenshot', params={'takeover':takeover})).status_code == 200
+        assert (await client.post(prefix+'/input', json={'takeover':takeover, 'kind':'click'})).status_code == 200
+        assert (await client.get(prefix+'/screenshot')).status_code == 422
+        assert (await client.post(prefix+'/input', json={'kind':'click'})).status_code == 409
+        assert (await client.post(prefix+'/account/inspect', json=body)).json() == inspect.return_value
+        check.assert_called_once_with(resident.AID, actor, None)
+
+
+def test_disconnected_account_allows_login_only(workspace, monkeypatch):
+    from lead_app import channels
+    from lead_app.db import one
+
+    aid, base = workspace
+    monkeypatch.setattr(resident, 'AID', aid)
+    with tx(aid) as c:
+        account = one(c, 'SELECT verified_at FROM lead.social_accounts WHERE id=%s', (base['account_id'],))
+        assert resident.bound_account(c) == base['external_account_id']
+    channels.disconnect_account(aid, base['account_id'], account['verified_at'])
+    with tx(aid) as c:
+        assert resident.bound_account(c, required=False) is None
+        with pytest.raises(ValueError, match='bound_account_unavailable'):
+            resident.bound_account(c)
+
+
+@pytest.mark.asyncio
+async def test_unbound_resident_serves_login_and_starts_work_only_after_resume(monkeypatch):
+    import asyncio
+    from contextlib import asynccontextmanager, nullcontext
+    from unittest.mock import AsyncMock
+
+    import httpx
+
+    listening = asyncio.Event()
+    operating = asyncio.Event()
+    state = {'desired_state': 'running'}
+    account = None
+    app = None
+
+    @asynccontextmanager
+    async def listen(login_app):
+        nonlocal app
+        app = login_app
+        listening.set()
+        yield
+
+    async def operate(mode, gateway):
+        assert mode == 'run' and account == '42' and state['desired_state'] == 'running'
+        operating.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(resident, 'serve_gateway', listen)
+    monkeypatch.setattr(resident, 'agent_tenant', lambda aid: aid)
+    monkeypatch.setattr(resident, 'tx', lambda aid: nullcontext())
+    monkeypatch.setattr(resident, 'require_agent', lambda c, aid: state)
+    monkeypatch.setattr(resident, 'bound_account', lambda c, *, required: account)
+    monkeypatch.setattr(resident, 'run', operate)
+    monkeypatch.setattr(resident.browser.gateway, 'maintenance', asyncio.Event().wait)
+    monkeypatch.setattr(resident.browser.gateway, 'close', AsyncMock())
+    monkeypatch.setattr(resident, 'require_original_profile', lambda: None)
+    monkeypatch.setattr(resident.browser, 'open_browser', AsyncMock(return_value={'session_id':'test'}))
+    task = asyncio.create_task(resident.serve())
+    try:
+        await asyncio.wait_for(listening.wait(), 1)
+        assert not operating.is_set()
+        state['desired_state'] = 'paused'  # /connect pauses before opening the browser.
+        headers = {'Authorization':'Bearer ' + resident.browser.internal_token()}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test', headers=headers) as client:
+            assert (await client.post('/agents/'+resident.AID+'/open', json={'platform':'telegram'})).status_code == 200
+        account = '42'
+        await asyncio.sleep(2.1)
+        assert not operating.is_set()
+        state['desired_state'] = 'running'
+        await asyncio.wait_for(operating.wait(), 4)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task

@@ -11,7 +11,7 @@ import subprocess
 import sys
 import traceback
 import time
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -130,9 +130,11 @@ def reconcile_model_adapter_faults(c, account):
         report('model_fault_reconciled', records=len(rows))
 
 
-def bound_account(c):
+def bound_account(c, *, required=True):
     rows = c.execute("""SELECT external_account_id FROM lead.social_accounts
         WHERE agent_id=%s AND platform='telegram' AND state='connected' AND automation_enabled""", (AID,)).fetchall()
+    if not rows and not required:
+        return None
     if len(rows) != 1 or not str(rows[0]['external_account_id'] or '').isdigit():
         raise ValueError('bound_account_unavailable')
     return rows[0]['external_account_id']
@@ -684,12 +686,11 @@ async def pulse():
         await asyncio.sleep(30)
 
 
-async def discover(actor, account):
-    """Serve existing authenticated read routes to the discovery client and its browser subprocess."""
+async def discover(actor, account, gateway):
+    """Enable only the original read routes for the lifetime of this discovery."""
     from lead_app import model
     if not getattr(model, 'LOCAL_COMMUNITY_POLICY', False):
         return {'delay': 60, 'reason': 'waiting_for_local_discovery_policy'}
-    import uvicorn
     from lead_app.community_growth import discover_communities
     from starlette.responses import Response
 
@@ -706,18 +707,101 @@ async def discover(actor, account):
                 return
         await browser.app(scope, receive, send)
 
+    gateway.discovery = read_gateway
+    try:
+        return await discover_communities(AID)
+    finally:
+        gateway.discovery = None
+
+
+def require_original_profile():
+    profile = STATE/'profiles'/AID
+    if not (profile/'identity.json').is_file() or not (profile/'storage').is_dir():
+        raise ValueError('original_profile_missing')
+
+
+class ChamberGateway:
+    def __init__(self):
+        from fastapi import APIRouter, Depends, FastAPI, HTTPException
+        from starlette.responses import Response
+
+        self.owner = asyncio.Lock()
+        self.handoff = asyncio.Event()
+        self.discovery = None
+        self.app = FastAPI(openapi_url=None)
+        self.app.middleware('http')(browser.auth)
+        self.app.get('/health')(browser.health)
+        login = APIRouter(prefix='/agents/' + AID, dependencies=[Depends(self.manual_control)])
+
+        @login.post('/open')
+        async def open_login(body: browser.OpenRequest):
+            if body.platform != 'telegram':
+                raise HTTPException(403)
+            require_original_profile()
+            return await browser.open_browser(AID, body)
+
+        @login.get('/screenshot')
+        async def screenshot(takeover: UUID, format: str = 'png'):
+            return await browser.screenshot(AID, format, takeover)
+
+        @login.post('/input')
+        async def user_input(body: browser.InputRequest):
+            if body.takeover is None:
+                raise HTTPException(409, '接管已过期')
+            return await browser.user_input(AID, body)
+
+        @login.post('/account/inspect')
+        async def inspect_login(body: browser.OpenRequest):
+            if body.platform != 'telegram':
+                raise HTTPException(403)
+            actor = browser.gateway.actors.get(AID)
+            if actor is None or actor.disconnected:
+                raise HTTPException(409, '接管已过期')
+            browser.require_takeover(AID, actor, None)
+            return await browser.inspect_account(UUID(AID), body)
+
+        async def discovery_only(scope, receive, send):
+            if self.discovery is None:
+                await Response(status_code=403)(scope, receive, send)
+            else:
+                await self.discovery(scope, receive, send)
+
+        self.app.include_router(login)
+        self.app.mount('/', discovery_only)
+
+    @staticmethod
+    def require_paused():
+        with tx(AID) as c:
+            if require_agent(c, AID)['desired_state'] != 'paused':
+                raise ValueError('请先暂停 Agent 再连接账号')
+
+    async def manual_control(self):
+        self.require_paused()
+        self.handoff.set()
+        try:
+            await asyncio.wait_for(self.owner.acquire(), timeout=10)
+        except TimeoutError:
+            raise ValueError('正在结束当前浏览器任务，请稍后重新连接') from None
+        try:
+            self.require_paused()
+            yield
+        finally:
+            self.owner.release()
+
+
+@asynccontextmanager
+async def serve_gateway(app):
+    import uvicorn
+
     class LocalServer(uvicorn.Server):
         def capture_signals(self):
             return nullcontext()
 
-    server = LocalServer(uvicorn.Config(read_gateway, lifespan='off', access_log=False, log_level='error',
+    server = LocalServer(uvicorn.Config(app, lifespan='off', access_log=False, log_level='error',
                                         ws='none', timeout_graceful_shutdown=5))
     with socket.socket() as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            listener.bind(('127.0.0.1', 8089))
-        except OSError:
-            return {'delay': 60, 'reason': 'discovery_gateway_busy'}
+        listener.bind(('127.0.0.1', 8089))
         listener.listen()
         serving = asyncio.create_task(server.serve(sockets=[listener]))
         try:
@@ -725,15 +809,51 @@ async def discover(actor, account):
                 while not server.started:
                     if serving.done():
                         await serving
-                        raise RuntimeError('discovery_gateway_unavailable')
+                        raise RuntimeError('browser_gateway_unavailable')
                     await asyncio.sleep(0.02)
-            return await discover_communities(AID)
+            yield
         finally:
             server.should_exit = True
             await serving
 
 
-async def run(mode):
+async def serve():
+    with service_scope(), tenant_scope(agent_tenant(AID), None):
+        gateway = ChamberGateway()
+        async with serve_gateway(gateway.app):
+            report('binding_gateway_ready')
+            renew = asyncio.create_task(browser.gateway.maintenance())
+            try:
+                while True:
+                    retry_operation = False
+                    async with gateway.owner:
+                        with tx(AID) as c:
+                            ready = (require_agent(c, AID)['desired_state'] == 'running'
+                                     and bound_account(c, required=False))
+                        if ready:
+                            gateway.handoff.clear()
+                            # End the manual browser lease before the operating preflight.
+                            await browser.gateway.close(AID)
+                            try:
+                                await run('run', gateway)
+                            except Exception as exc:
+                                report_failure('run', exc)
+                                retry_operation = True
+                    if retry_operation:
+                        # Keep the login listener available during a failed operating cycle.
+                        try:
+                            await asyncio.wait_for(gateway.handoff.wait(), 90)
+                        except TimeoutError:
+                            pass
+                    else:
+                        await asyncio.sleep(2)
+            finally:
+                renew.cancel()
+                await asyncio.gather(renew, return_exceptions=True)
+                await browser.gateway.close(AID)
+
+
+async def run(mode, gateway=None):
     # The hybrid browser uses a separate provider process. Public directory
     # and bound Telegram reads use the ordinary browser gateway.
     os.environ['LEAD_BROWSER_USE_ENABLED'] = '0'
@@ -745,7 +865,11 @@ async def run(mode):
             report('business_sandbox_verified')
         with tx(AID) as c:
             a = require_agent(c, AID)
-            account = bound_account(c)
+            account = bound_account(c, required=False)
+            if not account or (a['desired_state'] != 'running' and mode != 'status'):
+                require_original_profile()
+                report('awaiting_manual_connection', mode=mode)
+                return
             if mode == 'run':
                 for row in c.execute("""SELECT t.id::text AS task_id,
                     coalesce(t.result->>'target_id', m.result->>'target_id') AS peer,
@@ -784,10 +908,8 @@ async def run(mode):
                     report_model_destination(c)
             except Exception:
                 report('model_destination', endpoint_kind='unavailable')
-        profile = STATE/'profiles'/AID
-        if not (profile/'identity.json').is_file() or not (profile/'storage').is_dir():
-            raise ValueError('original_profile_missing')
-        renew = asyncio.create_task(browser.gateway.maintenance())
+        require_original_profile()
+        renew = asyncio.create_task(browser.gateway.maintenance()) if mode == 'verify' else None
         heartbeat = None
         try:
             actor = await browser.gateway.get(AID)
@@ -805,7 +927,10 @@ async def run(mode):
             schedule_sample = None
             await inspect_failed_delivery(actor, account)
             renewed = time.monotonic()
-            while True:
+            while not gateway.handoff.is_set():
+                with tx(AID) as c:
+                    if require_agent(c, AID)['desired_state'] != 'running' or bound_account(c, required=False) != account:
+                        return
                 if heartbeat.done():
                     await heartbeat
                 if actor is not browser.gateway.actors.get(AID) or actor.disconnected or time.monotonic()-renewed > 300:
@@ -818,7 +943,7 @@ async def run(mode):
                 writable = restriction == 'no_limits' and mode_name != 'readonly'
                 with tx(AID) as c:
                     a = require_agent(c, AID)
-                    if a['desired_state'] != 'running' or bound_account(c) != account:
+                    if a['desired_state'] != 'running' or bound_account(c, required=False) != account:
                         return
                     config, ready = inventory(c, a, account)
                     if schedule_sample is None or time.monotonic()-schedule_sample >= 60:
@@ -855,7 +980,7 @@ async def run(mode):
                                                                    'body':body,'source':str((original or {}).get('body',''))[:1200]})
                         return rule['body']
                     if op['kind'] == 'discover':
-                        result = await discover(actor, account)
+                        result = await discover(actor, account, gateway)
                     else:
                         result = await runtime.community_cycle(AID, rpc, selection=op, revise_copy=revise_copy,
                                     delivery_kinds=set(SLOTS)-delivered.keys(), allow_new_memberships=mode_name=='production')
@@ -875,14 +1000,24 @@ async def run(mode):
                 delay = max(5, min(60, result['delay'])) if result else 45
                 publish_state({'action':'waiting', 'last_result':reason,
                                'next_check_at':(datetime.now(timezone.utc)+timedelta(seconds=delay)).isoformat()})
-                await asyncio.sleep(delay)
+                try:
+                    await asyncio.wait_for(gateway.handoff.wait(), delay)
+                except TimeoutError:
+                    pass
         finally:
             if heartbeat:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
-            renew.cancel()
-            await asyncio.gather(renew, return_exceptions=True)
+            if renew:
+                renew.cancel()
+                await asyncio.gather(renew, return_exceptions=True)
             await browser.gateway.close(AID)
+
+
+def report_failure(mode, error):
+    codes = sorted(set(re.findall(r'\b(?:NS_|SEC_ERROR_|SSL_ERROR_|MOZILLA_PKIX_ERROR_|ERR_)[A-Z_0-9]+\b', str(error))))
+    report('failure', mode=mode, error=type(error).__name__, codes=codes,
+           stage=[(Path(frame.filename).name, frame.lineno) for frame in traceback.extract_tb(error.__traceback__)[-8:]])
 
 
 if __name__ == '__main__':
@@ -890,9 +1025,7 @@ if __name__ == '__main__':
     if mode not in ('verify','run','status'):
         raise SystemExit(2)
     try:
-        asyncio.run(run(mode))
+        asyncio.run(serve() if mode == 'run' else run(mode))
     except Exception as error:
-        codes = sorted(set(re.findall(r'\b(?:NS_|SEC_ERROR_|SSL_ERROR_|MOZILLA_PKIX_ERROR_|ERR_)[A-Z_0-9]+\b', str(error))))
-        report('failure', mode=mode, error=type(error).__name__, codes=codes,
-               stage=[(Path(frame.filename).name, frame.lineno) for frame in traceback.extract_tb(error.__traceback__)[-8:]])
+        report_failure(mode, error)
         raise SystemExit(1)
