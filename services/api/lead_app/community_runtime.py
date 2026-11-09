@@ -43,7 +43,12 @@ CHAMBER_AGENT_ID = "b1f9a23c-1153-4c67-a63b-11ebd264c687"
 async def local_community_decision(output, prompt, **kwargs):
     """First-party discovery rules. No provider, tool, prompt log or retry is involved."""
     from .community_discovery import CatalogSelection, QueryPlan, observation_shortlist
-    from .community_growth import CHAMBER_TOPICS, Candidate, Discovery, chamber_scenario_priority
+    from .community_growth import (
+        CHAMBER_TOPICS,
+        Candidate,
+        Discovery,
+        chamber_scenario_priority,
+    )
 
     if output is QueryPlan:
         used = {str(term).casefold() for term in prompt.get("previous_queries", [])}
@@ -405,11 +410,12 @@ def approve_community_review(aid, cid, *, accept, body="", permission="", minute
                 if p["mid"]:
                     reply.update(invitation_mid=p["mid"], opportunity_mid=p["mid"])
             if include_link:
-                from .promotion import configuration, new_marker, promotion_body
                 from .outbound_links import configured_problem
+                from .promotion import configuration, new_marker, promotion_body
                 business = one(c,"SELECT * FROM lead.business_profiles WHERE agent_id=%s ORDER BY revision DESC LIMIT 1",(aid,))
                 dest = configuration(agent,business)["destination_url"] if business else None
-                if not dest or configured_problem(): raise ValueError("请先设置可用的公开跟踪链接")
+                if not dest or configured_problem():
+                    raise ValueError("请先设置可用的公开跟踪链接")
                 marker = new_marker("telegram")
                 reply["body"], _ = promotion_body(body,dest,marker,business.get("product_url"))
                 link = one(c,"""INSERT INTO lead.tracking_links(tenant_id,agent_id,platform,public_code,destination_url,allowed_host)
@@ -435,7 +441,8 @@ def approved_operation(c, task, peer, operation):
         AND type='community_operator_review' AND state='accepted' AND expires_at>now() FOR SHARE""",(task["agent_id"],cid)) if cid else None
     reply = task["input"].get("reply") or {}
     action = "promotion" if operation=="reply" and reply.get("promote") else operation
-    if not card: return False
+    if not card:
+        return False
     p = card["payload"]
     if action == "promotion" and not review_rule_allows(p.get("quote",""),p.get("rule_zone",""),datetime.now(timezone.utc)):
         return False

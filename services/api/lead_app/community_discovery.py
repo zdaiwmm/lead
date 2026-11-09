@@ -449,8 +449,8 @@ def queue_repository_entries(saved, observed):
 
 
 async def hybrid_collect(aid, task, saved):
-    from .hybrid_research import explore
     from .community_runtime import CHAMBER_AGENT_ID
+    from .hybrid_research import explore
 
     # The model's answer is not link evidence. Use saved DOM anchors only.
     if str(aid) == CHAMBER_AGENT_ID or task["input"].get("chamber_campaign"):
@@ -632,9 +632,9 @@ def demand_queries(topics):
 
 async def advance(aid):
     from .community_growth import campaign_progress, search_interval
+    from .community_runtime import CHAMBER_AGENT_ID, local_community_decision
     from .community_search import QUERIES
     from .model import run_model
-    from .community_runtime import CHAMBER_AGENT_ID, local_community_decision
 
     with tx(aid) as c:
         a = require_agent(c, aid, True)

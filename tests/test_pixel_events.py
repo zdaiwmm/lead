@@ -577,7 +577,8 @@ def test_two_clicks_one_device_and_one_business_event_in_isolated_agent(pixel):
     assert send(pixel,"CompleteRegistration",**event).is_success
     assert send(pixel,"CompleteRegistration",**event).is_success
     for _ in range(6):
-        if not recover_scope(current_tenant(),aid,"live"):break
+        if not recover_scope(current_tenant(), aid, "live"):
+            break
     day=client.get(f"/api/agents/{aid}/analytics/overview").json()["series"][-1]
     assert (day["clicks"],day["devices"],day["pv"],day["site_devices"])==(2,1,1,1)
     with tx(aid) as c:
