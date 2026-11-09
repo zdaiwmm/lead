@@ -1,0 +1,14 @@
+[Unit]
+Description=Check GitHub for an approved lead release
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/lead-prod-vault/lead-git-releases
+
+[Service]
+Type=oneshot
+WorkingDirectory=/
+Environment=LEAD_NODE_GITHUB=1
+Environment=GIT_TERMINAL_PROMPT=0
+UMask=0077
+TimeoutStartSec=75min
+ExecStart=/usr/bin/python3 -EsB /usr/local/lib/lead-home-release/poll_home_release.py --state-dir /srv/lead-prod-vault/lead-git-releases/requests --hook /usr/local/lib/lead-home-release/home_systemd_release.py

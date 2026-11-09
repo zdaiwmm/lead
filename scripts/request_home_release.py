@@ -9,8 +9,19 @@ from pathlib import Path
 REPO = "zdaiwmm/lead"
 
 
+def github_cli(*, node=False):
+    if not node and os.environ.get("LEAD_NODE_GITHUB") != "1":
+        return ["gh"]
+    import pwd
+
+    user = pwd.getpwnam("lead-release-fetch")
+    return ["/usr/bin/setpriv", "--reuid", str(user.pw_uid), "--regid", str(user.pw_gid),
+            "--clear-groups", "--no-new-privs", "--", "/usr/bin/env", "-i", "HOME=" + user.pw_dir,
+            "PATH=/usr/bin:/bin", "GH_PROMPT_DISABLED=1", "/usr/local/lib/lead-home-release/gh"]
+
+
 def api(resource, payload=None):
-    args = ["gh", "api", f"repos/{REPO}/{resource}"]
+    args = [*github_cli(), "api", f"repos/{REPO}/{resource}"]
     if payload is not None:
         args.extend(["--method", "POST", "--input", "-"])
     output = subprocess.check_output(

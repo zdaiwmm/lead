@@ -3,7 +3,6 @@
 
 import json
 import os
-import pwd
 import re
 import subprocess
 import sys
@@ -14,7 +13,7 @@ from pathlib import Path
 # This program and its two sibling modules must be installed root-owned outside the application.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prepare_home_image import prepare  # noqa: E402
-from request_home_release import REPO  # noqa: E402
+from request_home_release import REPO, github_cli  # noqa: E402
 
 STORE = Path("/srv/lead-prod-vault/lead-git-releases")
 TOOLS = Path("/usr/local/lib/lead-home-release")
@@ -57,12 +56,7 @@ def materialize(sha):
             p.mkdir(mode=0o700, exist_ok=True)
         if p.resolve() != p or p.stat().st_uid != 0 or p.stat().st_mode & 0o022:
             raise ValueError("untrusted image store")
-    user = pwd.getpwnam("lead-release-fetch")
-    command = ["/usr/bin/setpriv", "--reuid", str(user.pw_uid), "--regid", str(user.pw_gid),
-               "--clear-groups", "--no-new-privs", "--", "/usr/bin/env", "-i", "HOME=" + user.pw_dir,
-               "PATH=/usr/bin:/bin", str(TOOLS / "gh")]
-    # Only the low-privilege child receives access to the node's gh configuration.
-    prepare(sha, images, get=public_api, download_command=command)
+    prepare(sha, images, get=public_api, download_command=github_cli(node=True))
     point = STORE / sha
     point.mkdir(mode=0o755, exist_ok=True)
     if point.resolve() != point or point.stat().st_uid or point.stat().st_mode & 0o022:

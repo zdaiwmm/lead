@@ -2,15 +2,35 @@
 
 import argparse
 import fcntl
+import hashlib
+import io
 import json
 import os
 import re
 import subprocess
 import tempfile
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from request_home_release import REPO, api, verified_run
+from request_home_release import REPO, api, github_cli, verified_run
+
+
+def read_receipt(run_id):
+    listing = api(f"actions/runs/{run_id}/artifacts?name=lead-home-request&per_page=2")
+    if listing["total_count"] != 1 or len(listing["artifacts"]) != 1:
+        raise ValueError("Missing or ambiguous approval artifact")
+    item = listing["artifacts"][0]
+    if item["name"] != "lead-home-request" or item["expired"] or not 0 < item["size_in_bytes"] < 65536:
+        raise ValueError("Invalid approval artifact")
+    raw = subprocess.check_output([*github_cli(), "api", f"repos/{REPO}/actions/artifacts/{item['id']}/zip"])
+    if "sha256:" + hashlib.sha256(raw).hexdigest() != item["digest"]:
+        raise ValueError("Invalid approval artifact digest")
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        files = archive.infolist()
+        if len(files) != 1 or files[0].filename != "lead-home-request.json" or files[0].file_size > 2048:
+            raise ValueError("Invalid approval receipt")
+        return json.loads(archive.read(files[0]))
 
 
 def approved(request):
@@ -32,10 +52,7 @@ def approved(request):
         return False
     if run["conclusion"] != "success":
         raise ValueError("Approval workflow incomplete or failed")
-    with tempfile.TemporaryDirectory() as tmp:
-        subprocess.run(["gh", "run", "download", str(run_id), "--repo", REPO,
-                        "--name", "lead-home-request", "--dir", tmp], check=True)
-        receipt = json.loads(Path(tmp, "lead-home-request.json").read_text())
+    receipt = read_receipt(run_id)
     expected = dict(deployment=request["id"], sha=sha, ci_run=payload["ci_run"],
                     ci_attempt=payload["ci_attempt"], approval_run=run_id)
     if payload.get("schema") != 1 or payload.get("repository") != REPO or receipt != expected:

@@ -57,13 +57,10 @@ def test_receipt_must_match_approved_request_id(receiver, tmp_path):
                head_branch="main", run_attempt=1, display_title=f"Home release {sha}",
                status="completed", conclusion="success")
 
-    def download(command, check):
-        receipt = dict(deployment=41, sha=sha, approval_run=1, ci_run=2, ci_attempt=1)
-        Path(command[-1], "lead-home-request.json").write_text(receiver.json.dumps(receipt))
-
+    receipt = dict(deployment=41, sha=sha, approval_run=1, ci_run=2, ci_attempt=1)
     with (
         patch.object(receiver, "api", return_value=run),
-        patch.object(receiver.subprocess, "run", side_effect=download),
+        patch.object(receiver, "read_receipt", return_value=receipt),
         pytest.raises(ValueError, match="Mismatch"),
     ):
         receiver.approved(request)
@@ -77,3 +74,19 @@ def test_completed_request_does_not_need_expired_approval_artifacts(receiver, tm
     ):
         receiver.poll(tmp_path, "/unused")
         approval.assert_not_called()
+
+
+
+def test_receipt_download_is_bound_to_github_digest(receiver, monkeypatch):
+    stream = receiver.io.BytesIO()
+    with receiver.zipfile.ZipFile(stream, "w") as z:
+        z.writestr("lead-home-request.json", '{"deployment":42}')
+    raw = stream.getvalue()
+    item = dict(name="lead-home-request", expired=False, id=3, size_in_bytes=len(raw),
+                digest="sha256:" + receiver.hashlib.sha256(raw).hexdigest())
+    monkeypatch.setattr(receiver, "api", lambda _: {"total_count": 1, "artifacts": [item]})
+    monkeypatch.setattr(receiver.subprocess, "check_output", lambda _: raw)
+    assert receiver.read_receipt(7) == {"deployment": 42}
+    item["digest"] = "sha256:" + "0" * 64
+    with pytest.raises(ValueError, match="digest"):
+        receiver.read_receipt(7)
