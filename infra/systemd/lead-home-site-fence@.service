@@ -1,0 +1,22 @@
+[Unit]
+Description=Hold the verified Lead site admission fence for %i
+RequiresMountsFor=/srv/lead-prod-vault
+[Service]
+Type=notify
+User=lead-release-fence
+Group=lead-release-fence
+ProtectSystem=strict
+ProtectHome=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+TemporaryFileSystem=/srv:ro
+TemporaryFileSystem=/run/lead-home:ro
+BindReadOnlyPaths=/srv/lead-prod-vault/lead-home-live/bin:/run/lead-home/bin
+BindReadOnlyPaths=/srv/lead-prod-vault/lead-home-live/pgsock:/run/lead-home/sock
+BindReadOnlyPaths=/usr/local/lib/lead-home-release/home_release_fence.py:/run/lead-home/fence.py
+BindReadOnlyPaths=/srv/lead-prod-vault/lead-onboard-87d151a/lead-home-pg-service.conf:/etc/lead-home-release/pg_service.conf
+Environment=PYTHONPATH=/run/lead-home/bin/site PYTHONDONTWRITEBYTECODE=1
+ExecStart=/run/lead-home/bin/py/bin/python3.12 -B /run/lead-home/fence.py --hold %i
+TimeoutStartSec=15
