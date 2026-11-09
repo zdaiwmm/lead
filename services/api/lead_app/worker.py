@@ -15,6 +15,7 @@ from .admin_operations import execution_policy
 from .analytics_ingest import TASK_QUEUE as ANALYTICS_QUEUE
 from .analytics_ingest import process_analytics_ingest
 from .async_db import run as run_db
+from .atomic_dispatch import close_channel_atom, prepare_channel_atom
 from .config import STATE, any_model_configured, env, model_config
 from .db import all_rows, emit, one
 from .db import pooled_tx as tx
@@ -23,6 +24,7 @@ from .scope import service_scope, tenant_scope
 from .temporal_client import connect
 from .workflows import (
     AnalyticsIngestWorkflow,
+    ChannelPreparationWorkflow,
     ChatWorkflow,
     PublishWorkflow,
     SupervisorWorkflow,
@@ -89,7 +91,7 @@ async def deliver_workspace(client, tenant, configured, key_was_configured):
             if agent and agent["desired_state"] == "paused" and e["event_type"] == "supervisor.wake":
                 await run_db(ack_outbox, aid, e["id"])
                 continue
-            if not agent or agent["desired_state"] == "archived":
+            if not agent or (agent["desired_state"] == "archived" and e["event_type"] != "dispatch.channel"):
                 if agent and e["event_type"] == "supervisor.wake":
                     try:
                         await client.get_workflow_handle("supervisor:" + aid).signal(
@@ -119,6 +121,16 @@ async def deliver_workspace(client, tenant, configured, key_was_configured):
                     id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
                     start_signal="wake",
                 )
+            elif e["event_type"] == "dispatch.channel":
+                try:
+                    await client.start_workflow(
+                        ChannelPreparationWorkflow.run,
+                        {"agent_id": aid, "task_id": payload["task_id"]},
+                        id="dispatch-channel:" + payload["task_id"], task_queue="lead-offline",
+                        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                    )
+                except WorkflowAlreadyStartedError:
+                    pass
             elif e["event_type"] in ("task.enqueue", "task.reconcile"):
                 try:
                     await client.start_workflow(
@@ -276,6 +288,11 @@ async def main():
         loop.add_signal_handler(sig, stop.set)
     async with AsyncExitStack() as stack:
         await stack.enter_async_context(worker)
+        await stack.enter_async_context(Worker(
+            client, task_queue="lead-offline", workflows=[ChannelPreparationWorkflow],
+            activities=[prepare_channel_atom, close_channel_atom],
+            max_concurrent_activities=1, max_concurrent_workflow_tasks=2,
+        ))
         if env().get("LEAD_ANALYTICS_DEDICATED") != "1":
             await stack.enter_async_context(analytics_worker)
         if env().get("LEAD_HOME_RELEASE_PROBE") == "1":

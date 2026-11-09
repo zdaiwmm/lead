@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from pydantic import BaseModel, Field
 
 from .browser_tools import BrowserTools
+from .budget import BudgetExceeded
 from .community_growth import (
     CHAMBER_BRIEF,
     CHAMBER_TOPICS,
@@ -623,6 +624,16 @@ def demand_queries(topics):
         for term in ("翻译", "双语", "EPUB", "术语")
         if any(term.casefold() in topic.casefold() for topic in topics)
     ]
+
+
+def model_wait(aid, task_id, phase, error):
+    # Keep the evidence and cursor. No model work was admitted.
+    with tx(aid) as c:
+        c.execute("""UPDATE lead.tasks SET result=coalesce(result,'{}') || %s
+            WHERE id=%s AND state='running'""",
+                  (j({"phase": phase, "model_wait": {"phase": phase, "reason": str(error),
+                       "required_units": error.required_units}}), task_id))
+    return {"delay": 300, "reason": "token_budget_wait"}
 
 
 async def advance(aid):
@@ -1251,6 +1262,7 @@ async def advance(aid):
             saved["priority_web_until"] = cursor + len(planned_urls)
             saved.setdefault("planned_web_queries", []).extend(planned_urls)
             assert len(queue) <= source_limit(saved)
+            saved.pop("model_wait", None)
             saved["phase"] = next_phase(payload, saved, native_queries)
             with tx(aid) as c:
                 c.execute(
@@ -1261,6 +1273,8 @@ async def advance(aid):
                     c, aid, "Agent 已调整找群方向", plan.rationale, task_id=task["id"]
                 )
             return {"delay": 1, "reason": "community_discovery_progress"}
+        except BudgetExceeded as error:
+            return model_wait(aid, task["id"], "plan_queries", error)
         except Exception as error:
             saved["errors"].append(
                 {"phase": "plan_queries", "error": type(error).__name__}
@@ -1668,6 +1682,7 @@ async def advance(aid):
                             reading_need="公开群卡已核实，进入后根据最近交流选择触达方式。",
                             rules_summary="发言和推广权限需另行核对。",
                         ))
+            saved.pop("model_wait", None)
             candidates = verified_candidates(
                 c,
                 result,
@@ -1717,6 +1732,8 @@ async def advance(aid):
                     task["id"],
                 ),
             )
+    except BudgetExceeded as error:
+        return model_wait(aid, task["id"], "assess", error)
     except Exception as error:
         saved["model_attempts"] = saved.get("model_attempts", 0) + 1
         saved["errors"].append({"phase": "assess", "error": type(error).__name__})

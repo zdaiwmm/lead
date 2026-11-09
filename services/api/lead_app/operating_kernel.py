@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import growth_experiments as trials
 from .db import all_rows, j, one, record, require_agent, tx, uid
+from .dispatch_plan import shadow_batch
 from .operating_contract import configuration
 from .operating_feedback import (
     after_task,
@@ -286,6 +287,16 @@ def candidates(c, aid, agent, business, now=None):
                 return
             paid_step = community_operation["paid"]
         request_units = None
+        if kind == "community_discovery":
+            checkpoint = one(c, """SELECT result FROM lead.tasks WHERE type='community.discover'
+                AND state='running' AND input->>'checkpoint_version'='2'
+                AND coalesce(input->>'research_request','')=%s ORDER BY created_at LIMIT 1""",
+                (agent["onboarding_state"].get("community_research_request", ""),))
+            saved = (checkpoint or {}).get("result") or {}
+            paid_step = saved.get("phase") in ("assess", "plan_queries", "hybrid_collect")
+            wait = saved.get("model_wait") or {}
+            if paid_step and wait.get("phase") == saved.get("phase"):
+                request_units = wait.get("required_units")
         if pilot and kind == "operating.strategy":
             from .model import managed_prompt, reservation_units
             from .operating_work import acquisition_review_prompt, is_acquisition_review
@@ -306,7 +317,7 @@ def candidates(c, aid, agent, business, now=None):
             rating = assess(
                 admission, kind, priority + boost, task, request_units=request_units
             )
-        elif pilot:
+        elif pilot or kind == "community_discovery":
             rating = assess(
                 admission, kind, priority + boost, task, paid_step=paid_step
             )
@@ -519,7 +530,13 @@ def candidates(c, aid, agent, business, now=None):
             contract_repair=repaired,
         )
 
-    if not one(
+    from . import atomic_dispatch
+
+    if atomic_dispatch.enabled(aid):
+        from .resource_pressure import sample
+        if not sample()["defer_optional"]:
+            atomic_dispatch.enqueue_channel_work(c, aid, agent, business)
+    elif not one(
         c,
         "SELECT 1 FROM lead.tasks WHERE type='channel.prepare' AND result->>'business_profile_id'=%s AND result->>'config_revision'=%s",
         (str(business["id"]), str(agent["config_revision"])),
@@ -805,6 +822,7 @@ async def cycle(args):
                 "blocked": barriers,
                 "review_id": feedback["review_id"],
                 "selected": selected.__dict__ if selected else None,
+                "parallel_shadow": shadow_batch(choices),
                 "candidates": [x.__dict__ for x in choices],
                 "next_at": (
                     now + timedelta(seconds=TICK_SECONDS if selected else 300)
