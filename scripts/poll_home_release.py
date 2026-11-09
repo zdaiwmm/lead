@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import zipfile
 from datetime import UTC, datetime, timedelta
@@ -82,12 +83,29 @@ def save_record(path, value):
         os.close(fd)
 
 
+class AttendedHost:
+    """Relay three fixed operations across the maintainer's authenticated SSH sessions."""
+
+    def __init__(self, expected_sha):
+        self.expected_sha = expected_sha
+
+    def call(self, action, sha):
+        if sha != self.expected_sha:
+            raise ValueError("another revision needs reconciliation")
+        print(json.dumps({"operation": action, "sha": sha}), flush=True)
+        response = json.loads(sys.stdin.readline(4096))
+        if response.get("operation") != action or response.get("sha") != sha or type(response.get("ok")) is not bool:
+            raise ValueError("host acknowledgement mismatch")
+        return response
+
+
 def finish(directory, hook, request_id, sha):
     if (directory / f"{request_id}.started").read_text() != sha:
         raise ValueError("Saved request does not match GitHub")
     result = directory / f"{request_id}.result"
     if not result.exists():
-        passed = subprocess.run([hook, "verify", sha], check=False).returncode == 0
+        passed = (hook.call("verify", sha)["ok"] if isinstance(hook, AttendedHost) else
+                  subprocess.run([hook, "verify", sha], check=False).returncode == 0)
         save_record(result, "success" if passed else "error")
     outcome = result.read_text()
     if outcome not in {"success", "error"}:
@@ -126,7 +144,7 @@ def poll(directory, hook):
         return
     request = requests[0]
     request_id, sha = request["id"], request["sha"]
-    print(f"Latest home deployment #{request_id}, SHA {sha}")
+    print(f"Latest home deployment #{request_id}, SHA {sha}", file=sys.stderr)
     statuses = api(f"deployments/{request_id}/statuses?per_page=1")
     remote = statuses[0]["state"] if statuses else None
     if hook is None:
@@ -162,7 +180,13 @@ def poll(directory, hook):
         ci = verified_run(sha)
         if (ci["id"], ci["run_attempt"]) != (request["payload"]["ci_run"], request["payload"]["ci_attempt"]):
             raise ValueError("Approved CI run or attempt changed")
-        live = subprocess.check_output([hook, "current"], text=True).strip()
+        if isinstance(hook, AttendedHost):
+            response = hook.call("current", sha)
+            if not response["ok"]:
+                raise ValueError("production node preflight failed")
+            live = response.get("current", "")
+        else:
+            live = subprocess.check_output([hook, "current"], text=True).strip()
         if not re.fullmatch(r"[0-9a-f]{40}", live):
             raise ValueError("Node did not identify its current version")
         if live != sha and api(f"compare/{live}...{sha}")["merge_base_commit"]["sha"] != live:
@@ -171,25 +195,33 @@ def poll(directory, hook):
         save_record(marker, sha)
         report(request_id, "in_progress")
         if live != sha:
-            subprocess.run([hook, "deploy", sha], check=True)
+            if isinstance(hook, AttendedHost):
+                if not hook.call("deploy", sha)["ok"]:
+                    raise ValueError("inspect production cutover before another attempt")
+            else:
+                subprocess.run([hook, "deploy", sha], check=True)
     # An interrupted request resumes with an independent probe, never a new cutover.
     finish(directory, hook, request_id, sha)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hook", type=Path, help="Enable execution with a trusted local adapter")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--attended-host", metavar="EXPECTED_SHA", help="Use an authenticated two-host maintenance session")
+    modes.add_argument("--hook", type=Path, help="Enable execution with a trusted local adapter")
     parser.add_argument("--state-dir", type=Path, help="Private persistent node release journal")
     args = parser.parse_args()
-    if args.hook is None:
+    if args.hook is None and not args.attended_host:
         poll(None, None)
         return
-    if not args.hook.is_absolute() or not args.state_dir or not args.state_dir.is_absolute():
+    if args.attended_host and not re.fullmatch("[a-f0-9]{40}", args.attended_host):
+        parser.error("expected exact application revision")
+    if (args.hook and not args.hook.is_absolute()) or not args.state_dir or not args.state_dir.is_absolute():
         parser.error("Execution requires an absolute hook and persistent state directory")
     args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (args.state_dir / "poll.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        poll(args.state_dir, str(args.hook))
+        poll(args.state_dir, AttendedHost(args.attended_host) if args.attended_host else str(args.hook))
 
 
 if __name__ == "__main__":
