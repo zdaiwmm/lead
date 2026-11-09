@@ -60,6 +60,15 @@ def probe(base, release, bindings):
         run("systemctl", "daemon-reload")
 
 
+def loaded(release, build):
+    if running_file(WEB, V + "/bin/web/.next/BUILD_ID").read_text().strip() != build:
+        return False
+    return all(
+        running_file(service, f"{V}/bin/{APP}/{name}").read_bytes() == (release/name).read_bytes()
+        for service, names in MODULES.items() for name in names
+    )
+
+
 def main(mode):
     if os.geteuid() or run("findmnt", "-nr", "-M", str(VAULT), "-o", "UUID") != "16a81cc6-d008-4bfc-acb5-2aa917c06dc9":
         raise RuntimeError("Mounted home production vault and administrator required")
@@ -87,8 +96,10 @@ def main(mode):
         restart()
         return
     if all(p.exists() for p in drops.values()):
-        if running_file(WEB, V+"/bin/web/.next/BUILD_ID").read_text().strip() != build:
+        if not loaded(release, build):
             restart()
+        if not loaded(release, build):
+            raise RuntimeError("Running attribution release does not match its package")
         probe(base, release, configs[ANALYTICS])
         return
     if any(p.exists() for p in drops.values()):
@@ -119,12 +130,8 @@ def main(mode):
         for service, path in drops.items():
             install_file(path, configs[service].encode())
         restart()
-        for service, names in MODULES.items():
-            for name in names:
-                if running_file(service, f"{V}/bin/{APP}/{name}").read_bytes() != (release/name).read_bytes():
-                    raise RuntimeError(service + " did not load " + name)
-        if running_file(WEB, V+"/bin/web/.next/BUILD_ID").read_text().strip() != build:
-            raise RuntimeError("Wrong workspace build")
+        if not loaded(release, build):
+            raise RuntimeError("Running attribution release does not match its package")
         probe(base, release, configs[ANALYTICS])
     except BaseException:
         for path in drops.values():
