@@ -544,8 +544,12 @@ def test_target_temporal_worker_processes_queued_event(pixel):
     body = BrowserEvent(key=token("analytics:"+cid), event_name="PageView", event_id=uid(),
                         anonymous_id=uid(), session_id=uid(), url="https://site.example/")
     event = admit_browser(conn, body, {"client_ip":None,"user_agent":"Fixture Browser"})
-    env = dict(os.environ, LEAD_ANALYTICS_TASK_QUEUE="lead-analytics-"+aid)
-    worker = subprocess.Popen([sys.executable, str(Path(__file__).parents[1]/"scripts/agent_analytics_temporal.py"),
+    root = Path(__file__).resolve().parents[1]
+    import_paths = [str(root / "services/api")]
+    if existing := os.environ.get("PYTHONPATH"):
+        import_paths.append(existing)
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(import_paths), LEAD_ANALYTICS_TASK_QUEUE="lead-analytics-"+aid)
+    worker = subprocess.Popen([sys.executable, str(root / "scripts/agent_analytics_temporal.py"),
                                "--agent", aid], env=env)
     try:
         for _ in range(45):
