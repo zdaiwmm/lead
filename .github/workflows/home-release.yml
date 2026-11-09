@@ -32,3 +32,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           APPROVED_SHA: ${{ inputs.sha }}
         run: python3 scripts/request_home_release.py
+      - name: Bind the deployment ID to this approved run
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lead-home-request
+          path: ${{ runner.temp }}/lead-home-request.json
+          if-no-files-found: error
+          retention-days: 7

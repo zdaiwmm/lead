@@ -60,6 +60,9 @@ def main():
     })
     if release.get("sha") != sha or not isinstance(release.get("id"), int):
         raise ValueError("Unresolved deployment request; inspect GitHub before retrying")
+    receipt = {"deployment": release["id"], "sha": sha, "ci_run": run["id"],
+               "ci_attempt": run["run_attempt"], "approval_run": int(os.environ["GITHUB_RUN_ID"])}
+    Path(os.environ["RUNNER_TEMP"], "lead-home-request.json").write_text(json.dumps(receipt))
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as file:
         file.write(f"Home deployment request #{release['id']} for `{sha}` created. "
                    "Check deployment statuses for the server result.\n")
