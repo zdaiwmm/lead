@@ -13,11 +13,14 @@ import psycopg
 from psycopg import sql
 
 # These are the durable admission points for business work. Backups write separate tables.
-TABLES = ("actions", "agents", "browser_runs", "chat_jobs", "notification_deliveries",
-          "takeover_sessions", "tasks")
-BUSY = """SELECT EXISTS (SELECT FROM lead.agents WHERE desired_state NOT IN ('paused','archived'))
+TABLES = ("actions", "agents", "browser_runs", "browser_sessions", "chat_jobs", "notification_deliveries",
+          "profile_leases", "profile_maintenance", "takeover_sessions", "tasks")
+BUSY = """SELECT EXISTS (SELECT FROM lead.agents WHERE desired_state NOT IN ('draft','paused','archived'))
     OR EXISTS (SELECT FROM lead.actions WHERE state IN ('prepared','dispatching','unknown'))
     OR EXISTS (SELECT FROM lead.browser_runs WHERE state='running')
+    OR EXISTS (SELECT FROM lead.browser_sessions WHERE state<>'closed')
+    OR EXISTS (SELECT FROM lead.profile_leases WHERE state IN ('held','uncertain'))
+    OR EXISTS (SELECT FROM lead.profile_maintenance WHERE state='active' AND expires_at>now())
     OR EXISTS (SELECT FROM lead.chat_jobs WHERE status IN ('pending','processing'))
     OR EXISTS (SELECT FROM lead.tasks WHERE state IN ('queued','running','reconciling'))
     OR EXISTS (SELECT FROM lead.notification_deliveries WHERE state IN ('sending','unknown'))

@@ -113,6 +113,8 @@ def verify(sha, *, fenced=False):
     health = json.loads(probe("api", "http://127.0.0.1:8088/api/health"))
     require(all(health.get(key) is True for key in ("database", "worker", "browser")),
             "API dependencies unavailable")
+    if fenced:
+        require(health.get("active_profiles") == 0, "browser profiles still in use")
     probe("web", "http://127.0.0.1:3100/")
     # Site-owned read-only check of durable Temporal and the isolated synthetic receipt.
     # Bind its evidence to this worker invocation so an older success cannot be reused.
