@@ -2,12 +2,13 @@ import asyncio
 import hashlib
 import html
 import re
+import secrets
 import time
 from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 import httpx
@@ -541,9 +542,22 @@ async def verify_login(aid: UUID, body: Connection):
     with tx(aid) as c:
         control_version = require_agent(c, aid)["control_version"]
         selected = one(c,"SELECT id,binding_version FROM lead.social_accounts WHERE platform=%s AND (%s::uuid IS NULL OR id=%s) ORDER BY created_at DESC LIMIT 1",(platform,body.account_id,body.account_id))
-    observed = (
-        await gateway(f"/agents/{aid}/account/inspect", body={"platform": platform,**({"account_id":str(body.account_id)} if body.account_id else {})})
-    ).json()
+        inspect_body = {"platform": platform}
+        if body.account_id:
+            inspect_body["account_id"] = str(body.account_id)
+        if platform == "reddit" and split_reddit_login(aid):
+            session = one(
+                c,
+                """SELECT t.id FROM lead.takeover_sessions t
+                JOIN lead.social_accounts s ON s.profile_id=t.profile_id
+                WHERE s.id=%s AND t.state='active' AND t.expires_at>now()
+                AND t.control_version=%s""",
+                (selected["id"] if selected else None, control_version),
+            )
+            if not session:
+                raise HTTPException(409, "请重新打开独立的 Reddit 登录窗口")
+            inspect_body.update(account_id=str(selected["id"]), takeover=str(session["id"]))
+    observed = (await gateway(f"/agents/{aid}/account/inspect", body=inspect_body)).json()
     auto = {
         "instagram": f"https://www.instagram.com/{observed['external_account_id']}/",
         "x": f"https://x.com/{observed['external_account_id']}/",
@@ -631,8 +645,54 @@ def respond_card(aid: UUID, card_id: UUID, body: CardResponse):
     return accept_card(str(aid), str(card_id), body.version, body.accepted)
 
 
+def split_reddit_login(aid):
+    projects = env().get("LEAD_SPLIT_REDDIT_LOGIN_AGENT_IDS") or ""
+    return str(aid) in {entry.strip() for entry in projects.split(",")}
+
+
+def login_browser_port(c, aid, path, body):
+    # The home ingress on 8089 routes a resident project's entire path to Telegram.
+    # Only an account or an active takeover of its isolated Reddit profile can
+    # select the ordinary browser on 18091.
+    if not split_reddit_login(aid):
+        return 8089
+    url = urlsplit(path)
+    operation = url.path.removeprefix(f"/agents/{aid}/")
+    data = body or {}
+    if operation in ("open", "account/inspect") and data.get("platform") == "reddit":
+        profile = one(
+            c,
+            """SELECT p.slot FROM lead.social_accounts s
+            JOIN lead.browser_profiles p ON p.id=s.profile_id
+            WHERE s.id=%s AND s.platform='reddit'""",
+            (data.get("account_id"),),
+        )
+        if not profile or profile["slot"] == "default":
+            raise HTTPException(409, "请重新打开独立的 Reddit 登录窗口")
+        return 18091
+    if operation in ("screenshot", "input"):
+        takeover = data.get("takeover")
+        if operation == "screenshot":
+            takeover = parse_qs(url.query).get("takeover", [None])[0]
+        if takeover:
+            profile = one(
+                c,
+                """SELECT p.slot, s.platform FROM lead.takeover_sessions t
+                JOIN lead.browser_profiles p ON p.id=t.profile_id
+                LEFT JOIN lead.social_accounts s ON s.profile_id=p.id AND s.platform='reddit'
+                WHERE t.id=%s AND t.state='active' AND t.expires_at>now()""",
+                (takeover,),
+            )
+            if not profile:
+                raise HTTPException(409, "接管已过期")
+            if profile["slot"] != "default" and profile["platform"] == "reddit":
+                return 18091
+    return 8089
+
+
 async def gateway(path, method="POST", body=None, timeout=100):
     matched = re.match(r"^/agents/([0-9a-fA-F-]{36})(?:/|$)", path)
+    port = 8089
     if matched:
         with tx(matched[1]) as c:
             if path == "/agents/" + matched[1] + "/close":
@@ -640,11 +700,12 @@ async def gateway(path, method="POST", body=None, timeout=100):
                     raise LookupError("Agent 不存在")
             else:
                 require_agent(c, matched[1])
+                port = login_browser_port(c, matched[1], path, body)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         try:
             r = await client.request(
                 method,
-                "http://127.0.0.1:8089" + path,
+                f"http://127.0.0.1:{port}" + path,
                 json=body,
                 headers={
                     "Authorization": "Bearer " + internal_token(),
@@ -911,6 +972,7 @@ async def connect(aid: UUID, body: Connection):
         create=True,
         account_id=body.account_id,
         new_binding=body.new_account,
+        isolated_login=body.platform == "reddit" and split_reddit_login(aid),
     )
     if profile["slot"] == "default":
         await asyncio.to_thread(domain.set_control, aid, "pause")
@@ -924,7 +986,10 @@ async def connect(aid: UUID, body: Connection):
             "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
         ):
             raise ValueError("此环境正在备份，请稍后重试")
-        if opened.get("profile_id", str(profile["id"])) != str(profile["id"]):
+        expected_profile = str(profile["id"])
+        # Only the legacy default executor predates profile IDs in open replies.
+        fallback = expected_profile if profile["slot"] == "default" else None
+        if opened.get("profile_id", fallback) != expected_profile:
             raise ValueError("账号环境已变化，请重新打开")
         account = one(
             c,
@@ -943,7 +1008,7 @@ async def connect(aid: UUID, body: Connection):
         )
         if account:
             c.execute("UPDATE lead.social_accounts SET binding_version=binding_version+1 WHERE id=%s",(account["id"],))
-        takeover_token = token("takeover:" + aid, 1800)
+        takeover_token = secrets.token_urlsafe(32)
         takeover = one(
             c,
             "INSERT INTO lead.takeover_sessions(tenant_id,agent_id,browser_session_id,profile_id,token_hash,control_version,state,expires_at) VALUES(%s,%s,%s,%s,%s,%s,'active',now()+interval '30 minutes') RETURNING id",
