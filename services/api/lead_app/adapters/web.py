@@ -47,7 +47,6 @@ ACCOUNT_LINKS = {
         'a[data-control-name="identity_welcome_message"]',
         'a[data-control-name="nav.settings_view_profile"]',
     ),
-    "reddit": ('header a[href*="/user/"]', 'reddit-header a[href*="/user/"]'),
     "pinterest": ('a[data-test-id="header-profile"]', 'a[data-test-id="profile-link"]'),
     "threads": ('a[aria-label="Profile"]', 'a:has(svg[aria-label="Profile"])'),
 }
@@ -266,7 +265,12 @@ class WebAdapter:
                 return await self.account(proof)
             finally:
                 await proof.close()
-        if self.platform == "facebook":
+        if self.platform == "reddit":
+            from .reddit import signed_in_username
+
+            identity = await signed_in_username(page)
+            await check_surface(page, self.hosts)
+        elif self.platform == "facebook":
             cookies = await page.context.cookies(["https://www.facebook.com"])
             own = next((c["value"] for c in cookies if c["name"] == "c_user"), None)
             if (
@@ -359,10 +363,6 @@ class WebAdapter:
             elif self.platform == "linkedin":
                 if parts[0] != "in" or len(parts) < 2:
                     raise NeedsAuth("无法核对当前 LinkedIn 身份")
-                identity = parts[1]
-            elif self.platform == "reddit":
-                if parts[0] != "user" or len(parts) < 2:
-                    raise NeedsAuth("无法核对当前 Reddit 身份")
                 identity = parts[1]
             else:
                 identity = parts[0].removeprefix("@")
