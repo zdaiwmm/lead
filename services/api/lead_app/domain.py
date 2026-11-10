@@ -307,6 +307,7 @@ def agent_detail(aid):
             "SELECT s.*, t.id AS target_id,t.canonical_url,t.display_name AS target_name,t.target_type,t.verified_permissions,t.state AS target_state, EXISTS(SELECT 1 FROM lead.authorization_grants g JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.target_type=t.target_type AND pc.action_type='publish' WHERE g.target_id=t.id AND g.revoked_at IS NULL AND g.allowed_actions ? 'publish' AND pc.technical_state='verified' AND (pc.permission_state='approved' OR pc.permission_state='pending' AND lead.owner_browser_pilot_allowed(t.id,g.id)) AND t.state='active' AND s.state='connected' AND (s.platform='lab' OR (jsonb_array_length(coalesce(t.verified_permissions->'publishing_verified_formats','[]'))>0 AND t.verified_permissions->>'adapter_version'=pc.adapter_version))) AS operational_ready FROM lead.social_accounts s LEFT JOIN LATERAL (SELECT t.* FROM lead.account_targets t WHERE t.account_id=s.id ORDER BY (t.state='active') DESC,(jsonb_array_length(coalesce(t.verified_permissions->'publishing_verified_formats','[]'))>0) DESC,(SELECT max(g.granted_at) FROM lead.authorization_grants g WHERE g.target_id=t.id AND g.revoked_at IS NULL) DESC NULLS LAST,t.id DESC LIMIT 1) t ON true ORDER BY s.created_at",
         )
         from .account_profiles import isolated_login_platforms
+        from .promotion import promoter_voice
 
         if "reddit" in isolated_login_platforms(aid):
             for account in a["accounts"]:
@@ -315,8 +316,9 @@ def agent_detail(aid):
                     account["editorial_preparation"] = bool(profile and profile["slot"].split("-", 1)[0] == "reddit")
                     review = one(c, """SELECT result FROM lead.tasks WHERE type='reddit.workspace_review'
                         AND input->>'account_id'=%s AND input->>'binding_version'=%s AND input->>'config_revision'=%s
-                        AND input->>'business_profile_id'=%s ORDER BY completed_at DESC LIMIT 1""",
-                        (str(account["id"]),str(account["binding_version"]),str(a["config_revision"]),str((a["business"] or {}).get("id"))))
+                        AND input->>'business_profile_id'=%s AND input->>'editorial_version'='2' AND input->>'public_voice'=%s ORDER BY completed_at DESC LIMIT 1""",
+                        (str(account["id"]),str(account["binding_version"]),str(a["config_revision"]),str((a["business"] or {}).get("id")),
+                         "independent_promoter" if promoter_voice(a) else "project_operator"))
                     account["editorial_review"] = review["result"] if review else None
         a["activity"] = _activity_rows(c)
         a["browser_runs"] = all_rows(

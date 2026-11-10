@@ -42,6 +42,9 @@ def test_device_owned_agent_delivers_independent_scoped_reddit_review(monkeypatc
             rows[0]["result"]["editorial_brief"]["source_excerpt"]
             == "A first party test product"
         )
+        draft = rows[0]["result"]["editorial_brief"]
+        assert "我是" not in draft["body"] and "产品方" not in draft["body"]
+        assert draft["source_excerpt"] not in draft["body"]
         assert rows[0]["result"]["confirmed_posts"] == rows[0]["result"]["clicks"] == 0
         c.execute(
             "UPDATE lead.social_accounts SET binding_version=binding_version+1,automation_enabled=false WHERE id=%s",
@@ -69,3 +72,10 @@ def test_device_owned_agent_delivers_independent_scoped_reddit_review(monkeypatc
             )["n"]
             == 2
         )
+
+    with tx(aid) as c:
+        c.execute("""UPDATE lead.agents SET onboarding_state=jsonb_set(onboarding_state,'{public_voice}',
+            '"independent_promoter"'::jsonb) WHERE id=%s""", (aid,))
+    collect()
+    acct_view = next(a for a in domain.agent_detail(aid)["accounts"] if a["id"] == acct["id"])
+    assert "协助" in acct_view["editorial_review"]["editorial_brief"]["disclosure"]
