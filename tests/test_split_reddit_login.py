@@ -118,6 +118,7 @@ async def test_reddit_retries_and_completes_on_its_own_browser(monkeypatch):
         profile = account_profiles.for_platform(aid, "reddit")
         actor = actors.actors[str(profile["id"])]
         assert actor.profile["slot"] == "reddit"
+        assert actor.page.url == "https://www.reddit.com/login/"
         assert str(actor.folder).endswith(f"/{aid}/accounts/{profile['id']}")
         assert actor.session != telegram_actor.session
         assert not any(
@@ -146,6 +147,8 @@ async def test_reddit_retries_and_completes_on_its_own_browser(monkeypatch):
         monkeypatch.setenv("LEAD_SPLIT_REDDIT_LOGIN_AGENT_IDS", f"{aid},{other}")
         with pytest.raises(HTTPException):
             await api.screenshot(UUID(other), req, "jpeg", takeover)
+        # The owner has finished the website's login flow and left /login/.
+        await actor.page.goto("https://www.reddit.com/")
         verified = await api.verify_login(
             UUID(aid), api.Connection(platform="reddit", account_id=pending["id"])
         )

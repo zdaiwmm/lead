@@ -328,7 +328,7 @@ def agent_detail(aid):
         )
         a["network"] = one(
             c,
-            "SELECT mode,state,expected_ip,verified_at FROM lead.network_identities ORDER BY created_at DESC LIMIT 1",
+            "SELECT n.mode,n.state,n.expected_ip,n.verified_at FROM lead.network_identities n JOIN lead.browser_profiles p ON p.network_identity_id=n.id WHERE p.slot='default'",
         )
         a["metrics"] = metrics(c)
         a["cards"] = all_rows(

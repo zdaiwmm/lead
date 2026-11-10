@@ -26,7 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from . import account_profiles
+from . import account_profiles, reddit_login
 from .adapters.catalog import SPECS
 from .config import BROWSER_BUILD, BROWSER_SDK, STATE, env, proxy_for
 from .db import j, one, record, require_agent, tx, uid
@@ -113,7 +113,7 @@ class Actor:
         fingerprint = saved.get("fingerprint", saved)
         native_config = saved.get("config", {}) if saved.get("version") == 2 else {}
         digest = hashlib.sha256(identity.read_bytes()).hexdigest()
-        proxy = proxy_for(self.aid)
+        proxy = reddit_login.assign_exit(self.aid, self.profile) or proxy_for(self.aid)
         from .managed_network import policy
 
         network_policy = policy(self.aid) or {}
@@ -1592,6 +1592,8 @@ async def open_browser(aid: str, body: OpenRequest):
         )
         if not url:
             raise HTTPException(400, "未知频道")
+        if body.platform == "reddit" and reddit_login.split_reddit_login(aid):
+            url = "https://www.reddit.com/login/"
         await actor.page.goto(url, wait_until="domcontentloaded", timeout=45000)
         return {"url": actor.page.url, "session_id": actor.session,"profile_id":str(actor.profile["id"])}
 

@@ -291,6 +291,34 @@ def reviewed_channel_schema(mirror, sha, extra):
     return paths
 
 
+# These site units are installed and verified separately; only these reviewed blobs
+# are compatible with the home application's release. Future revisions need review.
+REDDIT_SITE_FILES = {
+    "infra/home-reddit-login/browser.conf": "e80d38a2cb8a020280ba6a2f1cc5f350fe358c59",
+    "infra/home-reddit-login/lead-reddit-guard.service": "61031ac0195c3abcc0ae38de9a06ecf3cc688f1d",
+    "infra/home-reddit-login/lead-reddit-link.service": "cbeb23de298f2da604630ed2746fbe761b823ac6",
+    "infra/home-reddit-login/tokyo-guard.nft": "899f0ca6f4945c69e9ca0039c0da7746d155ff4e",
+    "infra/home-reddit-login/tokyo-sshd.conf": "2fb5148544188492b8fab3818f315f5b926ddbaf",
+}
+
+
+def reviewed_reddit_site(mirror, sha, extra):
+    paths = extra.intersection(REDDIT_SITE_FILES)
+    if not paths or not (TOOLS / "home_live_maintenance.py").is_file():
+        return set()
+    for path in paths:
+        require(run("git", "--git-dir", mirror, "rev-parse", f"{sha}:{path}") == REDDIT_SITE_FILES[path],
+                "Reddit site files require separate compatibility review")
+    for name, installed in (
+        ("browser.conf", "/etc/systemd/system/lead-home-browser.service.d/98-reddit-login.conf"),
+        ("lead-reddit-link.service", "/etc/systemd/system/lead-reddit-link.service"),
+    ):
+        require(run("git", "hash-object", "--no-filters", installed) == REDDIT_SITE_FILES["infra/home-reddit-login/" + name],
+                "Reddit browser unit differs from the reviewed version")
+    require(run("systemctl", "is-active", "lead-reddit-link.service") == "active", "Reddit tunnel unavailable")
+    return paths
+
+
 def deploy(sha):
     require(os.geteuid() == 0, "trusted node dispatcher required")
     safe_layout()
@@ -320,6 +348,7 @@ def deploy(sha):
                  and name not in ("README.md", "AGENTS.md")}
         extra -= reviewed_maintenance_files(mirror, sha, extra)
         extra -= reviewed_channel_schema(mirror, sha, extra)
+        extra -= reviewed_reddit_site(mirror, sha, extra)
         if extra:
             # The frame subsystem was already installed from this reviewed commit.
             # Only accept its EXACT reviewed blobs, and attest the installed components.

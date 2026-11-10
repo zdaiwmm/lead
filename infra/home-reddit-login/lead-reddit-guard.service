@@ -1,0 +1,13 @@
+[Unit]
+Description=Restrict the Reddit forwarding account to public IPv4 HTTPS
+Before=ssh.service ssh.socket
+[Service]
+Type=oneshot
+RuntimeDirectory=lead-reddit-auth
+RuntimeDirectoryMode=0755
+ExecStart=/usr/sbin/nft -f /etc/lead-reddit-link/guard.nft
+ExecStartPost=/usr/bin/install -o root -g root -m 0644 /etc/lead-reddit-link/authorized_key /run/lead-reddit-auth/authorized_keys
+ExecStop=/usr/bin/unlink /run/lead-reddit-auth/authorized_keys
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
