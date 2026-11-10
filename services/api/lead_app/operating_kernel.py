@@ -102,6 +102,7 @@ def eligible_publish_targets(c, barriers):
 
 def candidates(c, aid, agent, business, now=None):
     from .admin_settings import effective
+    from .channel_delivery import owns
     from .community_schedule import deadlines
     from .content_backlog import next_due as content_due
     from .operating_admission import assess, context
@@ -171,6 +172,8 @@ def candidates(c, aid, agent, business, now=None):
         # Telegram has its own checkpointed group/rules discovery and distinct
         # participation grants. Other connected adapters use scoped public research.
         for platform in channels or [None]:
+            if platform and owns(agent,platform):
+                continue
             if platform == "telegram":
                 continue
             if not reconcile(c, aid, agent, business, reviewed["review_id"], platform):
@@ -388,7 +391,6 @@ def candidates(c, aid, agent, business, now=None):
             key = publication_lane_key([row])
             if row["due"] > now and not lanes.get(key, {}).get("next_at"):
                 publish_schedule[key] = {"checked_at": now.isoformat(), "next_at": row["due"].isoformat(), "reason": "scheduled"}
-    from .channel_delivery import owns
     from .owned_audience import status as audience_status
 
     for target in eligible:
@@ -432,6 +434,7 @@ def candidates(c, aid, agent, business, now=None):
         for w in work
         if w["input"].get("kind") in WORK_KINDS
         and w["state"] == "running"
+        and not w["input"].get("channel_clock")
         and w["started_at"] > now - timedelta(minutes=5)
     ]
     if not active:
@@ -441,6 +444,8 @@ def candidates(c, aid, agent, business, now=None):
                 continue
             if channels and kind in ("opportunities", "validate", "strategy"):
                 platform = work["input"].get("platform")
+                if platform and owns(agent,platform) and kind in ("validate","opportunities"):
+                    continue
                 alternatives = not platform and work["input"].get("work_key", "").startswith("alternatives:")
                 if platform not in channels and not work["input"].get("target_id") and not alternatives:
                     continue
@@ -568,12 +573,16 @@ def candidates(c, aid, agent, business, now=None):
     return sorted(result, key=lambda v: (-v.priority, v.key)), barriers, reviewed
 
 
-async def run_work(aid, candidate, operating_plan=None):
+async def run_work(aid, candidate, operating_plan=None, *, channel_clock=None):
     from .budget import BudgetExceeded
     from .operating_work import REPORT_REVISION, execute
 
     with tx(aid) as c:
         agent = require_agent(c, aid, True)
+        if channel_clock:
+            from .channel_delivery import current as active_clock
+            if not active_clock(c,aid,channel_clock):
+                return {"stop":True}
         task = one(
             c, "SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE", (candidate.task_id,)
         )
@@ -596,6 +605,13 @@ async def run_work(aid, candidate, operating_plan=None):
                 (j({"reason": "source_version_changed"}), task["id"]),
             )
             return {"delay": 30, "reason": "source_version_changed"}
+        if channel_clock:
+            if task["state"] == "running" and task["started_at"] > datetime.now(timezone.utc) - timedelta(minutes=5):
+                return {"delay": 30, "reason": "research_already_running"}
+            account = one(c, """SELECT profile_id FROM lead.social_accounts WHERE platform=%s
+                AND automation_enabled AND state='connected' ORDER BY created_at,id LIMIT 1""", (task["input"]["platform"],))
+            task["input"].update(channel_profile_id=str(account["profile_id"]), channel_clock=channel_clock)
+            c.execute("UPDATE lead.tasks SET input=%s WHERE id=%s", (j(task["input"]), task["id"]))
         attempts = (task["result"] or {}).get("attempts", 0) + 1
         if operating_plan:
             task["input"]["operating_plan"] = operating_plan
@@ -618,6 +634,9 @@ async def run_work(aid, candidate, operating_plan=None):
                 c,
                 "SELECT id FROM lead.business_profiles ORDER BY revision DESC LIMIT 1",
             )
+            if channel_clock and not active_clock(c, aid, channel_clock):
+                c.execute("UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE id=%s AND state='running' AND input->'channel_clock'=%s", (task["id"], j(channel_clock)))
+                return {"stop": True}
             if (
                 current["desired_state"] != "running"
                 or current["config_revision"] != task["input"]["config_revision"]

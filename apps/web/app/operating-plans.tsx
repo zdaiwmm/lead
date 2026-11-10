@@ -541,8 +541,10 @@ export default function OperatingPlans({
                 <summary>各渠道的下次检查</summary>
                 <dl className={styles.facts}>
                   {data.channel_clocks.map((clock: Row) => (
-                    <div key={clock.platform}><dt>{socialNames[clock.platform] || clock.platform}</dt>
-                      <dd>{clock.reason === "no_available_verified_target" ? "等待可用的已验证目标"
+                    <div key={clock.platform + clock.lane}><dt>{socialNames[clock.platform] || clock.platform} · {clock.lane === "research" ? "机会研究" : "投放"}</dt>
+                      <dd>{clock.reason === "awaiting_validated_opportunity" ? "等待新的已核验需求"
+                        : clock.reason === "source_permission_required" ? "等待渠道数据接入权限"
+                        : clock.reason === "no_available_verified_target" ? "等待可用的已验证目标"
                         : clock.reason === "execution_attempts_exhausted" ? "遇阻，稍后复查"
                         : "已排期"} · {timestamp(clock.next_at, data.timezone)}</dd></div>
                   ))}

@@ -108,7 +108,7 @@ async def browser_step(actor, operation, task_id=None):
 async def cycle(aid, rpc):
     from .community_runtime import digest
     from .model import run_model
-    from .promotion import PROMOTER_VOICE, configuration, new_marker, promotion_body
+    from .promotion import PROMOTER_VOICE, configuration, promotion_body
     now = datetime.now(timezone.utc)
     with tx(aid) as c:
         a = require_agent(c, aid)
@@ -160,9 +160,10 @@ async def cycle(aid, rpc):
                     if body and decision.share_link:
                         destination=configuration(a,business)['destination_url']
                         if destination:
-                            marker=new_marker('telegram')
-                            body,_=promotion_body(body,destination,marker,business.get('product_url'))
-                            link=one(c,"INSERT INTO lead.tracking_links(tenant_id,agent_id,platform,public_code,destination_url,allowed_host) VALUES(%s,%s,'telegram',%s,%s,%s) RETURNING id",(current_tenant(),aid,marker,destination,urlsplit(destination).hostname))
+                            from .distribution import register
+                            link = register(c, aid, "telegram", destination, intent="inbox:" + str(task["id"]),
+                                            placement="inbox_reply", account=account["id"])
+                            body,_ = promotion_body(body,destination,link["public_code"],business.get("product_url"))
                         else:
                             link=None
                     else:

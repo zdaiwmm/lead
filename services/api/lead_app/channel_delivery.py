@@ -24,8 +24,17 @@ def owns(agent, platform):
 def enroll(c, aid, agent, platform):
     if not owns(agent, platform):
         return
+    for lane in ("delivery", "research"):
+        enroll_lane(c, aid, agent, platform, lane)
+
+
+def enroll_lane(c, aid, agent, platform, lane):
     control = agent["control_version"]
-    key = f"channel-clock:{aid}:{platform}:{control}"
+    key = (
+        f"channel-clock:{aid}:{platform}:{control}"
+        if lane == "delivery"
+        else f"channel-research:{aid}:{platform}:{control}"
+    )
     row = one(
         c,
         """INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,scheduled_at,result)
@@ -37,7 +46,7 @@ def enroll(c, aid, agent, platform):
             current_tenant(),
             aid,
             key,
-            j({"platform": platform, "control_version": control}),
+            j({"platform": platform, "control_version": control, "lane": lane}),
         ),
     )
     if row:
@@ -45,7 +54,7 @@ def enroll(c, aid, agent, platform):
             c,
             aid,
             "channel.clock",
-            {"task_id": str(row["id"]), "generation": row["version"]},
+            {"task_id": str(row["id"]), "generation": row["version"], "lane": lane},
         )
 
 
@@ -82,30 +91,47 @@ def current(c, aid, args):
 
 def opportunity(c, target_id):
     """Only attach observed, validated evidence for the exact authorized destination."""
+    from .operating_feedback import fingerprint
+
     row = one(
         c,
-        """
-        SELECT task.id, finding->>'observation' AS observation,
-            finding->>'source_url' AS source_url FROM lead.tasks task
-        CROSS JOIN LATERAL jsonb_array_elements(task.result->'findings') finding
-        JOIN lead.account_targets target ON target.id=%s
-        WHERE task.type='operating.validate' AND task.state='succeeded'
-          AND task.completed_at>now()-interval '14 days' AND task.result->>'status'='observed' AND task.result->>'channel_fit'='viable'
-          AND task.input->>'business_profile_id'=(SELECT id::text FROM lead.business_profiles
-              ORDER BY revision DESC LIMIT 1)
-          AND task.input->>'config_revision'=(SELECT config_revision::text FROM lead.agents
-              WHERE id=task.agent_id)
-          AND rtrim(finding->>'source_url','/')=rtrim(target.canonical_url,'/')
-          AND task.result->'source_urls' ? (finding->>'source_url')
-        ORDER BY task.completed_at DESC,task.id LIMIT 1""",
+        """WITH latest AS (
+            SELECT task.id,task.result,target.canonical_url
+            FROM lead.tasks task JOIN lead.account_targets target ON target.id=%s
+            WHERE task.type='operating.validate' AND task.state='succeeded'
+              AND task.completed_at>now()-interval '14 days' AND task.result->>'status'='observed'
+              AND task.input->>'business_profile_id'=(SELECT id::text FROM lead.business_profiles ORDER BY revision DESC LIMIT 1)
+              AND task.input->>'config_revision'=(SELECT config_revision::text FROM lead.agents WHERE id=task.agent_id)
+              AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(task.result->'source_urls') u
+                          WHERE rtrim(u,'/')=rtrim(target.canonical_url,'/'))
+            ORDER BY task.completed_at DESC,task.id DESC LIMIT 1
+        ) SELECT id,finding FROM latest CROSS JOIN LATERAL jsonb_array_elements(result->'findings') finding
+          WHERE result->>'channel_fit'='viable' AND rtrim(finding->>'source_url','/')=rtrim(canonical_url,'/')
+          ORDER BY finding->>'quote_id' LIMIT 1""",
         (target_id,),
     )
     if row:
-        return {
-            "evidence_task_id": str(row["id"]),
-            "source_url": row["source_url"],
-            "observation": row["observation"],
-        }
+        finding = row["finding"]
+        key = fingerprint(
+            [
+                finding["source_url"].rstrip("/"),
+                finding.get("quote") or finding["observation"],
+            ]
+        )
+        consumed = one(
+            c,
+            """SELECT 1 FROM lead.tasks WHERE type LIKE '%%.publish'
+            AND input->>'target_id'=%s AND input#>>'{operating_plan,channel_opportunity,source_key}'=%s
+            AND state<>'canceled' LIMIT 1""",
+            (str(target_id), key),
+        )
+        if not consumed:
+            return {
+                "evidence_task_id": str(row["id"]),
+                "source_key": key,
+                "source_url": finding["source_url"],
+                "observation": finding["observation"],
+            }
     return None
 
 
@@ -133,22 +159,30 @@ def next_target(args):
             for t in targets
             if t["platform"] == clock["input"]["platform"]
         )
-        if due and (not due[0][0] or datetime.fromisoformat(due[0][0]) <= now):
+        delay = 300
+        reason = "awaiting_target_window" if due else "no_available_verified_target"
+        for deadline, target_id in due:
+            if deadline and datetime.fromisoformat(deadline) > now:
+                delay = max(
+                    1,
+                    min(
+                        delay, (datetime.fromisoformat(deadline) - now).total_seconds()
+                    ),
+                )
+                break
+            evidence = opportunity(c, target_id)
+            if clock["input"]["platform"] in ("reddit", "facebook") and not evidence:
+                reason = "awaiting_validated_opportunity"
+                continue
             state.update(
                 pending_tick=args["tick"],
-                pending_target=due[0][1],
-                opportunity=opportunity(c, due[0][1]),
+                pending_target=target_id,
+                opportunity=evidence,
             )
             c.execute(
                 "UPDATE lead.tasks SET result=%s WHERE id=%s", (j(state), clock["id"])
             )
-            return {"target_id": due[0][1], "opportunity": state["opportunity"]}
-        delay = (
-            max(1, min(300, (datetime.fromisoformat(due[0][0]) - now).total_seconds()))
-            if due
-            else 300
-        )
-        reason = "awaiting_target_window" if due else "no_available_verified_target"
+            return {"target_id": target_id, "opportunity": evidence}
         c.execute(
             """UPDATE lead.tasks SET scheduled_at=now()+make_interval(secs=>%s),
             result=%s WHERE id=%s""",

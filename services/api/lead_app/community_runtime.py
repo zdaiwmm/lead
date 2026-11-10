@@ -2662,7 +2662,6 @@ async def community_cycle(aid, rpc, selection=None):
                                 return {"delay": 1, "reason": "public_shortlink_required"}
                             from .promotion import (
                                 configuration,
-                                new_marker,
                                 promotion_body,
                             )
 
@@ -2683,23 +2682,12 @@ async def community_cycle(aid, rpc, selection=None):
                                     (j({"receipt_review_after": (datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(),
                                         "outcome":{"state":"blocked","reason":"public_business_link_required"}}),task["id"]))
                                 return {"delay": 1, "reason": "public_business_link_required"}
-                            marker = new_marker("telegram")
-                            reply_body, _ = promotion_body(
-                                reply_body,
-                                destination,
-                                marker,
-                                business.get("product_url"),
-                            )
-                            link = one(c,
-                                "INSERT INTO lead.tracking_links(tenant_id,agent_id,platform,public_code,destination_url,allowed_host) VALUES(%s,%s,'telegram',%s,%s,%s) RETURNING id",
-                                (
-                                    current_tenant(),
-                                    aid,
-                                    marker,
-                                    destination,
-                                    urlsplit(destination).hostname,
-                                ),
-                            )
+                            from .distribution import register
+
+                            link = register(c, aid, "telegram", destination, intent="community:" + str(task["id"]),
+                                            placement="community_post" if standalone else "community_reply",
+                                            account=task["input"]["account_id"], location=task["input"]["candidate"]["telegram_url"])
+                            reply_body, _ = promotion_body(reply_body, destination, link["public_code"], business.get("product_url"))
                             tracking_id = str(link["id"])
                         c.execute(
                             "UPDATE lead.tasks SET input=input || %s WHERE id=%s",

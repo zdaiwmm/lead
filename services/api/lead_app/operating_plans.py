@@ -1142,7 +1142,7 @@ def status(aid: UUID, today_only: bool = False):
         plan["telegram_group_board"] = board
         plan["channel_clocks"] = all_rows(
             c,
-            """SELECT input->>'platform' AS platform,
+            """SELECT input->>'platform' AS platform, coalesce(input->>'lane','delivery') AS lane,
             result->>'reason' AS reason, scheduled_at AS next_at,
             result->>'last_target' AS last_target
             FROM lead.tasks WHERE type='channel.clock' AND state='planned'

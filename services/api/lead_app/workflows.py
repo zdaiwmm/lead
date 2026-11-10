@@ -43,7 +43,7 @@ class ChannelDeliveryWorkflow:
             pending_tick = pending_tick or str(workflow.uuid4())
             try:
                 result = await workflow.execute_activity(
-                    "channel_delivery_tick", {**args, "tick": pending_tick},
+                    "channel_research_tick" if args.get("lane")=="research" else "channel_delivery_tick", {**args, "tick": pending_tick},
                     start_to_close_timeout=timedelta(minutes=8), retry_policy=RETRY,
                 )
                 if result.get("stop"):

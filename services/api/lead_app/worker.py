@@ -17,6 +17,7 @@ from .analytics_ingest import process_analytics_ingest
 from .async_db import run as run_db
 from .atomic_dispatch import close_channel_atom, prepare_channel_atom
 from .channel_delivery import channel_delivery_tick, park_channel_target
+from .channel_research import channel_research_tick
 from .config import STATE, any_model_configured, env, model_config
 from .db import all_rows, emit, one
 from .db import pooled_tx as tx
@@ -144,7 +145,7 @@ async def deliver_workspace(client, tenant, configured, key_was_configured):
                     await client.start_workflow(
                         ChannelDeliveryWorkflow.run, {**payload,"agent_id":aid},
                         id=f"channel-clock:{payload['task_id']}:{payload['generation']}",
-                        task_queue="lead-delivery", id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                        task_queue="lead-research" if payload.get("lane")=="research" else "lead-delivery", id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
                     )
                 except WorkflowAlreadyStartedError:
                     pass
@@ -315,6 +316,10 @@ async def main():
         await stack.enter_async_context(Worker(
             client, task_queue="lead-delivery", workflows=[ChannelDeliveryWorkflow],
             activities=[channel_delivery_tick, park_channel_target], max_concurrent_activities=2,
+        ))
+        await stack.enter_async_context(Worker(
+            client, task_queue="lead-research", workflows=[ChannelDeliveryWorkflow],
+            activities=[channel_research_tick, park_channel_target], max_concurrent_activities=2,
         ))
         if env().get("LEAD_ANALYTICS_DEDICATED") != "1":
             await stack.enter_async_context(analytics_worker)

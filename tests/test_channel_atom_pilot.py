@@ -248,3 +248,79 @@ async def test_real_temporal_connected_channels(monkeypatch):
                 "instagram",
                 "reddit",
             ]
+
+
+async def test_channel_clocks_cross_day_and_continue_as_new():
+    import asyncio
+    import os
+
+    import pytest
+    from lead_app.workflows import ChannelDeliveryWorkflow
+    from temporalio import activity
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer, Worker
+
+    if os.environ.get("LEAD_WORKFLOW_TESTS") != "1":
+        pytest.skip("requires isolated time-skipping Temporal server")
+    # Test Temporal's actual timer and durable rollover at accelerated time.
+    ticks = {}
+    initial_runs = {}
+
+    def step(args):
+        key = args["task_id"]
+        seen = ticks.setdefault(key, [])
+        assert args["tick"] not in seen
+        seen.append(args["tick"])
+        initial_runs.setdefault(key, activity.info().workflow_run_id)
+        if key == "waiting-source":
+            return {"stop": True} if len(seen) == 3 else {"delay": 43200}
+        return {"stop": True} if len(seen) == 103 else {"delay": 900}
+
+    @activity.defn(name="channel_delivery_tick")
+    async def delivery(args: dict):
+        return step(args)
+
+    @activity.defn(name="channel_research_tick")
+    async def research(args: dict):
+        return step(args)
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        queue = "channel-day"
+        async with Worker(
+            env.client,
+            task_queue=queue,
+            workflows=[ChannelDeliveryWorkflow],
+            activities=[delivery, research],
+            max_concurrent_activities=2,
+        ):
+            start = await env.get_current_time()
+            handles = [
+                await env.client.start_workflow(
+                    ChannelDeliveryWorkflow.run,
+                    {"task_id": key, "lane": lane},
+                    id=uid(),
+                    task_queue=queue,
+                )
+                for key, lane in (
+                    ("waiting-source", "research"),
+                    ("active-target", "delivery"),
+                )
+            ]
+            await asyncio.wait_for(
+                handles[1].result(), timeout=240
+            )
+            await asyncio.wait_for(handles[0].result(), timeout=15)
+            assert (await env.get_current_time() - start).total_seconds() >= 86400
+            assert {key: len(items) for key, items in ticks.items()} == {
+                "waiting-source": 3,
+                "active-target": 103,
+            }
+            current = await handles[1].describe()
+            assert current.run_id != initial_runs["active-target"]
+            for run_id in (current.run_id, initial_runs["active-target"]):
+                history = await env.client.get_workflow_handle(
+                    handles[1].id, run_id=run_id
+                ).fetch_history()
+                await Replayer(workflows=[ChannelDeliveryWorkflow]).replay_workflow(
+                    history
+                )

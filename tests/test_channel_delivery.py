@@ -39,6 +39,97 @@ def reclaim_test_profiles(site_database, reclaim_test_profiles):
     yield
 
 
+def install_fixture_research(monkeypatch, actors):
+    # Isolate search and social pages. The real gateway still renders the page,
+    # captures DOM evidence, stores the browser step and validates the source link.
+    from lead_app import operating_work, resource_pressure
+    from lead_app.browser_tools import BrowserTools
+    from lead_app.research import ResearchPage, begin_run, finish_run
+
+    monkeypatch.setenv("LEAD_APPROVED_DISCOVERY_CHANNELS", "reddit,facebook")
+    monkeypatch.setattr(resource_pressure, "sample", lambda: {"defer_optional": False})
+    by_profile = {
+        str(actor.profile["id"]): platform for platform, actor in actors.items()
+    }
+    demand = "A store manager needs a shift handoff worksheet. Operators may share a relevant worksheet here."
+
+    async def offline_route(controller, route):
+        platform = by_profile[str(controller.actor.profile["id"])]
+        url = route.request.url
+        if url.startswith("https://www.google.com/search?"):
+            markup = f'<div id="search"><h3>Staff scheduling discussion</h3><a href="{TARGETS[platform]}">Shift worksheet resource directory</a></div>'
+        else:
+            assert url == TARGETS[platform]
+            markup = f"<article>{demand}</article>"
+        await route.fulfill(
+            content_type="text/html", body="<title>Staff scheduling</title>" + markup
+        )
+
+    async def validate_fixture(url):
+        assert url in TARGETS.values() or url.startswith(
+            "https://www.google.com/search?"
+        )
+
+    for actor in actors.values():
+        monkeypatch.setattr(actor.forward_proxy, "validate_url", validate_fixture)
+    monkeypatch.setattr(ResearchPage, "read_only_route", offline_route)
+
+    class FixtureTransport(BrowserTools):
+        async def command(self, operation, args=None):
+            if not self.run_id:
+                self.run_id = begin_run(
+                    self.aid, self.goal, task_id=self.task_id, mode=self.mode
+                )
+            return await browser.research_command(
+                self.aid,
+                browser.ResearchCommand(
+                    run_id=self.run_id,
+                    command_id=uid(),
+                    operation=operation,
+                    args=args or {},
+                ),
+            )
+
+        async def finish(self, state="succeeded"):
+            records = finish_run(self.aid, self.run_id, state)
+            await browser.close_research(self.aid, self.run_id)
+            return records
+
+    async def fixture_model(schema, context, **kwargs):
+        if schema is operating_work.ResearchBrief:
+            return schema(
+                audience="store managers",
+                hypothesis="staff need a worksheet",
+                queries=["shift handoff worksheet"],
+            )
+        page = context["untrusted_observations"][0]
+        passage = next(p for p in page["passages"] if "worksheet" in p["text"])
+        fields = {}
+        if schema is operating_work.ChannelCheck:
+            assert "may share" in passage["text"]
+            fields = {
+                "channel_fit": "viable",
+                "next_direction": "respond on the verified target",
+            }
+        return schema(
+            title="Shift handoff",
+            summary=passage["text"],
+            limitations="Fixture only",
+            findings=[
+                dict(
+                    source_id=page["source_id"],
+                    quote_id=passage["quote_id"],
+                    observation=passage["text"],
+                    next_step="Check sharing rules",
+                )
+            ],
+            **fields,
+        )
+
+    monkeypatch.setattr(operating_work, "BrowserTools", FixtureTransport)
+    monkeypatch.setattr(operating_work, "run_model", fixture_model)
+
+
 @pytest.mark.skipif(
     os.environ.get("LEAD_BROWSER_TESTS") != "1",
     reason="requires native disposable browser",
@@ -65,7 +156,7 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
     monkeypatch.setattr(activities, "run_model", decision)
     with tx(aid) as c:
         c.execute("UPDATE lead.agents SET desired_state='running' WHERE id=%s", (aid,))
-        business = one(
+        one(
             c,
             """INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,description,product_url)
             VALUES(%s,%s,1,'Shift planning worksheet','https://site.example') RETURNING id""",
@@ -103,6 +194,7 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
         return await browser.publish_action(aid, browser.PublishRequest(**data))
 
     monkeypatch.setattr(activities, "browser_rpc", offline_rpc)
+    install_fixture_research(monkeypatch, actors)
     links = {}
     anonymous = uid()
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -171,39 +263,11 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
                     VALUES(%s,%s,%s,1,'["publish"]','test_owner')""",
                     (current_tenant(), aid, target_id),
                 )
-                c.execute(
-                    """INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at,completed_at)
-                    VALUES(%s,%s,'operating.validate','succeeded',%s,%s,%s,now(),now())""",
-                    (
-                        current_tenant(),
-                        aid,
-                        uid(),
-                        j(
-                            {
-                                "business_profile_id": str(business["id"]),
-                                "config_revision": 1,
-                            }
-                        ),
-                        j(
-                            {
-                                "status": "observed",
-                                "channel_fit": "viable",
-                                "source_urls": [TARGETS[platform]],
-                                "findings": [
-                                    {
-                                        "observation": "A store manager is looking for a shift handoff worksheet.",
-                                        "source_url": TARGETS[platform],
-                                    }
-                                ],
-                            }
-                        ),
-                    ),
-                )
             domain.channel_control(aid, platform, True)
             with tx(aid) as c:
                 clock = one(
                     c,
-                    "SELECT id,version FROM lead.tasks WHERE type='channel.clock' AND input->>'platform'=%s",
+                    "SELECT id,version FROM lead.tasks WHERE type='channel.clock' AND input->>'platform'=%s AND input->>'lane'='delivery'",
                     (platform,),
                 )
             args = {
@@ -212,6 +276,47 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
                 "generation": clock["version"],
                 "tick": uid(),
             }
+            from lead_app.channel_research import channel_research_tick
+
+            with tx(aid) as c:
+                research = one(
+                    c,
+                    """SELECT id,version FROM lead.tasks WHERE type='channel.clock'
+                    AND input->>'platform'=%s AND input->>'lane'='research'""",
+                    (platform,),
+                )
+            research_args = {
+                **args,
+                "task_id": str(research["id"]),
+                "generation": research["version"],
+            }
+            with monkeypatch.context() as unavailable:
+                unavailable.setenv("LEAD_APPROVED_DISCOVERY_CHANNELS", "")
+                assert (await channel_research_tick(research_args))[
+                    "reason"
+                ] == "source_permission_required"
+            first = await channel_delivery.channel_delivery_tick(
+                {**args, "tick": uid()}
+            )
+            assert first["reason"] == "awaiting_validated_opportunity", first
+            for expected in (
+                "operating_work_completed",
+                "public_observation_ready",
+                "operating_work_completed",
+            ):
+                step = await channel_research_tick({**research_args, "tick": uid()})
+                with tx(aid) as c:
+                    assert step.get("reason") == expected, (
+                        step,
+                        all_rows(
+                            c,
+                            "SELECT type,state,result FROM lead.tasks WHERE type LIKE 'operating.%'",
+                        ),
+                    )
+            with tx(aid) as c:
+                evidence = channel_delivery.opportunity(c, target_id)
+                assert evidence and evidence["source_url"] == TARGETS[platform]
+                assert "worksheet" in evidence["observation"]
             await channel_delivery.channel_delivery_tick(args)
             with tx(aid) as c:
                 task = one(
@@ -246,6 +351,18 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
             assert len(site.posts) == 1
             links[platform] = task["input"]["link"]
             assert links[platform] in site.posts[0]["body"]
+            with tx(aid) as c:
+                assert channel_delivery.opportunity(c, target_id) is None
+                link_row = one(
+                    c,
+                    "SELECT account_id,placement,placement_ref FROM lead.tracking_links WHERE content_id=%s",
+                    (task["input"]["content_id"],),
+                )
+                assert link_row == {
+                    "account_id": account_id,
+                    "placement": "post",
+                    "placement_ref": str(target_id),
+                }
             path = urlsplit(links[platform]).path
             redirect = client.get(
                 path, follow_redirects=False, headers={"User-Agent": "Mozilla/5.0"}
@@ -329,3 +446,42 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
             ) == {str(p["id"]) for p in profiles.values()}
     finally:
         await gateway.close(aid)
+
+
+def test_distribution_placement_retries_and_source_integrity(pixel, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    aid, _, client, headers, _, _ = pixel
+    monkeypatch.setenv("LEAD_CHANNEL_ATOM_AGENT_IDS", aid)
+    path = f"/api/agents/{aid}/tracking-links"
+    body = {
+        "destination_url": "https://site.example/?version=1#try",
+        "platform": "discord",
+        "intent_id": uid(),
+        "placement": "profile",
+        "campaign": "cold-start",
+    }
+
+    def create(payload):
+        result = client.post(path, headers=headers, json=payload)
+        assert result.status_code == 200, result.text
+        return result.json()
+
+    with ThreadPoolExecutor(2) as pool:
+        first, replay = pool.map(create, [body, body])
+    assert first == replay and first["public_code"].startswith("dc_")
+    assert create({**body, "platform": "reddit"})["public_code"].startswith("rd_")
+    assert create({**body, "placement": "post"})["id"] != first["id"]
+    assert (
+        client.post(
+            path,
+            headers=headers,
+            json={**body, "destination_url": "https://else.example/"},
+        ).status_code
+        >= 400
+    )
+    with pytest.raises(psycopg.errors.RaiseException, match="immutable"), tx(aid) as c:
+        c.execute(
+            "UPDATE lead.tracking_links SET platform='reddit' WHERE id=%s",
+            (first["id"],),
+        )

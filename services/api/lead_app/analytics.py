@@ -74,6 +74,11 @@ def site_origin(value):
 class TrackingSetup(BaseModel):
     destination_url: str = Field(max_length=2000)
     platform: str = Field(default="direct", pattern=r"^[a-z_]{1,30}$")
+    intent_id: UUID | None = None
+    account_id: UUID | None = None
+    placement: str = Field(default="manual", pattern=r"^[a-z_]{1,40}$")
+    placement_ref: str | None = Field(default=None, max_length=500)
+    campaign: str | None = Field(default=None, max_length=180)
 
 
 class PromotionSetup(BaseModel):
@@ -149,7 +154,7 @@ def settings(aid: UUID):
         )
         links = all_rows(
             c,
-            "SELECT id,public_code,platform,destination_url FROM lead.tracking_links ORDER BY created_at DESC",
+            "SELECT id,public_code,platform,destination_url,account_id,placement,placement_ref,campaign FROM lead.tracking_links ORDER BY created_at DESC",
         )
         server = one(
             c,
@@ -302,27 +307,19 @@ def setup(aid: UUID, body: AnalyticsSetup):
 def create_link(aid: UUID, body: TrackingSetup):
     resolve_public(body.destination_url)
     aid = str(aid)
-    p = urlsplit(body.destination_url)
+    import secrets
+
+    from .atomic_dispatch import channel_pilot
+    from .distribution import register
+    from .promotion import PLATFORM_CODES
+
     with tx(aid) as c:
         require_agent(c, aid)
-        from .atomic_dispatch import channel_pilot
-        from .promotion import PLATFORM_CODES, new_marker
-
-        code = (new_marker(body.platform) if channel_pilot(aid) and body.platform in PLATFORM_CODES
-                else __import__("secrets").token_urlsafe(12))
-        row = one(
-            c,
-            "INSERT INTO lead.tracking_links(tenant_id,agent_id,platform,public_code,destination_url,allowed_host) VALUES(%s,%s,%s,%s,%s,%s) RETURNING id,public_code",
-            (
-                current_tenant(),
-                aid,
-                body.platform,
-                code,
-                body.destination_url,
-                p.hostname,
-            ),
-        )
-    return {**row, "url": public_origin() + "/r/" + code}
+        compact = channel_pilot(aid) and body.platform in PLATFORM_CODES
+        row = register(c, aid, body.platform, body.destination_url, intent="manual:" + str(body.intent_id or uid()),
+                       placement=body.placement, account=body.account_id, location=body.placement_ref, campaign=body.campaign,
+                       code=None if compact else secrets.token_urlsafe(12))
+    return {**row, "url": public_origin() + "/r/" + row["public_code"]}
 
 
 @router.get("/r/{code}")

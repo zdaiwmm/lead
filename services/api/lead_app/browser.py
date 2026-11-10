@@ -386,7 +386,9 @@ class Actor:
             a = one(c, "SELECT * FROM lead.agents WHERE id=%s FOR SHARE", (self.aid,))
             if not a or a["desired_state"] == "archived":
                 raise ValueError("Agent 不可运行")
-        task = one(c, "SELECT input->'channel_clock' AS clock FROM lead.tasks WHERE id=%s", (action["task_id"],))
+        task = None
+        if action.get("task_id"):
+            task = one(c, "SELECT input->'channel_clock' AS clock FROM lead.tasks WHERE id=%s", (action["task_id"],))
         if task and task["clock"]:
             from .channel_delivery import current
 
@@ -1502,24 +1504,30 @@ async def reload_publishing_adapter(aid: UUID, body: PublishRequest):
     return {"ok": True, "session_id": actor.session, "action_id": body.action_id}
 
 
+def research_profile(aid, run_id):
+    with tx(aid) as c:
+        row = one(c, """SELECT t.input->>'channel_profile_id' AS profile_id
+            FROM lead.browser_runs r LEFT JOIN lead.tasks t ON t.id=r.task_id WHERE r.id=%s""", (run_id,))
+        if not row:
+            raise HTTPException(404, "浏览任务不存在")
+        return row["profile_id"]
+
+
 @app.post("/agents/{aid}/research/command")
 async def research_command(aid: UUID, body: ResearchCommand):
     from .research import ResearchPage
 
     aid = str(aid)
     run_id = str(body.run_id)
-    with tx(aid) as c:
-        require_agent(c, aid)
-        if not one(c, "SELECT id FROM lead.browser_runs WHERE id=%s", (run_id,)):
-            raise HTTPException(404, "浏览任务不存在")
-    actor = await gateway.get(aid)
+    actor = await gateway.get(aid, research_profile(aid, run_id))
     controller = actor.research_pages.setdefault(run_id, ResearchPage(actor, run_id))
     return await controller.command(body.operation, body.args, str(body.command_id))
 
 
 @app.post("/agents/{aid}/research/{rid}/close")
 async def close_research(aid: UUID, rid: UUID):
-    actor = gateway.actors.get(str(aid))
+    actor = next((actor for actor in gateway.actors.values()
+                  if actor.aid == str(aid) and str(rid) in actor.research_pages), None)
     if actor:
         async with actor.lock:
             controller = actor.research_pages.pop(str(rid), None)
@@ -1534,7 +1542,7 @@ async def close_research(aid: UUID, rid: UUID):
 async def start_hybrid_research(aid: UUID, rid: UUID):
     from .hybrid_research import HybridResearchPage
 
-    actor = await gateway.get(str(aid))
+    actor = await gateway.get(str(aid), research_profile(str(aid), rid))
     async with actor.lock:
         controller = actor.research_pages.setdefault(
             str(rid), HybridResearchPage(actor, str(rid))

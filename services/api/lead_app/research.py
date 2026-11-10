@@ -110,15 +110,24 @@ class ResearchPage:
                 and a["desired_state"] != "running"
             ):
                 raise ResearchStopped("Agent 已暂停")
+            if run.get("task_id"):
+                clock = one(c, "SELECT input->'channel_clock' AS args FROM lead.tasks WHERE id=%s", (run["task_id"],))
+                if clock and clock["args"]:
+                    from .channel_delivery import current
+                    from .channel_research import source_access
+                    owner = current(c, self.actor.aid, clock["args"])
+                    if not owner or not source_access(owner["input"]["platform"]):
+                        raise ResearchStopped("渠道已停止")
             if one(
                 c,
-                "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('active','requested','ending') AND expires_at>now()",
+                "SELECT 1 FROM lead.takeover_sessions WHERE profile_id=%s AND state IN ('active','requested','ending') AND expires_at>now()",
+                (self.actor.profile["id"],),
             ):
                 raise ResearchStopped("用户正在接管浏览器")
             if not one(
                 c,
-                "SELECT 1 FROM lead.profile_leases WHERE state='held' AND epoch=%s AND expires_at>now()",
-                (self.actor.epoch,),
+                "SELECT 1 FROM lead.profile_leases WHERE profile_id=%s AND state='held' AND epoch=%s AND expires_at>now()",
+                (self.actor.profile["id"], self.actor.epoch),
             ):
                 raise ResearchStopped("浏览器租约已失效")
             return run
