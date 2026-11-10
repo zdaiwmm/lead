@@ -28,7 +28,7 @@ def disconnect_account(aid, account_id, expected_verified_at):
         if account["state"] == "disconnected":
             return {"ok": True, "duplicate": True}
         c.execute(
-            "UPDATE lead.social_accounts SET state='disconnected',automation_enabled=false WHERE id=%s",
+            "UPDATE lead.social_accounts SET state='disconnected',automation_enabled=false,binding_version=binding_version+1 WHERE id=%s",
             (account_id,),
         )
         c.execute(
@@ -54,20 +54,25 @@ def disconnect_account(aid, account_id, expected_verified_at):
         c.execute(
             """UPDATE lead.tasks t SET state='canceled',completed_at=now(),version=version+1
             WHERE t.state IN ('planned','queued','running','waiting_user') AND
-              (t.input->>'platform'=%s OR t.input->>'account_id'=%s OR
+              ((t.input->>'platform'=%s AND NOT EXISTS(SELECT 1 FROM lead.social_accounts sibling WHERE sibling.platform=%s AND sibling.automation_enabled AND sibling.state='connected')) OR t.input->>'account_id'=%s OR
                t.input->>'target_id' IN (SELECT id::text FROM lead.account_targets WHERE account_id=%s) OR
                EXISTS(SELECT 1 FROM lead.actions a JOIN lead.account_targets target ON target.id=a.target_id
                       WHERE a.task_id=t.id AND target.account_id=%s))
               AND NOT EXISTS(SELECT 1 FROM lead.actions a WHERE a.task_id=t.id AND a.state IN ('dispatching','unknown'))""",
-            (account["platform"], str(account_id), account_id, account_id),
+            (account["platform"], account["platform"], str(account_id), account_id, account_id),
         )
-        # The browser commit gate takes the same agent lock before any submission.
+        isolated = one(
+            c,
+            "SELECT slot<>'default' AS yes FROM lead.browser_profiles WHERE id=%s",
+            (account["profile_id"],),
+        )["yes"]
+        # The browser commit gate and disconnect conflict on the same project control row.
         c.execute(
-            "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+1,version=version+1,updated_at=now() WHERE id=%s",
-            (aid,),
+            "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+%s,version=version+1,updated_at=now() WHERE id=%s",
+            (0 if isolated else 1, aid),
         )
         c.execute(
-            "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending')"
+            "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending') AND profile_id=%s",(account["profile_id"],)
         )
         audit(
             c,
@@ -81,7 +86,7 @@ def disconnect_account(aid, account_id, expected_verified_at):
 
 
 def store_account(
-    aid, platform, observed, prompt_target=True, *, expected_control_version=None
+    aid, platform, observed, prompt_target=True, *, expected_control_version=None, expected_binding=None
 ):
     with tx(aid) as c:
         agent = require_agent(c, aid, True)
@@ -92,11 +97,20 @@ def store_account(
             raise ValueError("账号连接已变化，请重新打开登录窗口并验证")
         account = one(
             c,
-            "SELECT * FROM lead.social_accounts WHERE platform=%s ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
-            (platform,),
+            "SELECT * FROM lead.social_accounts WHERE platform=%s AND (%s::uuid IS NULL OR id=%s) ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+            (
+                platform,
+                expected_binding[0] if expected_binding else None,
+                expected_binding[0] if expected_binding else None,
+            ),
         )
         if not account:
             raise ValueError("请先打开此账号的连接窗口")
+        if (
+            expected_binding is not None
+            and (str(account["id"]), account["binding_version"]) != expected_binding
+        ):
+            raise ValueError("账号连接已变化，请重新验证")
         if (
             account["external_account_id"]
             and account["external_account_id"] != observed["external_account_id"]
@@ -116,12 +130,12 @@ def store_account(
                 (str(account["id"]),),
             )
             c.execute(
-                "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+1 WHERE id=%s",
-                (aid,),
+                "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+CASE WHEN EXISTS (SELECT 1 FROM lead.browser_profiles WHERE id=%s AND slot='default') THEN 1 ELSE 0 END WHERE id=%s",
+                (account["profile_id"], aid),
             )
         try:
             c.execute(
-                "UPDATE lead.social_accounts SET external_account_id=%s,display_name=%s,automation_enabled=CASE WHEN state='disconnected' THEN true ELSE automation_enabled END,state='connected',verified_at=now() WHERE id=%s",
+                "UPDATE lead.social_accounts SET binding_version=binding_version+1,external_account_id=%s,display_name=%s,automation_enabled=CASE WHEN state='disconnected' THEN true ELSE automation_enabled END,state='connected',verified_at=now() WHERE id=%s",
                 (
                     observed["external_account_id"],
                     observed["display_name"],
@@ -422,8 +436,8 @@ def accept_card(
                 ),
             )
             c.execute(
-                "UPDATE lead.agents SET authorization_version=%s,control_version=control_version+1 WHERE id=%s",
-                (ver, aid),
+                "UPDATE lead.agents SET authorization_version=%s,control_version=control_version+CASE WHEN EXISTS(SELECT 1 FROM lead.social_accounts s JOIN lead.browser_profiles p ON p.id=s.profile_id WHERE s.id=%s AND p.slot='default') THEN 1 ELSE 0 END WHERE id=%s",
+                (ver, target["account_id"], aid),
             )
             spec = SPECS[target["platform"]]
             if "text" in spec.formats:

@@ -46,6 +46,7 @@ export default function AccountBrowser({
   const frameTag = useRef("");
   const mounted = useRef(false);
   const takeover = useRef("");
+  const accountId = useRef<string | undefined>(undefined);
   const lastInput = useRef(0);
   const nextFrame = useRef(0);
   const expire = useCallback(() => {
@@ -239,11 +240,11 @@ export default function AccountBrowser({
     verify ? setVerifying(true) : setClosing(true);
     try {
       if (verify)
-        await api(`/agents/${aid}/accounts/verify-login`, { platform });
+        await api(`/agents/${aid}/accounts/verify-login`, { platform, account_id: accountId.current });
       if (state === "opening") {
         await connection.current?.promise.catch(() => {});
       }
-      await api(`/agents/${aid}/takeover/end`, {});
+      if (takeover.current) await api(`/agents/${aid}/takeover/end?takeover=${encodeURIComponent(takeover.current)}`, {});
       if (verify && onVerified) await onVerified();
       else onClose();
     } catch (e) {
@@ -281,6 +282,7 @@ export default function AccountBrowser({
       .then(async (session) => {
         if (canceled) return;
         takeover.current = session.takeover_id;
+        accountId.current = session.account_id;
         lastInput.current = performance.now();
         active.current = true;
         setState("ready");

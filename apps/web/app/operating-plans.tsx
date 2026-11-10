@@ -536,6 +536,19 @@ export default function OperatingPlans({
                 </dl>
               </section>
             )}
+            {Boolean(data.channel_clocks?.length) && (
+              <details className={styles.detailRow}>
+                <summary>各渠道的下次检查</summary>
+                <dl className={styles.facts}>
+                  {data.channel_clocks.map((clock: Row) => (
+                    <div key={clock.platform}><dt>{socialNames[clock.platform] || clock.platform}</dt>
+                      <dd>{clock.reason === "no_available_verified_target" ? "等待可用的已验证目标"
+                        : clock.reason === "execution_attempts_exhausted" ? "遇阻，稍后复查"
+                        : "已排期"} · {timestamp(clock.next_at, data.timezone)}</dd></div>
+                  ))}
+                </dl>
+              </details>
+            )}
             <details className={styles.detailRow} name={`${boardId}-direction`}>
               <summary>受众与效果</summary>
               <dl className={styles.facts}>

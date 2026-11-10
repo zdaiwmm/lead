@@ -51,7 +51,20 @@ class ChannelDeliveryWorkflow:
                 pending_tick = None
                 await workflow.sleep(max(1, float(result["delay"])))
             except ActivityError:
-                await workflow.sleep(60)
+                try:
+                    result = await workflow.execute_activity(
+                        "park_channel_target",
+                        {**args, "tick": pending_tick},
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RETRY,
+                    )
+                    if result.get("stop"):
+                        return
+                    pending_tick = None
+                    await workflow.sleep(result["delay"])
+                except ActivityError:
+                    # A storage outage preserves the original tick across restarts.
+                    await workflow.sleep(60)
         workflow.continue_as_new(args=[args, pending_tick])
 
 

@@ -108,8 +108,9 @@ def purge(tenant, aid, apply=False, retention_days=7):
     if folder.is_symlink() or folder.resolve().parent != (STATE / "profiles").resolve():
         raise ValueError("环境路径不属于指定 Agent")
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (folder / "actor.lock").open("a") as held:
+    with (folder / "profiles.lock").open("a") as project, (folder / "actor.lock").open("a") as held:
         try:
+            fcntl.flock(project, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError("浏览器仍在使用此环境") from None

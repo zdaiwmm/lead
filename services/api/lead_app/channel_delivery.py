@@ -50,6 +50,7 @@ def enroll(c, aid, agent, platform):
 
 
 def current(c, aid, args):
+    c.execute("SET LOCAL lock_timeout='500ms'")
     agent = one(c, "SELECT * FROM lead.agents WHERE id=%s FOR SHARE", (aid,))
     clock = one(
         c,
@@ -89,7 +90,7 @@ def opportunity(c, target_id):
         CROSS JOIN LATERAL jsonb_array_elements(task.result->'findings') finding
         JOIN lead.account_targets target ON target.id=%s
         WHERE task.type='operating.validate' AND task.state='succeeded'
-          AND task.result->>'status'='observed' AND task.result->>'channel_fit'='viable'
+          AND task.completed_at>now()-interval '14 days' AND task.result->>'status'='observed' AND task.result->>'channel_fit'='viable'
           AND task.input->>'business_profile_id'=(SELECT id::text FROM lead.business_profiles
               ORDER BY revision DESC LIMIT 1)
           AND task.input->>'config_revision'=(SELECT config_revision::text FROM lead.agents
@@ -209,3 +210,24 @@ async def channel_delivery_tick(args: dict):
         }
     )
     return await asyncio.to_thread(finish, args, target_id, result)
+
+
+@activity.defn
+@scoped_activity
+async def park_channel_target(args: dict):
+    """A poison target may yield to its siblings; never replace an uncertain send."""
+
+    def park():
+        with tx(args["agent_id"]) as c:
+            clock = current(c, args["agent_id"], args)
+            if not clock:
+                return {"stop": True}
+            state = clock["result"] or {}
+            target = state.get("pending_target")
+            if not target or state.get("pending_tick") != args["tick"]:
+                return {"delay": 300}
+        return finish(
+            args, target, {"delay": 3600, "reason": "execution_attempts_exhausted"}
+        )
+
+    return await asyncio.to_thread(park)

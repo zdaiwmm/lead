@@ -232,6 +232,18 @@ EXCLUDE_PARTS = {
 EXCLUDE_FILES = {"actor.lock", "parent.lock", ".parentlock", "lock"}
 
 
+def profile_member(relative):
+    parts = relative.parts
+    if len(parts) >= 3 and parts[0] == "accounts":
+        try:
+            if str(UUID(parts[1])) != parts[1]:
+                return False
+        except ValueError:
+            return False
+        parts = parts[2:]
+    return parts == ("identity.json",) or (len(parts) > 1 and parts[0] == "storage")
+
+
 def profile_files(folder):
     for path in sorted(folder.rglob("*")):
         relative = path.relative_to(folder)
@@ -243,7 +255,7 @@ def profile_files(folder):
         if path.is_symlink():
             raise ValueError("Profile 包含不允许备份的链接")
         if path.is_file() and (
-            relative.parts[0] == "storage" or relative.as_posix() == "identity.json"
+            profile_member(relative)
         ):
             yield path, relative.as_posix()
 
@@ -271,7 +283,7 @@ def claim_profile_backup(aid, allow_running=False):
         )
         if one(c, "SELECT 1 FROM lead.profile_maintenance WHERE state='active'"):
             raise ValueError("此环境正在备份")
-        profile = one(c, "SELECT id FROM lead.browser_profiles")
+        profile = one(c, "SELECT id FROM lead.browser_profiles WHERE slot='default'")
         c.execute(
             "INSERT INTO lead.profile_maintenance(id,tenant_id,agent_id,profile_id,purpose,expires_at,state) VALUES(%s,%s,%s,%s,'backup',now()+interval '15 minutes','active')",
             (guard_id, agent["tenant_id"], aid, profile["id"]),
@@ -331,18 +343,28 @@ def _backup_profile(aid, folder, key, automated=False):
     root = STATE / "profiles" / aid
     if not root.is_dir() or root.is_symlink():
         raise ValueError("Profile 尚未创建")
-    with (root / "actor.lock").open("a") as held:
+    with (root / "profiles.lock").open("a") as project, (root / "actor.lock").open("a") as held:
         try:
+            fcntl.flock(project, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError("原浏览器仍在运行，拒绝复制登录资料") from None
         with tx(aid) as c:
             agent = require_agent(c, aid, True)
-            profile = one(c, "SELECT * FROM lead.browser_profiles")
+            profile = one(c, "SELECT * FROM lead.browser_profiles WHERE slot='default'")
             if agent["desired_state"] == "running" and not automated:
                 raise ValueError("环境状态已改变，未备份")
             files = list(profile_files(root))
-            if not any(name == "identity.json" for _, name in files):
+            accounts = c.execute(
+                "SELECT id,config_hash FROM lead.browser_profiles WHERE slot<>'default' ORDER BY id"
+            ).fetchall()
+            fileset = {name for _, name in files}
+            saved_accounts = {
+                str(row["id"]): row["config_hash"]
+                for row in accounts
+                if "accounts/" + str(row["id"]) + "/identity.json" in fileset
+            }
+            if not saved_accounts and "identity.json" not in fileset:
                 raise ValueError("Profile 缺少设备身份文件")
             manifest = {
                 "agent_id": aid,
@@ -351,6 +373,7 @@ def _backup_profile(aid, folder, key, automated=False):
                 "config_hash": profile["config_hash"],
                 "engine_version": profile["engine_version"],
                 "sdk_version": profile["sdk_version"],
+                "account_profiles": saved_accounts,
                 "files": {
                     name: {"sha256": digest(path), "size": path.stat().st_size}
                     for path, name in files
@@ -518,11 +541,7 @@ def restore_profile(source, key):
                         or len(relative.parts) > 40
                     ):
                         raise ValueError("Profile 归档路径不可用")
-                    if relative.parts[0] not in (
-                        "manifest.json",
-                        "identity.json",
-                        "storage",
-                    ):
+                    if relative.as_posix() != "manifest.json" and not profile_member(relative):
                         raise ValueError("Profile 归档包含额外文件")
                     count += 1
                     total += member.size

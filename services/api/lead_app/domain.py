@@ -798,7 +798,7 @@ def connect_lab(aid):
         existing = one(c, "SELECT id FROM lead.social_accounts WHERE platform='lab'")
         if existing:
             return
-        profile = one(c, "SELECT id FROM lead.browser_profiles")
+        profile = one(c, "SELECT id FROM lead.browser_profiles WHERE slot='default'")
         account, target = uid(), uid()
         c.execute(
             "INSERT INTO lead.social_accounts(id,tenant_id,agent_id,profile_id,platform,external_account_id,display_name,state,verified_at) VALUES(%s,%s,%s,%s,'lab',%s,'本地测试站','connected',now())",

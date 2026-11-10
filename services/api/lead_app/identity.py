@@ -40,10 +40,10 @@ async def check(actor):
             require_agent(c, aid, True)
             if one(
                 c,
-                "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now()",
+                "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now() AND profile_id=%s", (actor.profile['id'],)
             ):
                 raise ValueError("请先结束浏览器接管")
-            profile = one(c, "SELECT * FROM lead.browser_profiles")
+            profile = one(c,"SELECT * FROM lead.browser_profiles WHERE id=%s",(actor.profile["id"],))
             network = one(
                 c,
                 "SELECT * FROM lead.network_identities WHERE id=%s",
@@ -127,7 +127,7 @@ async def check(actor):
             wanted_locale
             and device.get("language", "").lower() == wanted_locale.lower()
         )
-        baseline_path = STATE / "profiles" / aid / "observed-device.json"
+        baseline_path = actor.folder / "observed-device.json"
         stable = {
             k: device.get(k)
             for k in (

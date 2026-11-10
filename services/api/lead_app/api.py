@@ -485,6 +485,8 @@ def remove_preference(aid: UUID, memory_id: UUID, body: RevisionRequest):
 
 class Connection(BaseModel):
     platform: str
+    account_id: UUID | None = None
+    new_account: bool = False
 
 
 class LabPublish(BaseModel):
@@ -536,8 +538,9 @@ async def verify_login(aid: UUID, body: Connection):
     aid = str(aid)
     with tx(aid) as c:
         control_version = require_agent(c, aid)["control_version"]
+        selected = one(c,"SELECT id,binding_version FROM lead.social_accounts WHERE platform=%s AND (%s::uuid IS NULL OR id=%s) ORDER BY created_at DESC LIMIT 1",(platform,body.account_id,body.account_id))
     observed = (
-        await gateway(f"/agents/{aid}/account/inspect", body={"platform": platform})
+        await gateway(f"/agents/{aid}/account/inspect", body={"platform": platform,**({"account_id":str(body.account_id)} if body.account_id else {})})
     ).json()
     auto = {
         "instagram": f"https://www.instagram.com/{observed['external_account_id']}/",
@@ -554,10 +557,12 @@ async def verify_login(aid: UUID, body: Connection):
         observed,
         platform not in auto,
         expected_control_version=control_version,
+        expected_binding=(str(selected["id"]),selected["binding_version"]) if selected else None,
     )
     with tx(aid) as c:
         c.execute(
-            "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('active','requested','ending')"
+            "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('active','requested','ending') AND profile_id=(SELECT profile_id FROM lead.social_accounts WHERE id=%s)",
+            (account_id,),
         )
     if platform in auto:
         target = (
@@ -886,9 +891,19 @@ async def connect(aid: UUID, body: Connection):
     aid = str(aid)
     if body.platform not in [p[0] for p in domain.PLATFORMS] + ["lab"]:
         raise HTTPException(400, "频道不存在")
-    await asyncio.to_thread(domain.set_control, aid, "pause")
+    from .account_profiles import for_platform
+
+    profile = for_platform(
+        aid,
+        body.platform,
+        create=True,
+        account_id=body.account_id,
+        new_binding=body.new_account,
+    )
+    if profile["slot"] == "default":
+        await asyncio.to_thread(domain.set_control, aid, "pause")
     opened = (
-        await gateway("/agents/" + aid + "/open", body={"platform": body.platform})
+        await gateway("/agents/" + aid + "/open", body={"platform": body.platform,**({"account_id":str(profile["account_id"])} if profile.get("account_id") else {})})
     ).json()
     with tx(aid) as c:
         a = require_agent(c, aid, True)
@@ -897,17 +912,25 @@ async def connect(aid: UUID, body: Connection):
             "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
         ):
             raise ValueError("此环境正在备份，请稍后重试")
-        profile = one(c, "SELECT id FROM lead.browser_profiles")
-        if body.platform != "lab" and not one(
-            c, "SELECT id FROM lead.social_accounts WHERE platform=%s", (body.platform,)
-        ):
-            c.execute(
-                "INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,state) VALUES(%s,%s,%s,%s,'pending')",
+        if opened.get("profile_id", str(profile["id"])) != str(profile["id"]):
+            raise ValueError("账号环境已变化，请重新打开")
+        account = one(
+            c,
+            """SELECT id FROM lead.social_accounts WHERE platform=%s AND profile_id=%s
+            ORDER BY created_at DESC LIMIT 1""",
+            (body.platform, profile["id"]),
+        )
+        if body.platform != "lab" and not account:
+            account = one(
+                c,
+                "INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,state) VALUES(%s,%s,%s,%s,'pending') RETURNING id",
                 (current_tenant(), aid, profile["id"], body.platform),
             )
         c.execute(
-            "UPDATE lead.takeover_sessions SET state='expired',ended_at=now() WHERE state IN ('requested','active','ending')"
+            "UPDATE lead.takeover_sessions SET state='expired',ended_at=now() WHERE state IN ('requested','active','ending') AND profile_id=%s", (profile['id'],)
         )
+        if account:
+            c.execute("UPDATE lead.social_accounts SET binding_version=binding_version+1 WHERE id=%s",(account["id"],))
         takeover_token = token("takeover:" + aid, 1800)
         takeover = one(
             c,
@@ -925,6 +948,7 @@ async def connect(aid: UUID, body: Connection):
         audit(c, aid, "browser.takeover.started", {"platform": body.platform})
     return {
         "takeover_id": takeover["id"],
+        "account_id": account["id"] if account else None,
         "platform": body.platform,
         "status": "pending",
         "automation": False,
@@ -932,14 +956,23 @@ async def connect(aid: UUID, body: Connection):
 
 
 @app.post("/api/agents/{aid}/takeover/end")
-def end_takeover(aid: UUID):
+def end_takeover(aid: UUID, takeover: UUID | None = None):
     aid = str(aid)
     with tx(aid) as c:
         require_agent(c, aid, True)
+        if (
+            takeover is None
+            and one(
+                c,
+                "SELECT count(*) AS n FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now()",
+            )["n"]
+            > 1
+        ):
+            raise HTTPException(409,"请选择要结束的账号接管窗口")
         c.execute(
-            "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending')"
+            "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending') AND (%s::uuid IS NULL OR id=%s)", (takeover,takeover)
         )
-        record(c, aid, "已结束接管", "Agent 保持暂停。")
+        record(c, aid, "已结束接管", "浏览器控制权已交回。")
     return {"ok": True}
 
 
