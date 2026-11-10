@@ -82,3 +82,21 @@ def test_incremental_upgrade_and_existing_baseline_adoption(isolated_database):
             c.execute("SELECT count(*) FROM lead.platform_capabilities").fetchone()[0]
             >= 12
         )
+
+
+@pytest.mark.parametrize("baseline", ["0025_site_devices", "0026_local_restore_proof", "0028_distribution_slots"])
+def test_channel_upgrade_joins_installed_restore_history(isolated_database, baseline):
+    upgrade(isolated_database, target=baseline, roles=False)
+    with psycopg.connect(**isolated_database) as c:
+        before = c.execute("""SELECT md5(prosrc),prosecdef,proconfig,proacl::text FROM pg_proc
+            WHERE oid=to_regprocedure('lead.local_restore_ready()')""").fetchone()
+    upgrade(isolated_database, roles=False)
+    upgrade(isolated_database, roles=False)
+    with psycopg.connect(**isolated_database) as c:
+        assert c.execute("SELECT version_num FROM lead_migration_version").fetchall() == [("0029_merge_channel_restore",)]
+        after = c.execute("""SELECT md5(prosrc),prosecdef,proconfig,proacl::text FROM pg_proc
+            WHERE oid=to_regprocedure('lead.local_restore_ready()')""").fetchone()
+        assert after[:3] == ("f0b323f641b48d4ab81322cc4f501b42", True, ["search_path=pg_catalog, lead"])
+        if before:
+            assert after == before
+        assert c.execute("SELECT to_regclass('lead.pixel_first_landing') IS NOT NULL").fetchone()[0]

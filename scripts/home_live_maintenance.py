@@ -151,7 +151,11 @@ def channel_schema_ready():
     # A version row alone does not prove that the migration was applied.
     # Before the first cutover a return to the singleton reader must still be safe.
     ready = site_sql("""SELECT
-        (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0028_distribution_slots']
+        (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0029_merge_channel_restore']
+        AND EXISTS (SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.local_restore_ready()')
+             AND md5(prosrc)='f0b323f641b48d4ab81322cc4f501b42' AND prosecdef
+             AND proconfig=ARRAY['search_path=pg_catalog, lead'])
+        AND has_function_privilege('lead_runtime','lead.local_restore_ready()','EXECUTE')
         AND to_regclass('lead.pixel_first_landing') IS NOT NULL
         AND to_regclass('lead.pixel_device_customers') IS NOT NULL
         AND EXISTS (SELECT FROM pg_trigger WHERE tgrelid='lead.tracking_links'::regclass

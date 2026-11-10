@@ -273,6 +273,8 @@ CHANNEL_SCHEMA_FILES = {
     "infra/migrations/versions/0026_first_entry.py": "6c67420e3a578c42181ef45d69bed9ed70ec55bb",
     "infra/migrations/versions/0027_account_profiles.py": "244d0277b597d6f9f6351ff9da7920e8ed098a0c",
     "infra/migrations/versions/0028_distribution_slots.py": "ff2307da5e88017e5d8b91ef7ebcd233f1c77e01",
+    "infra/migrations/versions/0029_merge_channel_restore.py": "248855860ddd20d1659f6aef85b443d265fe36b2",
+    "infra/migrations/versions/0026_local_restore_proof.py": "0b9554440ea5c15417553d23ae4da8d6520b4377",
 }
 
 
