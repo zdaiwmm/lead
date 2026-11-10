@@ -6,6 +6,7 @@ from .account_profiles import isolated_login_platforms
 from .admin_operations import work_window
 from .admin_settings import effective
 from .db import all_rows, j, one, record, tx
+from .promotion import promoter_voice
 from .scope import current_tenant
 
 
@@ -39,9 +40,12 @@ def review_workspace(aid):
         if not business or not business["description"].strip():
             return
         now = one(c, "SELECT now() AS clock")["clock"]
+        voice = "independent_promoter" if promoter_voice(agent) else "project_operator"
         for account in accounts:
             scope = {
                 "platform": "reddit",
+                "editorial_version": 2,
+                "public_voice": voice,
                 "account_id": str(account["id"]),
                 "binding_version": account["binding_version"],
                 "business_profile_id": str(business["id"]),
@@ -89,7 +93,11 @@ def review_workspace(aid):
                     for line in business["description"].splitlines()
                     if line.strip()
                 )
-                disclosure = f"我是{name}的产品方，正在征集体验反馈。"
+                disclosure = (
+                    f"这份反馈邀请由协助{name}推广的自动化运营助手整理。"
+                    if voice == "independent_promoter"
+                    else f"这份{name}体验反馈邀请由项目的自动化运营助手整理。"
+                )
                 question = f"第一次体验{name}时，哪一步最难理解？你原本预期会发生什么？"
                 result["editorial_brief"] = {
                     "product": name,
@@ -98,7 +106,7 @@ def review_workspace(aid):
                     "feedback_question": question,
                     "disclosure": disclosure,
                     "title": f"{name} 的首次体验，有哪一步可以做得更清楚？",
-                    "body": f"{disclosure}我们的产品介绍中写道：“{fact}”。如果你愿意试用，请选一个你平时会做的操作，先记下预期，再用示例资料走一遍。{question}欢迎指出具体步骤，请勿贴出个人资料。",
+                    "body": f"{disclosure}如果你愿意试用，请选一个你平时会做的操作，先记下预期，再用示例资料走一遍。{question}欢迎指出具体步骤，请勿贴出个人资料。",
                     "use": "供普通社区成员讨论的内部选题。发布前核对该社区当前的分享规则和自动化权限。",
                 }
             elif previous["result"].get("editorial_brief"):
@@ -108,7 +116,7 @@ def review_workspace(aid):
                 if not previous
                 else "已复核 Reddit 渠道效果"
             )
-            key = f"reddit-workspace:{account['id']}:{account['binding_version']}:{business['id']}:{agent['config_revision']}:{now.date()}"
+            key = f"reddit-workspace:{account['id']}:{account['binding_version']}:{business['id']}:{agent['config_revision']}:v2:{voice}:{now.date()}"
             row = one(
                 c,
                 """INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at,started_at,completed_at)
