@@ -235,3 +235,28 @@ def test_only_reviewed_maintenance_blobs_are_accepted(hook, monkeypatch, tmp_pat
     git("-c", "user.name=fixture", "-c", "user.email=test@example.test", "commit", "-qm", "new tool")
     assert hook.reviewed_maintenance_files(repo / ".git", "HEAD", extra) == (
         hook.MAINTENANCE_FILES - {"scripts/poll_home_release.py"})
+
+
+def test_installed_handoff_tool_requires_exact_candidate_bytes(hook, tmp_path, monkeypatch):
+    monkeypatch.setattr(hook, "TOOLS", tmp_path)
+
+    repo = tmp_path / "handoff"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+    name = "scripts/home_live_maintenance.py"
+    candidate = repo / name
+    candidate.parent.mkdir()
+    candidate.write_text("old")
+    git("add", ".")
+    git("-c", "user.name=test", "-c", "user.email=fixture@example.test", "commit", "-qm", "baseline")
+    monkeypatch.setattr(hook, "MAINTENANCE_REVISION", git("rev-parse", "HEAD"))
+    candidate.write_text("reviewed")
+    git("add", ".")
+    git("-c", "user.name=test", "-c", "user.email=fixture@example.test", "commit", "-qm", "candidate")
+    installed = tmp_path / candidate.name
+    installed.write_text("different")
+    assert not hook.reviewed_maintenance_files(repo / ".git", "HEAD", {name})
+    installed.write_bytes(candidate.read_bytes())
+    assert hook.reviewed_maintenance_files(repo / ".git", "HEAD", {name}) == {name}
