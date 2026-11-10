@@ -220,11 +220,28 @@ def blocked(c, aid, task, *, write=True):
     return None
 
 
-def eligible_sql(alias="t"):
-    """Read scheduling gate. All dynamic SQL names are internal constants."""
+def current_binding_sql(alias="t", *, legacy_receipts=False):
+    """Match the Telegram identity that owned the task, even after a slot is reused."""
     if alias not in {"t", "recent", "old", "lead.tasks"}:
         raise ValueError("unsupported task alias")
-    return f"""NOT EXISTS (SELECT 1 FROM lead.memory_entries health
+    bound = f"""EXISTS (SELECT FROM lead.social_accounts bound
+        WHERE bound.agent_id={alias}.agent_id AND bound.id::text={alias}.input->>'account_id'
+          AND bound.external_account_id={alias}.input->>'external_account_id'
+          AND bound.platform='telegram' AND bound.state='connected' AND bound.automation_enabled)"""
+    if not legacy_receipts:
+        return bound
+    # Older unresolved submissions may lack identity fields. Keep their original
+    # receipt-only path and backoff. The browser verifies identity before access.
+    return f"""({bound} OR (
+        ({alias}.input->>'account_id' IS NULL OR {alias}.input->>'external_account_id' IS NULL)
+        AND ({alias}.state='reconciling' OR ({alias}.state='running' AND
+            ({alias}.result->>'join_state' IN ('dispatching','unknown','pending_approval')
+             OR {alias}.result->>'reply_state' IN ('dispatching','unknown'))))))"""
+
+
+def eligible_sql(alias="t", *, legacy_receipts=False):
+    """Read scheduling gate. All dynamic SQL names are internal constants."""
+    return current_binding_sql(alias, legacy_receipts=legacy_receipts) + f""" AND NOT EXISTS (SELECT 1 FROM lead.memory_entries health
         WHERE health.agent_id={alias}.agent_id AND health.body->>'type'='{TYPE}'
         AND health.body->>'account'={alias}.input->>'external_account_id'
         AND health.body->>'state'='blocked' AND (health.body->>'read_after')::timestamptz>now()

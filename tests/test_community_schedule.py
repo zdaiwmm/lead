@@ -289,3 +289,43 @@ def test_deferred_admission_refreshes_heartbeat_without_ignoring_gate(
         assert datetime.fromisoformat(
             row["onboarding_state"]["community_schedule"]["next_check_at"]
         ) == now + timedelta(seconds=expected)
+
+
+@pytest.mark.asyncio
+async def test_rebound_slot_excludes_old_retries_before_selection_and_execution(agent):
+    from lead_app import community_runtime, community_selection
+    from lead_app.db import require_agent
+
+    now = datetime.now(timezone.utc)
+    with tx(agent) as c:
+        owner = require_agent(c, agent)
+        config = community_growth.discovery_config(c, owner)
+        slot = one(c, """INSERT INTO lead.social_accounts
+            (tenant_id, agent_id, profile_id, platform, state, automation_enabled, external_account_id)
+            SELECT tenant_id,agent_id,id,'telegram','connected',true,'current' FROM lead.browser_profiles
+            WHERE agent_id=%s RETURNING id""", (agent,))["id"]
+        tasks = []
+        for external, minutes in (("old", 12), ("current", 3)):
+            row = one(c, """INSERT INTO lead.tasks
+                (tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at)
+                VALUES(%s,%s,'community.engage','failed',%s,%s,%s,now()) RETURNING id""",
+                (current_tenant(), agent, uid(),
+                 j({"account_id": str(slot), "external_account_id": external}),
+                 j({"retry_after": (now - timedelta(minutes=minutes)).isoformat()})))
+            tasks.append(str(row["id"]))
+        assert community_selection.choose(c, owner, config)["task_id"] == tasks[1]
+        assert community_schedule.deadlines(c, owner, now)["next_retry_at"] == now - timedelta(minutes=3)
+        c.execute("UPDATE lead.social_accounts SET automation_enabled=false WHERE id=%s", (slot,))
+        assert community_selection.choose(c, owner, config) is None
+        c.execute("UPDATE lead.social_accounts SET automation_enabled=true,external_account_id='replacement' WHERE id=%s", (slot,))
+        assert community_selection.choose(c, owner, config) is None
+        assert community_schedule.deadlines(c, owner, now)["next_retry_at"] is None
+
+    async def unexpected_rpc(*args):
+        pytest.fail("stale selection reached browser")
+
+    result = await community_runtime.community_cycle(
+        agent, unexpected_rpc, selection={"kind": "resume", "task_id": tasks[1]})
+    assert result["reason"] == "community_selection_changed"
+    with tx(agent) as c:
+        assert one(c, "SELECT state FROM lead.tasks WHERE id=%s", (tasks[1],))["state"] == "failed"

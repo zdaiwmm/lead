@@ -740,6 +740,7 @@ def report(c, agent, business, now):
 
 
 def community_work_due(c, agent, now):
+    from .community_health import eligible_sql
     from .community_runtime import (
         candidate_already_assessed,
         membership_review,
@@ -754,7 +755,7 @@ def community_work_due(c, agent, now):
     if any(at and at <= now for name, at in due.items() if name != "next_discovery_at"):
         return True
     if membership_review(c, focus=first_users(agent)) or one(
-        c, """SELECT 1 FROM lead.tasks WHERE type='community.engage' AND state='running'
+        c, """SELECT 1 FROM lead.tasks t WHERE """ + eligible_sql(legacy_receipts=True) + """ AND type='community.engage' AND state='running'
            AND (result->>'receipt_review_after' IS NULL OR (result->>'receipt_review_after')::timestamptz<=now())"""
     ):
         return True
@@ -763,7 +764,7 @@ def community_work_due(c, agent, now):
         if next_candidate(c, agent["config_revision"], True, chamber=True, proactive=agent["onboarding_state"].get("community_growth", {}).get("allow_proactive_post", False)) is not None:
             return True
         return bool(one(c, """
-            SELECT 1 FROM lead.tasks WHERE type='community.engage' AND state='failed'
+            SELECT 1 FROM lead.tasks t WHERE """ + eligible_sql() + """ AND type='community.engage' AND state='failed'
               AND input->>'config_revision'=%s AND input#>>'{candidate,selection_basis}'='observe_recent_chat'
               AND input->>'public_handle_recovery' IS NULL AND result->>'error_type'='HTTPStatusError'
               AND result->>'error_detail' LIKE 'TimeoutError: Locator.%%'

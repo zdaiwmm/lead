@@ -1997,7 +1997,7 @@ async def community_cycle(aid, rpc, selection=None):
             return
         task = one(
             c,
-            """SELECT * FROM lead.tasks WHERE """ + community_health.eligible_sql("lead.tasks") + """ AND type='community.engage' AND state='running'
+            """SELECT * FROM lead.tasks WHERE """ + community_health.eligible_sql("lead.tasks", legacy_receipts=True) + """ AND type='community.engage' AND state='running'
                AND (result->>'receipt_review_after' IS NULL OR (result->>'receipt_review_after')::timestamptz<=now())
                ORDER BY CASE WHEN input ? 'reply' AND result->>'reply_state' IS NULL THEN 0 ELSE 1 END,
                    coalesce((result->>'receipt_review_after')::timestamptz,created_at), created_at LIMIT 1""",
@@ -2009,7 +2009,8 @@ async def community_cycle(aid, rpc, selection=None):
             task = None
             kind = selection["kind"]
             if kind in {"resume", "receipt", "inventory", "diagnose"}:
-                task = one(c, "SELECT * FROM lead.tasks WHERE id=%s AND type='community.engage'", (selection["task_id"],))
+                task = one(c, "SELECT * FROM lead.tasks t WHERE id=%s AND type='community.engage' AND "
+                           + community_health.current_binding_sql(legacy_receipts=kind == "receipt"), (selection["task_id"],))
                 if not task or community_health.blocked(c, aid, task, write=False):
                     return {"delay": 1, "reason": "community_selection_changed"}
                 if task["state"] not in {"running", "reconciling", "failed"} and kind not in {"receipt", "inventory", "diagnose"}:
@@ -2044,7 +2045,7 @@ async def community_cycle(aid, rpc, selection=None):
         if not task and not prefer_outreach:
             # Alternate a due read with ordinary community work when the
             # backlog is large. No independent timer or new posting slot.
-            task = one(c, """SELECT * FROM lead.tasks WHERE """ + community_health.eligible_sql("lead.tasks") + """ AND type='community.engage' AND state='reconciling'
+            task = one(c, """SELECT * FROM lead.tasks WHERE """ + community_health.eligible_sql("lead.tasks", legacy_receipts=True) + """ AND type='community.engage' AND state='reconciling'
                 AND coalesce((result->>'receipt_review_after')::timestamptz,created_at)<=now()
                 AND (NOT %s OR coalesce((SELECT result#>>'{cycle_result,reason}' FROM lead.tasks
                     WHERE type='operating.decision' AND state='succeeded'
@@ -2072,7 +2073,7 @@ async def community_cycle(aid, rpc, selection=None):
         if not task and not prefer_outreach:
             unsupported_join = one(
                 c,
-                "SELECT id FROM lead.tasks WHERE type='community.engage' AND state='succeeded' AND result->'outcome'->>'reason'='尚不具备加入条件' AND result->'decision'->>'community_relevant'='true' AND coalesce(result->'decision'->>'automation_forbidden','false')<>'true' AND result->>'join_submitted' IS NULL AND coalesce(input->>'join_adapter_version','1')<>%s ORDER BY created_at DESC LIMIT 1",
+                "SELECT id FROM lead.tasks t WHERE " + community_health.current_binding_sql() + " AND type='community.engage' AND state='succeeded' AND result->'outcome'->>'reason'='尚不具备加入条件' AND result->'decision'->>'community_relevant'='true' AND coalesce(result->'decision'->>'automation_forbidden','false')<>'true' AND result->>'join_submitted' IS NULL AND coalesce(input->>'join_adapter_version','1')<>%s ORDER BY created_at DESC LIMIT 1",
                 (JOIN_ADAPTER_VERSION,),
             )
             if unsupported_join:
@@ -2087,7 +2088,7 @@ async def community_cycle(aid, rpc, selection=None):
         if not task and not prefer_outreach:
             repair = one(
                 c,
-                "SELECT * FROM lead.tasks WHERE type='community.engage' AND state='succeeded' AND result->>'join_submitted'='true' AND result->'history_observation'->>'joined'='false' AND result->'outcome'->>'state'='blocked' AND coalesce(input->>'membership_rechecked','false')<>'true' ORDER BY created_at DESC LIMIT 1",
+                "SELECT * FROM lead.tasks t WHERE " + community_health.current_binding_sql() + " AND type='community.engage' AND state='succeeded' AND result->>'join_submitted'='true' AND result->'history_observation'->>'joined'='false' AND result->'outcome'->>'state'='blocked' AND coalesce(input->>'membership_rechecked','false')<>'true' ORDER BY created_at DESC LIMIT 1",
             )
             if repair:
                 task = one(
@@ -2098,7 +2099,7 @@ async def community_cycle(aid, rpc, selection=None):
         if not task and not prefer_outreach:
             saved_reply = one(
                 c,
-                "SELECT * FROM lead.tasks WHERE type='community.engage' AND (state='failed' OR (state='succeeded' AND result->'outcome'->>'reason' IN ('讨论上下文已变化','原消息无法唯一确认','无法确认回复指向原问题'))) AND input->'reply' IS NOT NULL AND result->>'reply_state' IS NULL AND coalesce(input->>'reply_recovery_version','1')<>'2' ORDER BY created_at DESC LIMIT 1",
+                "SELECT * FROM lead.tasks t WHERE " + community_health.current_binding_sql() + " AND type='community.engage' AND (state='failed' OR (state='succeeded' AND result->'outcome'->>'reason' IN ('讨论上下文已变化','原消息无法唯一确认','无法确认回复指向原问题'))) AND input->'reply' IS NOT NULL AND result->>'reply_state' IS NULL AND coalesce(input->>'reply_recovery_version','1')<>'2' ORDER BY created_at DESC LIMIT 1",
             )
             if saved_reply:
                 task = one(
@@ -2129,7 +2130,7 @@ async def community_cycle(aid, rpc, selection=None):
         if not task and not prefer_outreach:
             contextual = one(
                 c,
-                "SELECT old.* FROM lead.tasks old WHERE old.type='community.engage' AND old.state='succeeded' AND old.result->'decision'->>'relevant_question'='true' AND old.result->'decision'->>'relevant_reading_need'='false' AND old.result->'history_observation'->>'joined'='true' AND old.result->'outcome'->>'state'='skipped' AND old.result->>'reply_state' IS NULL AND coalesce(old.input->>'context_policy_version','1')<>'2' AND NOT EXISTS(SELECT 1 FROM lead.tasks newer WHERE newer.type='community.engage' AND newer.input->'candidate'->>'telegram_url'=old.input->'candidate'->>'telegram_url' AND newer.created_at>old.created_at) ORDER BY old.created_at DESC LIMIT 1",
+                "SELECT old.* FROM lead.tasks old WHERE " + community_health.current_binding_sql("old") + " AND old.type='community.engage' AND old.state='succeeded' AND old.result->'decision'->>'relevant_question'='true' AND old.result->'decision'->>'relevant_reading_need'='false' AND old.result->'history_observation'->>'joined'='true' AND old.result->'outcome'->>'state'='skipped' AND old.result->>'reply_state' IS NULL AND coalesce(old.input->>'context_policy_version','1')<>'2' AND NOT EXISTS(SELECT 1 FROM lead.tasks newer WHERE newer.type='community.engage' AND newer.input->'candidate'->>'telegram_url'=old.input->'candidate'->>'telegram_url' AND newer.created_at>old.created_at) ORDER BY old.created_at DESC LIMIT 1",
             )
             if contextual:
                 task = one(
