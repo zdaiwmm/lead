@@ -364,6 +364,12 @@ class Actor:
         if platform not in ("lab", "telegram") and platform not in SPECS:
             raise ValueError("该频道的自动发布适配尚未开放")
         a = require_agent(c, self.aid, True)
+        task = one(c, "SELECT input->'channel_clock' AS clock FROM lead.tasks WHERE id=%s", (action["task_id"],))
+        if task and task["clock"]:
+            from .channel_delivery import current
+
+            if not current(c, self.aid, task["clock"]):
+                raise ValueError("此渠道已停用或重新启动，旧任务不能提交")
         if not account_setup and action["intent"].get("body"):
             from .promotion import promoter_copy_ok, promoter_voice
             if promoter_voice(a) and not promoter_copy_ok((action["intent"].get("title") or "") + "\n" + action["intent"]["body"], a["name"]):

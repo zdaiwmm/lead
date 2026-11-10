@@ -36,6 +36,26 @@ class ChannelPreparationWorkflow:
 
 
 @workflow.defn
+class ChannelDeliveryWorkflow:
+    @workflow.run
+    async def run(self, args: dict, pending_tick: str | None = None):
+        for _ in range(100):
+            pending_tick = pending_tick or str(workflow.uuid4())
+            try:
+                result = await workflow.execute_activity(
+                    "channel_delivery_tick", {**args, "tick": pending_tick},
+                    start_to_close_timeout=timedelta(minutes=8), retry_policy=RETRY,
+                )
+                if result.get("stop"):
+                    return
+                pending_tick = None
+                await workflow.sleep(max(1, float(result["delay"])))
+            except ActivityError:
+                await workflow.sleep(60)
+        workflow.continue_as_new(args=[args, pending_tick])
+
+
+@workflow.defn
 class AnalyticsIngestWorkflow:
     @workflow.run
     async def run(self, args: dict):

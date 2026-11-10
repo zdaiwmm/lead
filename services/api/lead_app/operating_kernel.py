@@ -388,9 +388,12 @@ def candidates(c, aid, agent, business, now=None):
             key = publication_lane_key([row])
             if row["due"] > now and not lanes.get(key, {}).get("next_at"):
                 publish_schedule[key] = {"checked_at": now.isoformat(), "next_at": row["due"].isoformat(), "reason": "scheduled"}
+    from .channel_delivery import owns
     from .owned_audience import status as audience_status
 
     for target in eligible:
+        if owns(agent, target["platform"]):
+            continue
         if trials.first_users(agent) and target["platform"] == "telegram":
             audience = audience_status(target.get("owned_audience"), now)
             if audience == "due":

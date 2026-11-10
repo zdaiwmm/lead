@@ -1444,6 +1444,13 @@ async def _publication_cycle(args: dict):
             or current["config_revision"] != a["config_revision"]
         ):
             return {"delay": 300, "reason": "configuration_changed"}
+        clock = args.get("channel_clock")
+        if clock:
+            from .channel_delivery import current as current_clock
+
+            owner = current_clock(c, aid, clock)
+            if not owner or owner["input"]["platform"] != platform:
+                return {"delay": 300, "reason":"channel_schedule_changed"}
         if content.action == "publish" and pending_publication(
             c, target["target_id"], current["config_revision"]
         ):
@@ -1586,6 +1593,7 @@ async def _publication_cycle(args: dict):
                     {
                         **publication,
                         "key": cycle_id,
+                        **({"channel_clock":clock} if clock else {}),
                         "bootstrap_run_id": str(launch["id"]) if launch else None,
                         "prepared_content_id": str(prepared_task["id"])
                         if prepared_task

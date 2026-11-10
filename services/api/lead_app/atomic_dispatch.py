@@ -77,6 +77,9 @@ def enqueue_connected(c, aid, agent, business):
         platform = account["platform"]
         if not channel_for(platform):
             continue
+        from .channel_delivery import enroll
+
+        enroll(c, aid, agent, platform)
         _, version = channel_config(c, aid, platform)
         intent = dict(
             platform=platform,

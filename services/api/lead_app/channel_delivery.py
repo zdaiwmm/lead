@@ -1,0 +1,211 @@
+"""Independent delivery clocks for enabled channels; platform grants remain authoritative."""
+
+import asyncio
+from datetime import datetime, timedelta, timezone
+
+from temporalio import activity
+
+from . import growth_experiments
+from .atomic_dispatch import channel_pilot
+from .db import emit, j, one, tx
+from .operating_playbooks import channel_for
+from .scope import current_tenant, scoped_activity
+
+
+def owns(agent, platform):
+    # Experiments already own scheduling/admission and their budgets.
+    return bool(
+        channel_pilot(agent["id"])
+        and channel_for(platform)
+        and not growth_experiments.enabled(agent)
+    )
+
+
+def enroll(c, aid, agent, platform):
+    if not owns(agent, platform):
+        return
+    control = agent["control_version"]
+    key = f"channel-clock:{aid}:{platform}:{control}"
+    row = one(
+        c,
+        """INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,scheduled_at,result)
+        VALUES(%s,%s,'channel.clock','planned',%s,%s,now(),'{}')
+        ON CONFLICT(workflow_id) DO UPDATE SET state='planned',version=lead.tasks.version+1,
+            result='{}',completed_at=NULL,scheduled_at=now()
+        WHERE lead.tasks.state='canceled' RETURNING id,version""",
+        (
+            current_tenant(),
+            aid,
+            key,
+            j({"platform": platform, "control_version": control}),
+        ),
+    )
+    if row:
+        emit(
+            c,
+            aid,
+            "channel.clock",
+            {"task_id": str(row["id"]), "generation": row["version"]},
+        )
+
+
+def current(c, aid, args):
+    agent = one(c, "SELECT * FROM lead.agents WHERE id=%s FOR SHARE", (aid,))
+    clock = one(
+        c,
+        """SELECT * FROM lead.tasks WHERE id=%s AND type='channel.clock'
+        AND state='planned' AND version=%s FOR UPDATE""",
+        (args["task_id"], args["generation"]),
+    )
+    if not agent or not clock:
+        return None
+    platform = clock["input"]["platform"]
+    if (
+        agent["desired_state"] != "running"
+        or agent["control_version"] != clock["input"]["control_version"]
+        or not owns(agent, platform)
+        or not one(
+            c,
+            """SELECT 1 FROM lead.social_accounts
+            WHERE platform=%s AND automation_enabled AND state='connected'""",
+            (platform,),
+        )
+    ):
+        c.execute(
+            "UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE id=%s",
+            (clock["id"],),
+        )
+        return None
+    return clock
+
+
+def opportunity(c, target_id):
+    """Only attach observed, validated evidence for the exact authorized destination."""
+    row = one(
+        c,
+        """
+        SELECT task.id, finding->>'observation' AS observation,
+            finding->>'source_url' AS source_url FROM lead.tasks task
+        CROSS JOIN LATERAL jsonb_array_elements(task.result->'findings') finding
+        JOIN lead.account_targets target ON target.id=%s
+        WHERE task.type='operating.validate' AND task.state='succeeded'
+          AND task.result->>'status'='observed' AND task.result->>'channel_fit'='viable'
+          AND task.input->>'business_profile_id'=(SELECT id::text FROM lead.business_profiles
+              ORDER BY revision DESC LIMIT 1)
+          AND task.input->>'config_revision'=(SELECT config_revision::text FROM lead.agents
+              WHERE id=task.agent_id)
+          AND rtrim(finding->>'source_url','/')=rtrim(target.canonical_url,'/')
+          AND task.result->'source_urls' ? (finding->>'source_url')
+        ORDER BY task.completed_at DESC,task.id LIMIT 1""",
+        (target_id,),
+    )
+    if row:
+        return {
+            "evidence_task_id": str(row["id"]),
+            "source_url": row["source_url"],
+            "observation": row["observation"],
+        }
+    return None
+
+
+def next_target(args):
+    from .operating_kernel import blocked, eligible_publish_targets
+
+    aid = args["agent_id"]
+    now = datetime.now(timezone.utc)
+    with tx(aid) as c:
+        clock = current(c, aid, args)
+        if not clock:
+            return {"stop": True}
+        state = clock["result"] or {}
+        if state.get("last_tick") == args["tick"]:
+            return {"delay": max(1, (clock["scheduled_at"] - now).total_seconds())}
+        if state.get("pending_tick") == args["tick"]:
+            return {
+                "target_id": state["pending_target"],
+                "opportunity": state.get("opportunity"),
+            }
+        targets = eligible_publish_targets(c, blocked(c))
+        deadlines = state.get("target_deadlines", {})
+        due = sorted(
+            (deadlines.get(str(t["target_id"]), ""), str(t["target_id"]))
+            for t in targets
+            if t["platform"] == clock["input"]["platform"]
+        )
+        if due and (not due[0][0] or datetime.fromisoformat(due[0][0]) <= now):
+            state.update(
+                pending_tick=args["tick"],
+                pending_target=due[0][1],
+                opportunity=opportunity(c, due[0][1]),
+            )
+            c.execute(
+                "UPDATE lead.tasks SET result=%s WHERE id=%s", (j(state), clock["id"])
+            )
+            return {"target_id": due[0][1], "opportunity": state["opportunity"]}
+        delay = (
+            max(1, min(300, (datetime.fromisoformat(due[0][0]) - now).total_seconds()))
+            if due
+            else 300
+        )
+        reason = "awaiting_target_window" if due else "no_available_verified_target"
+        c.execute(
+            """UPDATE lead.tasks SET scheduled_at=now()+make_interval(secs=>%s),
+            result=%s WHERE id=%s""",
+            (
+                delay,
+                j({**state, "reason": reason, "last_tick": args["tick"]}),
+                clock["id"],
+            ),
+        )
+        return {"delay": delay, "reason": reason}
+
+
+def finish(args, target_id, result):
+    now = datetime.now(timezone.utc)
+    delay = max(1, int(result.get("delay", 300)))
+    with tx(args["agent_id"]) as c:
+        clock = current(c, args["agent_id"], args)
+        if not clock:
+            return {"stop": True}
+        state = clock["result"] or {}
+        if state.get("pending_tick") != args["tick"]:
+            return {"delay": 1}
+        state.pop("pending_tick")
+        state.pop("pending_target")
+        deadlines = state.setdefault("target_deadlines", {})
+        deadlines[target_id] = (now + timedelta(seconds=delay)).isoformat()
+        state.update(
+            last_tick=args["tick"],
+            reason=result.get("reason", "plan_recorded"),
+            last_target=target_id,
+        )
+        c.execute(
+            "UPDATE lead.tasks SET result=%s,scheduled_at=now()+interval '1 second' WHERE id=%s",
+            (j(state), clock["id"]),
+        )
+    # Give another immediately eligible target a turn before sleeping on this one.
+    return {"delay": 1}
+
+
+@activity.defn
+@scoped_activity
+async def channel_delivery_tick(args: dict):
+    from .activities import _publication_cycle
+
+    selection = await asyncio.to_thread(next_target, args)
+    if "target_id" not in selection:
+        return selection
+    target_id = selection["target_id"]
+    result = await _publication_cycle(
+        {
+            "agent_id": args["agent_id"],
+            "cycle_id": args["tick"],
+            "target_id": target_id,
+            "operating_plan": {"channel_opportunity": selection.get("opportunity")},
+            "channel_clock": {
+                "task_id": args["task_id"],
+                "generation": args["generation"],
+            },
+        }
+    )
+    return await asyncio.to_thread(finish, args, target_id, result)

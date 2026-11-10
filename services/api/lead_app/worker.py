@@ -16,6 +16,7 @@ from .analytics_ingest import TASK_QUEUE as ANALYTICS_QUEUE
 from .analytics_ingest import process_analytics_ingest
 from .async_db import run as run_db
 from .atomic_dispatch import close_channel_atom, prepare_channel_atom
+from .channel_delivery import channel_delivery_tick
 from .config import STATE, any_model_configured, env, model_config
 from .db import all_rows, emit, one
 from .db import pooled_tx as tx
@@ -24,6 +25,7 @@ from .scope import service_scope, tenant_scope
 from .temporal_client import connect
 from .workflows import (
     AnalyticsIngestWorkflow,
+    ChannelDeliveryWorkflow,
     ChannelPreparationWorkflow,
     ChatWorkflow,
     PublishWorkflow,
@@ -137,6 +139,15 @@ async def deliver_workspace(client, tenant, configured, key_was_configured):
                     id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
                     start_signal="wake",
                 )
+            elif e["event_type"] == "channel.clock":
+                try:
+                    await client.start_workflow(
+                        ChannelDeliveryWorkflow.run, {**payload,"agent_id":aid},
+                        id=f"channel-clock:{payload['task_id']}:{payload['generation']}",
+                        task_queue="lead-delivery", id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                    )
+                except WorkflowAlreadyStartedError:
+                    pass
             elif e["event_type"] == "dispatch.channel":
                 await dispatch_channel_event(client, aid, payload)
             elif e["event_type"] in ("task.enqueue", "task.reconcile"):
@@ -300,6 +311,10 @@ async def main():
             client, task_queue="lead-offline", workflows=[ChannelPreparationWorkflow],
             activities=[prepare_channel_atom, close_channel_atom],
             max_concurrent_activities=2 if env().get("LEAD_CHANNEL_ATOM_AGENT_IDS") else 1, max_concurrent_workflow_tasks=2,
+        ))
+        await stack.enter_async_context(Worker(
+            client, task_queue="lead-delivery", workflows=[ChannelDeliveryWorkflow],
+            activities=[channel_delivery_tick], max_concurrent_activities=2,
         ))
         if env().get("LEAD_ANALYTICS_DEDICATED") != "1":
             await stack.enter_async_context(analytics_worker)
