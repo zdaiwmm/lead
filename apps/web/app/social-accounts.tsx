@@ -82,7 +82,7 @@ export default function SocialAccounts({
             isConnected &&
             a.automation_enabled &&
             agent.desired_state === "running";
-          const canOperate = !!p.automation || !!a?.operational_ready;
+          const canOperate = !!p.automation || !!a?.operational_ready || !!a?.editorial_preparation;
           const caption = !a
             ? "连接"
             : a.state === "needs_auth"
@@ -212,13 +212,29 @@ export default function SocialAccounts({
                             : enabled
                               ? a.operational_ready
                                 ? "正在自主运营"
-                                : agent.health_state === "needs_attention"
+                                : a.editorial_preparation
+                                  ? a.editorial_review
+                                    ? `正在筹备社区讨论 · 近 7 天已确认发布 ${a.editorial_review.confirmed_posts} 条，${a.editorial_review.links} 个跟踪链接记录了 ${a.editorial_review.clicks} 次点击`
+                                    : "正在筹备社区讨论，等待首次工作记录"
+                                  : agent.health_state === "needs_attention"
                                   ? "筹备需要处理，请查看工作记录"
                                   : a.target_id
                                     ? "Agent 正在验证运营环境"
                                     : "Agent 正在准备运营环境"
                               : "启动后，Agent 将自动完成运营准备"}
                     </p>
+                    {isConnected && !confirmDisconnect && a?.editorial_review && (
+                      <div className="small">
+                        {a.editorial_review.editorial_brief && (
+                          <details>
+                            <summary>查看社区讨论草稿</summary>
+                            <p>{a.editorial_review.editorial_brief.title}</p>
+                            <p>{a.editorial_review.editorial_brief.body}</p>
+                          </details>
+                        )}
+                        {enabled && <p>下次效果复核 {new Date(a.editorial_review.next_check_at).toLocaleString()}</p>}
+                      </div>
+                    )}
                     {error && (
                       <p className="field-error" role="alert">
                         {error}
@@ -316,7 +332,7 @@ export default function SocialAccounts({
                         ? "未连接"
                         : account.state !== "connected"
                           ? "需重新登录"
-                          : p.automation || account?.operational_ready
+                          : p.automation || account?.operational_ready || account?.editorial_preparation
                             ? "待激活"
                             : "仅支持连接"}
                   </small>

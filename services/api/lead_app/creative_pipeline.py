@@ -225,7 +225,7 @@ async def produce(
                 process_env = {
                     "PATH": os.environ.get("PATH", ""),
                     "LANG": "en_US.UTF-8",
-                    "PYTHONPATH": str(ROOT / "services/api"),
+                    "PYTHONPATH": os.pathsep.join(filter(None, (str(ROOT / "services/api"), os.environ.get("PYTHONPATH")))),
                 }
                 if env().get("LEAD_CREATIVE_FONT"):
                     process_env["LEAD_CREATIVE_FONT"] = env()["LEAD_CREATIVE_FONT"]
@@ -241,6 +241,8 @@ async def produce(
                     pass_fds=(held.fileno(),),
                 )
                 output, _ = await asyncio.wait_for(process.communicate(), timeout=150)
+                if not output.strip():
+                    raise ValueError("CREATIVE_WORKER_NO_OUTPUT")
                 rendered = json.loads(output)
                 if process.returncode:
                     raise ValueError(rendered.get("error", "CREATIVE_RENDER_FAILED"))
