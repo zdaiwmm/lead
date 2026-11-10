@@ -294,6 +294,8 @@ def reviewed_channel_schema(mirror, sha, extra):
 # These site units are installed and verified separately; only these reviewed blobs
 # are compatible with the home application's release. Future revisions need review.
 REDDIT_SITE_FILES = {
+    # Independently installed on Tokyo under PR #19, before the next application release.
+    "infra/home-reddit-login/private-listener.conf": "7b4cdf5479577735b99df998cf93fc7a3858d41a",
     "infra/home-reddit-login/browser.conf": "e80d38a2cb8a020280ba6a2f1cc5f350fe358c59",
     "infra/home-reddit-login/lead-reddit-guard.service": "61031ac0195c3abcc0ae38de9a06ecf3cc688f1d",
     "infra/home-reddit-login/lead-reddit-link.service": "cbeb23de298f2da604630ed2746fbe761b823ac6",
