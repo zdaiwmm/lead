@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import psutil
 
 from .community_growth import discovery_config, search_interval
+from .community_health import current_binding_sql
 from .db import j, one, record, require_agent, tx
 from .growth_experiments import first_users
 
@@ -40,7 +41,9 @@ def next_join_check(c):
         """WITH pending AS (
             SELECT id, (result->>'approval_review_after')::timestamptz AS explicit_due, coalesce((result->>'join_checked_at')::timestamptz, completed_at, created_at) AS checked,
                    coalesce((result->>'join_dispatched_at')::timestamptz, created_at) AS sent
-            FROM lead.tasks WHERE type='community.engage' AND state IN ('succeeded','failed')
+            FROM lead.tasks t WHERE type='community.engage' AND state IN ('succeeded','failed')
+              AND (input->>'account_id' IS NULL OR input->>'external_account_id' IS NULL
+                   OR """ + current_binding_sql() + """)
               AND (result->>'join_state'='pending_approval' OR (result->>'join_mode'='approval_request'
                    AND result->>'join_state' IN ('dispatching','unknown')))
         ) SELECT id, coalesce(explicit_due, checked + CASE
@@ -67,6 +70,7 @@ def next_pending_inventory(c):
           AND s.result ? 'inventory_checked_at'
         ) last ON true
         WHERE t.type='community.engage' AND t.state IN ('succeeded','failed') AND t.input ? 'account_id'
+          AND """ + current_binding_sql() + """
           AND t.result->>'join_submitted'='true' AND t.result->>'join_mode'='approval_request'
           AND t.result->>'join_state' IN ('unknown','dispatching','pending_approval')
         ORDER BY due,coalesce((t.result->>'join_checked_at')::timestamptz,t.created_at),t.id LIMIT 1""")
@@ -177,7 +181,7 @@ def deadlines(c, agent, now=None):
         review = row["due"] if row else None
     retry = one(
         c,
-        "SELECT min((result->>'retry_after')::timestamptz) AS due FROM lead.tasks WHERE type='community.engage' AND state='failed' AND result ? 'retry_after' AND result->>'reply_state' IS NULL AND (result->>'join_submitted' IS NULL OR result->>'join_state'='confirmed')",
+        "SELECT min((result->>'retry_after')::timestamptz) AS due FROM lead.tasks t WHERE " + current_binding_sql() + " AND type='community.engage' AND state='failed' AND result ? 'retry_after' AND result->>'reply_state' IS NULL AND (result->>'join_submitted' IS NULL OR result->>'join_state'='confirmed')",
     )["due"]
     from .growth_experiments import chamber_campaign
     pending_join = next_pending_inventory(c) if chamber_campaign(agent) else None if first_users(agent) else next_join_check(c)

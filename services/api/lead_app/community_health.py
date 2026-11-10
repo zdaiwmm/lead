@@ -220,11 +220,19 @@ def blocked(c, aid, task, *, write=True):
     return None
 
 
-def eligible_sql(alias="t"):
-    """Read scheduling gate. All dynamic SQL names are internal constants."""
+def current_binding_sql(alias="t"):
+    """Match the Telegram identity that owned the task, even after a slot is reused."""
     if alias not in {"t", "recent", "old", "lead.tasks"}:
         raise ValueError("unsupported task alias")
-    return f"""NOT EXISTS (SELECT 1 FROM lead.memory_entries health
+    return f"""EXISTS (SELECT FROM lead.social_accounts bound
+        WHERE bound.agent_id={alias}.agent_id AND bound.id::text={alias}.input->>'account_id'
+          AND bound.external_account_id={alias}.input->>'external_account_id'
+          AND bound.platform='telegram' AND bound.state='connected' AND bound.automation_enabled)"""
+
+
+def eligible_sql(alias="t"):
+    """Read scheduling gate. All dynamic SQL names are internal constants."""
+    return current_binding_sql(alias) + f""" AND NOT EXISTS (SELECT 1 FROM lead.memory_entries health
         WHERE health.agent_id={alias}.agent_id AND health.body->>'type'='{TYPE}'
         AND health.body->>'account'={alias}.input->>'external_account_id'
         AND health.body->>'state'='blocked' AND (health.body->>'read_after')::timestamptz>now()
