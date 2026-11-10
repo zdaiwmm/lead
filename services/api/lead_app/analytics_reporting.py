@@ -6,6 +6,8 @@ acknowledges the date. A concurrent source write leaves a new dirty notification
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import date, datetime, time, timedelta
 from typing import Literal
 from uuid import UUID
@@ -226,8 +228,10 @@ def materialized_metrics(c, objective):
         c.execute("SELECT set_config('app.analytics_scope',%s,true)", (previous,))
 
 
-def refresh_scope(tenant, agent, scope="live", limit=7):
-    completed = []
+def refresh_scope(tenant, agent, scope="live", limit=7, *, parallel_dates=True):
+    from .atomic_dispatch import read_batch_enabled
+
+    try_two = parallel_dates and limit >= 2 and read_batch_enabled(agent)
     # Reuse the existing queue and retry policy for previously built days.
     # Commit scheduling separately so a failed rebuild does not lose its job.
     with scoped_tx(tenant, agent, scope) as c:
@@ -239,34 +243,48 @@ def refresh_scope(tenant, agent, scope="live", limit=7):
                ORDER BY day DESC LIMIT %s ON CONFLICT DO NOTHING""",
             (limit,),
         )
+        two_ready = try_two and one(c, """SELECT 1 FROM lead.analytics_report_dirty
+            WHERE state='pending' AND next_attempt_at<=now() LIMIT 1 OFFSET 1""")
+    if not two_ready:
+        return _refresh_days(tenant, agent, scope, limit)
+    # The site-specific owner calls this entry directly. Both readers claim
+    # distinct durable dates; neither depends on a second event dispatcher.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="report-day") as pool:
+        extra = pool.submit(copy_context().run, _refresh_days, tenant, agent, scope, limit // 2)
+        completed = _refresh_days(tenant, agent, scope, limit - limit // 2)
+        return completed + extra.result()
+
+
+def _refresh_days(tenant, agent, scope, limit):
+    completed = []
     for _ in range(limit):
-        day = None
         try:
             with scoped_tx(tenant, agent, scope) as c:
                 c.execute("SET LOCAL statement_timeout='20s'")
                 row = one(
                     c,
                     """SELECT * FROM lead.analytics_report_dirty WHERE state='pending' AND next_attempt_at<=now()
-                    ORDER BY day DESC LIMIT 1 FOR UPDATE SKIP LOCKED""",
+                    ORDER BY next_attempt_at,changed_at,day LIMIT 1 FOR UPDATE SKIP LOCKED""",
                 )
                 if not row:
                     break
                 day = row["day"]
-                _replace_day(c, scope, day)
-                c.execute(
-                    "DELETE FROM lead.analytics_report_dirty WHERE day=%s", (day,)
-                )
-            completed.append(day.isoformat())
-        except Exception as error:
-            if day is not None:
-                with scoped_tx(tenant, agent, scope) as c:
-                    c.execute(
-                        """UPDATE lead.analytics_report_dirty SET attempts=attempts+1,
+                try:
+                    # Roll back partial materialization while retaining the outer
+                    # date lock until its retry deadline commits.
+                    with c.transaction():
+                        _replace_day(c, scope, day)
+                        c.execute("DELETE FROM lead.analytics_report_dirty WHERE day=%s", (day,))
+                except Exception as error:
+                    c.execute("""UPDATE lead.analytics_report_dirty SET attempts=attempts+1,
                         state=CASE WHEN attempts>=5 THEN 'failed' ELSE 'pending' END,
                         next_attempt_at=now()+make_interval(secs=>least(300,power(2,least(attempts+1,8))::integer)),
                         error_code='REPORT_REBUILD_UNAVAILABLE' WHERE day=%s AND request_token=%s""",
-                        (day, row["request_token"]),
-                    )
+                        (day, row["request_token"]))
+                    logging.warning("Analytics day rebuild deferred (%s)", type(error).__name__)
+                    break
+            completed.append(day.isoformat())
+        except Exception as error:
             logging.warning(
                 "Analytics report rebuild unavailable (%s); scoped snapshot retained",
                 type(error).__name__,

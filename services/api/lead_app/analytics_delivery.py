@@ -96,8 +96,26 @@ async def deliver_scope(client, tenant, agent, scope, limit=20):
 _archived_offsets = {}
 
 
-async def deliver_analytics(client, tenant):
+async def deliver_partition(client, tenant, aid, scope):
     from .analytics_reporting import refresh_scope
+    from .atomic_dispatch import read_batch_enabled
+
+    if not read_batch_enabled(aid):
+        sent = await deliver_scope(client, tenant, aid, scope)
+        return sent + len(await asyncio.to_thread(refresh_scope, tenant, aid, scope))
+    # A dirty day is committed by ingestion. It can be refreshed while the
+    # dispatcher waits for Temporal to accept *other* events in this scope.
+    # Join both operations even on failure before starting another partition.
+    results = await asyncio.gather(deliver_scope(client, tenant, aid, scope),
+                                   asyncio.to_thread(refresh_scope, tenant, aid, scope, parallel_dates=False),
+                                   return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    return results[0] + len(results[1])
+
+
+async def deliver_analytics(client, tenant):
 
     changed = 0
     with tenant_scope(tenant, None), service_scope():
@@ -122,8 +140,5 @@ async def deliver_analytics(client, tenant):
                     c, "SELECT id FROM lead.pixel_tests ORDER BY created_at"
                 )
             for scope in ["live"] + [str(test["id"]) for test in tests]:
-                changed += await deliver_scope(client, tenant, aid, scope)
-                changed += len(
-                    await asyncio.to_thread(refresh_scope, tenant, aid, scope)
-                )
+                changed += await deliver_partition(client, tenant, aid, scope)
     return changed

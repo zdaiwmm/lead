@@ -17,6 +17,12 @@ def enabled(aid):
     }
 
 
+def read_batch_enabled(aid):
+    return str(aid) in {
+        value.strip() for value in env().get("LEAD_PARALLEL_READ_AGENT_IDS", "").split(",")
+    }
+
+
 def enqueue_channel_work(c, aid, agent, business):
     for channel in catalog()["channels"]:
         platform = channel["platform"]
@@ -25,6 +31,7 @@ def enqueue_channel_work(c, aid, agent, business):
         source = str(business["id"])
         key = f"channel-prepare:{aid}:{source}:{revision}:{platform}:{version}"
         control = agent["control_version"]
+        workflow_id = f"dispatch:{key}:{control}"
         intent = {
             "platform": platform,
             "business_id": source,
@@ -36,9 +43,9 @@ def enqueue_channel_work(c, aid, agent, business):
             c,
             """INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,scheduled_at)
             SELECT %s,%s,'dispatch.channel','queued',%s,%s,now()
-            WHERE NOT EXISTS(SELECT 1 FROM lead.tasks WHERE workflow_id=%s)
+            WHERE NOT EXISTS(SELECT 1 FROM lead.tasks WHERE workflow_id IN (%s,%s))
             ON CONFLICT(workflow_id) DO NOTHING RETURNING id""",
-            (current_tenant(), aid, f"dispatch:{key}:{control}", j(intent), key),
+            (current_tenant(), aid, workflow_id, j(intent), key, workflow_id),
         )
         if row:
             emit(c, aid, "dispatch.channel", {"task_id": str(row["id"])})
@@ -72,15 +79,16 @@ def execute_channel(aid, task_id):
             and agent["control_version"] == intent["control_version"]
             and channel_config(c, aid, platform)[1] == intent["channel_version"]
         )
+        started_at = one(c, "SELECT clock_timestamp() AS at")["at"]
         if active:
             product = save_workspace(c, aid, agent, business, platform)
             state, result = "succeeded", {"product_task_id": product["id"]}
         else:
             state, result = "canceled", {"reason": "dispatch_scope_changed"}
         c.execute(
-            """UPDATE lead.tasks SET state=%s,result=%s,started_at=now(),completed_at=now()
+            """UPDATE lead.tasks SET state=%s,result=%s,started_at=%s,completed_at=clock_timestamp()
             WHERE id=%s""",
-            (state, j(result), task_id),
+            (state, j(result), started_at, task_id),
         )
 
 

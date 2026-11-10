@@ -147,3 +147,30 @@ def test_model_wait_keeps_discovery_cursor_and_does_not_spend_retry():
             }
     finally:
         domain.set_control(aid, "archive")
+
+
+def test_source_only_work_leaves_model_free_and_reserves_the_real_actor():
+    read = choice("operating.journey")
+    read.read_source = True
+    assert [row["key"] for row in shadow_batch([read, choice("audience"), choice("operating.strategy")])] == [
+        "operating.journey", "operating.strategy"
+    ]
+
+
+def test_versioned_channel_product_survives_control_changes(monkeypatch):
+    from lead_app import atomic_dispatch, domain
+    from lead_app.db import one, require_agent, tx
+    from lead_app.operating_workspace import save_workspace
+    from lead_app.scope import current_tenant
+
+    aid = domain.create_agent()
+    monkeypatch.setenv("LEAD_PARALLEL_AGENT_IDS", str(aid))
+    with tx(aid) as c:
+        business = one(c, """INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,description)
+            VALUES(%s,%s,1,'test') RETURNING *""", (current_tenant(),aid))
+        agent = require_agent(c,aid,True)
+        platform = atomic_dispatch.catalog()["channels"][0]["platform"]
+        save_workspace(c, aid, agent, business, platform)
+        c.execute("UPDATE lead.agents SET control_version=control_version+1 WHERE id=%s", (aid,))
+        atomic_dispatch.enqueue_channel_work(c, aid, require_agent(c,aid,True), business)
+        assert not one(c,"SELECT 1 FROM lead.tasks WHERE type='dispatch.channel' AND input->>'platform'=%s",(platform,))
