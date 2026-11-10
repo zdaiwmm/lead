@@ -1145,6 +1145,7 @@ async def auth(request, call_next):
 class OpenRequest(BaseModel):
     platform: str = "lab"
     account_id: UUID | None = None
+    takeover: UUID | None = None
 
 
 class PublishRequest(BaseModel):
@@ -1180,6 +1181,8 @@ async def inspect_account(aid: UUID, body: OpenRequest):
     )
     actor = await gateway.get(str(aid)) if profile["slot"]=="default" else await gateway.get(str(aid),profile["id"])
     async with actor.lock:
+        if body.takeover:
+            require_takeover(str(aid), actor, body.takeover)
         if body.platform == "telegram":
             from . import telegram
 

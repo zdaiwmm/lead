@@ -15,7 +15,15 @@ def directory(aid, profile, node_root=STATE):
     )
 
 
-def for_platform(aid, platform, *, create=False, account_id=None, new_binding=False):
+def for_platform(
+    aid,
+    platform,
+    *,
+    create=False,
+    account_id=None,
+    new_binding=False,
+    isolated_login=False,
+):
     with tx(aid) as c:
         agent = require_agent(c, aid, create)
         if new_binding and (
@@ -34,50 +42,53 @@ def for_platform(aid, platform, *, create=False, account_id=None, new_binding=Fa
                 (platform, account_id, account_id),
             )
             if existing:
+                if isolated_login and existing["slot"] == "default":
+                    raise ValueError("此账号仍使用原浏览器环境，请先核对绑定资料")
                 return existing
             if account_id:
                 raise ValueError("此账号不属于当前项目与渠道")
         base = one(c, "SELECT * FROM lead.browser_profiles WHERE slot='default'")
-        if not create or not channel_pilot(aid) or not channel_for(platform):
+        if not create or not (
+            isolated_login or (channel_pilot(aid) and channel_for(platform))
+        ):
             return base
         slot = platform if not new_binding else platform + "-" + uid()
-        existing = one(c, "SELECT * FROM lead.browser_profiles WHERE slot=%s", (slot,))
-        if existing:
-            return existing
-        pid = uid()
-        root = directory(aid, {"slot": platform, "id": pid})
-        profile = one(
-            c,
-            """INSERT INTO lead.browser_profiles
-            (id,tenant_id,agent_id,provider,engine_version,sdk_version,config_ref,config_hash,
-             storage_ref,key_material_ref,network_identity_id,slot)
-            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
-            (
-                pid,
-                agent["tenant_id"],
-                aid,
-                base["provider"],
-                base["engine_version"],
-                base["sdk_version"],
-                str(root / "identity.json"),
-                pid,
-                str(root / "storage"),
-                base["key_material_ref"],
-                base["network_identity_id"],
-                slot,
-            ),
-        )
-        c.execute(
-            """INSERT INTO lead.profile_leases(profile_id,tenant_id,agent_id,control_version)
-            VALUES(%s,%s,%s,%s)""",
-            (pid, agent["tenant_id"], aid, agent["control_version"]),
-        )
-        if new_binding:
+        profile = one(c, "SELECT * FROM lead.browser_profiles WHERE slot=%s", (slot,))
+        if not profile:
+            pid = uid()
+            root = directory(aid, {"slot": platform, "id": pid})
+            profile = one(
+                c,
+                """INSERT INTO lead.browser_profiles
+                (id,tenant_id,agent_id,provider,engine_version,sdk_version,config_ref,config_hash,
+                 storage_ref,key_material_ref,network_identity_id,slot)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+                (
+                    pid,
+                    agent["tenant_id"],
+                    aid,
+                    base["provider"],
+                    base["engine_version"],
+                    base["sdk_version"],
+                    str(root / "identity.json"),
+                    pid,
+                    str(root / "storage"),
+                    base["key_material_ref"],
+                    base["network_identity_id"],
+                    slot,
+                ),
+            )
+            c.execute(
+                """INSERT INTO lead.profile_leases(profile_id,tenant_id,agent_id,control_version)
+                VALUES(%s,%s,%s,%s)""",
+                (pid, agent["tenant_id"], aid, agent["control_version"]),
+            )
+        if isolated_login or new_binding:
             profile["account_id"] = one(
                 c,
                 """INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,state,automation_enabled)
                 VALUES(%s,%s,%s,%s,'pending',false) RETURNING id""",
-                (agent["tenant_id"], aid, pid, platform),
+                (agent["tenant_id"], aid, profile["id"], platform),
             )["id"]
         return profile
 
