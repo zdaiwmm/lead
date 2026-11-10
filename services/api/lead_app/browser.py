@@ -259,11 +259,13 @@ class Actor:
                     (digest, BROWSER_BUILD, BROWSER_SDK, profile["id"]),
                 )
                 c.execute(
-                    "UPDATE lead.network_identities SET mode=%s,state=%s WHERE id=%s",
+                    """UPDATE lead.network_identities SET mode=%s,state=%s WHERE id=%s
+                    AND NOT (state='verified' AND mode=%s AND coalesce(valid_until>now(),false))""",
                     (
                         "dedicated" if proxy else "shared_development",
                         "pending",
                         profile["network_identity_id"],
+                        "dedicated" if proxy else "shared_development",
                     ),
                 )
                 # A crash between a click and acknowledgement always reconciles.
@@ -512,10 +514,8 @@ class Actor:
                 if used >= maximum:
                     raise ValueError("此频道已达到今天的发布上限")
             if env().get("LEAD_DEPLOYMENT_MODE") == "production":
-                if not one(
-                    c,
-                    "SELECT 1 FROM lead.identity_checks i JOIN lead.network_identities n ON n.id=i.network_identity_id WHERE i.result='passed' AND i.valid_until>now() AND n.mode='dedicated' AND n.state='verified'",
-                ):
+                from .identity import verified_profile
+                if not verified_profile(c, self.profile["id"]):
                     raise ValueError("独立出口与设备验证尚未通过")
         return a
 

@@ -28,6 +28,14 @@ def page():
     )
 
 
+def verified_profile(c, pid):
+    return one(c, """SELECT 1 FROM lead.browser_profiles p JOIN lead.network_identities n ON n.id=p.network_identity_id
+        JOIN LATERAL (SELECT * FROM lead.identity_checks WHERE profile_id=p.id ORDER BY checked_at DESC,id DESC LIMIT 1) i ON true
+        WHERE p.id=%s AND i.result='passed' AND i.engine_version=p.engine_version AND i.config_hash=p.config_hash
+        AND i.network_identity_id=n.id AND i.valid_until>now() AND n.valid_until>now() AND n.expected_ip=i.observed_ip
+        AND n.mode='dedicated' AND n.state='verified'""", (pid,))
+
+
 async def check(actor):
     """Measure this browser's egress; never promotes an unconfigured shared IP.
 
@@ -193,7 +201,9 @@ async def check(actor):
                     result["errors"].append(
                         {"error": "exit_already_bound_to_another_agent"}
                     )
-            if not passed:
+            network_matches = (result["fixed_proxy"] and result["expected_ip_matches"] and result["probe_agreement"]
+                               and (not production or (result["os_egress_enforced"] and network_policy.get("usable") and result["region_matches"])))
+            if not passed and not network_matches:
                 c.execute(
                     "UPDATE lead.network_identities SET state=%s WHERE id=%s",
                     ("failed" if expected else "pending", network["id"]),

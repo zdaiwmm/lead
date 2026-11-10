@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from temporalio import activity
 
 from . import growth_experiments
+from .admin_operations import managed_execution
 from .atomic_dispatch import channel_pilot
 from .db import emit, j, one, tx
 from .operating_playbooks import channel_for
@@ -224,6 +225,7 @@ def finish(args, target_id, result):
 
 @activity.defn
 @scoped_activity
+@managed_execution("channel_delivery")
 async def channel_delivery_tick(args: dict):
     from .activities import _publication_cycle
 

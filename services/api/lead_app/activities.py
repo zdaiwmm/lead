@@ -560,7 +560,7 @@ async def execute_task(args: dict):
         task = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (task_id,))
         if not task or task["state"] in ("succeeded", "canceled"):
             return {"state": task["state"] if task else "absent"}
-    action = prepare_action(aid, task_id)
+    action = await asyncio.to_thread(prepare_action, aid, task_id)
     if not action:
         return {"state": "canceled"}
     with tx(aid) as c:
@@ -626,6 +626,12 @@ async def execute_task(args: dict):
                 if changed:
                     record(c, aid, "等待运营环境恢复", "平台会自动重试。")
             raise RuntimeError("browser_not_dispatched") from None
+    # A sibling can hold the shared submission gate across its browser click.
+    # Persisting this receipt may wait on that transaction; keep the RPC loop free.
+    return await asyncio.to_thread(record_publish_result, aid, task_id, task, action, result)
+
+
+def record_publish_result(aid, task_id, task, action, result):
     with tx(aid) as c:
         previous = one(c, "SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE", (task_id,))
         if previous["state"] in ("succeeded", "canceled"):

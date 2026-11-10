@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from temporalio import activity
 
 from .admin_settings import effective
-from .db import all_rows, audit, emit, one, record, require_agent, tx
+from .db import all_rows, audit, emit, j, one, record, require_agent, tx
 
 
 def work_window(hours, now=None):
@@ -153,7 +153,7 @@ def reset_failures(c, aid):
     )
 
 
-def admission(aid, category):
+def admission(aid, category, *, lane=None):
     # A tenant transaction is needed to count all live leases in that workspace.
     with tx() as c:
         agent = require_agent(c, aid)
@@ -167,7 +167,7 @@ def admission(aid, category):
         backoff = one(
             c,
             "SELECT max(next_retry_at) AS due FROM lead.admin_runtime_state WHERE agent_id=%s AND category=%s",
-            (aid, "planning" if category == "autonomous" else category),
+            (aid, "planning" if category in ("autonomous", "channel_delivery", "channel_research") else category),
         )
         if backoff["due"] and backoff["due"] > datetime.now(timezone.utc):
             return {
@@ -184,16 +184,18 @@ def admission(aid, category):
         )
         leases = all_rows(
             c,
-            "SELECT agent_id FROM lead.admin_runtime_leases WHERE released_at IS NULL AND expires_at>now()",
+            "SELECT agent_id,category FROM lead.admin_runtime_leases WHERE released_at IS NULL AND expires_at>now()",
         )
-        if any(str(row["agent_id"]) == aid for row in leases) or len(leases) >= min(
-            policy["max_concurrent_agents"], global_policy["max_concurrent_agents"]
-        ):
+        agents = {str(row["agent_id"]) for row in leases}
+        occupied = {row["category"] for row in leases if str(row["agent_id"]) == aid}
+        exclusive = any(not name.startswith("channel:") for name in occupied)
+        if (lane in occupied or (lane is None and exclusive) or
+            (aid not in agents and len(agents) >= min(policy["max_concurrent_agents"], global_policy["max_concurrent_agents"]))):
             return {"allowed": False, "delay": 10, "reason": "concurrency_limit"}
         lease = one(
             c,
             "INSERT INTO lead.admin_runtime_leases(tenant_id,agent_id,category,expires_at) VALUES(lead.ctx_tenant(),%s,%s,now()+interval '4 minutes') RETURNING id",
-            (aid, category),
+            (aid, lane or category),
         )
         return {
             "allowed": True,
@@ -217,6 +219,15 @@ def managed_execution(category):
                     if category == "publish"
                     else {"delay": 86400, "archived": True, "idle": True}
                 )
+            lane = None
+            channel_clock = category in ("channel_research","channel_delivery")
+            if channel_clock:
+                from .channel_delivery import current
+                with tx(aid) as c:
+                    clock = current(c, aid, args)
+                    if not clock:
+                        return {"stop":True}
+                    lane = "channel:" + category + ":" + clock["input"]["platform"]
             if category == "publish":
                 with tx(aid) as c:
                     task = one(
@@ -227,6 +238,13 @@ def managed_execution(category):
                         "SELECT state FROM lead.actions WHERE task_id=%s",
                         (args["task_id"],),
                     )
+                    from .atomic_dispatch import channel_pilot
+                    if task and channel_pilot(aid):
+                        profile = one(c, """SELECT p.id FROM lead.tasks task JOIN lead.account_targets t ON t.id::text=task.input->>'target_id'
+                            JOIN lead.social_accounts s ON s.id=t.account_id JOIN lead.browser_profiles p ON p.id=s.profile_id
+                            WHERE task.id=%s AND task.input ? 'channel_clock' AND p.slot<>'default'""", (args["task_id"],))
+                        if profile:
+                            lane = "channel:browser:" + str(profile["id"])
                 if task and task["type"] == "lab.publish":
                     return await fn(args)
                 if action and action["state"] in {
@@ -239,13 +257,19 @@ def managed_execution(category):
                     )  # Reconciliation is allowed outside work hours.
                 if agent["desired_state"] == "paused":
                     return await fn(args)
-            gate = admission(aid, category)
+            gate = admission(aid, category, lane=lane) if lane else admission(aid, category)
             if not gate["allowed"]:
                 deferred = {
                     "delay": gate["delay"],
                     "reason": gate["reason"],
                     **({"state": "deferred"} if category == "publish" else {}),
                 }
+                if channel_clock:
+                    with tx(aid) as c:
+                        if not current(c, aid, args):
+                            return {"stop":True}
+                        c.execute("UPDATE lead.tasks SET scheduled_at=now()+make_interval(secs=>%s),result=coalesce(result,'{}')||%s WHERE id=%s",
+                                  (gate["delay"], j({"reason":gate["reason"]}),args["task_id"]))
                 if category == "autonomous":
                     from .community_schedule import completed
 

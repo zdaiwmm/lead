@@ -246,8 +246,10 @@ def update_setup(aid, profile, expected_revision):
     return {"id": aid, "config_revision": revision}
 
 
-def complete_setup(aid):
-    with tx(aid) as c:
+def complete_setup(aid, *, connection=None):
+    from contextlib import nullcontext
+
+    with (nullcontext(connection) if connection is not None else tx(aid)) as c:
         a = require_agent(c, aid, True)
         if not a["onboarding_state"].get("setup_pending"):
             return {"id": aid}
@@ -322,7 +324,7 @@ def agent_detail(aid):
         )
         a["profile"] = one(
             c,
-            "SELECT id,provider,engine_version,config_hash,state FROM lead.browser_profiles",
+            "SELECT id,provider,engine_version,config_hash,state FROM lead.browser_profiles WHERE slot='default'",
         )
         a["network"] = one(
             c,
@@ -635,10 +637,12 @@ def control_in_tx(c, aid, action, platform=None, only_setup=False):
     return True
 
 
-def channel_control(aid, platform, enabled):
+def channel_control(aid, platform, enabled, *, connection=None):
+    from contextlib import nullcontext
+
     if platform not in [p[0] for p in PLATFORMS]:
         raise ValueError("社媒不存在")
-    with tx(aid) as c:
+    with (nullcontext(connection) if connection is not None else tx(aid)) as c:
         agent = require_agent(c, aid, True)
         if enabled and agent["onboarding_state"].get("setup_pending"):
             raise ValueError("请先完成渠道连接和 Agent 创建流程")

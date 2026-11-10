@@ -487,6 +487,7 @@ class Connection(BaseModel):
     platform: str
     account_id: UUID | None = None
     new_account: bool = False
+    start_managed_targets: bool = False
 
 
 class LabPublish(BaseModel):
@@ -530,6 +531,7 @@ async def verify_telegram(aid: UUID):
 @app.post("/api/agents/{aid}/accounts/verify-login")
 async def verify_login(aid: UUID, body: Connection):
     from .adapters.catalog import SPECS
+    from .atomic_dispatch import channel_pilot
     from .channels import store_account, store_target
 
     platform = body.platform
@@ -555,7 +557,7 @@ async def verify_login(aid: UUID, body: Connection):
         aid,
         platform,
         observed,
-        platform not in auto,
+        platform not in auto and not (platform in ("reddit","facebook") and channel_pilot(aid)),
         expected_control_version=control_version,
         expected_binding=(str(selected["id"]),selected["binding_version"]) if selected else None,
     )
@@ -572,6 +574,16 @@ async def verify_login(aid: UUID, body: Connection):
             )
         ).json()
         await asyncio.to_thread(store_target, aid, account_id, target)
+    if body.start_managed_targets:
+        from .channels import authorize_managed_discovery
+
+        with tx(aid) as c:
+            current = require_agent(c,aid,True)
+            if current["control_version"] != control_version or not selected:
+                raise ValueError("项目或绑定账号已变化，请重新核对后启动")
+            authorize_managed_discovery(c, aid, account_id, platform, observed["external_account_id"], selected["binding_version"]+1)
+            domain.complete_setup(aid, connection=c)
+            domain.channel_control(aid, platform, True, connection=c)
     return {"ok": True, "account_id": account_id}
 
 
@@ -948,6 +960,7 @@ async def connect(aid: UUID, body: Connection):
         audit(c, aid, "browser.takeover.started", {"platform": body.platform})
     return {
         "takeover_id": takeover["id"],
+        "managed_target_start": profile["slot"] != "default" and body.platform in ("reddit","facebook"),
         "account_id": account["id"] if account else None,
         "platform": body.platform,
         "status": "pending",

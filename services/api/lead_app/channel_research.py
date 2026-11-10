@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from temporalio import activity
 
+from .admin_operations import managed_execution
 from .channel_delivery import current
 from .config import env
 from .db import all_rows, j, one, tx
@@ -16,6 +17,77 @@ def source_access(platform):
         value.strip()
         for value in env().get("LEAD_APPROVED_DISCOVERY_CHANNELS", "").split(",")
     }
+
+
+def unbound_source(c, platform, agent, business):
+    if platform not in ("reddit", "facebook"):
+        return None
+    return one(
+        c,
+        """SELECT t.id AS evidence_id,s.id AS account_id,s.binding_version,
+        t.input->>'candidate_url' AS url
+        FROM lead.tasks t JOIN lead.social_accounts s ON s.platform=t.input->>'platform'
+        WHERE t.type='operating.validate' AND t.state='succeeded' AND t.result->>'status'='observed'
+          AND t.result->>'channel_fit'='viable' AND t.result->'source_urls' ? (t.input->>'candidate_url')
+          AND t.completed_at>now()-interval '14 days' AND t.input->>'business_profile_id'=%s
+          AND t.input->>'config_revision'=%s AND s.platform=%s AND s.state='connected' AND s.automation_enabled
+          AND NOT coalesce(t.result->'account_inspections','{}') ? (s.id::text||':'||s.binding_version::text)
+          AND NOT EXISTS (SELECT FROM lead.account_targets target WHERE target.account_id=s.id
+                           AND rtrim(target.canonical_url,'/')=rtrim(t.input->>'candidate_url','/'))
+          AND EXISTS (SELECT FROM lead.platform_capabilities p WHERE p.platform=s.platform AND p.action_type='publish'
+                      AND p.permission_state='approved')
+        ORDER BY t.completed_at DESC,s.created_at,s.id LIMIT 1""",
+        (str(business["id"]), str(agent["config_revision"]), platform),
+    )
+
+
+async def inspect_source(args, candidate):
+    import httpx
+
+    from .activities import browser_rpc
+    from .channels import store_target
+
+    aid = args["agent_id"]
+    try:
+        target = await browser_rpc(
+            f"/agents/{aid}/target/inspect",
+            {"account_id": str(candidate["account_id"]), "url": candidate["url"]},
+        )
+    except httpx.HTTPStatusError as error:
+        if (
+            error.response.status_code != 409
+            or error.response.json().get("code") == "browser_busy"
+        ):
+            raise
+        # Unavailable access is not evidence that this account manages the target.
+        reason = "target_management_unverified"
+    else:
+        if target["canonical_url"].rstrip("/") != candidate["url"].rstrip("/"):
+            reason = "target_management_unverified"
+        else:
+            binding = await asyncio.to_thread(
+                store_target,
+                aid,
+                str(candidate["account_id"]),
+                target,
+                expected_binding=candidate["binding_version"],
+                channel_clock=args,
+            )
+            reason = (
+                "target_permissions_review"
+                if binding["card_id"]
+                else "target_verification_queued"
+            )
+    with tx(aid) as c:
+        if not current(c, aid, args):
+            return {"stop": True}
+        key = f"{candidate['account_id']}:{candidate['binding_version']}"
+        c.execute(
+            """UPDATE lead.tasks SET result=jsonb_set(result,'{account_inspections}',
+                  coalesce(result->'account_inspections','{}') || %s) WHERE id=%s""",
+            (j({key: reason}), candidate["evidence_id"]),
+        )
+    return {"delay": 1, "reason": reason}
 
 
 def select(args):
@@ -75,6 +147,9 @@ def select(args):
             ):
                 return {"delay": 1, "reason": "research_step_recorded"}, None
             return {}, Candidate(**pending)
+        unbound = unbound_source(c, platform, agent, business)
+        if unbound:
+            return {"inspect": unbound}, None
         if not reconcile(c, aid, agent, business, None, platform):
             enqueue(
                 c,
@@ -138,11 +213,14 @@ def select(args):
 
 @activity.defn
 @scoped_activity
+@managed_execution("channel_research")
 async def channel_research_tick(args: dict):
     from .operating_kernel import run_work
 
     result, candidate = await asyncio.to_thread(select, args)
-    if candidate:
+    if result.get("inspect"):
+        result = await inspect_source(args, result["inspect"])
+    elif candidate:
         result = await run_work(args["agent_id"], candidate, channel_clock=args)
     if not result.get("stop") and not result.get("recorded"):
         delay = max(1, int(result.get("delay", 300)))

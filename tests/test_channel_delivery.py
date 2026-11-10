@@ -7,12 +7,10 @@ from urllib.parse import parse_qs, urlsplit
 
 import psycopg
 import pytest
-from lead_app import activities, browser, channel_delivery, domain
-from lead_app.adapters import get_adapter
-from lead_app.adapters.catalog import SPECS
+from lead_app import activities, api, browser, channel_delivery, domain
 from lead_app.browser import Gateway
 from lead_app.config import database_kwargs
-from lead_app.db import all_rows, j, one, tx, uid
+from lead_app.db import all_rows, one, tx, uid
 from lead_app.first_entry import customers
 from lead_app.migrations import upgrade
 from lead_app.scope import current_tenant
@@ -155,7 +153,6 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
 
     monkeypatch.setattr(activities, "run_model", decision)
     with tx(aid) as c:
-        c.execute("UPDATE lead.agents SET desired_state='running' WHERE id=%s", (aid,))
         one(
             c,
             """INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,description,product_url)
@@ -190,12 +187,25 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
     monkeypatch.setattr(browser, "gateway", gateway)
 
     async def offline_rpc(path, data):
+        if path.endswith("/target/inspect"):
+            return await browser.inspect_target(
+                aid, browser.TelegramTargetRequest(**data)
+            )
         assert path == f"/agents/{aid}/publish"
         return await browser.publish_action(aid, browser.PublishRequest(**data))
 
+    async def binding_gateway(path, *, body):
+        from types import SimpleNamespace
+
+        routed = {"open": browser.open_browser, "inspect": browser.inspect_account}
+        obs = await routed[path.rsplit("/", 1)[1]](aid, browser.OpenRequest(**body))
+        return SimpleNamespace(json=lambda: obs)
+
+    monkeypatch.setattr(api, "gateway", binding_gateway)
     monkeypatch.setattr(activities, "browser_rpc", offline_rpc)
     install_fixture_research(monkeypatch, actors)
     links = {}
+    prepared = {}
     anonymous = uid()
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     try:
@@ -214,56 +224,21 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
                     ]
                 )
             await actor.page.goto(TARGETS[platform])
-            adapter = get_adapter(platform)
-            account = await adapter.account(actor.page)
-            target = await adapter.target(
-                actor.page, TARGETS[platform], account["external_account_id"]
-            )
             with psycopg.connect(**database_kwargs(True)) as c:
                 c.execute(
                     """UPDATE lead.platform_capabilities SET permission_state='approved',technical_state='verified'
                     WHERE platform=%s AND action_type='publish'""",
                     (platform,),
                 )
-            with tx(aid) as c:
-                account_id = one(
-                    c,
-                    """INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,
-                    external_account_id,state,automation_enabled) SELECT tenant_id,agent_id,id,%s,%s,'connected',true
-                    FROM lead.browser_profiles WHERE id=%s RETURNING id""",
-                    (
-                        platform,
-                        account["external_account_id"],
-                        profiles[platform]["id"],
-                    ),
-                )["id"]
-                target_id = one(
-                    c,
-                    """INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,external_target_id,
-                    display_name,canonical_url,verified_permissions,state) VALUES(%s,%s,%s,%s,%s,'Fixture',%s,%s,'active') RETURNING id""",
-                    (
-                        current_tenant(),
-                        aid,
-                        account_id,
-                        SPECS[platform].target_type,
-                        target["external_target_id"],
-                        TARGETS[platform],
-                        j(
-                            {
-                                "actions": target["verified_permissions"],
-                                "public_url": TARGETS[platform],
-                                "publishing_verified_formats": ["text"],
-                                "adapter_version": SPECS[platform].version,
-                            }
-                        ),
-                    ),
-                )["id"]
-                c.execute(
-                    """INSERT INTO lead.authorization_grants(tenant_id,agent_id,target_id,version,allowed_actions,granted_by)
-                    VALUES(%s,%s,%s,1,'["publish"]','test_owner')""",
-                    (current_tenant(), aid, target_id),
-                )
-            domain.channel_control(aid, platform, True)
+            opened = await api.connect(aid, api.Connection(platform=platform))
+            assert opened["managed_target_start"]
+            account_id = opened["account_id"]
+            await api.verify_login(
+                aid,
+                api.Connection(
+                    platform=platform, account_id=account_id, start_managed_targets=True
+                ),
+            )
             with tx(aid) as c:
                 clock = one(
                     c,
@@ -298,7 +273,7 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
             first = await channel_delivery.channel_delivery_tick(
                 {**args, "tick": uid()}
             )
-            assert first["reason"] == "awaiting_validated_opportunity", first
+            assert first["reason"] == "no_available_verified_target", first
             for expected in (
                 "operating_work_completed",
                 "public_observation_ready",
@@ -310,9 +285,26 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
                         step,
                         all_rows(
                             c,
-                            "SELECT type,state,result FROM lead.tasks WHERE type LIKE 'operating.%'",
+                            "SELECT type,state,result FROM lead.tasks WHERE type LIKE 'operating.%%'",
                         ),
                     )
+            step = await channel_research_tick({**research_args, "tick": uid()})
+            assert step["reason"] == "target_verification_queued", step
+            with tx(aid) as c:
+                target_id = one(
+                    c,
+                    "SELECT id FROM lead.account_targets WHERE account_id=%s",
+                    (account_id,),
+                )["id"]
+                probe = one(
+                    c,
+                    "SELECT id FROM lead.tasks WHERE type='connection.verify_publish' AND input->>'target_id'=%s",
+                    (str(target_id),),
+                )
+            receipt = await activities.execute_task(
+                {"task_id": str(probe["id"]), "agent_id": aid}
+            )
+            assert receipt["state"] == "confirmed", receipt
             with tx(aid) as c:
                 evidence = channel_delivery.opportunity(c, target_id)
                 assert evidence and evidence["source_url"] == TARGETS[platform]
@@ -327,30 +319,46 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
                 assert task, one(
                     c, "SELECT result FROM lead.tasks WHERE id=%s", (clock["id"],)
                 )
-            params_task = {"task_id": str(task["id"]), "agent_id": aid}
-            if platform == "facebook":
-                from lead_app.adapters.web import WebAdapter
+            prepared[platform] = (site, task, account_id, target_id)
 
-                submit = WebAdapter.submit
+        from lead_app.adapters.web import WebAdapter
 
-                async def lose_response(self, page, observation):
-                    async with page.expect_response(
-                        lambda r: "/__fixture/publish" in r.url
-                    ):
-                        await submit(self, page, observation)
-                    raise ConnectionError("fixture disconnect after accepted submit")
+        submit = WebAdapter.submit
+        barrier = asyncio.Barrier(2)
 
-                with monkeypatch.context() as fault:
-                    fault.setattr(WebAdapter, "submit", lose_response)
-                    uncertain = await activities.execute_task(params_task)
-                assert uncertain["state"] == "unknown"
-                assert len(site.posts) == 1
-            result = await activities.execute_task(params_task)
-            assert result["state"] == "confirmed", result
-            assert (await activities.execute_task(params_task))["state"] == "succeeded"
-            assert len(site.posts) == 1
+        async def submit_together(self, page, observation):
+            # Both actors reach the final submit gate before either writes.
+            await asyncio.wait_for(barrier.wait(), timeout=15)
+            if self.platform == "facebook":
+                async with page.expect_response(
+                    lambda r: "/__fixture/publish" in r.url
+                ):
+                    await submit(self, page, observation)
+                raise ConnectionError("fixture disconnect after accepted submit")
+            return await submit(self, page, observation)
+
+        def request(platform):
+            return {"task_id": str(prepared[platform][1]["id"]), "agent_id": aid}
+
+        with monkeypatch.context() as fault:
+            fault.setattr(WebAdapter, "submit", submit_together)
+            results = await asyncio.gather(
+                *(activities.execute_task(request(p)) for p in platforms)
+            )
+        assert [r["state"] for r in results] == ["confirmed", "unknown"], results
+        assert len(prepared["facebook"][0].posts) == 2
+        assert (await activities.execute_task(request("facebook")))[
+            "state"
+        ] == "confirmed"
+        for platform in platforms:
+            actor = actors[platform]
+            site, task, account_id, target_id = prepared[platform]
+            assert (await activities.execute_task(request(platform)))[
+                "state"
+            ] == "succeeded"
+            assert len(site.posts) == 2
             links[platform] = task["input"]["link"]
-            assert links[platform] in site.posts[0]["body"]
+            assert links[platform] in site.posts[-1]["body"]
             with tx(aid) as c:
                 assert channel_delivery.opportunity(c, target_id) is None
                 link_row = one(
@@ -418,7 +426,12 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
                 datetime.now(timezone.utc),
             ) == {"channels": {"reddit": 1}, "unknown": 0, "observed": 1}
             assert (
-                len(all_rows(c, "SELECT id FROM lead.actions WHERE state='confirmed'"))
+                len(
+                    all_rows(
+                        c,
+                        "SELECT a.id FROM lead.actions a JOIN lead.tasks t ON t.id=a.task_id WHERE a.state='confirmed' AND t.type LIKE '%%.publish'",
+                    )
+                )
                 == 2
             )
         # Snapshot and restore the complete account inventory with the project at rest.
@@ -485,3 +498,20 @@ def test_distribution_placement_retries_and_source_integrity(pixel, monkeypatch)
             "UPDATE lead.tracking_links SET platform='reddit' WHERE id=%s",
             (first["id"],),
         )
+
+
+def test_node_schema_attestation_reads_actual_migration(site_database, monkeypatch):
+    from scripts import home_live_maintenance as site
+
+    with psycopg.connect(**database_kwargs(True)) as c:
+        monkeypatch.setattr(
+            site,
+            "site_sql",
+            lambda query: "t" if c.execute(query).fetchone()[0] else "f",
+        )
+        assert site.channel_schema_ready() == "ready"
+        c.execute(
+            "ALTER TABLE lead.tracking_links DISABLE TRIGGER keep_tracking_source"
+        )
+        with pytest.raises(ValueError, match="schema"):
+            site.channel_schema_ready()

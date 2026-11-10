@@ -35,6 +35,7 @@ export default function AccountBrowser({
   } | null>(null);
   const [error, setError] = useState("");
   const [frameError, setFrameError] = useState("");
+  const [managedStart, setManagedStart] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [closing, setClosing] = useState(false);
   const [retry, setRetry] = useState(0);
@@ -240,7 +241,7 @@ export default function AccountBrowser({
     verify ? setVerifying(true) : setClosing(true);
     try {
       if (verify)
-        await api(`/agents/${aid}/accounts/verify-login`, { platform, account_id: accountId.current });
+        await api(`/agents/${aid}/accounts/verify-login`, { platform, account_id: accountId.current, start_managed_targets: managedStart });
       if (state === "opening") {
         await connection.current?.promise.catch(() => {});
       }
@@ -283,6 +284,7 @@ export default function AccountBrowser({
         if (canceled) return;
         takeover.current = session.takeover_id;
         accountId.current = session.account_id;
+        setManagedStart(Boolean(session.managed_target_start));
         lastInput.current = performance.now();
         active.current = true;
         setState("ready");
@@ -376,7 +378,7 @@ export default function AccountBrowser({
             <SocialIcon platform={platform} size={24} />
             <div>
               <h2 id="account-browser-title">连接 {name}</h2>
-              <span className="muted small">在专属浏览器中登录账号</span>
+              <span className="muted small">{managedStart ? "授权 Lead 在账号可管理且允许推广的目标验证、发布文字。可随时暂停。" : "在专属浏览器中登录账号"}</span>
             </div>
           </div>
           <div className="browser-header-actions">
@@ -391,7 +393,7 @@ export default function AccountBrowser({
                 ) : (
                   <Check size={15} />
                 )}
-                {verifyLabel}
+                {managedStart ? "绑定并启动获客" : verifyLabel}
               </button>
             )}
             <button

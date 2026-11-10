@@ -267,6 +267,28 @@ def reviewed_maintenance_files(mirror, sha, extra):
     return historical
 
 
+# Schema changes are applied separately by the node database owner.
+CHANNEL_SCHEMA_FILES = {
+    ".env.example": "4ea891ba1cdcd4068d80d0ca07cca6460d1d3c01",
+    "infra/migrations/versions/0026_first_entry.py": "6c67420e3a578c42181ef45d69bed9ed70ec55bb",
+    "infra/migrations/versions/0027_account_profiles.py": "244d0277b597d6f9f6351ff9da7920e8ed098a0c",
+    "infra/migrations/versions/0028_distribution_slots.py": "ff2307da5e88017e5d8b91ef7ebcd233f1c77e01",
+}
+
+
+def reviewed_channel_schema(mirror, sha, extra):
+    paths = extra.intersection(CHANNEL_SCHEMA_FILES)
+    if not paths or not (TOOLS / "home_live_maintenance.py").is_file():
+        return set()
+    if any(run("git", "--git-dir", mirror, "rev-parse", f"{sha}:{path}") != CHANNEL_SCHEMA_FILES[path]
+           for path in paths):
+        return set()
+    # The independently installed tool checks the live database, outside the image.
+    require(run(TOOLS / "home_live_maintenance.py", "channel-schema") == "ready",
+            "channel schema migration has not been verified on this node")
+    return paths
+
+
 def deploy(sha):
     require(os.geteuid() == 0, "trusted node dispatcher required")
     safe_layout()
@@ -295,6 +317,7 @@ def deploy(sha):
         extra = {name for name in changes.split("\0") if name and not name.startswith(allowed)
                  and name not in ("README.md", "AGENTS.md")}
         extra -= reviewed_maintenance_files(mirror, sha, extra)
+        extra -= reviewed_channel_schema(mirror, sha, extra)
         if extra:
             # The frame subsystem was already installed from this reviewed commit.
             # Only accept its EXACT reviewed blobs, and attest the installed components.
