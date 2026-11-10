@@ -3,9 +3,21 @@
 from uuid import UUID
 
 from .atomic_dispatch import channel_pilot
-from .config import STATE
+from .config import STATE, env
 from .db import one, require_agent, tx, uid
 from .operating_playbooks import channel_for
+
+
+def isolated_login_platforms(aid):
+    settings = env()
+    platforms = set()
+    for key, channels in (
+        ("LEAD_SPLIT_REDDIT_LOGIN_AGENT_IDS", ("reddit",)),
+        ("LEAD_SPLIT_FACEBOOK_X_LOGIN_AGENT_IDS", ("facebook", "x")),
+    ):
+        if str(aid) in (entry.strip() for entry in settings.get(key, "").split(",")):
+            platforms.update(channels)
+    return platforms
 
 
 def directory(aid, profile, node_root=STATE):

@@ -1,8 +1,9 @@
-"""A separately assigned Reddit exit only affects isolated account profiles."""
+"""Bind eligible isolated login profiles to the project's existing Tokyo IPv4."""
 
 from ipaddress import IPv4Address
 from uuid import NAMESPACE_URL, uuid5
 
+from .account_profiles import isolated_login_platforms
 from .config import env
 from .db import one, require_agent, tx
 
@@ -10,24 +11,24 @@ PROVIDER = "reddit-login-ipv4"
 SOCKET = "socks5+unix:///run/lead-egress/reddit-v4.sock"
 
 
-def split_reddit_login(aid):
-    projects = env().get("LEAD_SPLIT_REDDIT_LOGIN_AGENT_IDS") or ""
-    return str(aid) in {entry.strip() for entry in projects.split(",")}
-
-
 def assign_exit(aid, profile):
-    slot = profile["slot"]
-    if slot != "reddit" and not slot.startswith("reddit-"):
-        return None
+    platform = profile["slot"].split("-", 1)[0]
     network_id = uuid5(NAMESPACE_URL, f"lead:{aid}:{PROVIDER}")
+    if platform != "reddit":
+        if platform not in ("facebook", "x"):
+            return None
+        if platform not in isolated_login_platforms(aid):
+            if str(profile["network_identity_id"]) == str(network_id):
+                raise ValueError("此账号的东京登录出口已停用，请核对配置")
+            return None
     expected = env().get("LEAD_REDDIT_IPV4_" + str(aid).replace("-", "").upper())
     if not expected:
-        if str(profile["network_identity_id"]) == str(network_id):
-            raise ValueError("此 Reddit 账号的固定出口尚未配置")
+        if platform != "reddit" or str(profile["network_identity_id"]) == str(network_id):
+            raise ValueError("此账号的固定出口尚未配置")
         return None
     address = IPv4Address(expected)
     if not address.is_global or address.is_multicast:
-        raise ValueError("Reddit 登录需要固定公网 IPv4")
+        raise ValueError("账号登录需要固定公网 IPv4")
     with tx(aid) as c:
         agent = require_agent(c, aid, True)
         c.execute(
@@ -44,7 +45,7 @@ def assign_exit(aid, profile):
             (network_id, PROVIDER, SOCKET, str(address)),
         )
         if not route:
-            raise ValueError("Reddit 出口绑定已变化，需要重新核对")
+            raise ValueError("账号出口绑定已变化，需要重新核对")
         c.execute(
             """UPDATE lead.browser_profiles SET network_identity_id=%s
             WHERE id=%s AND network_identity_id IS DISTINCT FROM %s""",
