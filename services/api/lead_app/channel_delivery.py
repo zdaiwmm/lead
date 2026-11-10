@@ -106,19 +106,13 @@ def opportunity(c, target_id):
               AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(task.result->'source_urls') u
                           WHERE rtrim(u,'/')=rtrim(target.canonical_url,'/'))
             ORDER BY task.completed_at DESC,task.id DESC LIMIT 1
-        ) SELECT id,finding FROM latest CROSS JOIN LATERAL jsonb_array_elements(result->'findings') finding
-          WHERE result->>'channel_fit'='viable' AND rtrim(finding->>'source_url','/')=rtrim(canonical_url,'/')
-          ORDER BY finding->>'quote_id' LIMIT 1""",
+        ) SELECT id,result->'cold_entry' AS finding FROM latest
+          WHERE result->>'channel_fit'='viable' AND rtrim(result#>>'{cold_entry,source_url}','/')=rtrim(canonical_url,'/')""",
         (target_id,),
     )
     if row:
         finding = row["finding"]
-        key = fingerprint(
-            [
-                finding["source_url"].rstrip("/"),
-                finding.get("quote") or finding["observation"],
-            ]
-        )
+        key = fingerprint([finding["source_url"].rstrip("/"), finding["observation"]])
         consumed = one(
             c,
             """SELECT 1 FROM lead.tasks WHERE type LIKE '%%.publish'
@@ -132,6 +126,7 @@ def opportunity(c, target_id):
                 "source_key": key,
                 "source_url": finding["source_url"],
                 "observation": finding["observation"],
+                "sharing_rule": finding["sharing_rule"],
             }
     return None
 

@@ -103,9 +103,12 @@ def install_fixture_research(monkeypatch, actors):
         page = context["untrusted_observations"][0]
         passage = next(p for p in page["passages"] if "worksheet" in p["text"])
         fields = {}
-        if schema is operating_work.ChannelCheck:
+        if schema is operating_work.ColdStartCheck:
             assert "may share" in passage["text"]
             fields = {
+                "entry_open": True,
+                "demand_quote_id": passage["quote_id"],
+                "sharing_quote_id": passage["quote_id"],
                 "channel_fit": "viable",
                 "next_direction": "respond on the verified target",
             }
@@ -143,6 +146,7 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
         target = context["targets"][0]
         evidence = context["operating_plan"]["channel_opportunity"]
         assert evidence["source_url"] == target["canonical_url"]
+        assert "may share" in evidence["sharing_rule"]
         return model(
             action="publish",
             title="Shift planning worksheet",
@@ -434,6 +438,23 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
                 )
                 == 2
             )
+        # A previously inspected destination can gain a new demand after its cooldown.
+        # Refreshing stable text still cannot issue a second publication for the old demand.
+        from lead_app.operating_followups import reconcile
+
+        with tx(aid) as c:
+            c.execute("""UPDATE lead.tasks SET completed_at=now()-interval '7 hours'
+                WHERE type='operating.validate' AND input->>'platform'='reddit' AND state='succeeded'""")
+            agent = one(c, "SELECT * FROM lead.agents")
+            business = one(
+                c, "SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1"
+            )
+            assert reconcile(c, aid, agent, business, None, "reddit", revisit=True)
+            assert one(
+                c,
+                "SELECT id FROM lead.tasks WHERE type='operating.validate' AND state='planned' AND input->>'candidate_url'=%s",
+                (TARGETS["reddit"],),
+            )
         # Snapshot and restore the complete account inventory with the project at rest.
         import json
         import secrets
@@ -515,3 +536,27 @@ def test_node_schema_attestation_reads_actual_migration(site_database, monkeypat
         )
         with pytest.raises(ValueError, match="schema"):
             site.channel_schema_ready()
+
+
+def test_no_cold_opportunity_without_permission_and_observed_demand():
+    from lead_app.operating_work import ColdStartCheck, assess_cold_entry
+
+    report = ColdStartCheck.model_construct(
+        channel_fit="viable",
+        entry_open=True,
+        demand_quote_id=None,
+        sharing_quote_id="S1:L2",
+    )
+    observations = {"S1": {"url": TARGETS["reddit"]}}
+    quotes = {
+        "S1:L1": "We need shift coverage.",
+        "S1:L2": "Relevant worksheets are welcome.",
+    }
+    assert assess_cold_entry(report, observations, quotes) is None
+    report.demand_quote_id = "S1:L1"
+    report.entry_open = False
+    assert assess_cold_entry(report, observations, quotes) is None
+    report.entry_open = True
+    report.sharing_quote_id = "S2:L2"
+    with pytest.raises(ValueError, match="SOURCE_MISMATCH"):
+        assess_cold_entry(report, observations, quotes)

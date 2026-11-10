@@ -28,7 +28,7 @@ def unbound_source(c, platform, agent, business):
         t.input->>'candidate_url' AS url
         FROM lead.tasks t JOIN lead.social_accounts s ON s.platform=t.input->>'platform'
         WHERE t.type='operating.validate' AND t.state='succeeded' AND t.result->>'status'='observed'
-          AND t.result->>'channel_fit'='viable' AND t.result->'source_urls' ? (t.input->>'candidate_url')
+          AND t.result->>'channel_fit'='viable' AND t.result#>>'{cold_entry,source_url}'=t.input->>'candidate_url' AND t.result->'source_urls' ? (t.input->>'candidate_url')
           AND t.completed_at>now()-interval '14 days' AND t.input->>'business_profile_id'=%s
           AND t.input->>'config_revision'=%s AND s.platform=%s AND s.state='connected' AND s.automation_enabled
           AND NOT coalesce(t.result->'account_inspections','{}') ? (s.id::text||':'||s.binding_version::text)
@@ -150,7 +150,7 @@ def select(args):
         unbound = unbound_source(c, platform, agent, business)
         if unbound:
             return {"inspect": unbound}, None
-        if not reconcile(c, aid, agent, business, None, platform):
+        if not reconcile(c, aid, agent, business, None, platform, revisit=True):
             enqueue(
                 c,
                 aid,

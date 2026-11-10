@@ -958,9 +958,11 @@ async def connect(aid: UUID, body: Connection):
         )
         record(c, aid, "已打开账号登录窗口", body.platform)
         audit(c, aid, "browser.takeover.started", {"platform": body.platform})
+    from .channel_delivery import owns
+
     return {
         "takeover_id": takeover["id"],
-        "managed_target_start": profile["slot"] != "default" and body.platform in ("reddit","facebook"),
+        "managed_target_start": profile["slot"] != "default" and body.platform in ("reddit","facebook") and owns(a, body.platform),
         "account_id": account["id"] if account else None,
         "platform": body.platform,
         "status": "pending",

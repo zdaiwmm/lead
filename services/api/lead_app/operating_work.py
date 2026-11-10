@@ -303,6 +303,24 @@ class ChannelCheck(SourceReport):
     next_direction: str = Field(max_length=180)
 
 
+class ColdStartCheck(ChannelCheck):
+    demand_quote_id: str | None = Field(default=None, description="当前原文中具体使用者需求的 quote_id；只有主题或搜索摘要时留空")
+    sharing_quote_id: str | None = Field(default=None, description="同一原文中允许这种产品文字分享的规则 quote_id；只有管理权限或含糊规则时留空")
+    entry_open: bool = Field(description="入口当前可参与且需求未被充分解决；锁帖、过期、不明确或无增量帮助时为 false")
+
+
+def assess_cold_entry(report, observations, quotes):
+    if not isinstance(report, ColdStartCheck) or not report.entry_open or report.channel_fit != "viable":
+        return None
+    demand, rule = report.demand_quote_id, report.sharing_quote_id
+    if not demand or not rule:
+        return None
+    source = demand.partition(":")[0]
+    if demand not in quotes or rule not in quotes or source != rule.partition(":")[0] or source not in observations:
+        raise ValueError("OPERATING_SOURCE_MISMATCH")
+    return {"source_url":observations[source]["url"], "observation":quotes[demand], "sharing_rule":quotes[rule]}
+
+
 class StrategyOption(BaseModel):
     decision: StrategyDecision
     executor: Literal["public_research", "owned_content"] = "public_research"
@@ -799,8 +817,11 @@ async def execute(aid, task, *, observation_only=False):
                 "progress": "no_new_evidence",
                 "not_a_business_outcome": True,
             }
+        schema = ChannelCheck if kind == "validate" else SourceReport
+        if kind == "validate" and task["input"].get("channel_clock") and task["input"].get("platform") in ("reddit","facebook"):
+            schema = ColdStartCheck
         report = await run_model(
-            ChannelCheck if kind == "validate" else SourceReport,
+            schema,
             {**context, "untrusted_observations": annotated},
             agent_id=aid,
             purpose="research",
@@ -817,6 +838,7 @@ async def execute(aid, task, *, observation_only=False):
             raise ValueError("OPERATING_SOURCE_MISMATCH")
         return {
             **report.model_dump(),
+            **({"cold_entry": assess_cold_entry(report,by_id,quotes)} if schema is ColdStartCheck else {}),
             "observed_pages": [
                 {"key": key, "url": observed["url"]}
                 for key, observed in zip(pages, observations)
