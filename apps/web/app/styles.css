@@ -4193,3 +4193,17 @@ progress::-moz-progress-bar {
 /* Results and execution each occupy a complete workspace row. */
 .agent-canvas .workspace-overview { grid-template-columns: minmax(0, 1fr); }
 .workspace-overview > .group-execution { padding: 0; border: 0; background: none; box-shadow: none; }
+
+.dialog-body:has(> .workflow-guide-frame) {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  min-height: 0;
+}
+
+.workflow-guide-frame {
+  width: 100%;
+  height: min(74dvh, 820px);
+  min-height: 0;
+  border: 0;
+}

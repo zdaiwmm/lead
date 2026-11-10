@@ -30,6 +30,7 @@ import OperatingPlans from "./operating-plans";
 import AccountBrowser from "./account-browser";
 import SocialIcon from "./social-icon";
 import NewAgentDialog from "./website-agent-dialog";
+import WorkflowGuide from "./workflow-guide";
 import NotificationIndicator from "./notification-indicator";
 
 type Row = Record<string, any>;
@@ -469,6 +470,7 @@ export default function Lead() {
           ))}
         </nav>
         <div className="sidebar-bottom">
+          <WorkflowGuide />
           <NotificationIndicator />
           <a
             href="/admin"
