@@ -1,9 +1,0 @@
-# Site template for the ordinary browser unit. Render the three values locally
-# after verifying the project's bound IPv6 and its browser-only SOCKS socket.
-[Service]
-RuntimeDirectory=lead-browser-runtime
-RuntimeDirectoryMode=0700
-Environment=HOME=/run/lead-browser-runtime
-Environment=TMPDIR=/run/lead-browser-runtime
-BindReadOnlyPaths=@BROWSER_SOCKET_SOURCE@:/run/lead-egress/@BROWSER_SOCKET_NAME@
-Environment=LEAD_IPV6_TUNNEL_@PROJECT_UUID_HEX_UPPER@=socks5+unix:///run/lead-egress/@BROWSER_SOCKET_NAME@

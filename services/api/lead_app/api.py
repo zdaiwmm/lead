@@ -45,6 +45,7 @@ from .operating_workspace import router as operations_router
 from .ops import router as ops_router
 from .pixel_events import router as pixel_router
 from .promotion import CODE_PATTERN
+from .reddit_login import split_reddit_login
 from .scope import current_tenant, tenant_scope
 from .security import internal_token, token, valid
 from .telemetry import TelemetryMiddleware, trace_headers
@@ -643,11 +644,6 @@ def respond_card(aid: UUID, card_id: UUID, body: CardResponse):
     from .channels import accept_card
 
     return accept_card(str(aid), str(card_id), body.version, body.accepted)
-
-
-def split_reddit_login(aid):
-    projects = env().get("LEAD_SPLIT_REDDIT_LOGIN_AGENT_IDS") or ""
-    return str(aid) in {entry.strip() for entry in projects.split(",")}
 
 
 def login_browser_port(c, aid, path, body):

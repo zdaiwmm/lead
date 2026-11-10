@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import json
 
+from . import reddit_login
 from .config import STATE, env
 from .db import j, one, require_agent, tx, uid
 from .scope import current_tenant
@@ -112,6 +113,8 @@ async def check(actor):
         expected = env().get("LEAD_EXPECTED_IP_" + aid.replace("-", "").upper()) or (
             str(network["expected_ip"]) if network["expected_ip"] else None
         )
+        if network["provider_ref"] == reddit_login.PROVIDER:
+            expected = str(network["expected_ip"])
         result["fixed_proxy"] = bool(actor.forward_proxy.upstream)
         result["expected_ip_matches"] = bool(
             expected and len(ips) == 1 and expected in ips

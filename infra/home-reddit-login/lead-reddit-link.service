@@ -1,0 +1,25 @@
+[Unit]
+Description=Private Chamber Reddit IPv4 browser tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=lead-reddit-link
+Group=lead-r-app
+RuntimeDirectory=lead-reddit-egress
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0077
+LoadCredential=identity:/etc/lead-reddit-link/identity
+ExecStart=/usr/bin/ssh -F /dev/null -NT -p 19190 -i %d/identity -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o HostKeyAlias=35.72.111.159 -o UserKnownHostsFile=/etc/lead-reddit-link/known_hosts -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0117 -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -D /run/lead-reddit-egress/reddit-v4.sock lead-reddit-v4@127.0.0.1
+Restart=always
+RestartSec=5
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_UNIX
+[Install]
+WantedBy=multi-user.target

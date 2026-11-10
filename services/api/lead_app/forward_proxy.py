@@ -18,7 +18,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .config import CONFIG, STATE, env
+from .config import CONFIG, STATE
 
 
 class BrowserForwardProxy:
@@ -26,14 +26,6 @@ class BrowserForwardProxy:
         self.aid = aid
         self.upstream = upstream
         self.bound_ipv6 = (upstream or {}).get("server") == "bound-ipv6"
-        tunnel_key = "LEAD_IPV6_TUNNEL_" + aid.replace("-", "").upper()
-        self.ipv6_tunnel = env().get(tunnel_key)
-        if self.ipv6_tunnel:
-            from .managed_network import parse
-
-            if not self.bound_ipv6 or not self.ipv6_tunnel.startswith("socks5+unix://"):
-                raise ValueError("IPv6 隧道需要原绑定 IPv6 身份和专用 Unix socket")
-            parse(self.ipv6_tunnel)
         self.server = None
         self.unix_server = None
         self.socket_path = STATE / "sockets" / ((slot_id or aid) + ".sock")
@@ -140,14 +132,13 @@ class BrowserForwardProxy:
             )
             # For a source-bound exit, bind the DNS socket to that same address.
             # This also avoids sending an IPv6 literal through HTTP CONNECT.
-            local_bind = self.bound_ipv6 and not self.ipv6_tunnel
             transport = (
                 httpx.AsyncHTTPTransport(local_address=self.upstream["source"])
-                if local_bind
+                if self.bound_ipv6
                 else None
             )
             async with httpx.AsyncClient(
-                proxy=None if local_bind else proxy_url,
+                proxy=None if self.bound_ipv6 else proxy_url,
                 transport=transport,
                 timeout=12,
                 trust_env=False,
@@ -190,10 +181,10 @@ class BrowserForwardProxy:
         self.public_ip(ip)
         if not self.upstream:
             return await asyncio.wait_for(asyncio.open_connection(ip, port), 15)
-        upstream = urlsplit(self.ipv6_tunnel or self.upstream["server"])
+        upstream = urlsplit(self.upstream["server"])
         # There is intentionally no direct-connection fallback in any error path.
         try:
-            if self.bound_ipv6 and not self.ipv6_tunnel:
+            if self.bound_ipv6:
                 return await asyncio.wait_for(
                     asyncio.open_connection(
                         ip,
@@ -342,10 +333,6 @@ class BrowserForwardProxy:
                 await writer.drain()
                 return
             if method == "CONNECT":
-                # Some HTTP transports serialize a numeric IPv6 CONNECT without brackets.
-                if target.count(":") > 1 and not target.startswith("["):
-                    address, _, port_text = target.rpartition(":")
-                    target = f"[{ipaddress.IPv6Address(address)}]:{int(port_text)}"
                 authority = urlsplit("//" + target)
                 host, port = authority.hostname, authority.port or 443
                 if port != 443 or not host:
