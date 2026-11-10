@@ -20,12 +20,52 @@ class ChannelPreparationWorkflow:
     @workflow.run
     async def run(self, args: dict):
         try:
-            await workflow.execute_activity("prepare_channel_atom", args,
+            for attempt in range(8):
+                result = await workflow.execute_activity("prepare_channel_atom", args,
+                    start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)
+                if result != "control_busy":
+                    return
+                if attempt < 7:
+                    await workflow.sleep(min(60, 2 ** (attempt + 1)))
+            await workflow.execute_activity("close_channel_atom", args,
                 start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)
         except ActivityError:
             await workflow.execute_activity("close_channel_atom", args,
                 start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)
             raise
+
+
+@workflow.defn
+class ChannelDeliveryWorkflow:
+    @workflow.run
+    async def run(self, args: dict, pending_tick: str | None = None):
+        for _ in range(100):
+            pending_tick = pending_tick or str(workflow.uuid4())
+            try:
+                result = await workflow.execute_activity(
+                    "channel_research_tick" if args.get("lane")=="research" else "channel_delivery_tick", {**args, "tick": pending_tick},
+                    start_to_close_timeout=timedelta(minutes=8), retry_policy=RETRY,
+                )
+                if result.get("stop"):
+                    return
+                pending_tick = None
+                await workflow.sleep(max(1, float(result["delay"])))
+            except ActivityError:
+                try:
+                    result = await workflow.execute_activity(
+                        "park_channel_target",
+                        {**args, "tick": pending_tick},
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RETRY,
+                    )
+                    if result.get("stop"):
+                        return
+                    pending_tick = None
+                    await workflow.sleep(result["delay"])
+                except ActivityError:
+                    # A storage outage preserves the original tick across restarts.
+                    await workflow.sleep(60)
+        workflow.continue_as_new(args=[args, pending_tick])
 
 
 @workflow.defn

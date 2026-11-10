@@ -169,7 +169,7 @@ def install_profile(target, identifier, quarantine):
             raise ValueError("旧控制者未隔离")
         details = item["details"]
         profile = c.execute(
-            "SELECT * FROM lead.browser_profiles WHERE agent_id=%s", (aid,)
+            "SELECT * FROM lead.browser_profiles WHERE agent_id=%s AND slot='default'", (aid,)
         ).fetchone()
         if (
             not profile
@@ -179,8 +179,23 @@ def install_profile(target, identifier, quarantine):
         ):
             raise ValueError("Profile 不属于恢复目标")
         destination = Path(details["node_root"]) / "profiles" / aid
+        slots = c.execute(
+            "SELECT id,slot,config_hash FROM lead.browser_profiles WHERE agent_id=%s AND slot<>'default'",
+            (aid,),
+        ).fetchall()
+        saved_slots = manifest.get("account_profiles", {})
+        allowed = {str(slot["id"]): slot["config_hash"] for slot in slots}
+        physical_slots = {
+            name.split("/")[1]
+            for name in manifest["files"]
+            if name.startswith("accounts/")
+        }
+        if set(saved_slots) != physical_slots or any(
+            allowed.get(k) != v for k, v in saved_slots.items()
+        ):
+            raise ValueError("账号环境与恢复快照不符")
         if aid in details["installed"]:
-            if not (destination / "identity.json").is_file():
+            if any(not (destination / name).is_file() for name in manifest["files"]):
                 raise ValueError("已安装的环境缺失")
             return {"state": "installed", "agent_id": aid}
         marker = destination / "recovery-case.json"
@@ -214,7 +229,7 @@ def install_profile(target, identifier, quarantine):
                 shutil.rmtree(temporary)
         details["installed"].append(aid)
         c.execute(
-            "UPDATE lead.browser_profiles SET storage_ref=%s,config_ref=%s,state='stopped',node_id=%s WHERE agent_id=%s",
+            "UPDATE lead.browser_profiles SET storage_ref=%s,config_ref=%s,state='stopped',node_id=%s WHERE agent_id=%s AND slot='default'",
             (
                 str(destination / "storage"),
                 str(destination / "identity.json"),
@@ -273,28 +288,27 @@ async def release(target, identifier):
             ).fetchone()
             if not guard or guard["state"] != "recovery_required" or not proof:
                 raise ValueError("不能证明旧控制者仍被隔离")
-        active = c.execute(
-            "SELECT a.id FROM lead.agents a JOIN lead.browser_profiles p ON p.agent_id=a.id WHERE a.desired_state<>'archived'"
-        ).fetchall()
-        for agent in active:
-            # Profiles without a previous browser can be generated normally.
-            profile = c.execute(
-                "SELECT storage_ref FROM lead.browser_profiles WHERE agent_id=%s",
-                (agent["id"],),
-            ).fetchone()
-            if (
-                Path(profile["storage_ref"]).exists()
-                and str(agent["id"]) not in details["installed"]
+        from .account_profiles import directory
+
+        active = c.execute("""SELECT p.id,p.slot,p.agent_id,p.storage_ref FROM lead.browser_profiles p
+            JOIN lead.agents a ON a.id=p.agent_id WHERE a.desired_state<>'archived'""").fetchall()
+        for profile in active:
+            aid = str(profile["agent_id"])
+            destination = directory(aid, profile, Path(details["node_root"]))
+            if Path(profile["storage_ref"]).exists() and (
+                aid not in details["installed"]
+                or not (destination / "identity.json").is_file()
             ):
                 raise ValueError("仍有已有登录环境未安装到恢复节点")
-            destination = Path(details["node_root"]) / "profiles" / str(agent["id"])
             c.execute(
-                "UPDATE lead.browser_profiles SET storage_ref=%s,config_ref=%s,node_id=%s WHERE agent_id=%s",
+                """UPDATE lead.browser_profiles SET storage_ref=%s,config_ref=%s,node_id=%s
+                WHERE id=%s AND agent_id=%s""",
                 (
                     str(destination / "storage"),
                     str(destination / "identity.json"),
                     "recovery:" + identifier,
-                    agent["id"],
+                    profile["id"],
+                    aid,
                 ),
             )
         install_material(c, Path(details["node_root"]))

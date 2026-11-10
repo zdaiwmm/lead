@@ -561,3 +561,108 @@ def test_acquisition_scope_separates_page_entries_from_window_conversions(pixel,
     assert len(refresh_scope(tenant, aid)) == 1
     assert not refresh_scope(tenant, aid)
     assert client.get(base+"overview").json()["series"][-1]["pv"] == 2
+
+
+def test_channel_pilot_uses_actual_first_landing_and_server_identity(
+    pixel, monkeypatch
+):
+    from datetime import timedelta
+    from urllib.parse import parse_qs, urlsplit
+
+    from lead_app.first_entry import customers
+
+    aid, cid, client, _, _, key = pixel
+    monkeypatch.setenv("LEAD_CHANNEL_ATOM_AGENT_IDS", aid)
+    with tx(aid) as c:
+        c.execute(
+            """INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,description,product_url)
+            VALUES(%s,%s,1,'Pilot product','https://site.example')""",
+            (current_tenant(), aid),
+        )
+    markers = {}
+    for platform in ("reddit", "facebook"):
+        result = client.post(
+            f"/api/agents/{aid}/tracking-links",
+            headers=pixel[3],
+            json={"platform": platform, "destination_url": "https://site.example/"},
+        )
+        assert result.status_code == 200, result.text
+        markers[platform] = result.json()["public_code"]
+        assert markers[platform].startswith(
+            {"reddit": "rd_", "facebook": "fb_"}[platform]
+        )
+
+    def arrive(device, platform):
+        params = {}
+        if platform:
+            marker = markers[platform]
+            response = client.get(
+                "/r/" + marker,
+                follow_redirects=False,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            proof = parse_qs(urlsplit(response.headers["location"]).query)["lc"][0]
+            params = {"ref": marker, "click_token": proof}
+        response = send(pixel, anonymous_id=device, session_id=uid(), **params)
+        assert response.status_code == 200, response.text
+        return response.json()["attribution"]
+
+    def purchase(buyer, context):
+        body = {
+            "connection_id": cid,
+            "user_id": buyer,
+            "event_name": "Purchase",
+            "event_id": uid(),
+            "lead_attribution": context,
+            "properties": {"order_id": uid(), "value": 5, "currency": "CNY"},
+        }
+        for _ in range(2):
+            result = client.post(
+                "/collect/server/events",
+                json=body,
+                headers={"Authorization": "Bearer " + key},
+            )
+            assert result.status_code == 200, result.text
+
+    start = datetime.now(timezone.utc) - timedelta(seconds=1)
+    a, b, d = uid(), uid(), uid()
+    arrive(a, "reddit")
+    purchase("A", arrive(a, "facebook"))
+    purchase("B", arrive(b, "facebook"))
+    arrive(d, None)
+    purchase("D", arrive(d, "facebook"))
+    cutoff = datetime.now(timezone.utc)
+    purchase("A", arrive(a, "facebook"))
+    target = {"connection_id": cid, "name": "Purchase", "revision": 1}
+    with tx(aid) as c:
+        assert customers(c, target, start, datetime.now(timezone.utc)) == {
+            "channels": {"reddit": 1, "facebook": 1},
+            "unknown": 1,
+            "observed": 3,
+        }
+        assert customers(c, target, cutoff, datetime.now(timezone.utc))["observed"] == 0
+
+    response = client.post(
+        f"/api/agents/{aid}/plans/preferences",
+        headers=pixel[3],
+        json={
+            "expected_revision": 0,
+            "objective_event": "Purchase",
+            "acquisition_criteria": {"first_definition": "首次购买的新客户"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    result = client.get(f"/api/agents/{aid}/plans").json()
+    assert result["strategy"]["results_30d"]["first_entry"]["channels"] == {
+        "reddit": 1,
+        "facebook": 1,
+    }
+    # Two explicit business customers on one anonymous device make its earlier
+    # landing ambiguous. Neither can take credit for the shared device's channel.
+    purchase("E", arrive(b, "reddit"))
+    with tx(aid) as c:
+        assert customers(c, target, start, datetime.now(timezone.utc)) == {
+            "channels": {"reddit": 1},
+            "unknown": 3,
+            "observed": 4,
+        }

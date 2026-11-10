@@ -13,7 +13,7 @@ import logging
 import os
 import platform
 import time
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import urlsplit
@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from . import account_profiles
 from .adapters.catalog import SPECS
 from .config import BROWSER_BUILD, BROWSER_SDK, STATE, env, proxy_for
 from .db import j, one, record, require_agent, tx, uid
@@ -41,14 +42,17 @@ class BrowserBusy(ValueError):
 
 
 class Actor:
-    def __init__(self, aid):
+    def __init__(self, aid, profile=None):
         self.aid = aid
+        self.profile = profile or account_profiles.for_platform(aid, "lab")
+        self.folder = account_profiles.directory(aid, self.profile)
         self.lock = asyncio.Lock()
         self.used = time.monotonic()
         self.manager = None
         self.context = None
         self.page = None
         self.file = None
+        self.project_file = None
         self.session = None
         self.epoch = None
         self.research_pages = {}
@@ -56,7 +60,7 @@ class Actor:
         self.disconnected = False
         from .browser_metering import Counter
 
-        self.counter = Counter(STATE / "profiles" / aid / "storage")
+        self.counter = Counter(self.folder / "storage")
 
     def browser_closed(self, *_):
         self.disconnected = True
@@ -72,8 +76,10 @@ class Actor:
                 "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
             ):
                 raise BrowserBusy("环境正在备份，请稍后重试")
-        folder = STATE / "profiles" / self.aid
+        folder = self.folder
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.project_file = (STATE / "profiles" / self.aid / "profiles.lock").open("a")
+        fcntl.flock(self.project_file, fcntl.LOCK_SH | fcntl.LOCK_NB)
         self.file = (folder / "actor.lock").open("a")
         fcntl.flock(self.file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         identity = folder / "identity.json"
@@ -87,7 +93,12 @@ class Actor:
             )
             # Stable, native engine entropy avoids assigning indistinguishable
             # audio identities when fpgen happens to draw the same common device.
-            seed = int(hashlib.sha256(self.aid.encode()).hexdigest()[:8], 16) or 1
+            seed_key = (
+                self.aid
+                if self.profile["slot"] == "default"
+                else str(self.profile["id"])
+            )
+            seed = int(hashlib.sha256(seed_key.encode()).hexdigest()[:8], 16) or 1
             identity.write_text(
                 json.dumps(
                     {
@@ -123,7 +134,7 @@ class Actor:
                 sort_keys=True,
             ).encode()
         ).hexdigest()
-        self.forward_proxy = await BrowserForwardProxy(self.aid, proxy).start()
+        self.forward_proxy = await BrowserForwardProxy(self.aid, proxy, None if self.profile["slot"]=="default" else str(self.profile["id"])).start()
         launch_settings = dict(
             browser=BROWSER_BUILD,
             user_data_dir=str(folder / "storage"),
@@ -191,7 +202,7 @@ class Actor:
                 self.manager = AsyncCamoufox(
                     persistent_context=True,
                     from_options=network_namespace.apply(
-                        options, self.aid, self.forward_proxy
+                        options, self.aid, self.forward_proxy, folder / "storage"
                     ),
                 )
             else:
@@ -220,14 +231,14 @@ class Actor:
             )
             with tx(self.aid) as c:
                 a = require_agent(c, self.aid, True)
-                profile = one(c, "SELECT * FROM lead.browser_profiles")
+                profile = self.profile
                 c.execute(
-                    "UPDATE lead.browser_sessions SET state='closed',ended_at=now() WHERE ended_at IS NULL"
+                    "UPDATE lead.browser_sessions SET state='closed',ended_at=now() WHERE ended_at IS NULL AND profile_id=%s", (profile['id'],)
                 )
                 lease = one(
                     c,
-                    "UPDATE lead.profile_leases SET epoch=epoch+1,owner_node_id='local',owner_actor_id=%s,control_version=%s,state='held',expires_at=now()+interval '90 seconds' RETURNING epoch",
-                    (str(os.getpid()), a["control_version"]),
+                    "UPDATE lead.profile_leases SET epoch=epoch+1,owner_node_id='local',owner_actor_id=%s,control_version=%s,state='held',expires_at=now()+interval '90 seconds' WHERE profile_id=%s RETURNING epoch",
+                    (str(os.getpid()), a["control_version"], profile["id"]),
                 )
                 self.epoch = lease["epoch"]
                 self.session = uid()
@@ -248,16 +259,21 @@ class Actor:
                     (digest, BROWSER_BUILD, BROWSER_SDK, profile["id"]),
                 )
                 c.execute(
-                    "UPDATE lead.network_identities SET mode=%s,state=%s WHERE id=%s",
+                    """UPDATE lead.network_identities SET mode=%s,state=%s WHERE id=%s
+                    AND NOT (state='verified' AND mode=%s AND coalesce(valid_until>now(),false))""",
                     (
                         "dedicated" if proxy else "shared_development",
                         "pending",
                         profile["network_identity_id"],
+                        "dedicated" if proxy else "shared_development",
                     ),
                 )
                 # A crash between a click and acknowledgement always reconciles.
                 c.execute(
-                    "UPDATE lead.actions SET state='unknown' WHERE state='dispatching'"
+                    """UPDATE lead.actions SET state='unknown' WHERE state='dispatching' AND target_id IN
+                    (SELECT t.id FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id
+                     WHERE s.profile_id=%s)""",
+                    (profile["id"],),
                 )
             self.measure()
         except BaseException:
@@ -323,14 +339,17 @@ class Actor:
                         (self.session,),
                     )
                     c.execute(
-                        "UPDATE lead.profile_leases SET state='released',expires_at=now() WHERE epoch=%s",
-                        (self.epoch,),
+                        "UPDATE lead.profile_leases SET state='released',expires_at=now() WHERE epoch=%s AND profile_id=%s",
+                        (self.epoch, self.profile["id"]),
                     )
-                    c.execute("UPDATE lead.browser_profiles SET state='stopped'")
+                    c.execute("UPDATE lead.browser_profiles SET state='stopped' WHERE id=%s",(self.profile["id"],))
         finally:
             if self.file:
                 self.file.close()
                 self.file = None
+            if self.project_file:
+                self.project_file.close()
+                self.project_file = None
 
     def touch(self):
         self.used = time.monotonic()
@@ -363,7 +382,20 @@ class Actor:
 
         if platform not in ("lab", "telegram") and platform not in SPECS:
             raise ValueError("该频道的自动发布适配尚未开放")
-        a = require_agent(c, self.aid, True)
+        if self.profile["slot"] == "default":
+            a = require_agent(c, self.aid, True)
+        else:
+            a = one(c, "SELECT * FROM lead.agents WHERE id=%s FOR SHARE", (self.aid,))
+            if not a or a["desired_state"] == "archived":
+                raise ValueError("Agent 不可运行")
+        task = None
+        if action.get("task_id"):
+            task = one(c, "SELECT input->'channel_clock' AS clock FROM lead.tasks WHERE id=%s", (action["task_id"],))
+        if task and task["clock"]:
+            from .channel_delivery import current
+
+            if not current(c, self.aid, task["clock"]):
+                raise ValueError("此渠道已停用或重新启动，旧任务不能提交")
         if not account_setup and action["intent"].get("body"):
             from .promotion import promoter_copy_ok, promoter_voice
             if promoter_voice(a) and not promoter_copy_ok((action["intent"].get("title") or "") + "\n" + action["intent"]["body"], a["name"]):
@@ -376,13 +408,13 @@ class Actor:
             raise ValueError("Agent 已暂停、被接管或配置已更改")
         if one(
             c,
-            "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now()",
+            "SELECT 1 FROM lead.takeover_sessions WHERE profile_id=%s AND state IN ('requested','active','ending') AND expires_at>now()", (self.profile["id"],)
         ):
             raise ValueError("用户正在接管")
         lease = one(
             c,
-            "SELECT * FROM lead.profile_leases WHERE epoch=%s AND state='held' AND expires_at>now()",
-            (self.epoch,),
+            "SELECT * FROM lead.profile_leases WHERE epoch=%s AND state='held' AND expires_at>now() AND profile_id=%s",
+            (self.epoch, self.profile["id"]),
         )
         if not lease:
             raise ValueError("浏览器控制租约已失效")
@@ -482,10 +514,8 @@ class Actor:
                 if used >= maximum:
                     raise ValueError("此频道已达到今天的发布上限")
             if env().get("LEAD_DEPLOYMENT_MODE") == "production":
-                if not one(
-                    c,
-                    "SELECT 1 FROM lead.identity_checks i JOIN lead.network_identities n ON n.id=i.network_identity_id WHERE i.result='passed' AND i.valid_until>now() AND n.mode='dedicated' AND n.state='verified'",
-                ):
+                from .identity import verified_profile
+                if not verified_profile(c, self.profile["id"]):
                     raise ValueError("独立出口与设备验证尚未通过")
         return a
 
@@ -959,40 +989,49 @@ class Gateway:
         return self.keep_preparation(aid, session_id)
 
     async def evict_idle(self):
-        for aid, actor in sorted(
+        for key, actor in sorted(
             list(self.actors.items()), key=lambda pair: pair[1].used
         ):
             if actor.lock.locked() or actor.research_pages:
                 continue
-            with tx(aid) as c:
+            with tx(actor.aid) as c:
                 if one(
                     c,
-                    "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now()",
+                    "SELECT 1 FROM lead.takeover_sessions WHERE browser_session_id=%s AND state IN ('requested','active','ending') AND expires_at>now()", (actor.session,)
                 ):
                     continue
                 if private_preparation(c, actor.session):
                     continue
-            await self.close(aid)
+            await self.close_one(actor.aid, key)
             return
 
     @scoped_agent_method
-    async def get(self, aid):
+    async def get(self, aid, profile_id=None):
         aid = str(UUID(aid))
-        async with self.locks.setdefault(aid, asyncio.Lock()):
+        with tx(aid) as c:
+            profile = (
+                one(c, "SELECT * FROM lead.browser_profiles WHERE id=%s", (profile_id,))
+                if profile_id
+                else one(c, "SELECT * FROM lead.browser_profiles WHERE slot='default'")
+            )
+        if not profile:
+            raise ValueError("账号浏览器环境不存在")
+        key = aid if profile["slot"] == "default" else str(profile["id"])
+        async with self.locks.setdefault(key, asyncio.Lock()):
             with tx(aid) as c:
                 if one(
                     c,
                     "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
                 ):
                     raise BrowserBusy("此环境正在备份，请稍后重试")
-            if aid in self.actors:
-                existing = self.actors[aid]
+            if key in self.actors:
+                existing = self.actors[key]
                 if not existing.disconnected:
                     existing.touch()
                     return existing
                 if existing.lock.locked():
                     raise BrowserBusy("浏览器正在恢复，请稍后重试")
-                self.actors.pop(aid)
+                self.actors.pop(key)
                 try:
                     await existing.close()
                 finally:
@@ -1004,7 +1043,7 @@ class Gateway:
                 await asyncio.wait_for(self.slots.acquire(), timeout=90)
             finally:
                 self.waiting -= 1
-            actor = Actor(aid)
+            actor = Actor(aid, profile)
             try:
                 await actor.launch()
             except BaseException:
@@ -1013,13 +1052,18 @@ class Gateway:
                 finally:
                     self.slots.release()
                 raise
-            self.actors[aid] = actor
+            self.actors[key] = actor
             return actor
 
     @scoped_agent_method
     async def close(self, aid):
-        async with self.locks.setdefault(aid, asyncio.Lock()):
-            actor = self.actors.pop(aid, None)
+        for key, actor in list(self.actors.items()):
+            if actor.aid == str(aid):
+                await self.close_one(aid, key)
+
+    async def close_one(self, aid, key):
+        async with self.locks.setdefault(key, asyncio.Lock()):
+            actor = self.actors.pop(key, None)
             if actor:
                 try:
                     async with actor.lock:
@@ -1033,28 +1077,29 @@ class Gateway:
                 await asyncio.sleep(20)
                 if self.waiting:
                     await self.evict_idle()
-                for aid, actor in list(self.actors.items()):
+                for key, actor in list(self.actors.items()):
+                    aid=actor.aid
                     try:
                         if actor.disconnected and not actor.lock.locked():
-                            await self.close(aid)
+                            await self.close_one(aid, key)
                         elif (
                             actor.lock.locked()
                             or actor.research_pages
-                            or self.locks[aid].locked()
+                            or self.locks[key].locked()
                             or self.keep_idle(aid, actor.session, time.monotonic() - actor.used)
                         ):
                             actor.measure()
                             with tx(aid) as c:
                                 c.execute(
-                                    "UPDATE lead.profile_leases SET expires_at=now()+interval '90 seconds' WHERE epoch=%s AND state='held'",
-                                    (actor.epoch,),
+                                    "UPDATE lead.profile_leases SET expires_at=now()+interval '90 seconds' WHERE epoch=%s AND profile_id=%s AND state='held'",
+                                    (actor.epoch, actor.profile["id"]),
                                 )
                                 c.execute(
                                     "UPDATE lead.browser_sessions SET heartbeat_at=now() WHERE id=%s",
                                     (actor.session,),
                                 )
                         else:
-                            await self.close(aid)
+                            await self.close_one(aid, key)
                     except Exception:
                         logging.warning(
                             "Browser maintenance unavailable; next cycle retries."
@@ -1069,7 +1114,7 @@ async def lifespan(app):
     maintenance = asyncio.create_task(gateway.maintenance())
     yield
     maintenance.cancel()
-    for aid in list(gateway.actors):
+    for aid in {actor.aid for actor in gateway.actors.values()}:
         await gateway.close(aid)
 
 
@@ -1099,6 +1144,7 @@ async def auth(request, call_next):
 
 class OpenRequest(BaseModel):
     platform: str = "lab"
+    account_id: UUID | None = None
 
 
 class PublishRequest(BaseModel):
@@ -1129,7 +1175,10 @@ class TelegramTargetRequest(BaseModel):
 async def inspect_account(aid: UUID, body: OpenRequest):
     from .adapters import get_adapter
 
-    actor = await gateway.get(str(aid))
+    profile = account_profiles.for_platform(
+        str(aid), body.platform, account_id=body.account_id
+    )
+    actor = await gateway.get(str(aid)) if profile["slot"]=="default" else await gateway.get(str(aid),profile["id"])
     async with actor.lock:
         if body.platform == "telegram":
             from . import telegram
@@ -1289,10 +1338,10 @@ async def inspect_target(aid: UUID, body: TelegramTargetRequest):
             raise HTTPException(404, "已连接账号不存在")
         if one(
             c,
-            "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('active','requested','ending') AND expires_at>now()",
+            "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('active','requested','ending') AND expires_at>now() AND profile_id=%s",(account['profile_id'],)
         ):
             raise ValueError("请先结束浏览器接管")
-    actor = await gateway.get(aid)
+    actor = await gateway.get(aid, account["profile_id"])
     async with actor.lock:
         return await get_adapter(account["platform"]).target(
             actor.page, body.url, account["external_account_id"]
@@ -1319,7 +1368,7 @@ async def tiktok_diagnostic(aid: UUID):
             "SELECT 1 FROM lead.social_accounts WHERE platform='tiktok' AND state='connected'",
         ):
             raise HTTPException(404, "没有已连接的 TikTok 账号")
-    actor = await gateway.get(aid)
+    actor = await gateway.get(aid,account_profiles.for_platform(aid,"tiktok")["id"])
     async with actor.lock:
         if urlsplit(actor.page.url).hostname not in {"www.tiktok.com", "tiktok.com"}:
             return {"state": "off_platform"}
@@ -1384,11 +1433,11 @@ async def publish_action(aid: UUID, body: PublishRequest):
     aid = str(aid)
     with tx(aid) as c:
         action = one(
-            c, "SELECT intent FROM lead.actions WHERE id=%s", (body.action_id,)
+            c, "SELECT a.intent,s.profile_id FROM lead.actions a JOIN lead.account_targets t ON t.id=a.target_id JOIN lead.social_accounts s ON s.id=t.account_id WHERE a.id=%s", (body.action_id,)
         )
         if not action:
             raise HTTPException(404)
-    actor = await gateway.get(aid)
+    actor = await gateway.get(aid,action["profile_id"])
     if (
         action["intent"].get("platform") in SPECS
         and env().get("LEAD_DEPLOYMENT_MODE") == "production"
@@ -1439,7 +1488,7 @@ async def reload_publishing_adapter(aid: UUID, body: PublishRequest):
     from .adapters import web
 
     aid = str(aid)
-    actor = await gateway.get(aid)
+    actor = await gateway.get(aid,account_profiles.for_platform(aid,"tiktok")["id"])
     async with actor.lock:
         with tx(aid) as c:
             action = one(c, "SELECT * FROM lead.actions WHERE id=%s", (body.action_id,))
@@ -1455,24 +1504,30 @@ async def reload_publishing_adapter(aid: UUID, body: PublishRequest):
     return {"ok": True, "session_id": actor.session, "action_id": body.action_id}
 
 
+def research_profile(aid, run_id):
+    with tx(aid) as c:
+        row = one(c, """SELECT t.input->>'channel_profile_id' AS profile_id
+            FROM lead.browser_runs r LEFT JOIN lead.tasks t ON t.id=r.task_id WHERE r.id=%s""", (run_id,))
+        if not row:
+            raise HTTPException(404, "浏览任务不存在")
+        return row["profile_id"]
+
+
 @app.post("/agents/{aid}/research/command")
 async def research_command(aid: UUID, body: ResearchCommand):
     from .research import ResearchPage
 
     aid = str(aid)
     run_id = str(body.run_id)
-    with tx(aid) as c:
-        require_agent(c, aid)
-        if not one(c, "SELECT id FROM lead.browser_runs WHERE id=%s", (run_id,)):
-            raise HTTPException(404, "浏览任务不存在")
-    actor = await gateway.get(aid)
+    actor = await gateway.get(aid, research_profile(aid, run_id))
     controller = actor.research_pages.setdefault(run_id, ResearchPage(actor, run_id))
     return await controller.command(body.operation, body.args, str(body.command_id))
 
 
 @app.post("/agents/{aid}/research/{rid}/close")
 async def close_research(aid: UUID, rid: UUID):
-    actor = gateway.actors.get(str(aid))
+    actor = next((actor for actor in gateway.actors.values()
+                  if actor.aid == str(aid) and str(rid) in actor.research_pages), None)
     if actor:
         async with actor.lock:
             controller = actor.research_pages.pop(str(rid), None)
@@ -1487,7 +1542,7 @@ async def close_research(aid: UUID, rid: UUID):
 async def start_hybrid_research(aid: UUID, rid: UUID):
     from .hybrid_research import HybridResearchPage
 
-    actor = await gateway.get(str(aid))
+    actor = await gateway.get(str(aid), research_profile(str(aid), rid))
     async with actor.lock:
         controller = actor.research_pages.setdefault(
             str(rid), HybridResearchPage(actor, str(rid))
@@ -1517,7 +1572,10 @@ async def check_identity(aid: UUID):
 
 @app.post("/agents/{aid}/open")
 async def open_browser(aid: str, body: OpenRequest):
-    actor = await gateway.get(aid)
+    profile = account_profiles.for_platform(
+        aid, body.platform, create=True, account_id=body.account_id
+    )
+    actor = await gateway.get(aid,profile["id"])
     if body.platform != "lab" and env().get("LEAD_DEPLOYMENT_MODE") == "production":
         from .identity import check
 
@@ -1532,7 +1590,7 @@ async def open_browser(aid: str, body: OpenRequest):
         if not url:
             raise HTTPException(400, "未知频道")
         await actor.page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        return {"url": actor.page.url, "session_id": actor.session}
+        return {"url": actor.page.url, "session_id": actor.session,"profile_id":str(actor.profile["id"])}
 
 
 @app.post("/agents/{aid}/publish-lab")
@@ -1554,7 +1612,7 @@ def require_takeover(aid, actor, takeover):
 
 @app.get("/agents/{aid}/screenshot")
 async def screenshot(aid: str, format: str = "png", takeover: UUID | None = None):
-    actor = await gateway.get(aid)
+    actor = await gateway.get(aid,account_profiles.takeover_profile(aid,takeover) if takeover else None)
     async with actor.lock:
         if takeover:
             require_takeover(aid, actor, takeover)
@@ -1582,7 +1640,7 @@ async def page_status(aid: UUID):
 
 @app.post("/agents/{aid}/input")
 async def user_input(aid: str, body: InputRequest):
-    actor = await gateway.get(aid)
+    actor = await gateway.get(aid,account_profiles.takeover_profile(aid,body.takeover) if body.takeover else None)
     async with actor.lock:
         require_takeover(aid, actor, body.takeover)
         if body.kind == "click":
@@ -1638,18 +1696,18 @@ async def begin_backup(aid: UUID, body: BackupRequest | None = None):
     from .backups import claim_profile_backup
 
     aid = str(aid)
-    async with gateway.locks.setdefault(aid, asyncio.Lock()):
-        actor = gateway.actors.get(aid)
-        async with actor.lock if actor else nullcontext():
-            guard_id = claim_profile_backup(
-                aid, allow_running=body.automated if body else False
+    guard_id = claim_profile_backup(
+        aid, allow_running=body.automated if body else False
+    )
+    try:
+        await gateway.close(aid)
+    except BaseException:
+        with tx(aid) as c:
+            c.execute(
+                "UPDATE lead.profile_maintenance SET state='complete' WHERE id=%s",
+                (guard_id,),
             )
-            if actor:
-                try:
-                    await actor.close()
-                finally:
-                    gateway.actors.pop(aid, None)
-                    gateway.slots.release()
+        raise
     return {"guard_id": guard_id}
 
 

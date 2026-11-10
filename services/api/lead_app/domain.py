@@ -246,8 +246,10 @@ def update_setup(aid, profile, expected_revision):
     return {"id": aid, "config_revision": revision}
 
 
-def complete_setup(aid):
-    with tx(aid) as c:
+def complete_setup(aid, *, connection=None):
+    from contextlib import nullcontext
+
+    with (nullcontext(connection) if connection is not None else tx(aid)) as c:
         a = require_agent(c, aid, True)
         if not a["onboarding_state"].get("setup_pending"):
             return {"id": aid}
@@ -322,7 +324,7 @@ def agent_detail(aid):
         )
         a["profile"] = one(
             c,
-            "SELECT id,provider,engine_version,config_hash,state FROM lead.browser_profiles",
+            "SELECT id,provider,engine_version,config_hash,state FROM lead.browser_profiles WHERE slot='default'",
         )
         a["network"] = one(
             c,
@@ -627,23 +629,33 @@ def control_in_tx(c, aid, action, platform=None, only_setup=False):
             "archive": "已归档",
         }[action],
     )
+    if state == "running":
+        from .atomic_dispatch import refresh_connected
+
+        refresh_connected(c, aid)
     emit(c, aid, "supervisor.wake")
     return True
 
 
-def channel_control(aid, platform, enabled):
+def channel_control(aid, platform, enabled, *, connection=None, start_account=None):
+    from contextlib import nullcontext
+
+    if start_account and not enabled:
+        raise ValueError("绑定入口只能启动本账号")
     if platform not in [p[0] for p in PLATFORMS]:
         raise ValueError("社媒不存在")
-    with tx(aid) as c:
+    with (nullcontext(connection) if connection is not None else tx(aid)) as c:
         agent = require_agent(c, aid, True)
         if enabled and agent["onboarding_state"].get("setup_pending"):
             raise ValueError("请先完成渠道连接和 Agent 创建流程")
         account = one(
             c,
-            "SELECT * FROM lead.social_accounts WHERE platform=%s ORDER BY created_at DESC LIMIT 1",
-            (platform,),
+            """SELECT * FROM lead.social_accounts WHERE platform=%s AND (%s::uuid IS NULL OR id=%s)
+            ORDER BY (state='connected') DESC,created_at DESC LIMIT 1""",
+            (platform,start_account,start_account),
         )
-        if not account or account["state"] != "connected":
+        allowed_states = {"connected"} if enabled else {"connected", "needs_auth", "restricted"}
+        if not account or account["state"] not in allowed_states:
             raise ValueError("请先连接并登录此社媒账号")
         if enabled and agent["desired_state"] != "running":
             from .admin_operations import reset_failures
@@ -654,24 +666,30 @@ def channel_control(aid, platform, enabled):
             if not task_connection(c, aid)[0]["key"]:
                 raise ValueError("运营模型尚未配置凭据，请让所有者在后台检查模型服务")
             c.execute(
-                "UPDATE lead.social_accounts SET automation_enabled=(platform=%s) WHERE platform<>'lab'",
-                (platform,),
+                """UPDATE lead.social_accounts SET automation_enabled=(platform=%s AND (%s::uuid IS NULL OR id=%s))
+                WHERE platform<>'lab'""", (platform,start_account,start_account),
             )
             c.execute(
                 "UPDATE lead.agents SET desired_state='running',health_state='queued',control_version=control_version+1,version=version+1,updated_at=now() WHERE id=%s",
                 (aid,),
             )
             c.execute(
-                "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending')"
+                """UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending')
+                AND (%s::uuid IS NULL OR profile_id=%s)""", (start_account,account["profile_id"])
             )
         c.execute(
-            "UPDATE lead.social_accounts SET automation_enabled=%s WHERE platform=%s",
-            (enabled, platform),
+            "UPDATE lead.social_accounts SET automation_enabled=%s WHERE platform=%s AND (%s::uuid IS NULL OR id=%s)",
+            (enabled, platform,start_account,start_account),
         )
         if not enabled:
             c.execute(
                 "UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE state IN ('planned','queued') AND (input->>'platform'=%s OR input->>'account_id'=%s OR input->>'target_id' IN (SELECT id::text FROM lead.account_targets WHERE account_id=%s))",
                 (platform, str(account["id"]), account["id"]),
+            )
+            c.execute(
+                """UPDATE lead.tasks SET state='canceled',completed_at=now()
+                   WHERE type='dispatch.channel' AND state='waiting_user' AND input->>'platform'=%s""",
+                (platform,),
             )
         else:
             from .account_setup import delegate_accounts
@@ -683,6 +701,9 @@ def channel_control(aid, platform, enabled):
             "channel.resumed" if enabled else "channel.paused",
             {"platform": platform},
         )
+        from .atomic_dispatch import refresh_connected
+
+        refresh_connected(c, aid)
         record(c, aid, "已启动此社媒运营" if enabled else "已暂停此社媒运营", platform)
         emit(c, aid, "supervisor.wake")
     return {"ok": True}
@@ -785,7 +806,7 @@ def connect_lab(aid):
         existing = one(c, "SELECT id FROM lead.social_accounts WHERE platform='lab'")
         if existing:
             return
-        profile = one(c, "SELECT id FROM lead.browser_profiles")
+        profile = one(c, "SELECT id FROM lead.browser_profiles WHERE slot='default'")
         account, target = uid(), uid()
         c.execute(
             "INSERT INTO lead.social_accounts(id,tenant_id,agent_id,profile_id,platform,external_account_id,display_name,state,verified_at) VALUES(%s,%s,%s,%s,'lab',%s,'本地测试站','connected',now())",

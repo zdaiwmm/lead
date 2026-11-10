@@ -25,11 +25,13 @@ async def execute(actor, action_id):
                 return {"state": action["state"]}
             target = one(
                 c,
-                "SELECT t.*,s.external_account_id,s.platform FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id WHERE t.id=%s",
+                "SELECT t.*,s.external_account_id,s.profile_id,s.platform FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id WHERE t.id=%s",
                 (action["target_id"],),
             )
             if not target:
                 raise ScopeChanged("授权目标不存在")
+            if str(target["profile_id"]) != str(actor.profile["id"]):
+                raise ScopeChanged("账号与执行环境不匹配")
             preparation = one(
                 c,
                 "SELECT * FROM lead.publish_preparations WHERE action_id=%s",
@@ -58,7 +60,7 @@ async def execute(actor, action_id):
             )
             if one(
                 c,
-                "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now()",
+                "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now() AND profile_id=%s", (actor.profile['id'],)
             ):
                 return {
                     "state": "confirmed"
@@ -344,11 +346,8 @@ def gate(actor, c, action):
     platform = action["intent"]["platform"]
     spec = SPECS[platform]
     from .config import env
-
-    if env().get("LEAD_DEPLOYMENT_MODE") == "production" and not one(
-        c,
-        "SELECT 1 FROM lead.identity_checks i JOIN lead.network_identities n ON n.id=i.network_identity_id JOIN lead.browser_profiles p ON p.id=i.profile_id AND p.config_hash=i.config_hash AND p.engine_version=i.engine_version AND p.network_identity_id=n.id WHERE i.result='passed' AND i.valid_until>now() AND n.valid_until>now() AND n.expected_ip=i.observed_ip AND n.mode='dedicated' AND n.state='verified'",
-    ):
+    from .identity import verified_profile
+    if env().get("LEAD_DEPLOYMENT_MODE") == "production" and not verified_profile(c, actor.profile["id"]):
         raise ScopeChanged("独立出口与设备验证尚未通过")
     if (
         not target
@@ -380,6 +379,12 @@ def gate(actor, c, action):
         "SELECT * FROM lead.authorization_grants WHERE id=%s AND revoked_at IS NULL",
         (action["grant_id"],),
     )
+    scope_id = grant["limits"].get("managed_scope_id")
+    if scope_id and not one(c, """SELECT 1 FROM lead.interaction_cards scope JOIN lead.social_accounts s
+            ON s.id::text=scope.payload->>'account_id' AND s.external_account_id=scope.payload->>'external_account_id'
+            WHERE scope.id=%s AND s.id=%s AND scope.state='accepted' AND scope.type='manage_account'
+            AND scope.payload->>'source'='managed_target_binding' AND scope.expires_at>now()""", (scope_id,target["account_id"])):
+        raise ScopeChanged("账号文字发布委托已失效")
     if action["intent"].get("media") and "upload_media" not in grant["allowed_actions"]:
         raise ScopeChanged("授权范围不包含媒体上传")
     kind = action["intent"].get("format", "text")

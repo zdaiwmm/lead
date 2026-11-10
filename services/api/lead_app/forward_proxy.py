@@ -22,19 +22,19 @@ from .config import CONFIG, STATE
 
 
 class BrowserForwardProxy:
-    def __init__(self, aid, upstream=None):
+    def __init__(self, aid, upstream=None, slot_id=None):
         self.aid = aid
         self.upstream = upstream
         self.bound_ipv6 = (upstream or {}).get("server") == "bound-ipv6"
         self.server = None
         self.unix_server = None
-        self.socket_path = STATE / "sockets" / (aid + ".sock")
+        self.socket_path = STATE / "sockets" / ((slot_id or aid) + ".sock")
         self.port = None
         self.boundary_nonce = os.urandom(32).hex()
         self.boundary = None
         self.password = hmac.new(
             CONFIG["session_secret"].encode(),
-            ("forward:" + aid).encode(),
+            ("forward:" + (slot_id or aid)).encode(),
             hashlib.sha256,
         ).hexdigest()
         self.cache = {}

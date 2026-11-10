@@ -1,6 +1,7 @@
 """Owner-scoped account binding, targets, versioned grants and probe cards."""
 
 import secrets
+from contextlib import nullcontext
 
 import psycopg
 
@@ -28,7 +29,7 @@ def disconnect_account(aid, account_id, expected_verified_at):
         if account["state"] == "disconnected":
             return {"ok": True, "duplicate": True}
         c.execute(
-            "UPDATE lead.social_accounts SET state='disconnected',automation_enabled=false WHERE id=%s",
+            "UPDATE lead.social_accounts SET state='disconnected',automation_enabled=false,binding_version=binding_version+1 WHERE id=%s",
             (account_id,),
         )
         c.execute(
@@ -54,20 +55,25 @@ def disconnect_account(aid, account_id, expected_verified_at):
         c.execute(
             """UPDATE lead.tasks t SET state='canceled',completed_at=now(),version=version+1
             WHERE t.state IN ('planned','queued','running','waiting_user') AND
-              (t.input->>'platform'=%s OR t.input->>'account_id'=%s OR
+              ((t.input->>'platform'=%s AND NOT EXISTS(SELECT 1 FROM lead.social_accounts sibling WHERE sibling.platform=%s AND sibling.automation_enabled AND sibling.state='connected')) OR t.input->>'account_id'=%s OR
                t.input->>'target_id' IN (SELECT id::text FROM lead.account_targets WHERE account_id=%s) OR
                EXISTS(SELECT 1 FROM lead.actions a JOIN lead.account_targets target ON target.id=a.target_id
                       WHERE a.task_id=t.id AND target.account_id=%s))
               AND NOT EXISTS(SELECT 1 FROM lead.actions a WHERE a.task_id=t.id AND a.state IN ('dispatching','unknown'))""",
-            (account["platform"], str(account_id), account_id, account_id),
+            (account["platform"], account["platform"], str(account_id), account_id, account_id),
         )
-        # The browser commit gate takes the same agent lock before any submission.
+        isolated = one(
+            c,
+            "SELECT slot<>'default' AS yes FROM lead.browser_profiles WHERE id=%s",
+            (account["profile_id"],),
+        )["yes"]
+        # The browser commit gate and disconnect conflict on the same project control row.
         c.execute(
-            "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+1,version=version+1,updated_at=now() WHERE id=%s",
-            (aid,),
+            "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+%s,version=version+1,updated_at=now() WHERE id=%s",
+            (0 if isolated else 1, aid),
         )
         c.execute(
-            "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending')"
+            "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending') AND profile_id=%s",(account["profile_id"],)
         )
         audit(
             c,
@@ -81,7 +87,7 @@ def disconnect_account(aid, account_id, expected_verified_at):
 
 
 def store_account(
-    aid, platform, observed, prompt_target=True, *, expected_control_version=None
+    aid, platform, observed, prompt_target=True, *, expected_control_version=None, expected_binding=None
 ):
     with tx(aid) as c:
         agent = require_agent(c, aid, True)
@@ -92,11 +98,20 @@ def store_account(
             raise ValueError("账号连接已变化，请重新打开登录窗口并验证")
         account = one(
             c,
-            "SELECT * FROM lead.social_accounts WHERE platform=%s ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
-            (platform,),
+            "SELECT * FROM lead.social_accounts WHERE platform=%s AND (%s::uuid IS NULL OR id=%s) ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+            (
+                platform,
+                expected_binding[0] if expected_binding else None,
+                expected_binding[0] if expected_binding else None,
+            ),
         )
         if not account:
             raise ValueError("请先打开此账号的连接窗口")
+        if (
+            expected_binding is not None
+            and (str(account["id"]), account["binding_version"]) != expected_binding
+        ):
+            raise ValueError("账号连接已变化，请重新验证")
         if (
             account["external_account_id"]
             and account["external_account_id"] != observed["external_account_id"]
@@ -116,12 +131,12 @@ def store_account(
                 (str(account["id"]),),
             )
             c.execute(
-                "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+1 WHERE id=%s",
-                (aid,),
+                "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+CASE WHEN EXISTS (SELECT 1 FROM lead.browser_profiles WHERE id=%s AND slot='default') THEN 1 ELSE 0 END WHERE id=%s",
+                (account["profile_id"], aid),
             )
         try:
             c.execute(
-                "UPDATE lead.social_accounts SET external_account_id=%s,display_name=%s,automation_enabled=CASE WHEN state='disconnected' THEN true ELSE automation_enabled END,state='connected',verified_at=now() WHERE id=%s",
+                "UPDATE lead.social_accounts SET binding_version=binding_version+1,external_account_id=%s,display_name=%s,automation_enabled=CASE WHEN state='disconnected' THEN true ELSE automation_enabled END,state='connected',verified_at=now() WHERE id=%s",
                 (
                     observed["external_account_id"],
                     observed["display_name"],
@@ -155,10 +170,38 @@ def store_account(
                     }
                 ],
             )
+        from .atomic_dispatch import refresh_connected
+
+        refresh_connected(c, aid)
         return str(account["id"])
 
 
-def store_target(aid, account_id, observed, *, notify=True):
+def managed_scope(c, account):
+    return one(c, """SELECT * FROM lead.interaction_cards WHERE type='manage_account' AND state='accepted'
+        AND expires_at>now() AND payload->>'source'='managed_target_binding'
+        AND payload->>'account_id'=%s AND payload->>'external_account_id'=%s AND payload->>'binding_version'=%s
+        ORDER BY created_at DESC LIMIT 1""",
+        (str(account["id"]),account["external_account_id"],str(account["binding_version"])))
+
+
+def authorize_managed_discovery(c, aid, account_id, platform, observed_id, binding_version):
+    from .atomic_dispatch import channel_pilot
+
+    account = one(c, """SELECT s.* FROM lead.social_accounts s JOIN lead.browser_profiles p ON p.id=s.profile_id
+        WHERE s.id=%s AND s.platform=%s AND p.slot<>'default' AND s.state='connected' FOR UPDATE OF s""", (account_id,platform))
+    if not account or not channel_pilot(aid) or platform not in ("reddit","facebook") or account["external_account_id"] != observed_id or account["binding_version"] != binding_version:
+        raise ValueError("绑定账号已变化，不能启动渠道")
+    if not managed_scope(c,account):
+        payload = {"source":"managed_target_binding", "account_id":str(account_id), "platform":platform,
+                   "external_account_id":observed_id, "binding_version":account["binding_version"],
+                   "allowed_actions":["verify_text","publish_text"], "scope":"managed_targets"}
+        c.execute("""INSERT INTO lead.interaction_cards(tenant_id,agent_id,type,state,payload,expires_at)
+                     VALUES(%s,%s,'manage_account','accepted',%s,now()+interval '1 year')""",
+                  (current_tenant(),aid,j(payload)))
+        audit(c,aid,"managed_targets.authorized",payload)
+
+
+def store_target(aid, account_id, observed, *, notify=True, expected_binding=None, channel_clock=None):
     with tx(aid) as c:
         a = require_agent(c, aid, True)
         account = one(
@@ -168,6 +211,13 @@ def store_target(aid, account_id, observed, *, notify=True):
         )
         if not account or account["platform"] not in SPECS:
             raise ValueError("账号尚未验证")
+        if expected_binding is not None and account["binding_version"] != expected_binding:
+            raise ValueError("核对目标时账号绑定已变化")
+        if channel_clock:
+            from .channel_delivery import current
+            owner = current(c, aid, channel_clock)
+            if not owner or owner["input"]["platform"] != account["platform"] or not account["automation_enabled"]:
+                raise ValueError("核对目标时渠道已暂停")
         spec = SPECS[account["platform"]]
         target = one(
             c,
@@ -189,7 +239,8 @@ def store_target(aid, account_id, observed, *, notify=True):
                 ),
             ),
         )
-        if not notify and one(
+        authority = managed_scope(c,account) if channel_clock else None
+        if (not notify or authority) and one(
             c,
             "SELECT id FROM lead.authorization_grants WHERE target_id=%s AND revoked_at IS NULL",
             (target["id"],),
@@ -212,14 +263,22 @@ def store_target(aid, account_id, observed, *, notify=True):
                     {
                         "target_id": str(target["id"]),
                         "target_name": target["display_name"],
-                        "allowed_actions": ["publish", "upload_media"],
-                        "formats": list(spec.formats),
-                        "limits": {"publish_per_day": None if spec.platform == "telegram" else 3, "read_others": False},
+                        "allowed_actions": ["publish"] if authority else ["publish","upload_media"],
+                        "formats": ["text"] if authority else list(spec.formats),
+                         "limits": {"publish_per_day": None if spec.platform == "telegram" else 3, "read_others": False,
+                                   **({"managed_scope_id":str(authority["id"])} if authority else {})},
                         "expected_authorization_version": a["authorization_version"],
                     }
                 ),
             ),
         )
+        if authority:
+            scope_id = str(authority["id"])
+            accept_card(aid, str(card["id"]), card["version"], True, delegation_id=scope_id, connection=c)
+            probe = one(c, """SELECT id,version FROM lead.interaction_cards WHERE type='verify_publish' AND state='pending'
+                AND payload->>'target_id'=%s ORDER BY created_at DESC LIMIT 1""", (str(target["id"]),))
+            accept_card(aid, str(probe["id"]), probe["version"], True, delegation_id=scope_id, connection=c)
+            return {"target_id":target["id"], "card_id":None}
         if not notify:
             return {"target_id": target["id"], "card_id": card["id"]}
         append_message(
@@ -358,9 +417,9 @@ def create_verification(
 
 
 def accept_card(
-    aid, card_id, version, accepted, *, delegation_id=None, bootstrap_run_id=None
+    aid, card_id, version, accepted, *, delegation_id=None, bootstrap_run_id=None, connection=None
 ):
-    with tx(aid) as c:
+    with (nullcontext(connection) if connection is not None else tx(aid)) as c:
         a = require_agent(c, aid, True)
         card = one(
             c,
@@ -384,7 +443,7 @@ def accept_card(
         payload = card["payload"]
         target = one(
             c,
-            "SELECT t.*,s.platform,s.state AS account_state FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id WHERE t.id=%s AND t.state='active'",
+            "SELECT t.*,s.platform,s.state AS account_state,s.profile_id,p.slot FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id JOIN lead.browser_profiles p ON p.id=s.profile_id WHERE t.id=%s AND t.state='active'",
             (payload["target_id"],),
         )
         if not target or target["account_state"] != "connected":
@@ -397,7 +456,16 @@ def accept_card(
                 "SELECT * FROM lead.social_accounts WHERE id=%s",
                 (target["account_id"],),
             )
-            require_delegation(c, a, account, delegation_id)
+            if target["platform"] in ("reddit","facebook"):
+                scope = managed_scope(c,account)
+                if (not scope or str(scope["id"]) != str(delegation_id) or a["desired_state"] != "running"
+                    or not account["automation_enabled"] or target["slot"]=="default"
+                    or "publish" not in target["verified_permissions"].get("actions",[]) or
+                    (card["type"]=="authorize_target" and payload["allowed_actions"] != ["publish"]) or
+                    (card["type"]=="verify_publish" and (payload["format"]!="text" or payload.get("media")))):
+                    raise ValueError("账号托管范围已改变")
+            else:
+                require_delegation(c, a, account, delegation_id)
         if card["type"] == "authorize_target":
             if a["authorization_version"] != payload["expected_authorization_version"]:
                 raise ValueError("授权范围已更新，请重新核对目标")
@@ -419,8 +487,8 @@ def accept_card(
                 ),
             )
             c.execute(
-                "UPDATE lead.agents SET authorization_version=%s,control_version=control_version+1 WHERE id=%s",
-                (ver, aid),
+                "UPDATE lead.agents SET authorization_version=%s,control_version=control_version+CASE WHEN EXISTS(SELECT 1 FROM lead.social_accounts s JOIN lead.browser_profiles p ON p.id=s.profile_id WHERE s.id=%s AND p.slot='default') THEN 1 ELSE 0 END WHERE id=%s",
+                (ver, target["account_id"], aid),
             )
             spec = SPECS[target["platform"]]
             if "text" in spec.formats:
@@ -460,7 +528,7 @@ def accept_card(
                 raise ValueError("授权已撤销")
             if one(
                 c,
-                "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('active','requested','ending') AND expires_at>now()",
+                "SELECT 1 FROM lead.takeover_sessions WHERE profile_id=%s AND state IN ('active','requested','ending') AND expires_at>now()", (target["profile_id"],)
             ):
                 raise ValueError("请先结束浏览器接管")
             records = []
@@ -474,9 +542,11 @@ def accept_card(
                     raise ValueError("素材已变化或不再可用")
                 records.append(row)
             validate(target["platform"], payload, records)
+            isolated = target["slot"] != "default"
+            version_step = 0 if isolated else 1
             c.execute(
-                "UPDATE lead.agents SET desired_state=%s,health_state='queued',control_version=control_version+1 WHERE id=%s",
-                (a["desired_state"] if delegation_id or pilot else "draft", aid),
+                "UPDATE lead.agents SET desired_state=%s,health_state='queued',control_version=control_version+%s WHERE id=%s",
+                (a["desired_state"] if isolated or delegation_id or pilot else "draft", version_step, aid),
             )
             task = one(
                 c,
@@ -491,7 +561,7 @@ def accept_card(
                             "key": str(card_id),
                             "bootstrap_verification": True,
                             "bootstrap_run_id": bootstrap_run_id,
-                            "control_version": a["control_version"] + 1,
+                            "control_version": a["control_version"] + version_step,
                             "delegation_id": str(delegation_id)
                             if delegation_id
                             else None,

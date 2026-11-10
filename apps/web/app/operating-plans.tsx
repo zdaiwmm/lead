@@ -523,8 +523,39 @@ export default function OperatingPlans({
                     ["近 30 天可核实的新增用户", measured(data.strategy.results_30d?.new_users)],
                     ["投入上限", data.strategy.cost_ceiling], ["质量观察", data.strategy.quality_check],
                   ].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || "待核验"}</dd></div>)}
+                  {data.strategy.results_30d?.first_entry && (
+                    <div><dt>近 30 天新增客户的首次到站渠道</dt>
+                      <dd>{data.strategy.results_30d.first_entry.observed
+                        ? [...Object.entries<number>(data.strategy.results_30d.first_entry.channels)
+                            .map(([channel, people]) => (socialNames[channel] || channel) + " " + measured(people)),
+                            "来源未知 " + measured(data.strategy.results_30d.first_entry.unknown),
+                            "已观测合计 " + measured(data.strategy.results_30d.first_entry.observed)].join(" · ")
+                        : "暂无可核验的新客记录"}</dd>
+                    </div>
+                  )}
                 </dl>
               </section>
+            )}
+            {Boolean(data.channel_clocks?.length) && (
+              <details className={styles.detailRow}>
+                <summary>各渠道的下次检查</summary>
+                <dl className={styles.facts}>
+                  {data.channel_clocks.map((clock: Row) => (
+                    <div key={clock.platform + clock.lane}><dt>{socialNames[clock.platform] || clock.platform} · {clock.lane === "research" ? "机会研究" : "投放"}</dt>
+                      <dd>{clock.reason === "awaiting_validated_opportunity" ? "等待新的已核验需求"
+                        : clock.reason === "target_permissions_review" ? "等待目标授权"
+                        : clock.reason === "target_verification_queued" ? "目标验证帖已排期"
+                        : clock.reason === "target_management_unverified" ? "未核实该账号的管理权限"
+                        : clock.reason === "work_hours" ? "等待工作时段"
+                        : clock.reason === "concurrency_limit" ? "等待可用执行位"
+                        : clock.reason === "token_budget_wait" ? "等待可用预算"
+                        : clock.reason === "source_permission_required" ? "等待渠道数据接入权限"
+                        : clock.reason === "no_available_verified_target" ? "等待可用的已验证目标"
+                        : clock.reason === "execution_attempts_exhausted" ? "遇阻，稍后复查"
+                        : "已排期"} · {timestamp(clock.next_at, data.timezone)}</dd></div>
+                  ))}
+                </dl>
+              </details>
             )}
             <details className={styles.detailRow} name={`${boardId}-direction`}>
               <summary>受众与效果</summary>

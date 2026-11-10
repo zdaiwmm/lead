@@ -13,6 +13,7 @@ PLATFORM_CODES = {
     "youtube": "yt",
     "tiktok": "tt",
     "reddit": "rd",
+    "discord": "dc",
     "pinterest": "pi",
     "threads": "th",
     "whatsapp": "wa",

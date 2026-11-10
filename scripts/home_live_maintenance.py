@@ -147,6 +147,33 @@ def maintenance(action, sha):
     site_sql("BEGIN;" + LOCK + query + "COMMIT;")
 
 
+def channel_schema_ready():
+    # A version row alone does not prove that the migration was applied.
+    # Before the first cutover a return to the singleton reader must still be safe.
+    ready = site_sql("""SELECT
+        (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0029_merge_channel_restore']
+        AND EXISTS (SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.local_restore_ready()')
+             AND md5(prosrc)='f0b323f641b48d4ab81322cc4f501b42' AND prosecdef
+             AND proconfig=ARRAY['search_path=pg_catalog, lead'])
+        AND has_function_privilege('lead_runtime','lead.local_restore_ready()','EXECUTE')
+        AND to_regclass('lead.pixel_first_landing') IS NOT NULL
+        AND to_regclass('lead.pixel_device_customers') IS NOT NULL
+        AND EXISTS (SELECT FROM pg_trigger WHERE tgrelid='lead.tracking_links'::regclass
+                    AND tgname='keep_tracking_source' AND tgenabled='O')
+        AND EXISTS (SELECT FROM pg_constraint WHERE conrelid='lead.tracking_links'::regclass
+                    AND pg_get_constraintdef(oid)='UNIQUE (tenant_id, agent_id, platform, intent_key, placement)')
+        AND EXISTS (SELECT FROM pg_constraint WHERE conrelid='lead.browser_profiles'::regclass
+                    AND pg_get_constraintdef(oid)='UNIQUE (tenant_id, agent_id, slot)')
+        AND NOT EXISTS (SELECT FROM lead.browser_profiles WHERE slot<>'default')
+        AND NOT EXISTS (SELECT FROM lead.social_accounts WHERE binding_version<1)
+        AND (SELECT count(*)=2 FROM pg_attribute WHERE attrelid='lead.pixel_receipts'::regclass AND NOT attisdropped
+             AND (attname,atttypid) IN (('server_identified','boolean'::regtype),('entry_link_id','uuid'::regtype)))
+        """)
+    if ready != "t":
+        raise ValueError("channel schema, constraints or baseline profile inventory differ")
+    return "ready"
+
+
 def main(args):
     if os.geteuid() != 0:
         raise ValueError("root required")
@@ -157,6 +184,9 @@ def main(args):
         if busy not in ("t", "f"):
             raise ValueError("cannot determine whether work is active")
         print("busy" if busy == "t" else "idle")
+        return
+    if args == ["channel-schema"]:
+        print(channel_schema_ready())
         return
     if args == ["health"]:
         print(json.dumps(health()))

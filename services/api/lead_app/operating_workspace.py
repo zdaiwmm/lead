@@ -122,6 +122,11 @@ def prepare_workspace(aid, platform):
 def save_workspace(c, aid, agent, business, platform):
     channel, version = channel_config(c, aid, platform)
     pack = draft_pack(agent, business, channel, version)
+    return persist_workspace(c, aid, agent, business, channel, version, pack)
+
+
+def persist_workspace(c, aid, agent, business, channel, version, pack):
+    platform = channel["platform"]
     fingerprint = hashlib.sha256(
         json.dumps(pack, sort_keys=True, default=str).encode()
     ).hexdigest()
@@ -131,8 +136,8 @@ def save_workspace(c, aid, agent, business, platform):
     if old:
         return {"id": str(old["id"]), **old["result"], "duplicate": True}
     job_id = uid()
-    c.execute(
-        "INSERT INTO lead.tasks(id,tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at,started_at,completed_at) VALUES(%s,%s,%s,'channel.prepare','succeeded',%s,%s,%s,now(),now(),now())",
+    inserted = one(c,
+        "INSERT INTO lead.tasks(id,tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at,started_at,completed_at) VALUES(%s,%s,%s,'channel.prepare','succeeded',%s,%s,%s,now(),now(),now()) ON CONFLICT(workflow_id) DO NOTHING RETURNING id",
         (
             job_id,
             current_tenant(),
@@ -142,6 +147,9 @@ def save_workspace(c, aid, agent, business, platform):
             j(pack),
         ),
     )
+    if not inserted:
+        existing = one(c, "SELECT id,result FROM lead.tasks WHERE workflow_id=%s", (key,))
+        return {"id": str(existing["id"]), **existing["result"], "duplicate": True}
     record(
         c,
         aid,

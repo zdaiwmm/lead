@@ -560,7 +560,7 @@ async def execute_task(args: dict):
         task = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (task_id,))
         if not task or task["state"] in ("succeeded", "canceled"):
             return {"state": task["state"] if task else "absent"}
-    action = prepare_action(aid, task_id)
+    action = await asyncio.to_thread(prepare_action, aid, task_id)
     if not action:
         return {"state": "canceled"}
     with tx(aid) as c:
@@ -626,6 +626,12 @@ async def execute_task(args: dict):
                 if changed:
                     record(c, aid, "等待运营环境恢复", "平台会自动重试。")
             raise RuntimeError("browser_not_dispatched") from None
+    # A sibling can hold the shared submission gate across its browser click.
+    # Persisting this receipt may wait on that transaction; keep the RPC loop free.
+    return await asyncio.to_thread(record_publish_result, aid, task_id, task, action, result)
+
+
+def record_publish_result(aid, task_id, task, action, result):
     with tx(aid) as c:
         previous = one(c, "SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE", (task_id,))
         if previous["state"] in ("succeeded", "canceled"):
@@ -1444,6 +1450,20 @@ async def _publication_cycle(args: dict):
             or current["config_revision"] != a["config_revision"]
         ):
             return {"delay": 300, "reason": "configuration_changed"}
+        clock = args.get("channel_clock")
+        if clock:
+            from .channel_delivery import current as current_clock
+
+            owner = current_clock(c, aid, clock)
+            if not owner or owner["input"]["platform"] != platform:
+                return {"delay": 300, "reason":"channel_schedule_changed"}
+            if content.action == "publish" and platform in ("reddit", "facebook"):
+                from .channel_delivery import opportunity
+
+                evidence = opportunity(c, target["target_id"])
+                selected = (args.get("operating_plan") or {}).get("channel_opportunity") or {}
+                if not evidence or evidence["source_key"] != selected.get("source_key"):
+                    return {"delay": 300, "reason": "opportunity_changed"}
         if content.action == "publish" and pending_publication(
             c, target["target_id"], current["config_revision"]
         ):
@@ -1560,19 +1580,11 @@ async def _publication_cycle(args: dict):
             ),
         )
         if destination:
-            p = urlsplit(destination)
-            c.execute(
-                "INSERT INTO lead.tracking_links(tenant_id,agent_id,platform,public_code,destination_url,allowed_host,content_id) VALUES(%s,%s,%s,%s,%s,%s,%s)",
-                (
-                    current_tenant(),
-                    aid,
-                    platform,
-                    marker,
-                    destination,
-                    p.hostname,
-                    item["id"],
-                ),
-            )
+            from .distribution import register
+
+            register(c, aid, platform, destination, intent="publish:" + cycle_id, placement="post",
+                     account=target["account_id"], location=str(target["target_id"]), content=item["id"],
+                     campaign=(args.get("operating_plan") or {}).get("experiment_id"), code=marker)
         task = one(
             c,
             "INSERT INTO lead.tasks(tenant_id,agent_id,plan_id,type,state,workflow_id,input,scheduled_at) VALUES(%s,%s,%s,%s,'queued',%s,%s,now()) RETURNING id",
@@ -1586,6 +1598,7 @@ async def _publication_cycle(args: dict):
                     {
                         **publication,
                         "key": cycle_id,
+                        **({"channel_clock":clock} if clock else {}),
                         "bootstrap_run_id": str(launch["id"]) if launch else None,
                         "prepared_content_id": str(prepared_task["id"])
                         if prepared_task

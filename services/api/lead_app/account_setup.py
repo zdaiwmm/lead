@@ -777,10 +777,8 @@ def setup_guard(actor, c, task):
         },
         account_setup=True,
     )
-    if env().get("LEAD_DEPLOYMENT_MODE") == "production" and not one(
-        c,
-        "SELECT 1 FROM lead.identity_checks i JOIN lead.network_identities n ON n.id=i.network_identity_id JOIN lead.browser_profiles p ON p.id=i.profile_id AND p.config_hash=i.config_hash AND p.engine_version=i.engine_version AND p.network_identity_id=n.id WHERE i.result='passed' AND i.valid_until>now() AND n.valid_until>now() AND n.expected_ip=i.observed_ip AND n.mode='dedicated' AND n.state='verified'",
-    ):
+    from .identity import verified_profile
+    if env().get("LEAD_DEPLOYMENT_MODE") == "production" and not verified_profile(c, actor.profile["id"]):
         raise ValueError("运营环境核验尚未通过，已停止频道设置")
     return account
 

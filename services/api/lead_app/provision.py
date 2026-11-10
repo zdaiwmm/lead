@@ -92,6 +92,10 @@ def provision_security(conn):
     conn.execute(
         "REVOKE EXECUTE ON FUNCTION lead.backup_ready(),lead.offsite_backup_ready(),lead.confirm_channel_probe(uuid),lead.confirm_telegram_probe(uuid) FROM PUBLIC"
     )
+    # Existing installations and pre-branch backup restores may still have the old schema.
+    if conn.execute("SELECT to_regprocedure('lead.local_restore_ready()')").fetchone()[0]:
+        conn.execute("REVOKE ALL ON FUNCTION lead.local_restore_ready() FROM PUBLIC")
+        conn.execute("GRANT EXECUTE ON FUNCTION lead.local_restore_ready() TO lead_runtime")
     conn.execute(
         "GRANT EXECUTE ON FUNCTION lead.backup_ready(),lead.offsite_backup_ready(),lead.confirm_channel_probe(uuid),lead.confirm_telegram_probe(uuid) TO lead_runtime"
     )

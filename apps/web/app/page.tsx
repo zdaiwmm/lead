@@ -1158,11 +1158,11 @@ export default function Lead() {
           platform={browser.platform}
           name={browser.name}
           verifyLabel={browser.activate ? "验证并激活" : "验证并完成"}
-          onVerified={browser.activate ? async () => {
+          onVerified={browser.activate ? async (started) => {
             const platform = browser.platform;
             setBrowser(null);
             await run(async () => {
-              await api(`/agents/${current}/channels/${platform}/control`, { enabled: true });
+              if (!started) await api(`/agents/${current}/channels/${platform}/control`, { enabled: true });
             });
             await refresh();
           } : undefined}

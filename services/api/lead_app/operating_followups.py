@@ -125,7 +125,7 @@ def observed_links(c, task_ids):
     return list(found.values())[:24]
 
 
-def reconcile(c, aid, agent, business, review_id, platform=None, *, alternatives=False):
+def reconcile(c, aid, agent, business, review_id, platform=None, *, alternatives=False, revisit=False):
     from .operating_admission import assess, context
 
     scope = (str(business["id"]), str(agent["config_revision"]))
@@ -133,7 +133,7 @@ def reconcile(c, aid, agent, business, review_id, platform=None, *, alternatives
         c,
         """SELECT state,input->>'candidate_url' AS url,input->>'candidate_label' AS label,
         input->>'observed_in_task_id' AS source_id,result->>'channel_fit' AS fit,
-        result->>'error_code' AS error_code
+        result->>'error_code' AS error_code, completed_at>now()-interval '6 hours' AS recent
         FROM lead.tasks WHERE type='operating.validate' AND state<>'canceled'
         AND input->>'business_profile_id'=%s AND input->>'config_revision'=%s AND (input->>'platform') IS NOT DISTINCT FROM %s
         AND (coalesce(input->>'work_key','') LIKE 'alternatives:%%')=%s""",
@@ -162,7 +162,9 @@ def reconcile(c, aid, agent, business, review_id, platform=None, *, alternatives
         for r in previous
     ):
         return True
-    visited = {r["url"] for r in previous if r["url"]}
+    visited = {r["url"] for r in previous if r["url"] and
+               (not revisit or r["state"] in ("running","planned") or r["recent"] or r["state"]=="failed")}
+    revisitable = {r["url"] for r in previous if r["url"]} - visited
     # Current permissions gate the NEW task. Previously observed public URLs remain
     # evidence after a pause/resume, but not after a business/configuration change.
     sources = all_rows(
@@ -217,6 +219,10 @@ def reconcile(c, aid, agent, business, review_id, platform=None, *, alternatives
             ORDER BY completed_at DESC LIMIT 1""",
             (*scope, str(source["id"])),
         )
+        validation_key = fingerprint(item["url"])
+        if item["url"] in revisitable:
+            window = one(c, "SELECT floor(extract(epoch FROM now())/21600)::bigint AS n")["n"]
+            validation_key += ":" + str(window)
         tid = enqueue(
             c,
             aid,
@@ -226,7 +232,7 @@ def reconcile(c, aid, agent, business, review_id, platform=None, *, alternatives
             "核对公开入口的受众、准入规则与可行下一步："
             + item["label"].splitlines()[0][:100],
             source_review_id=review_id,
-            work_key=("alternatives:" if alternatives else "") + fingerprint(item["url"]),
+            work_key=("alternatives:" if alternatives else "") + validation_key,
             platform=platform,
         )
         c.execute(

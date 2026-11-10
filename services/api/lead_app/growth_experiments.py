@@ -317,7 +317,7 @@ def review_trial(c, aid, agent, business, trial, now):
         )
         from .acquisition_strategy import target_results
 
-        outcomes = {"events": None, "new_users": None} if chamber_campaign(agent) else target_results(c, b.get("target_snapshot"), b["public_at"], b["review_at"], b["id"])
+        outcomes = {"events": None, "new_users": None} if chamber_campaign(agent) else target_results(c, b.get("target_snapshot"), b["public_at"], b["review_at"], b["id"], pilot_agent=aid)
         b.update(
             state="closed",
             comparison=prior,

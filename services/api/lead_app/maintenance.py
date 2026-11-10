@@ -102,6 +102,7 @@ class Maintenance:
                     "SELECT a.id FROM lead.agents a JOIN lead.tenants t ON t.id=a.tenant_id WHERE a.desired_state<>'archived' AND t.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM lead.backup_records b WHERE b.agent_id=a.id AND b.kind='profile' AND b.state='verified' AND b.started_at>now()-interval '24 hours') ORDER BY a.created_at"
                 ).fetchall()
                 if (STATE / "profiles" / str(r["id"]) / "identity.json").is_file()
+                or any((STATE / "profiles" / str(r["id"])).glob("accounts/*/identity.json"))
             ]
 
     async def database_loop(self):

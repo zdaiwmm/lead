@@ -260,3 +260,24 @@ def test_installed_handoff_tool_requires_exact_candidate_bytes(hook, tmp_path, m
     assert not hook.reviewed_maintenance_files(repo / ".git", "HEAD", {name})
     installed.write_bytes(candidate.read_bytes())
     assert hook.reviewed_maintenance_files(repo / ".git", "HEAD", {name}) == {name}
+
+
+def test_only_reviewed_migrations_on_attested_database(hook, monkeypatch, tmp_path):
+    monkeypatch.setattr(hook, "TOOLS", tmp_path)
+    (tmp_path / "home_live_maintenance.py").touch()
+    paths = set(hook.CHANNEL_SCHEMA_FILES) | {"infra/migrations/versions/unreviewed.py"}
+    live = ["ready"]
+    override = {}
+    def read(*args):
+        if args[-1] == "channel-schema":
+            return live[0]
+        path = args[-1].split(":",1)[1]
+        return override.get(path, hook.CHANNEL_SCHEMA_FILES[path])
+    monkeypatch.setattr(hook,"run",read)
+    assert hook.reviewed_channel_schema(tmp_path,"a"*40,paths) == set(hook.CHANNEL_SCHEMA_FILES)
+    override[".env.example"] = "modified"
+    assert not hook.reviewed_channel_schema(tmp_path,"a"*40,paths)
+    override.clear()
+    live[0] = "mismatch"
+    with pytest.raises(hook.Refused):
+        hook.reviewed_channel_schema(tmp_path,"a"*40,paths)

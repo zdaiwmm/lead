@@ -15,7 +15,7 @@ def required():
     )
 
 
-def apply(options, aid, proxy):
+def apply(options, aid, proxy, storage=None):
     if not required():
         return options
     if (
@@ -36,7 +36,7 @@ def apply(options, aid, proxy):
             **options["env"],
             "LEAD_BOUNDARY_NONCE": proxy.boundary_nonce,
             "LEAD_REAL_BROWSER": str(Path(options["executable_path"]).resolve()),
-            "LEAD_BROWSER_PROFILE": str(STATE / "profiles" / aid / "storage"),
+            "LEAD_BROWSER_PROFILE": str(storage or STATE / "profiles" / aid / "storage"),
             "LEAD_BROWSER_ASSETS": str(STATE / "assets" / aid),
             "LEAD_BROWSER_SOCKET": str(proxy.socket_path),
             "LEAD_BROWSER_PROXY_PORT": str(proxy.port),
