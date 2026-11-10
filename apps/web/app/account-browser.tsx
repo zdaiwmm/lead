@@ -24,7 +24,7 @@ export default function AccountBrowser({
   platform: string;
   name: string;
   onClose: () => void;
-  onVerified?: () => Promise<void>;
+  onVerified?: (started?: boolean) => Promise<void>;
   verifyLabel?: string;
 }) {
   const [state, setState] = useState("opening");
@@ -246,7 +246,7 @@ export default function AccountBrowser({
         await connection.current?.promise.catch(() => {});
       }
       if (takeover.current) await api(`/agents/${aid}/takeover/end?takeover=${encodeURIComponent(takeover.current)}`, {});
-      if (verify && onVerified) await onVerified();
+      if (verify && onVerified) await onVerified(managedStart);
       else onClose();
     } catch (e) {
       stopping.current = false;

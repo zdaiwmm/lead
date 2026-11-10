@@ -583,7 +583,7 @@ async def verify_login(aid: UUID, body: Connection):
                 raise ValueError("项目或绑定账号已变化，请重新核对后启动")
             authorize_managed_discovery(c, aid, account_id, platform, observed["external_account_id"], selected["binding_version"]+1)
             domain.complete_setup(aid, connection=c)
-            domain.channel_control(aid, platform, True, connection=c)
+            domain.channel_control(aid, platform, True, connection=c, start_account=account_id)
     return {"ok": True, "account_id": account_id}
 
 

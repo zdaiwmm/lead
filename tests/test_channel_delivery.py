@@ -538,6 +538,30 @@ def test_node_schema_attestation_reads_actual_migration(site_database, monkeypat
             site.channel_schema_ready()
 
 
+def test_starting_one_binding_preserves_paused_sibling(pixel, monkeypatch):
+    aid = pixel[0]
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-only")
+    with tx(aid) as c:
+        ids = []
+        for _ in range(2):
+            ids.append(
+                one(
+                    c,
+                    """INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,external_account_id,state,automation_enabled)
+                SELECT tenant_id,agent_id,id,'reddit',%s,'connected',false FROM lead.browser_profiles WHERE slot='default' RETURNING id""",
+                    (uid(),),
+                )["id"]
+            )
+    domain.channel_control(aid, "reddit", True, start_account=ids[0])
+    domain.channel_control(aid, "reddit", True, start_account=ids[0])
+    with tx(aid) as c:
+        enabled = all_rows(
+            c,
+            "SELECT id FROM lead.social_accounts WHERE platform='reddit' AND automation_enabled",
+        )
+        assert enabled == [{"id": ids[0]}]
+
+
 def test_no_cold_opportunity_without_permission_and_observed_demand():
     from lead_app.operating_work import ColdStartCheck, assess_cold_entry
 
