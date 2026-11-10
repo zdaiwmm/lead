@@ -191,6 +191,7 @@ async def publish_outbox(client):
     workspace_retry_at = {}
     notification_ticks = {}
     experience_ticks = {}
+    reddit_ticks = {}
     external_delivery_tasks = {}
     notification_slots = asyncio.Semaphore(3)
 
@@ -248,6 +249,14 @@ async def publish_outbox(client):
                         with tenant_scope(tenant, None):
                             await asyncio.to_thread(collect_experiences)
                         experience_ticks[tenant] = time.monotonic()
+                    if time.monotonic() - reddit_ticks.get(tenant, float("-inf")) >= 60:
+                        from .reddit_workspace import review_enabled
+
+                        reddit_ticks[tenant] = time.monotonic()
+                        try:
+                            await asyncio.to_thread(review_enabled, tenant)
+                        except Exception:
+                            logging.exception("Reddit editorial review deferred until next scan")
                     workspace_failures.pop(tenant, None)
                     workspace_retry_at.pop(tenant, None)
                 except Exception:
