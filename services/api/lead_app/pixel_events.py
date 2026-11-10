@@ -925,12 +925,19 @@ def receive(
             or (prior["user_key"] and identity and prior["user_key"] != identity)
         ):
             raise HTTPException(409, "订单编号已用于不同支付内容")
+    entry_link_id = None
+    # The transaction touch can outlive a visit. Take landing evidence only from
+    # a signed click presented on this PageView, in the matching visit.
+    if (body.event_name == "PageView" and visit and getattr(body, "ref", None)
+            and eligible(click, occurred) and click["tracking_link_id"] == str(visit["tracking_link_id"])):
+        entry_link_id = click["tracking_link_id"]
+    explicit_identity = frozen.get("explicit_identity") if frozen is not None else body.user_id
     row = one(
         c,
         """INSERT INTO lead.pixel_receipts(tenant_id,agent_id,connection_id,event_id,event_name,scope_key,
         anonymous_id,user_key,business_key,touchpoint_id,visit_session_id,definition_revision,trust_level,
-        counted,duplicate_of,payload_sha256,occurred_at,value,currency,click_id)
-        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+        counted,duplicate_of,payload_sha256,occurred_at,value,currency,click_id,entry_link_id,server_identified)
+        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
         (
             current_tenant(),
             conn["agent_id"],
@@ -952,6 +959,8 @@ def receive(
             properties.get("value") if body.event_name == "Purchase" else None,
             properties.get("currency") if body.event_name == "Purchase" else None,
             attributed_click,
+            entry_link_id,
+            trust == "server_verified" and bool(explicit_identity),
         ),
     )
     if test and not basic:

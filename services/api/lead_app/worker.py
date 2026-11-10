@@ -75,6 +75,22 @@ def ack_outbox(aid, eid):
         c.execute("UPDATE lead.outbox_events SET published_at=now() WHERE id=%s", (eid,))
 
 
+async def dispatch_channel_event(client, aid, payload):
+    args = {"agent_id": aid, "task_id": payload["task_id"]}
+    workflow_id = "dispatch-channel:" + args["task_id"]
+    if "generation" in payload:
+        args["generation"] = payload["generation"]
+        workflow_id += ":" + str(args["generation"])
+    try:
+        await client.start_workflow(
+            ChannelPreparationWorkflow.run, args, id=workflow_id, task_queue="lead-offline",
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+        )
+    except WorkflowAlreadyStartedError:
+        pass
+    return client.get_workflow_handle(workflow_id)
+
+
 async def deliver_workspace(client, tenant, configured, key_was_configured):
     from .analytics_delivery import deliver_analytics
 
@@ -122,15 +138,7 @@ async def deliver_workspace(client, tenant, configured, key_was_configured):
                     start_signal="wake",
                 )
             elif e["event_type"] == "dispatch.channel":
-                try:
-                    await client.start_workflow(
-                        ChannelPreparationWorkflow.run,
-                        {"agent_id": aid, "task_id": payload["task_id"]},
-                        id="dispatch-channel:" + payload["task_id"], task_queue="lead-offline",
-                        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-                    )
-                except WorkflowAlreadyStartedError:
-                    pass
+                await dispatch_channel_event(client, aid, payload)
             elif e["event_type"] in ("task.enqueue", "task.reconcile"):
                 try:
                     await client.start_workflow(
@@ -291,7 +299,7 @@ async def main():
         await stack.enter_async_context(Worker(
             client, task_queue="lead-offline", workflows=[ChannelPreparationWorkflow],
             activities=[prepare_channel_atom, close_channel_atom],
-            max_concurrent_activities=1, max_concurrent_workflow_tasks=2,
+            max_concurrent_activities=2 if env().get("LEAD_CHANNEL_ATOM_AGENT_IDS") else 1, max_concurrent_workflow_tasks=2,
         ))
         if env().get("LEAD_ANALYTICS_DEDICATED") != "1":
             await stack.enter_async_context(analytics_worker)

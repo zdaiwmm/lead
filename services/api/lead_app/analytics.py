@@ -305,7 +305,11 @@ def create_link(aid: UUID, body: TrackingSetup):
     p = urlsplit(body.destination_url)
     with tx(aid) as c:
         require_agent(c, aid)
-        code = __import__("secrets").token_urlsafe(12)
+        from .atomic_dispatch import channel_pilot
+        from .promotion import PLATFORM_CODES, new_marker
+
+        code = (new_marker(body.platform) if channel_pilot(aid) and body.platform in PLATFORM_CODES
+                else __import__("secrets").token_urlsafe(12))
         row = one(
             c,
             "INSERT INTO lead.tracking_links(tenant_id,agent_id,platform,public_code,destination_url,allowed_host) VALUES(%s,%s,%s,%s,%s,%s) RETURNING id,public_code",

@@ -669,7 +669,7 @@ def assemble(c, agent, business, now=None):
     target = next((event for event in mode["events"] if event["name"] == mode["objective_event"]), None)
     strategy["results_30d"] = acquisition_strategy.target_results(
         c, {**target, "first_definition": strategy["first_definition"]} if target else None,
-        now - timedelta(days=30), now)
+        now - timedelta(days=30), now, pilot_agent=agent["id"])
     if mode.get("clicks_only"):
         strategy.update(test_layer="distribution", layer_label="触达与分发", measurement="独立产品短链的有效点击", first_step="点击推广帖的产品短链", first_definition=None, cost_ceiling=None,
                         next_action="跨场景触达与回访，按相同帖龄的有效点击分配下一次机会。")

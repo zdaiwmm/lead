@@ -627,6 +627,10 @@ def control_in_tx(c, aid, action, platform=None, only_setup=False):
             "archive": "已归档",
         }[action],
     )
+    if state == "running":
+        from .atomic_dispatch import refresh_connected
+
+        refresh_connected(c, aid)
     emit(c, aid, "supervisor.wake")
     return True
 
@@ -643,7 +647,8 @@ def channel_control(aid, platform, enabled):
             "SELECT * FROM lead.social_accounts WHERE platform=%s ORDER BY created_at DESC LIMIT 1",
             (platform,),
         )
-        if not account or account["state"] != "connected":
+        allowed_states = {"connected"} if enabled else {"connected", "needs_auth", "restricted"}
+        if not account or account["state"] not in allowed_states:
             raise ValueError("请先连接并登录此社媒账号")
         if enabled and agent["desired_state"] != "running":
             from .admin_operations import reset_failures
@@ -673,6 +678,11 @@ def channel_control(aid, platform, enabled):
                 "UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE state IN ('planned','queued') AND (input->>'platform'=%s OR input->>'account_id'=%s OR input->>'target_id' IN (SELECT id::text FROM lead.account_targets WHERE account_id=%s))",
                 (platform, str(account["id"]), account["id"]),
             )
+            c.execute(
+                """UPDATE lead.tasks SET state='canceled',completed_at=now()
+                   WHERE type='dispatch.channel' AND state='waiting_user' AND input->>'platform'=%s""",
+                (platform,),
+            )
         else:
             from .account_setup import delegate_accounts
 
@@ -683,6 +693,9 @@ def channel_control(aid, platform, enabled):
             "channel.resumed" if enabled else "channel.paused",
             {"platform": platform},
         )
+        from .atomic_dispatch import refresh_connected
+
+        refresh_connected(c, aid)
         record(c, aid, "已启动此社媒运营" if enabled else "已暂停此社媒运营", platform)
         emit(c, aid, "supervisor.wake")
     return {"ok": True}

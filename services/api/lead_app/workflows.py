@@ -20,7 +20,14 @@ class ChannelPreparationWorkflow:
     @workflow.run
     async def run(self, args: dict):
         try:
-            await workflow.execute_activity("prepare_channel_atom", args,
+            for attempt in range(8):
+                result = await workflow.execute_activity("prepare_channel_atom", args,
+                    start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)
+                if result != "control_busy":
+                    return
+                if attempt < 7:
+                    await workflow.sleep(min(60, 2 ** (attempt + 1)))
+            await workflow.execute_activity("close_channel_atom", args,
                 start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)
         except ActivityError:
             await workflow.execute_activity("close_channel_atom", args,

@@ -155,6 +155,9 @@ def store_account(
                     }
                 ],
             )
+        from .atomic_dispatch import refresh_connected
+
+        refresh_connected(c, aid)
         return str(account["id"])
 
 

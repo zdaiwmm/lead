@@ -523,6 +523,16 @@ export default function OperatingPlans({
                     ["近 30 天可核实的新增用户", measured(data.strategy.results_30d?.new_users)],
                     ["投入上限", data.strategy.cost_ceiling], ["质量观察", data.strategy.quality_check],
                   ].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || "待核验"}</dd></div>)}
+                  {data.strategy.results_30d?.first_entry && (
+                    <div><dt>近 30 天新增客户的首次到站渠道</dt>
+                      <dd>{data.strategy.results_30d.first_entry.observed
+                        ? [...Object.entries<number>(data.strategy.results_30d.first_entry.channels)
+                            .map(([channel, people]) => (socialNames[channel] || channel) + " " + measured(people)),
+                            "来源未知 " + measured(data.strategy.results_30d.first_entry.unknown),
+                            "已观测合计 " + measured(data.strategy.results_30d.first_entry.observed)].join(" · ")
+                        : "暂无可核验的新客记录"}</dd>
+                    </div>
+                  )}
                 </dl>
               </section>
             )}

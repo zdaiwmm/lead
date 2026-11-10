@@ -107,7 +107,7 @@ def current(c, agent, business, goal, mode):
     }
 
 
-def target_results(c, target, start, end, experiment_id=None):
+def target_results(c, target, start, end, experiment_id=None, *, pilot_agent=None):
     """Report only source-linked live receipts for the frozen goal definition."""
     if not target or not target.get("ready"):
         return {"events": None, "new_users": None}
@@ -135,6 +135,15 @@ def target_results(c, target, start, end, experiment_id=None):
     )
     # A first-event contract is supplied by the product owner. Ordinary purchase
     # or activation receipts alone cannot distinguish an existing customer.
+    from .atomic_dispatch import channel_pilot
+
+    if (pilot_agent and channel_pilot(pilot_agent) and target.get("first_definition")
+            and target.get("method") == "server"):
+        from .first_entry import customers
+
+        entry = customers(c, target, start, end, experiment_id)
+        attributable = sum(entry["channels"].values()) if entry["observed"] else None
+        return {"events": counts["events"] or None, "new_users": attributable, "first_entry": entry}
     return {
         "events": counts["events"] if counts["events"] else None,
         "new_users": counts["identified"]

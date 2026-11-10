@@ -137,6 +137,7 @@ def frozen_browser(c, conn, body):
             "policy": policy,
             "policy_version": version,
             "identity_key": identity,
+            "explicit_identity": bool(body.user_id),
             "receipt_fingerprint": fingerprint,
             "link": link,
         }

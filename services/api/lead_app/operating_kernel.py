@@ -543,7 +543,7 @@ def candidates(c, aid, agent, business, now=None):
 
     from . import atomic_dispatch
 
-    if atomic_dispatch.enabled(aid):
+    if atomic_dispatch.enabled(aid) or atomic_dispatch.channel_pilot(aid):
         from .resource_pressure import sample
         if not sample()["defer_optional"]:
             atomic_dispatch.enqueue_channel_work(c, aid, agent, business)
