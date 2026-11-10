@@ -1592,8 +1592,12 @@ async def open_browser(aid: str, body: OpenRequest):
         )
         if not url:
             raise HTTPException(400, "未知频道")
-        if body.platform == "reddit" and reddit_login.split_reddit_login(aid):
-            url = "https://www.reddit.com/login/"
+        if body.platform in account_profiles.isolated_login_platforms(aid):
+            url = {
+                "reddit": "https://www.reddit.com/login/",
+                "facebook": "https://www.facebook.com/login/",
+                "x": "https://x.com/i/flow/login",
+            }[body.platform]
         await actor.page.goto(url, wait_until="domcontentloaded", timeout=45000)
         return {"url": actor.page.url, "session_id": actor.session,"profile_id":str(actor.profile["id"])}
 

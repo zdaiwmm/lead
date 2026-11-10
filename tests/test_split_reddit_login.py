@@ -33,11 +33,37 @@ def test_existing_shared_account_requires_review(monkeypatch):
 @pytest.mark.skipif(
     os.getenv("LEAD_BROWSER_TESTS") != "1", reason="requires native Camoufox"
 )
-async def test_reddit_retries_and_completes_on_its_own_browser(monkeypatch):
+@pytest.mark.parametrize(
+    ("channel", "setting", "login_url", "signed_in_url"),
+    [
+        (
+            "reddit",
+            "LEAD_SPLIT_REDDIT_LOGIN_AGENT_IDS",
+            "https://www.reddit.com/login/",
+            "https://www.reddit.com/",
+        ),
+        (
+            "facebook",
+            "LEAD_SPLIT_FACEBOOK_X_LOGIN_AGENT_IDS",
+            "https://www.facebook.com/login/",
+            "https://www.facebook.com/",
+        ),
+        (
+            "x",
+            "LEAD_SPLIT_FACEBOOK_X_LOGIN_AGENT_IDS",
+            "https://x.com/i/flow/login",
+            "https://x.com/home",
+        ),
+    ],
+)
+async def test_isolated_login_retries_and_completes(
+    monkeypatch, channel, setting, login_url, signed_in_url
+):
     aid = domain.create_agent()
     other = domain.create_agent()
-    monkeypatch.setenv("LEAD_SPLIT_REDDIT_LOGIN_AGENT_IDS", aid)
-    site = FixtureSite("reddit")
+    monkeypatch.setenv(setting, aid)
+    monkeypatch.setenv("LEAD_REDDIT_IPV4_" + aid.replace("-", "").upper(), "1.1.1.1")
+    site = FixtureSite(channel)
     actors = browser.Gateway()
     monkeypatch.setattr(browser, "gateway", actors)
     launch = browser.Actor.launch
@@ -74,7 +100,7 @@ async def test_reddit_retries_and_completes_on_its_own_browser(monkeypatch):
         "AsyncClient",
         lambda **kw: client(transport=httpx.MockTransport(send), **kw),
     )
-    connect = api.Connection(platform="reddit")
+    connect = api.Connection(platform=channel)
     req = Request({"type": "http", "headers": []})
     try:
         tg = await api.connect(aid, api.Connection(platform="telegram"))
@@ -106,7 +132,7 @@ async def test_reddit_retries_and_completes_on_its_own_browser(monkeypatch):
         assert offline.value.status_code == 503
         with tx(aid) as c:
             pending = one(
-                c, "SELECT id FROM lead.social_accounts WHERE platform='reddit'"
+                c, "SELECT id FROM lead.social_accounts WHERE platform=%s", (channel,)
             )
             assert one(c, "SELECT count(*) AS n FROM lead.takeover_sessions")["n"] == 1
         unavailable = False
@@ -115,10 +141,10 @@ async def test_reddit_retries_and_completes_on_its_own_browser(monkeypatch):
             opened["account_id"] == pending["id"] and not opened["managed_target_start"]
         )
         takeover = opened["takeover_id"]
-        profile = account_profiles.for_platform(aid, "reddit")
+        profile = account_profiles.for_platform(aid, channel)
         actor = actors.actors[str(profile["id"])]
-        assert actor.profile["slot"] == "reddit"
-        assert actor.page.url == "https://www.reddit.com/login/"
+        assert actor.profile["slot"] == channel
+        assert actor.page.url == login_url
         assert str(actor.folder).endswith(f"/{aid}/accounts/{profile['id']}")
         assert actor.session != telegram_actor.session
         assert not any(
@@ -129,28 +155,33 @@ async def test_reddit_retries_and_completes_on_its_own_browser(monkeypatch):
         assert (await api.screenshot(UUID(aid), req, "jpeg", takeover)).body.startswith(
             b"\xff\xd8"
         )
-        await actor.page.locator("textarea[name=title]").focus()
+        await actor.page.evaluate(
+            "document.body.appendChild(document.createElement('input')).id='fixture-login'"
+        )
+        await actor.page.locator("#fixture-login").focus()
         await api.browser_input(
             UUID(aid), api.BrowserInput(kind="text", text="fixture", takeover=takeover)
         )
-        assert (
-            await actor.page.locator("textarea[name=title]").input_value() == "fixture"
-        )
+        assert await actor.page.locator("#fixture-login").input_value() == "fixture"
         with tx(other) as c:
             assert (
                 api.login_browser_port(
-                    c, other, f"/agents/{other}/open", {"platform": "reddit"}
+                    c, other, f"/agents/{other}/open", {"platform": channel}
                 )
                 == 8089
             )
         # A takeover from another project cannot select this direct gateway.
-        monkeypatch.setenv("LEAD_SPLIT_REDDIT_LOGIN_AGENT_IDS", f"{aid},{other}")
+        monkeypatch.setenv(setting, f"{aid},{other}")
         with pytest.raises(HTTPException):
             await api.screenshot(UUID(other), req, "jpeg", takeover)
         # The owner has finished the website's login flow and left /login/.
-        await actor.page.goto("https://www.reddit.com/")
+        if channel == "facebook":
+            await actor.context.add_cookies(
+                [{"name": "c_user", "value": "10001", "url": signed_in_url}]
+            )
+        await actor.page.goto(signed_in_url)
         verified = await api.verify_login(
-            UUID(aid), api.Connection(platform="reddit", account_id=pending["id"])
+            UUID(aid), api.Connection(platform=channel, account_id=pending["id"])
         )
         assert verified["ok"]
         assert [path.rsplit("/", 1)[-1] for path, _ in ports] == [
@@ -159,14 +190,14 @@ async def test_reddit_retries_and_completes_on_its_own_browser(monkeypatch):
             "screenshot",
             "input",
             "inspect",
-        ]
+        ] + (["inspect"] if channel == "x" else [])
         assert {port for _, port in ports} == {18091}
         with pytest.raises(HTTPException) as stale:
             await api.screenshot(UUID(aid), req, "jpeg", takeover)
         assert stale.value.status_code == 409
         with pytest.raises(HTTPException) as ended:
             await api.verify_login(
-                UUID(aid), api.Connection(platform="reddit", account_id=pending["id"])
+                UUID(aid), api.Connection(platform=channel, account_id=pending["id"])
             )
         assert ended.value.status_code == 409
         tg_frame = await api.screenshot(UUID(aid), req, "jpeg", tg["takeover_id"])
@@ -182,7 +213,8 @@ async def test_reddit_retries_and_completes_on_its_own_browser(monkeypatch):
             assert (
                 one(
                     c,
-                    "SELECT count(*) AS n FROM lead.social_accounts WHERE platform='reddit'",
+                    "SELECT count(*) AS n FROM lead.social_accounts WHERE platform=%s",
+                    (channel,),
                 )["n"]
                 == 1
             )

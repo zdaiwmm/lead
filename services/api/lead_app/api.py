@@ -24,6 +24,7 @@ from fastapi.responses import (
 from pydantic import BaseModel, Field
 
 from . import domain, website_brief
+from .account_profiles import isolated_login_platforms
 from .admin_advanced_api import router as advanced_admin_router
 from .admin_api import router as admin_router
 from .analytics import router as analytics_router
@@ -45,7 +46,6 @@ from .operating_workspace import router as operations_router
 from .ops import router as ops_router
 from .pixel_events import router as pixel_router
 from .promotion import CODE_PATTERN
-from .reddit_login import split_reddit_login
 from .scope import current_tenant, tenant_scope
 from .security import internal_token, token, valid
 from .telemetry import TelemetryMiddleware, trace_headers
@@ -546,7 +546,7 @@ async def verify_login(aid: UUID, body: Connection):
         inspect_body = {"platform": platform}
         if body.account_id:
             inspect_body["account_id"] = str(body.account_id)
-        if platform == "reddit" and split_reddit_login(aid):
+        if platform in isolated_login_platforms(aid):
             session = one(
                 c,
                 """SELECT t.id FROM lead.takeover_sessions t
@@ -556,7 +556,7 @@ async def verify_login(aid: UUID, body: Connection):
                 (selected["id"] if selected else None, control_version),
             )
             if not session:
-                raise HTTPException(409, "请重新打开独立的 Reddit 登录窗口")
+                raise HTTPException(409, "请重新打开此账号的独立登录窗口")
             inspect_body.update(account_id=str(selected["id"]), takeover=str(session["id"]))
     observed = (await gateway(f"/agents/{aid}/account/inspect", body=inspect_body)).json()
     auto = {
@@ -647,25 +647,31 @@ def respond_card(aid: UUID, card_id: UUID, body: CardResponse):
 
 
 def login_browser_port(c, aid, path, body):
-    # The home ingress on 8089 routes a resident project's entire path to Telegram.
-    # Only an account or an active takeover of its isolated Reddit profile can
-    # select the ordinary browser on 18091.
-    if not split_reddit_login(aid):
+    # The resident project's default ingress forwards all paths to Telegram.
+    platforms = isolated_login_platforms(aid)
+    if not platforms:
         return 8089
     url = urlsplit(path)
     operation = url.path.removeprefix(f"/agents/{aid}/")
     data = body or {}
-    if operation in ("open", "account/inspect") and data.get("platform") == "reddit":
-        profile = one(
+    opening = operation in ("open", "account/inspect") and data.get("platform") in platforms
+    # X verifies its profile target immediately after ending the login takeover.
+    inspecting_target = operation == "target/inspect" and bool(platforms & {"facebook", "x"})
+    if opening or inspecting_target:
+        account = one(
             c,
-            """SELECT p.slot FROM lead.social_accounts s
-            JOIN lead.browser_profiles p ON p.id=s.profile_id
-            WHERE s.id=%s AND s.platform='reddit'""",
+            """SELECT p.slot, s.platform FROM lead.social_accounts s
+            JOIN lead.browser_profiles p ON p.id=s.profile_id WHERE s.id=%s""",
             (data.get("account_id"),),
         )
-        if not profile or profile["slot"] == "default":
-            raise HTTPException(409, "请重新打开独立的 Reddit 登录窗口")
-        return 18091
+        if opening and (not account or account["platform"] != data["platform"]):
+            raise HTTPException(409, "请重新打开此账号的独立登录窗口")
+        if account and account["platform"] in platforms and (
+            opening or account["platform"] in ("facebook", "x")
+        ):
+            if account["slot"].split("-", 1)[0] != account["platform"]:
+                raise HTTPException(409, "请重新打开此账号的独立登录窗口")
+            return 18091
     if operation in ("screenshot", "input"):
         takeover = data.get("takeover")
         if operation == "screenshot":
@@ -673,15 +679,17 @@ def login_browser_port(c, aid, path, body):
         if takeover:
             profile = one(
                 c,
-                """SELECT p.slot, s.platform FROM lead.takeover_sessions t
+                """SELECT p.slot, EXISTS (
+                    SELECT 1 FROM lead.social_accounts s WHERE s.profile_id=p.id
+                    AND s.platform=split_part(p.slot, '-', 1)
+                ) AS bound FROM lead.takeover_sessions t
                 JOIN lead.browser_profiles p ON p.id=t.profile_id
-                LEFT JOIN lead.social_accounts s ON s.profile_id=p.id AND s.platform='reddit'
                 WHERE t.id=%s AND t.state='active' AND t.expires_at>now()""",
                 (takeover,),
             )
             if not profile:
                 raise HTTPException(409, "接管已过期")
-            if profile["slot"] != "default" and profile["platform"] == "reddit":
+            if profile["slot"].split("-", 1)[0] in platforms and profile["bound"]:
                 return 18091
     return 8089
 
@@ -968,7 +976,7 @@ async def connect(aid: UUID, body: Connection):
         create=True,
         account_id=body.account_id,
         new_binding=body.new_account,
-        isolated_login=body.platform == "reddit" and split_reddit_login(aid),
+        isolated_login=body.platform in isolated_login_platforms(aid),
     )
     if profile["slot"] == "default":
         await asyncio.to_thread(domain.set_control, aid, "pause")
