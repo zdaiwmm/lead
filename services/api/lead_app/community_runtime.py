@@ -1997,7 +1997,7 @@ async def community_cycle(aid, rpc, selection=None):
             return
         task = one(
             c,
-            """SELECT * FROM lead.tasks WHERE """ + community_health.eligible_sql("lead.tasks") + """ AND type='community.engage' AND state='running'
+            """SELECT * FROM lead.tasks WHERE """ + community_health.eligible_sql("lead.tasks", legacy_receipts=True) + """ AND type='community.engage' AND state='running'
                AND (result->>'receipt_review_after' IS NULL OR (result->>'receipt_review_after')::timestamptz<=now())
                ORDER BY CASE WHEN input ? 'reply' AND result->>'reply_state' IS NULL THEN 0 ELSE 1 END,
                    coalesce((result->>'receipt_review_after')::timestamptz,created_at), created_at LIMIT 1""",
@@ -2010,7 +2010,7 @@ async def community_cycle(aid, rpc, selection=None):
             kind = selection["kind"]
             if kind in {"resume", "receipt", "inventory", "diagnose"}:
                 task = one(c, "SELECT * FROM lead.tasks t WHERE id=%s AND type='community.engage' AND "
-                           + community_health.current_binding_sql(), (selection["task_id"],))
+                           + community_health.current_binding_sql(legacy_receipts=kind == "receipt"), (selection["task_id"],))
                 if not task or community_health.blocked(c, aid, task, write=False):
                     return {"delay": 1, "reason": "community_selection_changed"}
                 if task["state"] not in {"running", "reconciling", "failed"} and kind not in {"receipt", "inventory", "diagnose"}:
@@ -2045,7 +2045,7 @@ async def community_cycle(aid, rpc, selection=None):
         if not task and not prefer_outreach:
             # Alternate a due read with ordinary community work when the
             # backlog is large. No independent timer or new posting slot.
-            task = one(c, """SELECT * FROM lead.tasks WHERE """ + community_health.eligible_sql("lead.tasks") + """ AND type='community.engage' AND state='reconciling'
+            task = one(c, """SELECT * FROM lead.tasks WHERE """ + community_health.eligible_sql("lead.tasks", legacy_receipts=True) + """ AND type='community.engage' AND state='reconciling'
                 AND coalesce((result->>'receipt_review_after')::timestamptz,created_at)<=now()
                 AND (NOT %s OR coalesce((SELECT result#>>'{cycle_result,reason}' FROM lead.tasks
                     WHERE type='operating.decision' AND state='succeeded'

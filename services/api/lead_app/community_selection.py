@@ -42,7 +42,7 @@ def choose(c, agent, config, now=None):
         AND coalesce(t.result->>'join_state','') NOT IN ('dispatching','unknown','pending_approval')
         ORDER BY h.body->>'read_after' LIMIT 1""", (fences["accounts"],))
     active = all_rows(c, """SELECT * FROM lead.tasks t WHERE type='community.engage'
-        AND state IN ('running','reconciling') AND """ + community_health.eligible_sql() + """
+        AND state IN ('running','reconciling') AND """ + community_health.eligible_sql(legacy_receipts=True) + """
         AND NOT (input->>'account_id'=ANY(%s))
         AND coalesce((result->>'receipt_review_after')::timestamptz,created_at)<=now()
         ORDER BY CASE WHEN input ? 'reply' AND result->>'reply_state' IS NULL THEN 0 ELSE 1 END,

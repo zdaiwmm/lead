@@ -755,7 +755,7 @@ def community_work_due(c, agent, now):
     if any(at and at <= now for name, at in due.items() if name != "next_discovery_at"):
         return True
     if membership_review(c, focus=first_users(agent)) or one(
-        c, """SELECT 1 FROM lead.tasks t WHERE """ + eligible_sql() + """ AND type='community.engage' AND state='running'
+        c, """SELECT 1 FROM lead.tasks t WHERE """ + eligible_sql(legacy_receipts=True) + """ AND type='community.engage' AND state='running'
            AND (result->>'receipt_review_after' IS NULL OR (result->>'receipt_review_after')::timestamptz<=now())"""
     ):
         return True
