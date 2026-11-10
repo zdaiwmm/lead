@@ -107,7 +107,7 @@ async def deliver_partition(client, tenant, aid, scope):
     # dispatcher waits for Temporal to accept *other* events in this scope.
     # Join both operations even on failure before starting another partition.
     results = await asyncio.gather(deliver_scope(client, tenant, aid, scope),
-                                   asyncio.to_thread(refresh_scope, tenant, aid, scope),
+                                   asyncio.to_thread(refresh_scope, tenant, aid, scope, parallel_dates=False),
                                    return_exceptions=True)
     for result in results:
         if isinstance(result, BaseException):

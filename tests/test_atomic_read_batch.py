@@ -66,8 +66,8 @@ async def test_dirty_day_finishes_before_blocked_delivery(monkeypatch):
     refreshed = threading.Event()
     refresh = analytics_reporting.refresh_scope
 
-    def refresh_day(*args):
-        days = refresh(*args)
+    def refresh_day(*args, **kwargs):
+        days = refresh(*args, **kwargs)
         refreshed.set()
         return days
 
@@ -91,3 +91,31 @@ def test_oldest_ready_dirty_day_progresses_despite_new_arrivals():
             (tenant, aid))
         oldest = one(c, "SELECT current_date-4 AS day")["day"]
     assert analytics_reporting.refresh_scope(tenant, aid, "live", limit=1) == [oldest.isoformat()]
+
+
+def test_direct_site_reader_claims_distinct_dates_and_retains_failed_day(monkeypatch):
+    aid, tenant = domain.create_agent(), current_tenant()
+    monkeypatch.setenv("LEAD_PARALLEL_READ_AGENT_IDS", str(aid))
+    with scoped_tx(tenant, aid, "live") as c:
+        c.execute("""INSERT INTO lead.analytics_report_dirty(tenant_id,agent_id,scope_key,day)
+            SELECT %s,%s,'live',current_date-n FROM generate_series(1,2) n""", (tenant, aid))
+        oldest = one(c, "SELECT min(day) AS d FROM lead.analytics_report_dirty")["d"]
+    barrier = threading.Barrier(2)
+    seen = []
+    replace = analytics_reporting._replace_day
+
+    def overlap(c, scope, day):
+        seen.append(day)
+        barrier.wait(timeout=5)
+        replace(c, scope, day)
+        if day == oldest:
+            raise ValueError("injected after materialization")
+
+    monkeypatch.setattr(analytics_reporting, "_replace_day", overlap)
+    completed = analytics_reporting.refresh_scope(tenant, aid, "live", limit=3)
+    assert len(seen) == len(set(seen)) == 2
+    assert len(completed) == 1
+    with scoped_tx(tenant, aid, "live") as c:
+        pending = one(c, "SELECT day,attempts,next_attempt_at>now() AS cooling FROM lead.analytics_report_dirty")
+        assert pending == {"day":oldest,"attempts":1,"cooling":True}
+        assert one(c, "SELECT day FROM lead.analytics_report_days")["day"] != oldest
