@@ -168,8 +168,46 @@ class ResearchPage:
             url = public_url(last["url"])
             await self.actor.forward_proxy.validate_url(url)
             await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await self.wait_for_content()
             # Element handles are deliberately rebuilt by a fresh read. A click
             # from the old process may not target a changed document.
+
+    async def wait_for_content(self):
+        # Wait for actual visible content, without requiring every
+        # analytics request on the website to become idle.
+        if not self.redirect_metadata_only:
+            await self.page.locator("body").wait_for(state="visible")
+        try:
+            if not self.redirect_metadata_only:
+                await self.page.wait_for_function(
+                    "document.body.innerText.trim().length>30", timeout=4000
+                )
+        except BrowserTimeout:
+            pass
+        host = (urlsplit(self.page.url).hostname or "").lower()
+        search_selector = (
+            "#search h3"
+            if host in ("www.google.com", "google.com")
+            else "#b_results .b_algo"
+            if host in ("www.bing.com", "bing.com")
+            else ".result__a"
+            if host == "html.duckduckgo.com"
+            else None
+        )
+        # Discourse mounts its navigation before the result list or post body.
+        if host == "discuss.privacyguides.net":
+            path = urlsplit(self.page.url).path
+            if path.rstrip("/") == "/search":
+                search_selector = '.fps-result a[href*="/t/"]'
+            elif path.startswith("/t/"):
+                search_selector = ".topic-post .cooked"
+        if search_selector and not self.redirect_metadata_only:
+            try:
+                await self.page.locator(search_selector).first.wait_for(
+                    timeout=8000
+                )
+            except BrowserTimeout:
+                pass
 
     async def read_only_route(self, route):
         # Even a malicious page or accidental submit cannot issue writes while
@@ -406,41 +444,7 @@ class ResearchPage:
                         self.redirect_metadata_only = True
                     if self.community_redirects:
                         self.redirect_metadata_only = True
-                    # Wait for actual visible content, without requiring every
-                    # analytics request on the website to become idle.
-                    if not self.redirect_metadata_only:
-                        await self.page.locator("body").wait_for(state="visible")
-                    try:
-                        if not self.redirect_metadata_only:
-                            await self.page.wait_for_function(
-                                "document.body.innerText.trim().length>30", timeout=4000
-                            )
-                    except BrowserTimeout:
-                        pass
-                    host = (urlsplit(self.page.url).hostname or "").lower()
-                    search_selector = (
-                        "#search h3"
-                        if host in ("www.google.com", "google.com")
-                        else "#b_results .b_algo"
-                        if host in ("www.bing.com", "bing.com")
-                        else ".result__a"
-                        if host == "html.duckduckgo.com"
-                        else None
-                    )
-                    # Discourse mounts its navigation before the result list or post body.
-                    if host == "discuss.privacyguides.net":
-                        path = urlsplit(self.page.url).path
-                        if path.rstrip("/") == "/search":
-                            search_selector = '.fps-result a[href*="/t/"]'
-                        elif path.startswith("/t/"):
-                            search_selector = ".topic-post .cooked"
-                    if search_selector and not self.redirect_metadata_only:
-                        try:
-                            await self.page.locator(search_selector).first.wait_for(
-                                timeout=8000
-                            )
-                        except BrowserTimeout:
-                            pass
+                    await self.wait_for_content()
                     self.refs = {}
                 elif operation == "read":
                     if self.page.url == "about:blank":

@@ -109,3 +109,43 @@ async def test_three_public_browser_runs_are_concurrent_scoped_and_fenced(monkey
         for aid in ids:
             await gateway.close(aid)
             domain.set_control(aid, "archive")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.environ.get("LEAD_BROWSER_TESTS") != "1",
+    reason="native browser and delayed public-page fixture",
+)
+async def test_recovered_research_waits_for_visible_content(monkeypatch):
+    monkeypatch.setattr(domain, "emit", lambda *a, **k: None)
+    aid = domain.create_agent()
+    rid = begin_run(aid, "恢复延迟呈现的研究页面")
+    gateway = Gateway()
+
+    async def delayed_page(route):
+        await route.fulfill(
+            content_type="text/html",
+            body="""<!doctype html><title>Delayed research</title><body><script>
+                setTimeout(() => {
+                    document.body.innerHTML = '<p>Research content becomes visible after the document is loaded.</p><a href="/next">Next</a>';
+                }, 600);
+            </script></body>""",
+        )
+
+    try:
+        actor = await gateway.get(aid)
+        monkeypatch.setattr(actor, "route", delayed_page)
+        first = await ResearchPage(actor, rid).command(
+            "open", {"url": "https://example.com/research"}, str(uuid4())
+        )
+        assert first["elements"] and "Research content" in first["text"]
+        await gateway.close(aid)
+        actor = await gateway.get(aid)
+        monkeypatch.setattr(actor, "route", delayed_page)
+        restored = await ResearchPage(actor, rid).command("read", {}, str(uuid4()))
+        assert "Research content" in restored["text"]
+        assert restored["elements"][0]["name"] == "Next"
+        finish_run(aid, rid)
+    finally:
+        await gateway.close(aid)
+        domain.set_control(aid, "archive")
