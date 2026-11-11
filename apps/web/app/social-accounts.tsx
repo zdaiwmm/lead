@@ -72,18 +72,21 @@ export default function SocialAccounts({
     >
       <div className="social-grid">
         {unique.map((p) => {
+          const verification = Object.values(agent.onboarding_state?.browser_challenges || {}).find((v: any) => v.state === "waiting_user" && v.platform === p.id) as Row | undefined;
+          const needsVerification = Boolean(verification);
           const a = accounts.find(
             (a: Row) =>
               a.platform === p.id &&
-              ["connected", "needs_auth", "restricted"].includes(a.state),
+              (needsVerification ? a.id === verification?.account_id : ["connected", "needs_auth", "restricted"].includes(a.state)),
           );
           const isConnected = a?.state === "connected";
           const enabled =
             isConnected &&
+            !needsVerification &&
             a.automation_enabled &&
             agent.desired_state === "running";
           const canOperate = !!p.automation || !!a?.operational_ready || !!a?.editorial_preparation;
-          const caption = !a
+          const caption = needsVerification ? "等待真人验证" : !a
             ? "连接"
             : a.state === "needs_auth"
               ? "登录失效"
@@ -117,7 +120,7 @@ export default function SocialAccounts({
                   {a && (
                     <span className={`social-state ${enabled ? "active" : ""}`}>
                       {!enabled &&
-                        (a.state === "needs_auth" ? (
+                        (needsVerification || a.state === "needs_auth" ? (
                           <CircleAlert size={10} />
                         ) : a.state === "restricted" ? (
                           <LockKeyhole size={9} />
@@ -200,12 +203,12 @@ export default function SocialAccounts({
                       {displayed.display_name ||
                         displayed.username ||
                         displayed.external_account_id ||
-                        "账号已连接"}
+                        (needsVerification ? "等待完成验证" : "账号已连接")}
                     </p>
                     <p className="muted small">
                       {confirmDisconnect
                         ? "此 Agent 将停止操作该账号，未提交的相关任务会取消，历史记录保留。其他 Agent 可重新登录并绑定，运营授权需重新确认。浏览器登录状态不会转移。"
-                        : !isConnected
+                        : needsVerification ? "平台要求真人验证，原页面和任务已保留。完成验证后可继续原任务。" : !isConnected
                           ? `${caption}。可重新登录，或解除绑定后交给其他 Agent。`
                           : !canOperate
                             ? "已支持登录，自主运营尚未开放"
@@ -247,7 +250,7 @@ export default function SocialAccounts({
                             readOnly ||
                             !!busy ||
                             (!canOperate && !enabled) ||
-                            !isConnected
+                            !isConnected || needsVerification
                           }
                           onClick={() => toggle(p.id, !enabled)}
                         >
@@ -263,10 +266,10 @@ export default function SocialAccounts({
                           disabled={readOnly || !!busy}
                           onClick={() => {
                             setOpen("");
-                            onConnect(p);
+                            onConnect({ ...p, account_id: verification?.account_id });
                           }}
                         >
-                          重新登录
+                          {needsVerification ? "打开原窗口验证" : "重新登录"}
                         </button>
                         <button
                           className="text-button danger"

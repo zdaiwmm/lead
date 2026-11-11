@@ -41,12 +41,43 @@ class BrowserBusy(ValueError):
     code = "browser_busy"
 
 
+class BrowserLock(asyncio.Lock):
+    """Recheck after acquiring: an already queued worker must not steal the page."""
+
+    def __init__(self, aid, profile_id):
+        super().__init__()
+        self.aid = aid
+        self.profile_id = profile_id
+
+    async def __aenter__(self):
+        await self.acquire()
+        try:
+            from .browser_challenges import pending
+
+            with tx(self.aid) as c:
+                if pending(c, self.profile_id):
+                    raise ValueError("原浏览器正在等待真人验证，自动操作已暂停")
+        except BaseException:
+            self.release()
+            raise
+
+
+@asynccontextmanager
+async def manual_control(actor):
+    # Only explicit takeover, read-only screenshots, and shutdown use this path.
+    await actor.lock.acquire()
+    try:
+        yield
+    finally:
+        actor.lock.release()
+
+
 class Actor:
     def __init__(self, aid, profile=None):
         self.aid = aid
         self.profile = profile or account_profiles.for_platform(aid, "lab")
         self.folder = account_profiles.directory(aid, self.profile)
-        self.lock = asyncio.Lock()
+        self.lock = BrowserLock(aid, self.profile["id"])
         self.used = time.monotonic()
         self.manager = None
         self.context = None
@@ -396,6 +427,9 @@ class Actor:
 
             if not current(c, self.aid, task["clock"]):
                 raise ValueError("此渠道已停用或重新启动，旧任务不能提交")
+        from .browser_challenges import pending
+        if pending(c, self.profile["id"]):
+            raise ValueError("原浏览器正在等待真人验证，自动操作已暂停")
         if not account_setup and action["intent"].get("body"):
             from .promotion import promoter_copy_ok, promoter_voice
             if promoter_voice(a) and not promoter_copy_ok((action["intent"].get("title") or "") + "\n" + action["intent"]["body"], a["name"]):
@@ -958,6 +992,9 @@ class Gateway:
 
     def keep_preparation(self, aid, session_id):
         with tx(aid) as c:
+            from .browser_challenges import all_pending
+            if any(v["session_id"] == str(session_id) for v in all_pending(c)):
+                return True
             return bool(one(
                 c,
                 "SELECT 1 FROM lead.takeover_sessions WHERE browser_session_id=%s AND state IN ('requested','active','ending') AND expires_at>now()",
@@ -995,6 +1032,9 @@ class Gateway:
             if actor.lock.locked() or actor.research_pages:
                 continue
             with tx(actor.aid) as c:
+                from .browser_challenges import pending
+                if pending(c, actor.profile["id"]):
+                    continue
                 if one(
                     c,
                     "SELECT 1 FROM lead.takeover_sessions WHERE browser_session_id=%s AND state IN ('requested','active','ending') AND expires_at>now()", (actor.session,)
@@ -1006,7 +1046,7 @@ class Gateway:
             return
 
     @scoped_agent_method
-    async def get(self, aid, profile_id=None):
+    async def get(self, aid, profile_id=None, *, allow_challenge=False):
         aid = str(UUID(aid))
         with tx(aid) as c:
             profile = (
@@ -1019,6 +1059,12 @@ class Gateway:
         key = aid if profile["slot"] == "default" else str(profile["id"])
         async with self.locks.setdefault(key, asyncio.Lock()):
             with tx(aid) as c:
+                from .browser_challenges import pending
+                challenge = pending(c, profile["id"])
+                if challenge and not allow_challenge:
+                    raise ValueError("原浏览器正在等待真人验证，请先在社媒账号中完成验证")
+                if challenge and (key not in self.actors or self.actors[key].disconnected or str(self.actors[key].session) != challenge["session_id"]):
+                    raise ValueError("原验证窗口已失效，任务保持暂停；请核对原任务后重新连接账号")
                 if one(
                     c,
                     "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()",
@@ -1066,7 +1112,7 @@ class Gateway:
             actor = self.actors.pop(key, None)
             if actor:
                 try:
-                    async with actor.lock:
+                    async with manual_control(actor):
                         await actor.close()
                 finally:
                     self.slots.release()
@@ -1160,6 +1206,68 @@ class InputRequest(BaseModel):
     text: str = Field(default="", max_length=4000)
 
 
+def challenge_profile(aid, takeover):
+    with tx(aid) as c:
+        row = one(c, "SELECT profile_id FROM lead.takeover_sessions WHERE id=%s", (takeover,))
+        if not row:
+            raise ValueError("接管已过期")
+        return row["profile_id"]
+
+
+class ChallengeRequest(BaseModel):
+    takeover: UUID
+    platform: str
+    challenge_id: UUID | None = None
+    start_managed_targets: bool = False
+
+
+@app.post("/agents/{aid}/challenge/status")
+async def challenge_status(aid: str, body: ChallengeRequest):
+    from urllib.parse import urlsplit
+
+    from .adapters import get_adapter
+    from .adapters.core import HumanVerificationRequired, check_challenge
+    from .browser_challenges import block, pending
+
+    actor = await gateway.get(aid, challenge_profile(aid, body.takeover), allow_challenge=True)
+    async with manual_control(actor):
+        require_takeover(aid, actor, body.takeover)
+        with tx(aid) as c:
+            challenge = pending(c, actor.profile["id"])
+        if not challenge and body.platform != "lab":
+            adapter = get_adapter(body.platform)
+            if urlsplit(actor.page.url).hostname in getattr(adapter, "hosts", ()):
+                try:
+                    await check_challenge(actor.page)
+                except HumanVerificationRequired:
+                    block(actor, body.platform)
+                    with tx(aid) as c:
+                        challenge = pending(c, actor.profile["id"])
+        return {"challenge": challenge}
+
+
+@app.post("/agents/{aid}/challenge/verify")
+async def verify_challenge(aid: str, body: ChallengeRequest):
+    from .adapters import get_adapter
+    from .adapters.core import check_challenge
+    from .browser_challenges import assert_session, finish, last_for, pending
+
+    actor = await gateway.get(aid, challenge_profile(aid, body.takeover), allow_challenge=True)
+    async with manual_control(actor):
+        with tx(aid) as c:
+            challenge = pending(c, actor.profile["id"])
+            last = last_for(c, actor.profile["id"])
+        if not challenge and last.get("id") == str(body.challenge_id) and last.get("state") == "resolved" and last.get("platform") == body.platform:
+            return {"ok": True, "resumed_tasks": last["resumed_tasks"], "account_id": last["account_id"], "finish_login": last.get("finish_login", not last["external_account_id"])}
+        require_takeover(aid, actor, body.takeover)
+        assert_session(challenge, actor)
+        if challenge["id"] != str(body.challenge_id) or challenge["platform"] != body.platform:
+            raise ValueError("验证请求已变化，请重新打开原窗口")
+        await check_challenge(actor.page)
+        observed = await get_adapter(body.platform).account(actor.page)
+        return finish(actor, challenge["id"], observed)
+
+
 class ResearchCommand(BaseModel):
     run_id: UUID
     command_id: UUID
@@ -1195,7 +1303,13 @@ async def inspect_account(aid: UUID, body: OpenRequest):
                 )
             if known:
                 await telegram.open_account(actor.page, known["external_account_id"])
-        return await get_adapter(body.platform).account(actor.page)
+        from .adapters.core import HumanVerificationRequired
+        from .browser_challenges import block
+        try:
+            return await get_adapter(body.platform).account(actor.page)
+        except HumanVerificationRequired:
+            block(actor, body.platform)
+            raise
 
 
 class CommunitySearchRequest(BaseModel):
@@ -1578,7 +1692,16 @@ async def open_browser(aid: str, body: OpenRequest):
     profile = account_profiles.for_platform(
         aid, body.platform, create=True, account_id=body.account_id
     )
-    actor = await gateway.get(aid,profile["id"])
+    actor = await gateway.get(aid,profile["id"], allow_challenge=True)
+    from .browser_challenges import assert_session, pending
+    async with manual_control(actor):
+        with tx(aid) as c:
+            challenge = pending(c, profile["id"])
+        if challenge:
+            assert_session(challenge, actor)
+            if challenge["platform"] != body.platform:
+                raise ValueError("请先完成原账号的真人验证")
+            return {"session_id": actor.session, "profile_id": str(profile["id"]), "challenge": challenge}
     if body.platform != "lab" and env().get("LEAD_DEPLOYMENT_MODE") == "production":
         from .identity import check
 
@@ -1621,8 +1744,8 @@ def require_takeover(aid, actor, takeover):
 
 @app.get("/agents/{aid}/screenshot")
 async def screenshot(aid: str, format: str = "png", takeover: UUID | None = None):
-    actor = await gateway.get(aid,account_profiles.takeover_profile(aid,takeover) if takeover else None)
-    async with actor.lock:
+    actor = await gateway.get(aid,account_profiles.takeover_profile(aid,takeover) if takeover else None, allow_challenge=True)
+    async with manual_control(actor):
         if takeover:
             require_takeover(aid, actor, takeover)
         return Response(
@@ -1649,8 +1772,8 @@ async def page_status(aid: UUID):
 
 @app.post("/agents/{aid}/input")
 async def user_input(aid: str, body: InputRequest):
-    actor = await gateway.get(aid,account_profiles.takeover_profile(aid,body.takeover) if body.takeover else None)
-    async with actor.lock:
+    actor = await gateway.get(aid,account_profiles.takeover_profile(aid,body.takeover) if body.takeover else None, allow_challenge=True)
+    async with manual_control(actor):
         require_takeover(aid, actor, body.takeover)
         if body.kind == "click":
             await actor.page.mouse.click(

@@ -305,7 +305,7 @@ export default function Lead() {
   async function connect(p: Row) {
     if (!current || readOnly) return;
     window.dispatchEvent(new Event("lead:close-dialogs"));
-    setBrowser({ platform: p.id, name: p.name, activate: p.activate });
+    setBrowser({ platform: p.id, name: p.name, activate: p.activate, account_id: p.account_id });
     setChannels(false);
   }
   const running = agents.filter((a) => a.desired_state === "running").length;
@@ -1158,6 +1158,7 @@ export default function Lead() {
           key={current + browser.platform}
           aid={current}
           platform={browser.platform}
+          requestedAccountId={browser.account_id}
           name={browser.name}
           verifyLabel={browser.activate ? "验证并激活" : "验证并完成"}
           onVerified={browser.activate ? async (started) => {

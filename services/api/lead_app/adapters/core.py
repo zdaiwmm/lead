@@ -9,6 +9,39 @@ class NeedsAuth(ValueError):
     pass
 
 
+class HumanVerificationRequired(NeedsAuth):
+    """The current page must remain available for an owner's verification."""
+
+    code = "human_verification_required"
+    safe_to_restart = False
+
+
+async def check_challenge(page):
+    # Require a visible challenge widget or a dedicated challenge heading/path.
+    # A post discussing CAPTCHA, or a hidden preloaded widget, is not evidence.
+    widgets = (
+        'iframe[src*="captcha" i],iframe[src*="challenges.cloudflare.com"],'
+        'iframe[src*="arkoselabs.com"],iframe[src*="funcaptcha"],'
+        'iframe[title*="challenge" i],#challenge-running,#challenge-stage'
+    )
+    headings = page.locator(
+        ':is(h1,h2,[role="heading"]):not(article *,shreddit-post *)'
+    ).filter(
+        has_text=re.compile(
+            r"^(?:verify (?:that )?you(?: are|'re) human|are you (?:a )?(?:human|robot)\??|"
+            r"let[’']s confirm you are human|human verification|安全验证|真人验证|人机验证)[.!?。！]?$",
+            re.I,
+        )
+    )
+    path = urlsplit(page.url).path
+    if (
+        await page.locator(widgets).filter(visible=True).count()
+        or await headings.filter(visible=True).count()
+        or re.search(r"^/(?:captcha|challenge|i/flow/challenge|cdn-cgi/challenge-platform)(?:/|$)", path, re.I)
+    ):
+        raise HumanVerificationRequired("平台要求真人验证，已保留原页面，请接管浏览器完成验证")
+
+
 class ScopeChanged(ValueError):
     pass
 
@@ -24,6 +57,7 @@ class PreparationNotStarted(LayoutChanged):
 async def first_visible(page, selectors, timeout=12000):
     deadline = asyncio.get_running_loop().time() + timeout / 1000
     while True:
+        await check_challenge(page)
         for selector in selectors:
             items = page.locator(selector).filter(visible=True)
             count = await items.count()
@@ -70,6 +104,7 @@ async def local_account_link(page, selectors, timeout=0):
     # missing evidence; conflicting identities must still fail immediately.
     deadline = asyncio.get_running_loop().time() + timeout / 1000
     while True:
+        await check_challenge(page)
         found = set()
         for selector in selectors:
             for item in await page.locator(selector).filter(visible=True).all():
@@ -115,6 +150,7 @@ async def wait_ready(page):
     markers = "[role=progressbar], [aria-busy=true], [data-testid=uploadProgress]"
     deadline = asyncio.get_running_loop().time() + 60
     while await page.locator(markers).filter(visible=True).count():
+        await check_challenge(page)
         if asyncio.get_running_loop().time() > deadline:
             raise LayoutChanged("媒体仍在处理，未进入发布阶段")
         await asyncio.sleep(0.25)
@@ -124,6 +160,7 @@ async def check_surface(page, hosts):
     p = urlsplit(page.url)
     if p.scheme != "https" or p.hostname not in hosts:
         raise NeedsAuth("当前不在已验证的平台页面")
+    await check_challenge(page)
     if re.search(
         r"/(login|signin|challenge|checkpoint|authwall)(?:[/?#]|$)", p.path, re.I
     ):

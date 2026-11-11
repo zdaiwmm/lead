@@ -978,8 +978,16 @@ async def connect(aid: UUID, body: Connection):
         new_binding=body.new_account,
         isolated_login=body.platform in isolated_login_platforms(aid),
     )
-    if profile["slot"] == "default":
-        await asyncio.to_thread(domain.set_control, aid, "pause")
+    from .browser_challenges import pending
+    def prepare_connection():
+        with tx(aid) as c:
+            require_agent(c, aid, True)
+            challenge = pending(c, profile["id"])
+            if challenge and challenge["platform"] != body.platform:
+                raise ValueError("请先完成原账号的真人验证")
+            if profile["slot"] == "default" and not challenge:
+                domain.control_in_tx(c, aid, "pause")
+    await asyncio.to_thread(prepare_connection)
     opened = (
         await gateway("/agents/" + aid + "/open", body={"platform": body.platform,**({"account_id":str(profile["account_id"])} if profile.get("account_id") else {})})
     ).json()
@@ -1010,7 +1018,7 @@ async def connect(aid: UUID, body: Connection):
         c.execute(
             "UPDATE lead.takeover_sessions SET state='expired',ended_at=now() WHERE state IN ('requested','active','ending') AND profile_id=%s", (profile['id'],)
         )
-        if account:
+        if account and not opened.get("challenge"):
             c.execute("UPDATE lead.social_accounts SET binding_version=binding_version+1 WHERE id=%s",(account["id"],))
         takeover_token = secrets.token_urlsafe(32)
         takeover = one(
@@ -1025,18 +1033,39 @@ async def connect(aid: UUID, body: Connection):
                 a["control_version"],
             ),
         )
-        record(c, aid, "已打开账号登录窗口", body.platform)
+        record(c, aid, "已接管原验证窗口" if opened.get("challenge") else "已打开账号登录窗口", body.platform)
         audit(c, aid, "browser.takeover.started", {"platform": body.platform})
     from .channel_delivery import owns
 
     return {
         "takeover_id": takeover["id"],
+        "challenge": opened.get("challenge"),
         "managed_target_start": profile["slot"] != "default" and body.platform in ("reddit","facebook") and owns(a, body.platform),
         "account_id": account["id"] if account else None,
         "platform": body.platform,
         "status": "pending",
         "automation": False,
     }
+
+
+class BrowserChallengeRequest(BaseModel):
+    takeover: UUID
+    platform: str
+    start_managed_targets: bool = False
+    challenge_id: UUID | None = None
+
+
+@app.post("/api/agents/{aid}/browser/challenge/status")
+async def browser_challenge_status(aid: UUID, body: BrowserChallengeRequest):
+    return (await gateway(f"/agents/{aid}/challenge/status", body=body.model_dump(mode="json"))).json()
+
+
+@app.post("/api/agents/{aid}/browser/challenge/verify")
+async def browser_challenge_verify(aid: UUID, body: BrowserChallengeRequest):
+    result = (await gateway(f"/agents/{aid}/challenge/verify", body=body.model_dump(mode="json"))).json()
+    if result.get("finish_login"):
+        return {**(await verify_login(aid, Connection(platform=body.platform, account_id=result["account_id"], start_managed_targets=body.start_managed_targets))), "finish_login": True}
+    return result
 
 
 @app.post("/api/agents/{aid}/takeover/end")

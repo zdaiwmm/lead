@@ -14,6 +14,7 @@ from playwright.async_api import TimeoutError as BrowserTimeoutError
 
 from .catalog import SPECS, target_url, validate
 from .core import (
+    HumanVerificationRequired,
     LayoutChanged,
     NeedsAuth,
     PreparationNotStarted,
@@ -505,6 +506,10 @@ class WebAdapter:
                 )
             own = await self.account(page)
             await self.target(page, target["canonical_url"], own["external_account_id"])
+        except HumanVerificationRequired as error:
+            # Identity/target navigation has not touched the editor or upload.
+            error.safe_to_restart = True
+            raise
         except BrowserTimeoutError as error:
             # All initial identity/target navigation is read-only. A timeout here
             # must not strand the action as though an upload had been interrupted.

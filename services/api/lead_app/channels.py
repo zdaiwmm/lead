@@ -28,6 +28,9 @@ def disconnect_account(aid, account_id, expected_verified_at):
             archive_account_receipts(c, aid, account["id"], account["external_account_id"])
         if account["state"] == "disconnected":
             return {"ok": True, "duplicate": True}
+        from .browser_challenges import pending, save
+        if (challenge := pending(c, account["profile_id"])) and challenge["account_id"] == str(account_id):
+            save(c, aid, {**challenge, "state": "canceled"})
         c.execute(
             "UPDATE lead.social_accounts SET state='disconnected',automation_enabled=false,binding_version=binding_version+1 WHERE id=%s",
             (account_id,),
