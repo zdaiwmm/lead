@@ -384,14 +384,14 @@ async def test_release_then_verify_another_telegram_login_through_native_gateway
     aid, account, target, _ = bound
     old_id = str(int(uid().replace("-", "")[:12], 16))
     new_id = str(int(old_id) + 1)
-    channels.store_account(
+    previous_account_id = channels.store_account(
         aid,
         "telegram",
         {"external_account_id": old_id, "display_name": "Previous fixture"},
     )
     with tx(aid) as c:
         account = one(
-            c, "SELECT * FROM lead.social_accounts WHERE id=%s", (account["id"],)
+            c, "SELECT * FROM lead.social_accounts WHERE id=%s", (previous_account_id,)
         )
     channels.disconnect_account(aid, account["id"], account["verified_at"])
     old_slot = "2" if slot == "1" else "1"
@@ -430,18 +430,25 @@ async def test_release_then_verify_another_telegram_login_through_native_gateway
             monkeypatch.setattr(browser_module.gateway, "get", get_actor)
             monkeypatch.setattr(api_module, "gateway", inspect_gateway)
             result = await verify_login(UUID(aid), Connection(platform="telegram"))
-            assert result["account_id"] == str(account["id"])
+            assert result["account_id"] != str(account["id"])
             assert page.url == "https://web.telegram.org/k/?account=" + slot
             with tx(aid) as c:
                 current = one(
                     c,
                     "SELECT * FROM lead.social_accounts WHERE id=%s",
-                    (account["id"],),
+                    (result["account_id"],),
                 )
                 assert (
                     current["state"] == "connected"
                     and current["external_account_id"] == new_id
                 )
+                previous = one(
+                    c,
+                    "SELECT state,external_account_id FROM lead.social_accounts WHERE id=%s",
+                    (previous_account_id,),
+                )
+                assert previous["state"] == "disconnected"
+                assert previous["external_account_id"] == old_id
                 assert (
                     one(
                         c,
