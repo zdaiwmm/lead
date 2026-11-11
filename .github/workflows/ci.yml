@@ -84,7 +84,7 @@ jobs:
             | sudo tee /etc/apt/apt.conf.d/99lead-ci-acquire >/dev/null
           sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get update
           sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get install -y bubblewrap fonts-noto-cjk
-          .venv/bin/playwright install-deps firefox chromium
+          sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY "$PWD/.venv/bin/python" -m playwright install-deps firefox chromium
           .venv/bin/playwright install chromium
           .venv/bin/python scripts/ci_install_camoufox.py
           # This ephemeral runner permits user namespaces for the bwrap boundary.
