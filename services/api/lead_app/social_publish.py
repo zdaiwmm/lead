@@ -420,11 +420,12 @@ def gate(actor, c, action):
             or datetime.fromisoformat(rules["checked_at"]) < datetime.now(timezone.utc) - timedelta(days=1)):
             raise ScopeChanged("普通成员投稿范围或社区规则已过期，需要重新核对")
     scope_id = grant["limits"].get("managed_scope_id")
-    if scope_id and not one(c, """SELECT 1 FROM lead.interaction_cards scope JOIN lead.social_accounts s
-            ON s.id::text=scope.payload->>'account_id' AND s.external_account_id=scope.payload->>'external_account_id'
-            WHERE scope.id=%s AND s.id=%s AND scope.state='accepted' AND scope.type='manage_account'
-            AND scope.payload->>'source'='managed_target_binding' AND scope.expires_at>now()""", (scope_id,target["account_id"])):
-        raise ScopeChanged("账号文字发布委托已失效")
+    if scope_id:
+        from .channels import managed_scope
+        account = one(c, "SELECT * FROM lead.social_accounts WHERE id=%s", (target["account_id"],))
+        scope = managed_scope(c, account) if account else None
+        if not scope or str(scope["id"]) != scope_id:
+            raise ScopeChanged("账号文字发布委托已失效")
     if action["intent"].get("media") and "upload_media" not in grant["allowed_actions"]:
         raise ScopeChanged("授权范围不包含媒体上传")
     kind = action["intent"].get("format", "text")

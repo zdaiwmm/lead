@@ -166,12 +166,12 @@ def managed_scope(c, account):
         (str(account["id"]),account["external_account_id"],str(account["binding_version"])))
 
 
-def authorize_managed_discovery(c, aid, account_id, platform, observed_id, binding_version):
+def authorize_managed_discovery(c, aid, account_id, platform, observed_id, binding_version, *, explicit=False):
     from .atomic_dispatch import channel_pilot
 
     account = one(c, """SELECT s.* FROM lead.social_accounts s JOIN lead.browser_profiles p ON p.id=s.profile_id
         WHERE s.id=%s AND s.platform=%s AND p.slot<>'default' AND s.state='connected' FOR UPDATE OF s""", (account_id,platform))
-    if not account or not channel_pilot(aid) or platform not in ("reddit","facebook") or account["external_account_id"] != observed_id or account["binding_version"] != binding_version:
+    if not account or (not explicit and not channel_pilot(aid)) or platform not in ("reddit","facebook") or account["external_account_id"] != observed_id or account["binding_version"] != binding_version:
         raise ValueError("绑定账号已变化，不能启动渠道")
     if not managed_scope(c,account):
         payload = {"source":"managed_target_binding", "account_id":str(account_id), "platform":platform,
@@ -181,6 +181,8 @@ def authorize_managed_discovery(c, aid, account_id, platform, observed_id, bindi
                      VALUES(%s,%s,'manage_account','accepted',%s,now()+interval '1 year')""",
                   (current_tenant(),aid,j(payload)))
         audit(c,aid,"managed_targets.authorized",payload)
+    c.execute("""UPDATE lead.agents SET onboarding_state=jsonb_set(onboarding_state,'{managed_channel_delivery}',
+        coalesce(onboarding_state->'managed_channel_delivery','{}') || jsonb_build_object(%s::text,true)) WHERE id=%s""", (platform,aid))
 
 
 def store_target(aid, account_id, observed, *, notify=True, expected_binding=None, channel_clock=None):
@@ -198,7 +200,8 @@ def store_target(aid, account_id, observed, *, notify=True, expected_binding=Non
         if channel_clock:
             from .channel_delivery import current
             owner = current(c, aid, channel_clock)
-            if not owner or owner["input"]["platform"] != account["platform"] or not account["automation_enabled"]:
+            from .channel_authority import driver_accounts
+            if not owner or owner["input"]["platform"] != account["platform"] or not account["automation_enabled"] or not any(row["id"] == account["id"] for row in driver_accounts(c,aid,account["platform"])):
                 raise ValueError("核对目标时渠道已暂停")
         spec = SPECS[account["platform"]]
         member = observed.get("access_mode") == "ordinary_member"

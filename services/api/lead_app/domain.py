@@ -699,7 +699,7 @@ def channel_control(aid, platform, enabled, *, connection=None, start_account=No
                 raise ValueError("运营模型尚未配置凭据，请让所有者在后台检查模型服务")
             c.execute(
                 """UPDATE lead.social_accounts SET automation_enabled=(platform=%s AND (%s::uuid IS NULL OR id=%s))
-                WHERE platform<>'lab'""", (platform,start_account,start_account),
+                WHERE platform<>'lab' AND %s::uuid IS NULL""", (platform,start_account,start_account,start_account),
             )
             c.execute(
                 "UPDATE lead.agents SET desired_state='running',health_state='queued',control_version=control_version+1,version=version+1,updated_at=now() WHERE id=%s",

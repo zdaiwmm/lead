@@ -23,6 +23,10 @@ def source_access(platform):
 def unbound_source(c, platform, agent, business):
     if platform not in ("reddit", "facebook"):
         return None
+    from .channel_authority import driver_accounts
+    allowed_ids = [str(row["id"]) for row in driver_accounts(c,str(agent["id"]),platform)]
+    if not allowed_ids:
+        return None
     return one(
         c,
         """SELECT t.id AS evidence_id,s.id AS account_id,s.binding_version,
@@ -31,7 +35,7 @@ def unbound_source(c, platform, agent, business):
         WHERE t.type='operating.validate' AND t.state='succeeded' AND t.result->>'status'='observed'
           AND t.result->>'channel_fit'='viable' AND t.result#>>'{cold_entry,source_url}'=t.input->>'candidate_url' AND t.result->'source_urls' ? (t.input->>'candidate_url')
           AND t.completed_at>now()-interval '14 days' AND t.input->>'business_profile_id'=%s
-          AND t.input->>'config_revision'=%s AND s.platform=%s AND s.state='connected' AND s.automation_enabled
+          AND t.input->>'config_revision'=%s AND s.platform=%s AND s.id::text=ANY(%s) AND s.state='connected' AND s.automation_enabled
           AND (NOT coalesce(t.result->'account_inspections','{}') ? (s.id::text||':'||s.binding_version::text)
                OR (t.result#>>ARRAY['account_inspections',s.id::text||':'||s.binding_version::text,'checked_at'])::timestamptz<now()-interval '1 day')
           AND NOT EXISTS (SELECT FROM lead.account_targets target WHERE target.account_id=s.id
@@ -41,7 +45,7 @@ def unbound_source(c, platform, agent, business):
           AND EXISTS (SELECT FROM lead.platform_capabilities p WHERE p.platform=s.platform AND p.action_type='publish'
                       AND p.permission_state='approved')
         ORDER BY t.completed_at DESC,s.created_at,s.id LIMIT 1""",
-        (str(business["id"]), str(agent["config_revision"]), platform),
+        (str(business["id"]), str(agent["config_revision"]), platform, allowed_ids),
     )
 
 

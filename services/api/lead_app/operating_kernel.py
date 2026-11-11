@@ -401,7 +401,7 @@ def candidates(c, aid, agent, business, now=None):
     from .owned_audience import status as audience_status
 
     for target in eligible:
-        if owns(agent, target["platform"]):
+        if owns(agent, target["platform"], account_id=target["account_id"], connection=c):
             continue
         if trials.first_users(agent) and target["platform"] == "telegram":
             audience = audience_status(target.get("owned_audience"), now)
@@ -615,9 +615,13 @@ async def run_work(aid, candidate, operating_plan=None, *, channel_clock=None):
         if channel_clock:
             if task["state"] == "running" and task["started_at"] > datetime.now(timezone.utc) - timedelta(minutes=5):
                 return {"delay": 30, "reason": "research_already_running"}
-            account = one(c, """SELECT profile_id FROM lead.social_accounts WHERE platform=%s
-                AND automation_enabled AND state='connected' ORDER BY created_at,id LIMIT 1""", (task["input"]["platform"],))
-            task["input"].update(channel_profile_id=str(account["profile_id"]), channel_clock=channel_clock)
+            from .channel_authority import driver_accounts
+            accounts = driver_accounts(c,aid,task["input"]["platform"])
+            if not accounts:
+                return {"stop":True}
+            account = accounts[0]
+            task["input"].update(channel_profile_id=str(account["profile_id"]), channel_account_id=str(account["id"]),
+                                 channel_account_binding=account["binding_version"], channel_clock=channel_clock)
             c.execute("UPDATE lead.tasks SET input=%s WHERE id=%s", (j(task["input"]), task["id"]))
         attempts = (task["result"] or {}).get("attempts", 0) + 1
         if operating_plan:
@@ -641,7 +645,8 @@ async def run_work(aid, candidate, operating_plan=None, *, channel_clock=None):
                 c,
                 "SELECT id FROM lead.business_profiles ORDER BY revision DESC LIMIT 1",
             )
-            if channel_clock and not active_clock(c, aid, channel_clock):
+            from .channel_authority import research_binding_valid
+            if channel_clock and (not active_clock(c, aid, channel_clock) or not research_binding_valid(c,aid,task["input"])):
                 c.execute("UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE id=%s AND state='running' AND input->'channel_clock'=%s", (task["id"], j(channel_clock)))
                 return {"stop": True}
             if (

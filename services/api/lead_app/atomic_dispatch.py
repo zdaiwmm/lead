@@ -1,6 +1,8 @@
 """Persist and execute account-free channel preparation one platform at a time."""
 
 import asyncio
+import hashlib
+import json
 
 from psycopg.errors import LockNotAvailable
 from temporalio import activity
@@ -79,6 +81,10 @@ def enqueue_connected(c, aid, agent, business):
         if not channel_for(platform) or not owns(agent, platform):
             continue
 
+        from .channel_authority import binding_snapshot, driver_accounts, has_driver
+        bound = binding_snapshot(driver_accounts(c, aid, platform))
+        if not bound:
+            continue
         enroll(c, aid, agent, platform)
         _, version = channel_config(c, aid, platform)
         intent = dict(
@@ -87,8 +93,11 @@ def enqueue_connected(c, aid, agent, business):
             config_revision=agent["config_revision"],
             control_version=agent["control_version"],
             channel_version=version,
+            **({"account_bindings":bound} if has_driver(agent,platform) else {}),
         )
         product_key = f"channel-prepare:{aid}:{business['id']}:{agent['config_revision']}:{platform}:{version}"
+        if has_driver(agent,platform):
+            product_key += ":" + hashlib.sha256(json.dumps(bound,sort_keys=True).encode()).hexdigest()[:20]
         job_key = f"connected:{product_key}:{agent['control_version']}"
         job = one(
             c,
@@ -115,7 +124,7 @@ def enqueue_connected(c, aid, agent, business):
 
 def refresh_connected(c, aid):
     agent = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
-    if not channel_pilot(aid) and not agent["onboarding_state"].get("reddit_member_delivery"):
+    if not channel_pilot(aid) and not agent["onboarding_state"].get("reddit_member_delivery") and not any(agent["onboarding_state"].get("managed_channel_delivery", {}).values()):
         return
     agent = one(c, "SELECT * FROM lead.agents WHERE id=%s FOR NO KEY UPDATE", (aid,))
     business = one(
@@ -148,8 +157,12 @@ def connected_inputs(c, aid, task_id, generation, pack=None):
     business = one(
         c, "SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1"
     )
+    from .channel_authority import binding_snapshot, driver_accounts, has_driver
+    from .channel_delivery import owns
+    current_accounts = driver_accounts(c,aid,platform)
     allowed = (
-        (channel_pilot(aid) or (platform == "reddit" and agent["onboarding_state"].get("reddit_member_delivery") is True))
+        owns(agent,platform)
+        and (not has_driver(agent,platform) or intent.get("account_bindings")==binding_snapshot(current_accounts))
         and agent["desired_state"] == "running"
         and business
         and str(business["id"]) == intent["business_id"]
@@ -160,12 +173,7 @@ def connected_inputs(c, aid, task_id, generation, pack=None):
     )
     if not allowed:
         state, reason = "canceled", "dispatch_scope_changed"
-    elif not one(
-        c,
-        """SELECT id FROM lead.social_accounts WHERE platform=%s AND
-        state='connected' AND automation_enabled LIMIT 1 FOR SHARE""",
-        (platform,),
-    ):
+    elif not current_accounts:
         state, reason = "waiting_user", "channel_connection_required"
     else:
         return (agent, business, channel, version), (task["result"] or {}).get("pack")

@@ -14,16 +14,21 @@ from .operating_playbooks import channel_for
 from .scope import current_tenant, scoped_activity
 
 
-def owns(agent, platform):
+def owns(agent, platform, *, account_id=None, connection=None):
+    from .channel_authority import driver_accounts, has_driver
+    managed = has_driver(agent, platform)
+    if managed and account_id is not None:
+        return bool(connection is not None and any(str(row["id"]) == str(account_id) for row in driver_accounts(connection, str(agent["id"]), platform)))
     member = platform == "reddit" and agent["onboarding_state"].get("reddit_member_delivery") is True
     # Bounded experiments keep their own budget admission. Chamber's existing
     # campaign has no experiment pool; explicitly delegated Reddit work uses
     # these clocks, and the shared kernel skips the same channel via owns().
     return bool(
-        (channel_pilot(agent["id"]) or member)
+        (channel_pilot(agent["id"]) or member or managed)
         and channel_for(platform)
         and (
             not growth_experiments.enabled(agent)
+            or managed
             or (member and growth_experiments.chamber_campaign(agent))
         )
     )
@@ -67,6 +72,7 @@ def enroll_lane(c, aid, agent, platform, lane):
 
 
 def current(c, aid, args):
+    from .channel_authority import driver_accounts
     c.execute("SET LOCAL lock_timeout='500ms'")
     agent = one(c, "SELECT * FROM lead.agents WHERE id=%s FOR SHARE", (aid,))
     clock = one(
@@ -82,12 +88,7 @@ def current(c, aid, args):
         agent["desired_state"] != "running"
         or agent["control_version"] != clock["input"]["control_version"]
         or not owns(agent, platform)
-        or not one(
-            c,
-            """SELECT 1 FROM lead.social_accounts
-            WHERE platform=%s AND automation_enabled AND state='connected'""",
-            (platform,),
-        )
+        or not driver_accounts(c, aid, platform)
     ):
         c.execute(
             "UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE id=%s",
@@ -157,7 +158,9 @@ def next_target(args):
                 "opportunity": state.get("opportunity"),
             }
         state.pop("execution_cadence", None)
-        targets = eligible_publish_targets(c, blocked(c))
+        from .channel_authority import driver_accounts
+        allowed_accounts = {str(row["id"]) for row in driver_accounts(c, aid, clock["input"]["platform"])}
+        targets = [target for target in eligible_publish_targets(c, blocked(c)) if str(target["account_id"]) in allowed_accounts]
         deadlines = state.get("target_deadlines", {})
         due = sorted(
             (deadlines.get(str(t["target_id"]), ""), str(t["target_id"]))
