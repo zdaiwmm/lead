@@ -15,7 +15,7 @@ class Scope(BaseModel):
     operation: str | None = None
 
     def applies_to(self, subject: "Scope") -> bool:
-        return all(value is None or value == getattr(subject, key)
+        return all(value is None or getattr(subject, key) is None or value == getattr(subject, key)
                    for key, value in self.model_dump().items())
 
 
@@ -47,6 +47,11 @@ class Decision(BaseModel):
     resume_events: tuple[str, ...] = ()
     execution_cadence_protocol: Literal[1] = 1
 
+    @field_validator("next_at")
+    @classmethod
+    def aware_deadline(cls, value):
+        return WaitEvidence.aware_time(value)
+
 
 def decide(evidence: list[WaitEvidence], now: datetime, *, subject: Scope,
            uncertain_write: bool = False) -> Decision:
@@ -55,6 +60,8 @@ def decide(evidence: list[WaitEvidence], now: datetime, *, subject: Scope,
     applicable = tuple(item for item in evidence if item.scope.applies_to(subject))
     if uncertain_write:
         return Decision(state="receipt_only", constraints=applicable)
+    if any(item.reason_code == "duplicate_operation" for item in applicable):
+        return Decision(state="terminal", constraints=applicable)
     events = {item.resume_event for item in applicable if item.resume_event}
     if any(item.valid_until is not None and item.valid_until <= now for item in applicable):
         events.add("evidence_refresh")
@@ -63,6 +70,4 @@ def decide(evidence: list[WaitEvidence], now: datetime, *, subject: Scope,
     future = [item.not_before for item in applicable if item.not_before and item.not_before > now]
     if future:
         return Decision(state="waiting_time", constraints=applicable, next_at=max(future))
-    if any(item.reason_code == "duplicate_operation" for item in applicable):
-        return Decision(state="terminal", constraints=applicable)
     return Decision(state="ready", constraints=applicable)

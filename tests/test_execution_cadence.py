@@ -70,3 +70,24 @@ def test_raw_text_is_not_platform_rate_evidence():
     result = fault(ValueError("Some page said FLOOD_WAIT_900 and 429"), "observe")
     assert result["error_code"] != "rate_limited"
     assert result.get("source") != "platform"
+
+
+def test_unknown_subject_scope_does_not_erase_a_possible_constraint():
+    from lead_app.execution_cadence import Scope, decide
+    item=evidence(scope=Scope(agent_id='a',account_id='x',binding_version=2,target_id='group',operation='reply'),not_before=NOW+timedelta(hours=1))
+    result=decide([item],NOW,subject=Scope(agent_id='a',account_id='x'))
+    assert result.state=='waiting_time'
+    assert len(result.constraints)==1
+
+
+def test_decision_deadline_requires_timezone():
+    from lead_app.execution_cadence import Decision
+    with pytest.raises(ValueError):
+        Decision(state='waiting_time',next_at=datetime(2026,11,11))
+
+
+def test_completed_duplicate_does_not_wait_for_another_limit():
+    duplicate=evidence(reason_code='duplicate_operation')
+    items=[duplicate,evidence(not_before=NOW+timedelta(hours=1))]
+    assert decision(items).state=='terminal'
+    assert decision(items,uncertain_write=True).state=='receipt_only'
