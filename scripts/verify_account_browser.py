@@ -22,6 +22,7 @@ WEB = ROOT / "apps/web"
 AID = "11111111-1111-4111-8111-111111111111"
 TAKEOVER = "22222222-2222-4222-8222-222222222222"
 ACCOUNT = "33333333-3333-4333-8333-333333333333"
+CHALLENGE = "44444444-4444-4444-8444-444444444444"
 SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="900"><rect width="1280" height="900" fill="white"/></svg>'
 
 
@@ -40,6 +41,9 @@ async def scenarios(base):
                 "debounce",
                 "unmount",
                 "managed",
+                "challenge",
+                "challenge_input_error",
+                "challenge_close",
             ):
                 page = await browser.new_page()
                 calls, errors = [], []
@@ -49,6 +53,7 @@ async def scenarios(base):
                     asyncio.Event(),
                 )
                 hold_frame = False
+                challenge = {"id": CHALLENGE, "state": "waiting_user"} if case.startswith("challenge") else None
                 page.on("pageerror", lambda e: errors.append(str(e)))
 
                 async def handle(route):
@@ -61,6 +66,7 @@ async def scenarios(base):
                                 "takeover_id": TAKEOVER,
                                 "account_id": ACCOUNT,
                                 "managed_target_start": case == "managed",
+                                "challenge": challenge,
                             }
                         )
                     elif path.endswith("/browser/input"):
@@ -70,7 +76,7 @@ async def scenarios(base):
                             hold_frame = True
                         elif len(calls) == 1:
                             await release.wait()
-                        if case in ("input_error", "expired"):
+                        if case in ("input_error", "expired", "challenge_input_error"):
                             await route.fulfill(
                                 status=409,
                                 json={
@@ -81,6 +87,15 @@ async def scenarios(base):
                             )
                         else:
                             await route.fulfill(json={"ok": True})
+                    elif path.endswith("/browser/challenge/status"):
+                        await route.fulfill(json={"challenge": challenge})
+                    elif path.endswith("/browser/challenge/verify"):
+                        assert request.post_data_json == {
+                            "platform": "facebook", "takeover": TAKEOVER,
+                            "challenge_id": CHALLENGE, "start_managed_targets": False,
+                        }
+                        calls.append("challenge_verify")
+                        await route.fulfill(json={"ok": True, "finish_login": False, "resumed_tasks": 1})
                     elif path.endswith("/accounts/verify-login"):
                         assert request.post_data_json == {
                             "platform": "facebook",
@@ -127,14 +142,30 @@ async def scenarios(base):
                     )
                     verify = page.get_by_role(
                         "button",
-                        name="绑定并启动获客" if case == "managed" else "验证并完成",
+                        name="验证完成，继续任务" if challenge else "绑定并启动获客" if case == "managed" else "验证并完成",
                         exact=True,
                     )
                     close = page.get_by_role("button", name="关闭账号浏览器")
                     await expect(picture).to_be_visible()
                     if case == "timeout":
                         await page.clock.install()
-                    if case == "managed":
+                    if challenge:
+                        await page.get_by_role("textbox").fill("验证码已由用户填写")
+                        await asyncio.wait_for(entered.wait(), 5)
+                        if case == "challenge_close":
+                            await close.click()
+                        else:
+                            await verify.click()
+                        assert calls == ["text"], calls
+                        release.set()
+                        if case == "challenge_input_error":
+                            await expect(page.get_by_role("dialog").get_by_role("alert")).to_contain_text("输入服务暂时不可用")
+                            assert calls == ["text"], calls
+                            await verify.click()
+                        await expect(page.get_by_text("已关闭", exact=True)).to_be_visible()
+                        assert calls == ["text", "end" if case == "challenge_close" else "challenge_verify"], calls
+                        await expect(page.get_by_text("started:false", exact=True)).to_be_visible()
+                    elif case == "managed":
                         await verify.click()
                         await expect(
                             page.get_by_text("已关闭", exact=True)
@@ -142,7 +173,7 @@ async def scenarios(base):
                         await expect(
                             page.get_by_text("started:true", exact=True)
                         ).to_be_visible()
-                        assert calls == ["verify", "end"], calls
+                        assert calls == ["verify"], calls
                     elif case == "debounce":
                         # Submit text and a debounced wheel immediately before verification.
                         await page.get_by_role("textbox").fill("登录")
@@ -155,7 +186,7 @@ async def scenarios(base):
                         await expect(
                             page.get_by_text("已关闭", exact=True)
                         ).to_be_visible()
-                        assert calls == ["text", "scroll", "verify", "end"], calls
+                        assert calls == ["text", "scroll", "verify"], calls
                     elif case == "verify_error":
                         await verify.click()
                         await expect(
@@ -166,7 +197,7 @@ async def scenarios(base):
                         await expect(
                             page.get_by_text("已关闭", exact=True)
                         ).to_be_visible()
-                        assert calls == ["verify", "verify", "end"], calls
+                        assert calls == ["verify", "verify"], calls
                     else:
                         await picture.click(position={"x": 20, "y": 20})
                         await asyncio.wait_for(entered.wait(), 5)
@@ -189,7 +220,7 @@ async def scenarios(base):
                             await expect(
                                 page.get_by_text("已关闭", exact=True)
                             ).to_be_visible()
-                            assert calls == ["click", "verify", "end"], calls
+                            assert calls == ["click", "verify"], calls
                         elif case == "unmount":
                             await page.get_by_role(
                                 "button", name="移除测试组件"
@@ -211,11 +242,11 @@ async def scenarios(base):
                             await expect(
                                 page.get_by_text("已关闭", exact=True)
                             ).to_be_visible()
-                            assert calls == ["click", "verify", "end"], calls
+                            assert calls == ["click", "verify"], calls
                         else:
                             assert "verify" not in calls and "end" not in calls, calls
                             release.set()
-                            if case in ("input_error", "expired"):
+                            if case in ("input_error", "expired", "challenge_input_error"):
                                 await expect(
                                     page.get_by_role("dialog").get_by_role("alert")
                                 ).to_contain_text(
@@ -235,7 +266,7 @@ async def scenarios(base):
                                 assert calls == (
                                     ["click", "end"]
                                     if case == "expired"
-                                    else ["click", "verify", "end"]
+                                    else ["click", "verify"]
                                 ), calls
                             else:
                                 await expect(
@@ -244,7 +275,7 @@ async def scenarios(base):
                                 assert calls == (
                                     ["click", "end"]
                                     if case == "close"
-                                    else ["click", "text", "key", "verify", "end"]
+                                    else ["click", "text", "key", "verify"]
                                 ), calls
                     assert not errors, errors
                     print(f"PASS {case}: {calls}", flush=True)

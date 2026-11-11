@@ -15,6 +15,7 @@ from playwright.async_api import TimeoutError as BrowserTimeoutError
 from ..reddit_member import ordinary_member
 from .catalog import SPECS, target_url, validate
 from .core import (
+    HumanVerificationRequired,
     LayoutChanged,
     NeedsAuth,
     PreparationNotStarted,
@@ -508,6 +509,10 @@ class WebAdapter:
             checked = await self.target(page, target["canonical_url"], own["external_account_id"], member=member)
             if member and checked["rules"]["sha256"] != target["verified_permissions"]["rules"]["sha256"]:
                 raise ScopeChanged("社区规则已更新，请重新核对选题与参与范围")
+        except HumanVerificationRequired as error:
+            # Identity/target navigation has not touched the editor or upload.
+            error.safe_to_restart = True
+            raise
         except BrowserTimeoutError as error:
             # All initial identity/target navigation is read-only. A timeout here
             # must not strand the action as though an upload had been interrupted.
@@ -1163,12 +1168,18 @@ class WebAdapter:
             from ..reddit_member import read_rules
 
             check = await page.context.new_page()
+            preserve_challenge = False
             try:
                 rules = await read_rules(check, target["canonical_url"])
                 if rules["sha256"] != target["verified_permissions"]["rules"]["sha256"]:
                     raise ScopeChanged("提交前社区规则已变化，未点击发布")
+            except HumanVerificationRequired:
+                # The actor takes over this exact tab; keep the prepared draft intact.
+                preserve_challenge = True
+                raise
             finally:
-                await check.close()
+                if not preserve_challenge:
+                    await check.close()
         if self.platform == "tiktok" and observation.get("disclosures"):
             await self.tiktok_declarations(
                 page, observation["disclosures"]["ai_generated"], verify=True

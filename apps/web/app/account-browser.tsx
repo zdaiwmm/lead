@@ -15,6 +15,7 @@ type Row = Record<string, any>;
 export default function AccountBrowser({
   aid,
   platform,
+  requestedAccountId,
   name,
   onClose,
   onVerified,
@@ -22,6 +23,7 @@ export default function AccountBrowser({
 }: {
   aid: string;
   platform: string;
+  requestedAccountId?: string;
   name: string;
   onClose: () => void;
   onVerified?: (started?: boolean) => Promise<void>;
@@ -40,6 +42,7 @@ export default function AccountBrowser({
   const [closing, setClosing] = useState(false);
   const [retry, setRetry] = useState(0);
   const [latency, setLatency] = useState<number | null>(null);
+  const [challenge, setChallenge] = useState<Row | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const keyboard = useRef<HTMLTextAreaElement>(null);
@@ -255,13 +258,27 @@ export default function AccountBrowser({
         return;
       }
       if (!mounted.current) return;
-      if (verify)
-        await api(`/agents/${aid}/accounts/verify-login`, { platform, account_id: accountId.current, start_managed_targets: managedStart });
+      let recovered = false;
+      if (verify) {
+        const currentChallenge = challenge || (await api(`/agents/${aid}/browser/challenge/status`, {
+          platform, takeover: takeover.current,
+        })).challenge;
+        if (currentChallenge) {
+          setChallenge(currentChallenge);
+          const result = await api(`/agents/${aid}/browser/challenge/verify`, {
+            platform, takeover: takeover.current, challenge_id: currentChallenge.id,
+            start_managed_targets: managedStart,
+          });
+          recovered = !result.finish_login;
+        } else {
+          await api(`/agents/${aid}/accounts/verify-login`, { platform, account_id: accountId.current, start_managed_targets: managedStart });
+        }
+      }
       if (state === "opening") {
         await connection.current?.promise.catch(() => {});
       }
-      if (takeover.current) await api(`/agents/${aid}/takeover/end?takeover=${encodeURIComponent(takeover.current)}`, {});
-      if (verify && onVerified) await onVerified(managedStart);
+      if (!verify && takeover.current) await api(`/agents/${aid}/takeover/end?takeover=${encodeURIComponent(takeover.current)}`, {});
+      if (verify && onVerified && !recovered) await onVerified(managedStart);
       else onClose();
     } catch (e) {
       stopping.current = false;
@@ -288,16 +305,18 @@ export default function AccountBrowser({
     setLatency(null);
     setState("opening");
     setError("");
-    const key = `${aid}:${platform}:${retry}`;
+    setChallenge(null);
+    const key = `${aid}:${platform}:${requestedAccountId || ""}:${retry}`;
     if (connection.current?.key !== key)
       connection.current = {
         key,
-        promise: api(`/agents/${aid}/connect`, { platform }),
+        promise: api(`/agents/${aid}/connect`, { platform, account_id: requestedAccountId }),
       };
     connection.current.promise
       .then(async (session) => {
         if (canceled) return;
         takeover.current = session.takeover_id;
+        setChallenge(session.challenge || null);
         accountId.current = session.account_id;
         setManagedStart(Boolean(session.managed_target_start));
         lastInput.current = performance.now();
@@ -320,11 +339,35 @@ export default function AccountBrowser({
       )
         shot();
     }, 60);
+    let checkingChallenge = false;
+    const challengePoll = setInterval(async () => {
+      if (
+        canceled ||
+        !active.current ||
+        stopping.current ||
+        checkingChallenge ||
+        document.hidden
+      )
+        return;
+      checkingChallenge = true;
+      try {
+        const result = await api(`/agents/${aid}/browser/challenge/status`, {
+          platform,
+          takeover: takeover.current,
+        });
+        if (!canceled) setChallenge(result.challenge || null);
+      } catch {
+        // Frame/input errors expose expired or disconnected sessions.
+      } finally {
+        checkingChallenge = false;
+      }
+    }, 2000);
     return () => {
       canceled = true;
       mounted.current = false;
       active.current = false;
       clearInterval(poll);
+      clearInterval(challengePoll);
       frameController.current?.abort();
       inputController.current?.abort();
       inputController.current = null;
@@ -338,7 +381,7 @@ export default function AccountBrowser({
       document.body.style.overflow = previousOverflow;
       previousFocus?.focus();
     };
-  }, [aid, platform, retry, shot]);
+  }, [aid, platform, requestedAccountId, retry, shot]);
   useEffect(() => {
     const target = viewport.current;
     if (!target) return;
@@ -395,8 +438,10 @@ export default function AccountBrowser({
           <div className="browser-title">
             <SocialIcon platform={platform} size={24} />
             <div>
-              <h2 id="account-browser-title">连接 {name}</h2>
-              <span className="muted small">{managedStart ? "授权 Lead 在账号可管理且允许推广的目标验证、发布文字。可随时暂停。" : "在专属浏览器中登录账号"}</span>
+              <h2 id="account-browser-title">{challenge ? "完成验证" : "连接"} {name}</h2>
+              <span className="muted small" role="status">
+                {challenge ? "任务已暂停，请在原窗口完成真人验证；关闭窗口不会恢复任务" : "在专属浏览器中登录账号"}
+              </span>
             </div>
           </div>
           <div className="browser-header-actions">
@@ -411,7 +456,7 @@ export default function AccountBrowser({
                 ) : (
                   <Check size={15} />
                 )}
-                {verifying ? "正在完成验证…" : managedStart ? "绑定并启动获客" : verifyLabel}
+                {verifying ? "正在完成验证…" : challenge ? "验证完成，继续任务" : managedStart ? "绑定并启动获客" : verifyLabel}
               </button>
             )}
             <button

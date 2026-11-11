@@ -51,6 +51,10 @@ def blocked(c, *, community_worker=False):
         pending = [row for row in pending if row["type"] != "community.engage"]
     stale = stale_identity_tasks(c)
     targets, accounts, unknown = set(), set(), False
+    from .browser_challenges import all_pending
+    for challenge in all_pending(c):
+        for sibling in all_rows(c, "SELECT id FROM lead.social_accounts WHERE profile_id=%s", (challenge["profile_id"],)):
+            accounts.add(str(sibling["id"]))
     for row in pending:
         payload = row["input"]
         if payload.get("target_id"):

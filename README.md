@@ -104,6 +104,8 @@ DEEPSEEK_MODEL=deepseek-flash
 
 ## 浏览器与网络
 
+真人验证接管：识别验证后保留原窗口，暂停相关浏览器自动操作；用户完成验证并核对原账号后继续原任务。已提交的不确定动作只核对回执。详见 [真人验证与原窗口接管](docs/BROWSER_VERIFICATION.md)。
+
 混合探索：运行 `.venv/bin/python scripts/install_browser_use.py` 安装独立的 browser-use 运行环境，设置 `LEAD_BROWSER_USE_ENABLED=1`。探索使用无社媒登录的 Chromium/CDP，只开放平台只读研究工具；账号操作和发布继续由 Camoufox 与动作账本执行。browser-use 的模型消耗计入同一 Agent 的每日额度。
 
 每个 Agent 的配置、Cookie、IndexedDB、LocalStorage 分别放在 `.state/profiles/<agent_id>/`。一个配置对应一个独立 Camoufox 进程，跨进程文件锁避免重复启动，同一环境串行执行，不同环境并发执行。默认上限由 `LEAD_BROWSER_CONCURRENCY=3` 控制。

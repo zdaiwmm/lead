@@ -81,8 +81,11 @@ def rules_digest(text):
 
 
 async def read_rules(page, canonical):
+    from .adapters.core import check_challenge
+
     url = canonical.rstrip("/") + "/about/rules/"
     await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    await check_challenge(page)
     if page.url.rstrip("/") != url.rstrip("/"):
         raise ValueError("社区规则页发生跳转，请重新核对")
     content = page.locator("main").first
