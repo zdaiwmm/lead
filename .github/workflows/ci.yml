@@ -65,7 +65,7 @@ jobs:
       - run: .venv/bin/python -m pip install -r requirements.lock.txt
       - run: .venv/bin/python scripts/bootstrap.py
       - name: Read-only DNS snapshot before Compose
-        run: .venv/bin/python scripts/ci_dns_diagnostics.py before-compose
+        run: .venv/bin/python .github/scripts/ci_dns_diagnostics.py before-compose
       - name: Start isolated CI database
         run: |
           docker compose --env-file .state/infra.env -f infra/compose.yaml up -d postgres temporal
@@ -77,7 +77,11 @@ jobs:
       - run: .venv/bin/ruff check services scripts tests infra/migrations
       - run: .venv/bin/python scripts/check_repository.py
       - name: Read-only DNS snapshot before native prerequisites
-        run: .venv/bin/python scripts/ci_dns_diagnostics.py before-apt
+        run: .venv/bin/python .github/scripts/ci_dns_diagnostics.py before-apt
+      - name: Recover hosted-runner DNS when official archives cannot resolve
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT /usr/bin/python3 -IB .github/scripts/ci_dns_recovery.py apply
+      - name: Read back runner DNS
+        run: .venv/bin/python .github/scripts/ci_dns_diagnostics.py after-recovery
       - name: Native Linux browser and namespace prerequisites
         run: |
           # Validate the official backups before excluding the runner's failing
@@ -111,6 +115,9 @@ jobs:
         run: LEAD_TEST_CHANNEL_TEMPORAL=127.0.0.1:17233 LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_WORKFLOW_TESTS=1 .venv/bin/pytest -q --junitxml=.state/ci-tests.xml
       - if: always() && hashFiles('.state/infra.env') != ''
         run: docker compose --env-file .state/infra.env -f infra/compose.yaml down
+      - name: Restore original hosted-runner DNS
+        if: always()
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT /usr/bin/python3 -IB .github/scripts/ci_dns_recovery.py restore
   frontend:
     needs: scope
     if: needs.scope.outputs.kind == 'application'

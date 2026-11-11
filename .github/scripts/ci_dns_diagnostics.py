@@ -62,7 +62,7 @@ def resolve(host, method):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("before-compose", "before-apt"))
+    parser.add_argument("phase", choices=("before-compose", "before-apt", "after-recovery", "after-restore"))
     phase = parser.parse_args().phase
 
     def emit(value):

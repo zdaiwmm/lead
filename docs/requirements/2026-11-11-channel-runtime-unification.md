@@ -84,3 +84,5 @@ PR #44 合入 `99acac464868b44a7c909bd31284217e25780780`；两轮完整 CI 43036
 后续仅调整临时 CI runner 的 APT 镜像列表：先有界核验两个现有官方 HTTPS 备用源可达，再排除失败的 Azure 镜像；保留原 suite 和 Ubuntu 签名 keyring。全局 APT 重试/超时及严格更新错误同时覆盖 Playwright 内部安装。该缓解方案依据官方 [runner 配置](https://github.com/actions/runner-images/blob/main/images/ubuntu/scripts/build/configure-apt-sources.sh) 和 [APT 镜像列表协议](https://manpages.ubuntu.com/manpages/noble/man1/apt-transport-mirror.1.html)，不声称已确认测试机 DNS 根因。新的精确 main 仍须通过完整应用验证与同轮产物，不能采用仅工具证明。
 
 PR #45 的主线 `28a0f3e0d461a6c8cac42500eaa482d52e910a93` 完整 CI 43040036877 在首次普通官方域名解析检查即失败，尚未切换镜像源；工具范围 CI 成功不构成应用证明。继续增加有界只读诊断，对比 Compose 启动前后系统解析器、路由和官方 DoH 返回。诊断先在 PR 的独立临时 runner 上执行，不修改 DNS、不固定 IP、不跳过 TLS，也不替代正式应用验证。
+
+PR #46 诊断 run 43041169761 确认：同一临时 runner 在 Compose 前后，原解析器对三个 Ubuntu 域名均失败，但 GitHub、Microsoft 域名正常，同机 Google 官方 DoH 对全部域名均正常。路由和解析器配置未被 Compose 改变。后续恢复仅限 GitHub 托管的 Linux runner：先验证公共解析器可用，再保存原默认网卡 DNS 并有界修改；任何后验失败立即还原，任务结束按 root 持有的恢复记录回读还原。生产 DNS、软件包签名及测试放行要求不变。先在本 PR 验证真实修改/恢复，再合入执行完整应用 CI。
