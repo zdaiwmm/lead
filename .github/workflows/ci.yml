@@ -64,8 +64,6 @@ jobs:
       - run: python -m venv .venv
       - run: .venv/bin/python -m pip install -r requirements.lock.txt
       - run: .venv/bin/python scripts/bootstrap.py
-      - name: Read-only DNS snapshot before Compose
-        run: .venv/bin/python .github/scripts/ci_dns_diagnostics.py before-compose
       - name: Start isolated CI database
         run: |
           docker compose --env-file .state/infra.env -f infra/compose.yaml up -d postgres temporal
@@ -76,24 +74,11 @@ jobs:
           .venv/bin/python scripts/migrate.py
       - run: .venv/bin/ruff check services scripts tests infra/migrations
       - run: .venv/bin/python scripts/check_repository.py
-      - name: Read-only DNS snapshot before native prerequisites
-        run: .venv/bin/python .github/scripts/ci_dns_diagnostics.py before-apt
-      - name: Recover hosted-runner DNS when official archives cannot resolve
-        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT /usr/bin/python3 -IB .github/scripts/ci_dns_recovery.py apply
-      - name: Read back runner DNS
-        run: .venv/bin/python .github/scripts/ci_dns_diagnostics.py after-recovery
       - name: Native Linux browser and namespace prerequisites
         run: |
-          # Validate the official backups before excluding the runner's failing
-          # Azure mirror. Keep the existing suites and Ubuntu signing keyring.
-          for host in archive.ubuntu.com security.ubuntu.com; do
-            timeout 15 getent ahostsv4 "$host"
-            curl --fail --silent --show-error --proto '=https' --connect-timeout 5 --max-time 15 \
-              --output /dev/null "https://$host/ubuntu/dists/noble/InRelease"
-          done
-          test -f /etc/apt/apt-mirrors.txt
-          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' \
-            | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          # Validate the signed Ubuntu mirror before changing the runner's list.
+          # Existing Ubuntu suites, components and trust keyring stay in place.
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT /usr/bin/python3 -IB .github/scripts/ci_apt_mirror.py
           # Playwright's own apt calls must inherit these bounds too.
           printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\nAPT::Update::Error-Mode "any";\n' \
             | sudo tee /etc/apt/apt.conf.d/99lead-ci-acquire >/dev/null
@@ -115,9 +100,6 @@ jobs:
         run: LEAD_TEST_CHANNEL_TEMPORAL=127.0.0.1:17233 LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_WORKFLOW_TESTS=1 .venv/bin/pytest -q --junitxml=.state/ci-tests.xml
       - if: always() && hashFiles('.state/infra.env') != ''
         run: docker compose --env-file .state/infra.env -f infra/compose.yaml down
-      - name: Restore original hosted-runner DNS
-        if: always()
-        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT /usr/bin/python3 -IB .github/scripts/ci_dns_recovery.py restore
   frontend:
     needs: scope
     if: needs.scope.outputs.kind == 'application'

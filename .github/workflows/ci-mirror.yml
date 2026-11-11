@@ -1,0 +1,30 @@
+name: CI Ubuntu mirror verification
+on:
+  pull_request:
+    paths:
+      - .github/workflows/ci-mirror.yml
+      - .github/scripts/ci_apt_mirror.py
+      - tests/test_ci_apt_mirror.py
+      - .github/workflows/ci.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify and select signed Ubuntu mirror
+        run: |
+          sha256sum /etc/apt/sources.list.d/ubuntu.sources /usr/share/keyrings/ubuntu-archive-keyring.gpg > "$RUNNER_TEMP/ubuntu-trust.sha256"
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT /usr/bin/python3 -IB .github/scripts/ci_apt_mirror.py
+          sha256sum --check "$RUNNER_TEMP/ubuntu-trust.sha256"
+      - name: Verify actual package index and browser prerequisites
+        run: |
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\nAPT::Update::Error-Mode "any";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99lead-ci-acquire >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap fonts-noto-cjk

@@ -85,4 +85,6 @@ PR #44 合入 `99acac464868b44a7c909bd31284217e25780780`；两轮完整 CI 43036
 
 PR #45 的主线 `28a0f3e0d461a6c8cac42500eaa482d52e910a93` 完整 CI 43040036877 在首次普通官方域名解析检查即失败，尚未切换镜像源；工具范围 CI 成功不构成应用证明。继续增加有界只读诊断，对比 Compose 启动前后系统解析器、路由和官方 DoH 返回。诊断先在 PR 的独立临时 runner 上执行，不修改 DNS、不固定 IP、不跳过 TLS，也不替代正式应用验证。
 
-PR #46 诊断 run 43041169761 确认：同一临时 runner 在 Compose 前后，原解析器对三个 Ubuntu 域名均失败，但 GitHub、Microsoft 域名正常，同机 Google 官方 DoH 对全部域名均正常。路由和解析器配置未被 Compose 改变。后续恢复仅限 GitHub 托管的 Linux runner：先验证公共解析器可用，再保存原默认网卡 DNS 并有界修改；任何后验失败立即还原，任务结束按 root 持有的恢复记录回读还原。生产 DNS、软件包签名及测试放行要求不变。先在本 PR 验证真实修改/恢复，再合入执行完整应用 CI。
+PR #46 的只读诊断 run 43041169761 / 43044213601 确认：同一临时 runner 在 Compose 前后，原解析器对三个 Ubuntu 域名均失败，GitHub、Microsoft 正常；备用 Google UDP 对部分 Ubuntu 请求返回 SERVFAIL/REFUSED，恢复前置检查拒绝，未修改 DNS。不能将此结果归因于 Compose 或应用业务。
+
+同机 kernel.org Ubuntu 镜像的 noble、noble-updates、noble-security、noble-backports 全部通过 HTTPS 下载、现有 Ubuntu archive keyring 验签和发行元数据核对。最终实现只在全部签名校验成功后替换临时 runner 的 APT 镜像列表；原 Suites、Components、Signed-By 和严格 APT 更新门槛保留。未采用 DNS 修改方案。PR 先验证真实 apt-get update/install，再对精确 main 运行完整应用 CI；生产 DNS 和权限不变。镜像来源见 [Linux Kernel Archives](https://mirrors.edge.kernel.org/)。
