@@ -17,14 +17,19 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Check inherited network configuration without exposing values
+        run: |
+          python3 -c 'import json,os; print(json.dumps({k:bool(os.environ.get(k)) for k in ("http_proxy","https_proxy","all_proxy","no_proxy","HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY")}))'
+          sudo python3 -c 'import json,os; print(json.dumps({k:bool(os.environ.get(k)) for k in ("http_proxy","https_proxy","all_proxy","no_proxy","HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY")}))'
+          curl --fail --silent --show-error --proto '=https' --connect-timeout 5 --max-time 15 --output /dev/null https://mirrors.edge.kernel.org/ubuntu/dists/noble/InRelease
       - name: Verify and select signed Ubuntu mirror
         run: |
           sha256sum /etc/apt/sources.list.d/ubuntu.sources /usr/share/keyrings/ubuntu-archive-keyring.gpg > "$RUNNER_TEMP/ubuntu-trust.sha256"
-          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT /usr/bin/python3 -IB .github/scripts/ci_apt_mirror.py
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT,http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY /usr/bin/python3 -IB .github/scripts/ci_apt_mirror.py
           sha256sum --check "$RUNNER_TEMP/ubuntu-trust.sha256"
       - name: Verify actual package index and browser prerequisites
         run: |
           printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\nAPT::Update::Error-Mode "any";\n' \
             | sudo tee /etc/apt/apt.conf.d/99lead-ci-acquire >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap fonts-noto-cjk
+          sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get update
+          sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get install -y bubblewrap fonts-noto-cjk
