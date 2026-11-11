@@ -36,7 +36,7 @@
 
 ## 发布记录
 
-主实现与首轮测试夹具补正已分别经 PR #40 / #41 合入；应用尚未完成切换，线上盘点基线见上。正式交付固定最终 main SHA、同轮 CI/run/attempt 与产物，维护工具安装、应用 Deployment、单渠道纳管和独立回读分别记录在本需求 PR 的持续交付说明及私有回执中。
+本需求已完成现有家庭生产环境的应用与双渠道交付。冻结运行提交为 `16e1551bf832ddcaa95fea0768c928e814c0f213`，完整 CI、同轮镜像、应用发布和逐渠道实际验收见下方“最终交付”。后续文档收尾提交不替换该已验收运行版本。此前失败候选及恢复经过保留如下。
 
 首次纳管通常先交付主应用，再在安全点逐个迁移两个执行器；独立模式允许在同版本维护安全点先迁移专用执行器，主线跟随模式必须等待主应用切换。全部回读成功后登记双渠道清单。后续发布先准备独立渠道候选，再由正式应用入口切换共享 Worker；最终验收必须同时证明两个实际执行器来自获批版本。结果未知只续核验，不能盲目重新发布。
 
@@ -88,3 +88,15 @@ PR #45 的主线 `28a0f3e0d461a6c8cac42500eaa482d52e910a93` 完整 CI 4304003687
 PR #46 的只读诊断 run 43041169761 / 43044213601 确认：同一临时 runner 在 Compose 前后，原解析器对三个 Ubuntu 域名均失败，GitHub、Microsoft 正常；备用 Google UDP 对部分 Ubuntu 请求返回 SERVFAIL/REFUSED，恢复前置检查拒绝，未修改 DNS。不能将此结果归因于 Compose 或应用业务。
 
 同机 kernel.org Ubuntu 镜像的 noble、noble-updates、noble-security、noble-backports 全部通过 HTTPS 下载、现有 Ubuntu archive keyring 验签和发行元数据核对。最终实现只在全部签名校验成功后替换临时 runner 的 APT 镜像列表；原 Suites、Components、Signed-By 和严格 APT 更新门槛保留。未采用 DNS 修改方案。PR 先验证真实 apt-get update/install，再对精确 main 运行完整应用 CI；生产 DNS 和权限不变。镜像来源见 [Linux Kernel Archives](https://mirrors.edge.kernel.org/)。
+
+### 最终交付（2026-11-11）
+
+- 冻结运行版本：`16e1551bf832ddcaa95fea0768c928e814c0f213`。主实现及补正经 PR #40–#46 合入；[完整应用 CI 43045606039](https://github.com/zdaiwmm/lead/actions/runs/43045606039) / attempt 1 成功，后端 **954 项通过**，前端、真实镜像非 root 读取、Linux 隔离和 systemd 挂载/恢复演练通过。
+- 同轮应用产物 `13867575696`，镜像 SHA256 `043e2708f2195e7c35944435f9fe1578f1755d499d070387ef011969b003edad`。节点再次验证来源、内部 REVISION、摘要和只读挂载。既有已验证维护工具源码未变化，仅独立回读，不重复安装。
+- [发布审核 43048387483](https://github.com/zdaiwmm/lead/actions/runs/43048387483) 成功；home-production Deployment `7714114829` 已记录节点独立核验成功。应用与两执行器的最终综合核验通过；证据读取曾有间歇失败，仅有界重读，没有重复发布。
+- Telegram、Reddit 分别由正式入口纳管并登记。实际进程、公共代码、私有适配器、只读/可写挂载和启动证明均匹配同一获批版本；每次切换均证实另一渠道进程未重启。Telegram 实际非 root Linux 业务沙箱验证通过，原准入结果及草稿字节保留。
+- Telegram 当前执行进程的真实日志确认账号绑定一致、独占资料持有及双出口匹配，进入 `production` 模式；本轮状态检查为 `no_limits`，恢复后的心跳与巡查调度正常。没有另起竞争同一资料的驻留执行器。
+- Reddit 在维护安全点使用原持久资料和同一公共代码验证独立出口、主页账号身份及绑定；首次菜单检查未通过，完整清理后按相同身份门槛复核成功，未改认证逻辑或重新登录。该浏览器探测证明原资料与公共代码链路；实际 systemd 执行器隔离由前述独立进程/挂载证明承担，不将探测子进程冒充完整 systemd 沙箱。探测结束后独立确认会话、租约及代理关闭，原浏览器服务和两个执行器未变化。
+- 已恢复入口与运营，维护标记清除。切换前后账号、Profile、绑定版本及平台许可完全一致；未知/派发中动作、待对账社区发送与人工接管计数均为零。Reddit research clock 保持 `planned / source_permission_required`，profile/subreddit 发布许可仍 `pending`，没有为了验收授予权限或发送测试社媒内容。
+
+CI 镜像恢复补充：最终 PR 的真实 APT 更新和依赖安装验证通过。通过的 runner 未配置代理，因此不把此前一次 HTTPS 超时归因于代理丢失；保留代理变量的调用方式仅保证存在既有代理时提权不丢失网络配置。最终版本不修改 DNS，不降低 Ubuntu 签名或完整测试门槛。
