@@ -1,6 +1,7 @@
 """Filesystem cutover, mount identity and lost-status regression cases (no production data)."""
 
 import importlib
+import stat
 import subprocess
 from pathlib import Path
 
@@ -456,7 +457,10 @@ def executors(hook, monkeypatch, tmp_path):
     actual_lstat, actual_samefile = Path.lstat, Path.samefile
     def lstat(path):
         st = actual_lstat(path)
-        return SimpleNamespace(st_mode=st.st_mode, st_uid=0, st_size=st.st_size)
+        # The host's temporary-directory ancestors are outside the synthetic node.
+        # Keep actual modes and symlink types within tmp_path, including its root.
+        mode = stat.S_IFDIR | 0o755 if path in tmp_path.parents else st.st_mode
+        return SimpleNamespace(st_mode=mode, st_uid=0, st_size=st.st_size)
     monkeypatch.setattr(Path, 'lstat', lstat)
     def samefile(path, other):
         if path in [proc_base / str(i) / 'root' / bindings[c]['release'].lstrip('/')
@@ -745,7 +749,9 @@ def provisioning(hook, monkeypatch, tmp_path):
     actual = Path.lstat
     def lstat(path):
         value = actual(path)
-        return SimpleNamespace(st_mode=value.st_mode, st_uid=0, st_gid=0, st_size=value.st_size)
+        # Model only strict external ancestors as trusted, not fixture directories.
+        mode = stat.S_IFDIR | 0o755 if path in tmp_path.parents else value.st_mode
+        return SimpleNamespace(st_mode=mode, st_uid=0, st_gid=0, st_size=value.st_size)
     monkeypatch.setattr(Path, 'lstat', lstat)
     import grp
     import pwd
@@ -1000,3 +1006,34 @@ def test_executor_command_identity_ignores_systemd_runtime_counters(hook):
     next_run = first.replace('[Wed]', '[Thu]').replace('pid=10', 'pid=11').replace('code=(null)', 'code=exited')
     assert hook.executor_command_identity(first) == hook.executor_command_identity(next_run)
     assert hook.executor_command_identity(first) != hook.executor_command_identity(first.replace('/entry.py', '/other.py'))
+
+
+@pytest.mark.parametrize('fault', ['writable', 'symlink'])
+def test_executor_fixture_keeps_unsafe_internal_config_ancestor(executors, fault):
+    e = executors
+    assert len(e.hook.verify_executors(e.revision)) == 2
+    directory = e.registry.parent
+    if fault == 'writable':
+        directory.chmod(0o777)
+    else:
+        moved = directory.with_name('redirected-config')
+        directory.rename(moved)
+        directory.symlink_to(moved, target_is_directory=True)
+    with pytest.raises(e.hook.Refused, match='unsafe executor config directory'):
+        e.hook.verify_executors(e.revision)
+
+
+@pytest.mark.parametrize('fault', ['writable', 'symlink'])
+def test_provision_fixture_keeps_unsafe_internal_config_ancestor(provisioning, fault):
+    p = provisioning
+    assert p.h.executor_provision_plan(p.path, p.sha)[0]['channel'] == p.channel
+    directory = p.path.parent
+    if fault == 'writable':
+        directory.chmod(0o777)
+    else:
+        moved = directory.with_name('redirected-config')
+        directory.rename(moved)
+        directory.symlink_to(moved, target_is_directory=True)
+    with pytest.raises(p.h.Refused, match='unsafe executor config directory'):
+        p.h.executor_provision_plan(p.path, p.sha)
+    assert not any(command[0] == 'systemctl' for command in p.commands)
