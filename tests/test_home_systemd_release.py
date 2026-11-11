@@ -329,3 +329,17 @@ def test_runtime_dependency_probe_is_unprivileged_and_fails_closed(hook, monkeyp
     monkeypatch.setattr(hook, "process", lambda role: next(processes))
     with pytest.raises(hook.Refused, match="changed during compatibility"):
         hook.verify_model_runtime()
+
+
+def test_operator_download_tool_requires_exact_reviewed_source(hook, monkeypatch, tmp_path):
+    name = "scripts/prepare_home_image.py"
+    source = Path(__file__).resolve().parents[1] / name
+    blob = subprocess.check_output(["git", "hash-object", "--no-filters", str(source)], text=True).strip()
+    assert hook.RUNTIME_COMPATIBILITY_FILES[name] == {blob}
+    monkeypatch.setattr(hook, "TOOLS", tmp_path)
+    (tmp_path / "home_live_maintenance.py").touch()
+    monkeypatch.setattr(hook, "run", lambda *args: blob)
+    assert hook.reviewed_runtime_files(tmp_path, "a" * 40, {name, "scripts/arbitrary.py"}) == {name}
+    monkeypatch.setattr(hook, "run", lambda *args: "unreviewed revision")
+    with pytest.raises(hook.Refused, match="separate compatibility review"):
+        hook.reviewed_runtime_files(tmp_path, "a" * 40, {name})
