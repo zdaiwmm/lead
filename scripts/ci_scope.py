@@ -69,6 +69,21 @@ def changed_files(root, base, head, *, merge_base=False):
     return changes
 
 
+def check_docs(root, changes):
+    root = root.resolve()
+    for name, _, mode in changes:
+        if not is_doc(name) or mode not in {"100644", "100755"}:
+            continue
+        path = root / name
+        for href in re.findall(r"\]\(([^)]+)\)", path.read_text()):
+            href = href.strip("<>").split("#", 1)[0]
+            if not href or re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", href):
+                continue
+            target = (path.parent / href).resolve()
+            if not target.is_relative_to(root) or not target.exists():
+                raise ValueError(f"Broken/outside repository documentation link in {name}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
@@ -88,6 +103,8 @@ def main():
     except (KeyError, ValueError, subprocess.SubprocessError, UnicodeError):
         kind = "application"
         tools = True
+    else:
+        check_docs(args.root, changes)
     print(json.dumps({"kind": kind, "event": name, "tools": tools}))
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as f:
         f.write(f"kind={kind}\n")

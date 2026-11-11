@@ -84,6 +84,19 @@ def test_pr_scope_excludes_unrelated_main_changes(tmp_path):
     assert scope.classify(scope.changed_files(tmp_path, main, head, merge_base=True)) == "tools"
 
 
+def test_engineering_document_links_are_checked_without_application_tests(tmp_path):
+    doc = tmp_path / "AGENTS.md"
+    doc.write_text('[public](https://example.com) [self](AGENTS.md#section)')
+    changed = [("AGENTS.md", "100644", "100644")]
+    scope.check_docs(tmp_path, changed)
+    doc.write_text('[missing](missing-file.md)')
+    with pytest.raises(ValueError, match="documentation link"):
+        scope.check_docs(tmp_path, changed)
+    doc.write_text('[outside](../outside.md)')
+    with pytest.raises(ValueError):
+        scope.check_docs(tmp_path, changed)
+
+
 @pytest.mark.parametrize("kind,event,required", [
     ("application", "pull_request", {"scope", "checks", "frontend"}),
     ("tools", "pull_request", {"scope", "checks"}),
