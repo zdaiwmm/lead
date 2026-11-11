@@ -57,7 +57,12 @@ async def _upload(aid, incoming, rights=None):
                 str(temp),
                 str(base),
                 cwd=ROOT,
-                env={**os.environ, "PYTHONPATH": str(ROOT / "services/api")},
+                env={
+                    **os.environ,
+                    "PYTHONPATH": os.pathsep.join(filter(None, (
+                        str(ROOT / "services/api"), os.environ.get("PYTHONPATH")
+                    ))),
+                },
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
