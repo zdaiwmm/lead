@@ -21,10 +21,10 @@ from test_pixel_events import send
 
 
 @pytest.fixture
-def site_database(isolated_database, monkeypatch):
+def site_database(isolated_database, monkeypatch, request):
     from lead_app.db_pool import close_all
 
-    upgrade(isolated_database)
+    upgrade(isolated_database, target=getattr(request, "param", "head"))
     with monkeypatch.context() as environment:
         environment.setenv("LEAD_DB_NAME", isolated_database["dbname"])
         yield
@@ -521,6 +521,7 @@ def test_distribution_placement_retries_and_source_integrity(pixel, monkeypatch)
         )
 
 
+@pytest.mark.parametrize("site_database", ["0029_merge_channel_restore"], indirect=True)
 def test_node_schema_attestation_reads_actual_migration(site_database, monkeypatch):
     from scripts import home_live_maintenance as site
 

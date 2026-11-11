@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import signal
 import time
@@ -65,7 +66,12 @@ def model_became_available():
 
 def outbox_rows():
     with tx() as c:
-        return all_rows(c, "SELECT * FROM lead.outbox_events WHERE published_at IS NULL AND event_type<>'analytics.ingest' ORDER BY occurred_at LIMIT 50")
+        return all_rows(c, """WITH picked AS (SELECT o.id FROM lead.outbox_events o LEFT JOIN lead.agents a ON a.id=o.agent_id
+            WHERE o.published_at IS NULL AND o.event_type<>'analytics.ingest' AND o.available_at<=now()
+            AND (o.lease_until IS NULL OR o.lease_until<now())
+            ORDER BY (a.desired_state='archived'),o.occurred_at LIMIT 20 FOR UPDATE OF o SKIP LOCKED)
+            UPDATE lead.outbox_events o SET lease_token=gen_random_uuid(),lease_until=now()+interval '2 minutes',
+            delivery_attempts=delivery_attempts+1 FROM picked WHERE o.id=picked.id RETURNING o.*""")
 
 
 def outbox_agent(aid):
@@ -73,9 +79,26 @@ def outbox_agent(aid):
         return one(c, "SELECT desired_state FROM lead.agents WHERE id=%s", (aid,))
 
 
-def ack_outbox(aid, eid):
+def ack_outbox(aid, eid, lease=None):
     with tx(aid) as c:
-        c.execute("UPDATE lead.outbox_events SET published_at=now() WHERE id=%s", (eid,))
+        c.execute("UPDATE lead.outbox_events SET published_at=now(),delivery_error=NULL,lease_token=NULL,lease_until=NULL WHERE id=%s AND (%s::uuid IS NULL OR lease_token=%s)", (eid, lease, lease))
+        from .runtime_issues import resolve
+        resolve(c, aid, "delivery:" + str(eid))
+
+
+def defer_outbox(aid, event, error):
+    with tx(aid) as c:
+        c.execute("""UPDATE lead.outbox_events SET delivery_error=%s,lease_token=NULL,lease_until=NULL,
+            available_at=now()+make_interval(secs=>least(300,power(2,least(delivery_attempts,8))::integer))
+            WHERE id=%s AND lease_token=%s""", (type(error).__name__, event["id"], event.get("lease_token")))
+        from .runtime_issues import report
+        report(c, aid, "delivery:" + str(event["id"]), type(error).__name__,
+               "这项任务暂未送达执行器，已保留并自动重试。", retry_seconds=min(300, 2 ** min(event.get("delivery_attempts", 1), 8)))
+
+
+async def start_workflow(client, *args, **kwargs):
+    # Workflow IDs make an ambiguous RPC retry safe; never retry external sends here.
+    return await asyncio.wait_for(client.start_workflow(*args, **kwargs), timeout=5)
 
 
 async def dispatch_channel_event(client, aid, payload):
@@ -85,7 +108,7 @@ async def dispatch_channel_event(client, aid, payload):
         args["generation"] = payload["generation"]
         workflow_id += ":" + str(args["generation"])
     try:
-        await client.start_workflow(
+        await start_workflow(client,
             ChannelPreparationWorkflow.run, args, id=workflow_id, task_queue="lead-offline",
             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
         )
@@ -95,81 +118,95 @@ async def dispatch_channel_event(client, aid, payload):
 
 
 async def deliver_workspace(client, tenant, configured, key_was_configured):
-    from .analytics_delivery import deliver_analytics
-
-    if env().get("LEAD_ANALYTICS_DEDICATED") != "1":
-        await deliver_analytics(client, tenant)
     with tenant_scope(tenant, None), service_scope():
         if configured and not key_was_configured:
             await run_db(model_became_available)
         events = await run_db(outbox_rows)
-        for e in events:
-            aid = str(e["agent_id"])
-            payload = e["payload"]
-            agent = await run_db(outbox_agent, aid)
-            if agent and agent["desired_state"] == "paused" and e["event_type"] == "supervisor.wake":
-                await run_db(ack_outbox, aid, e["id"])
-                continue
-            if not agent or (agent["desired_state"] == "archived" and e["event_type"] != "dispatch.channel"):
-                if agent and e["event_type"] == "supervisor.wake":
-                    try:
-                        await client.get_workflow_handle("supervisor:" + aid).signal(
-                            "wake"
-                        )
-                    except RPCError as error:
-                        if error.status != RPCStatusCode.NOT_FOUND:
-                            raise
-                await run_db(ack_outbox, aid, e["id"])
-                continue
-            if e["event_type"] == "chat.enqueue":
-                await client.start_workflow(
-                    ChatWorkflow.run,
-                    aid,
-                    id="chat:" + aid,
-                    task_queue="lead",
-                    id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
-                    start_signal="enqueue",
-                    start_signal_args=[payload["job_id"]],
-                )
-            elif e["event_type"] == "supervisor.wake":
-                await client.start_workflow(
-                    SupervisorWorkflow.run,
-                    aid,
-                    id="supervisor:" + aid,
-                    task_queue="lead",
-                    id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
-                    start_signal="wake",
-                )
-            elif e["event_type"] == "channel.clock":
-                try:
-                    await client.start_workflow(
-                        ChannelDeliveryWorkflow.run, {**payload,"agent_id":aid},
-                        id=f"channel-clock:{payload['task_id']}:{payload['generation']}",
-                        task_queue="lead-research" if payload.get("lane")=="research" else "lead-delivery", id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-                    )
-                except WorkflowAlreadyStartedError:
-                    pass
-            elif e["event_type"] == "dispatch.channel":
-                await dispatch_channel_event(client, aid, payload)
-            elif e["event_type"] in ("task.enqueue", "task.reconcile"):
-                try:
-                    await client.start_workflow(
-                        PublishWorkflow.run,
-                        {"agent_id": aid, "task_id": payload["task_id"]},
-                        id=(
-                            "task-reconcile:"
-                            + payload["task_id"]
-                            + ":"
-                            + payload["recovery_id"]
-                        )
-                        if e["event_type"] == "task.reconcile"
-                        else "task:" + payload["task_id"],
+        async def deliver_event(e):
+            try:
+                aid = str(e["agent_id"])
+                payload = e["payload"]
+                agent = await run_db(outbox_agent, aid)
+                if agent and agent["desired_state"] == "paused" and e["event_type"] == "supervisor.wake":
+                    await run_db(ack_outbox, aid, e["id"], e.get("lease_token"))
+                    return
+                if not agent or (agent["desired_state"] == "archived" and e["event_type"] != "dispatch.channel"):
+                    if agent and e["event_type"] == "supervisor.wake":
+                        try:
+                            await asyncio.wait_for(
+                                client.get_workflow_handle("supervisor:" + aid).signal("wake"),
+                                timeout=5,
+                            )
+                        except RPCError as error:
+                            if error.status != RPCStatusCode.NOT_FOUND:
+                                raise
+                    await run_db(ack_outbox, aid, e["id"], e.get("lease_token"))
+                    return
+                if e["event_type"] == "chat.enqueue":
+                    await start_workflow(client,
+                        ChatWorkflow.run,
+                        aid,
+                        id="chat:" + aid,
                         task_queue="lead",
-                        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                        id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+                        start_signal="enqueue",
+                        start_signal_args=[payload["job_id"]],
                     )
-                except WorkflowAlreadyStartedError:
-                    pass
-            await run_db(ack_outbox, aid, e["id"])
+                elif e["event_type"] == "supervisor.wake":
+                    await start_workflow(client,
+                        SupervisorWorkflow.run,
+                        aid,
+                        id="supervisor:" + aid,
+                        task_queue="lead",
+                        id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+                        start_signal="wake",
+                    )
+                elif e["event_type"] == "channel.clock":
+                    try:
+                        await start_workflow(client,
+                            ChannelDeliveryWorkflow.run, {**payload,"agent_id":aid},
+                            id=f"channel-clock:{payload['task_id']}:{payload['generation']}",
+                            task_queue="lead-research" if payload.get("lane")=="research" else "lead-delivery", id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                        )
+                    except WorkflowAlreadyStartedError:
+                        pass
+                elif e["event_type"] == "dispatch.channel":
+                    await dispatch_channel_event(client, aid, payload)
+                elif e["event_type"] in ("task.enqueue", "task.reconcile"):
+                    try:
+                        await start_workflow(client,
+                            PublishWorkflow.run,
+                            {"agent_id": aid, "task_id": payload["task_id"]},
+                            id=(
+                                "task-reconcile:"
+                                + payload["task_id"]
+                                + ":"
+                                + payload["recovery_id"]
+                            )
+                            if e["event_type"] == "task.reconcile"
+                            else "task:" + payload["task_id"],
+                            task_queue="lead",
+                            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                        )
+                    except WorkflowAlreadyStartedError:
+                        pass
+                await run_db(ack_outbox, aid, e["id"], e.get("lease_token"))
+            except Exception as error:
+                await run_db(defer_outbox, str(e["agent_id"]), e, error)
+                logging.warning("Individual task delivery unavailable (%s)", type(error).__name__)
+
+        groups = {}
+        for event in sorted(events, key=lambda e: (e["occurred_at"], str(e["id"]))):
+            # Keep conversation signals ordered; independent tasks can dispatch concurrently.
+            key = str(event["agent_id"]) + ":chat" if event["event_type"] == "chat.enqueue" else str(event["id"])
+            groups.setdefault(key, []).append(event)
+        slots = asyncio.Semaphore(4)
+        async def deliver_group(rows):
+            async with slots:
+                for event in rows:
+                    await deliver_event(event)
+        await asyncio.gather(*(deliver_group(rows) for rows in groups.values()))
+
 
 
 def release_fenced():
@@ -190,8 +227,6 @@ async def publish_outbox(client):
     workspace_failures = {}
     workspace_retry_at = {}
     notification_ticks = {}
-    experience_ticks = {}
-    reddit_ticks = {}
     external_delivery_tasks = {}
     notification_slots = asyncio.Semaphore(3)
 
@@ -202,78 +237,104 @@ async def publish_outbox(client):
             async with notification_slots:
                 await dispatch(limit=5)
 
+    auxiliary_tasks = {}
+
+    async def auxiliary(tenant, kind):
+        try:
+            with tenant_scope(tenant, None), service_scope():
+                if kind == "analytics":
+                    from .analytics_delivery import deliver_analytics
+                    await deliver_analytics(client, tenant)
+                elif kind == "notifications":
+                    from .admin_notifications import collect
+                    await asyncio.to_thread(collect)
+                elif kind == "external_notifications":
+                    from .admin_delivery import enqueue_pending
+                    await asyncio.to_thread(enqueue_pending)
+                    await deliver_external(tenant)
+                elif kind == "reddit_review":
+                    from .reddit_workspace import review_enabled
+                    await asyncio.to_thread(review_enabled, tenant)
+                else:
+                    from .admin_experiences import collect
+                    await asyncio.to_thread(collect)
+        except Exception as error:
+            logging.warning("Auxiliary %s unavailable (%s)", kind, type(error).__name__)
+
     use_release_probe = env().get("LEAD_HOME_RELEASE_PROBE") == "1"
     credential_state = None
-    while True:
-        try:
-            if use_release_probe and await asyncio.to_thread(release_fenced):
-                (STATE / "worker-heartbeat").write_text(str(time.time()))
-                await asyncio.sleep(poll_seconds)
-                continue
-            configured = any_model_configured()
-            current_credentials = tuple(
-                bool(model_config(provider)["key"])
-                for provider in ("deepseek", "openai")
-            )
-            if not configured or current_credentials != credential_state:
-                configured_workspaces.clear()
-            if current_credentials != credential_state:
-                workspace_failures.clear()
-                workspace_retry_at.clear()
-            credential_state = current_credentials
-            for tenant in await asyncio.to_thread(execution_tenants):
-                if time.monotonic() < workspace_retry_at.get(tenant, 0):
+    try:
+        while True:
+            try:
+                if use_release_probe and await asyncio.to_thread(release_fenced):
+                    (STATE / "worker-heartbeat").write_text(str(time.time()))
+                    await asyncio.sleep(poll_seconds)
                     continue
-                try:
-                    await deliver_workspace(
-                        client, tenant, configured, tenant in configured_workspaces
-                    )
-                    if configured:
-                        configured_workspaces.add(tenant)
-                    if time.monotonic() - notification_ticks.get(tenant, 0) >= 30:
-                        from .admin_notifications import collect
+                configured = any_model_configured()
+                current_credentials = tuple(
+                    hashlib.sha256(model_config(provider)["key"].encode()).digest()
+                    for provider in ("deepseek", "openai")
+                )
+                if not configured or current_credentials != credential_state:
+                    configured_workspaces.clear()
+                if current_credentials != credential_state:
+                    workspace_failures.clear()
+                    workspace_retry_at.clear()
+                credential_state = current_credentials
+                for tenant in await asyncio.to_thread(execution_tenants):
+                    for kind, interval in (("analytics", 5), ("notifications", 5), ("external_notifications", 5), ("experiences", 600), ("reddit_review", 60)):
+                        if kind == "analytics" and env().get("LEAD_ANALYTICS_DEDICATED") == "1":
+                            continue
+                        key = (tenant, kind)
+                        prior = auxiliary_tasks.get(key)
+                        if (prior is None or prior.done()) and time.monotonic() - notification_ticks.get(key, 0) >= interval:
+                            auxiliary_tasks[key] = asyncio.create_task(auxiliary(tenant, kind))
+                            notification_ticks[key] = time.monotonic()
+                    if time.monotonic() < workspace_retry_at.get(tenant, 0):
+                        continue
+                    try:
+                        await deliver_workspace(
+                            client, tenant, configured, tenant in configured_workspaces
+                        )
+                        if configured:
+                            configured_workspaces.add(tenant)
+                        workspace_failures.pop(tenant, None)
+                        workspace_retry_at.pop(tenant, None)
+                    except Exception:
+                        failures = workspace_failures.get(tenant, 0) + 1
+                        workspace_failures[tenant] = failures
+                        delay = min(60, 2 ** min(failures, 6))
+                        workspace_retry_at[tenant] = time.monotonic() + delay
+                        logging.warning(
+                            "Workspace delivery unavailable; retry in %s seconds; other workspaces continue.",
+                            delay,
+                        )
+                (STATE / "worker-heartbeat").write_text(str(time.time()))
+            except Exception:
+                logging.warning(
+                    "Task delivery temporarily unavailable; durable outbox retained."
+                )
+            await asyncio.sleep(poll_seconds)
+    finally:
+        tasks = list(auxiliary_tasks.values()) + list(external_delivery_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            from asyncio import gather
+            await gather(*tasks, return_exceptions=True)
 
-                        with tenant_scope(tenant, None):
-                            await asyncio.to_thread(collect)
-                            previous = external_delivery_tasks.get(tenant)
-                            if previous is None or previous.done():
-                                if previous is not None:
-                                    previous.exception()
-                                external_delivery_tasks[tenant] = asyncio.create_task(
-                                    deliver_external(tenant)
-                                )
-                        notification_ticks[tenant] = time.monotonic()
-                    if time.monotonic() - experience_ticks.get(tenant, 0) >= 600:
-                        from .admin_experiences import collect as collect_experiences
 
-                        with tenant_scope(tenant, None):
-                            await asyncio.to_thread(collect_experiences)
-                        experience_ticks[tenant] = time.monotonic()
-                    if time.monotonic() - reddit_ticks.get(tenant, float("-inf")) >= 60:
-                        from .reddit_workspace import review_enabled
-
-                        reddit_ticks[tenant] = time.monotonic()
-                        try:
-                            await asyncio.to_thread(review_enabled, tenant)
-                        except Exception:
-                            logging.exception("Reddit editorial review deferred until next scan")
-                    workspace_failures.pop(tenant, None)
-                    workspace_retry_at.pop(tenant, None)
-                except Exception:
-                    failures = workspace_failures.get(tenant, 0) + 1
-                    workspace_failures[tenant] = failures
-                    delay = min(60, 2 ** min(failures, 6))
-                    workspace_retry_at[tenant] = time.monotonic() + delay
-                    logging.warning(
-                        "Workspace delivery unavailable; retry in %s seconds; other workspaces continue.",
-                        delay,
-                    )
-            (STATE / "worker-heartbeat").write_text(str(time.time()))
-        except Exception:
-            logging.warning(
-                "Task delivery temporarily unavailable; durable outbox retained."
-            )
-        await asyncio.sleep(poll_seconds)
+async def await_release_window(stop):
+    # Attest the new boot before polling business workflow histories. A failed
+    # cutover can then return to the old queues without recording new commands.
+    while await asyncio.to_thread(release_fenced):
+        (STATE / "worker-heartbeat").write_text(str(time.time()))
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=1)
+            return False
+        except asyncio.TimeoutError:
+            pass
+    return not stop.is_set()
 
 
 async def main():
@@ -299,6 +360,14 @@ async def main():
         max_concurrent_workflow_tasks=workflow_slots,
         graceful_shutdown_timeout=timedelta(seconds=5),
     )
+    # Reserved activity capacity prevents long research from occupying all send/chat slots.
+    publish_worker = Worker(client, task_queue="lead-publish",
+        activities=[execute_task, mark_task_failed, execution_policy],
+        max_concurrent_activities=max(1, int(env().get("LEAD_PUBLISH_SLOTS") or 3)),
+        graceful_shutdown_timeout=timedelta(seconds=5))
+    chat_worker = Worker(client, task_queue="lead-chat", activities=[chat_job],
+        max_concurrent_activities=max(1, int(env().get("LEAD_CHAT_SLOTS") or 2)),
+        graceful_shutdown_timeout=timedelta(seconds=5))
     analytics_worker = Worker(
         client,
         task_queue=ANALYTICS_QUEUE,
@@ -315,6 +384,12 @@ async def main():
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
+    if env().get("LEAD_HOME_RELEASE_PROBE") == "1":
+        from .home_release_probe import prove_boot
+
+        await prove_boot(client)
+        if not await await_release_window(stop):
+            return
     async with AsyncExitStack() as stack:
         await stack.enter_async_context(worker)
         await stack.enter_async_context(Worker(
@@ -330,12 +405,10 @@ async def main():
             client, task_queue="lead-research", workflows=[ChannelDeliveryWorkflow],
             activities=[channel_research_tick, park_channel_target], max_concurrent_activities=2,
         ))
+        await stack.enter_async_context(publish_worker)
+        await stack.enter_async_context(chat_worker)
         if env().get("LEAD_ANALYTICS_DEDICATED") != "1":
             await stack.enter_async_context(analytics_worker)
-        if env().get("LEAD_HOME_RELEASE_PROBE") == "1":
-            from .home_release_probe import prove_boot
-
-            await prove_boot(client)
         delivery = asyncio.create_task(publish_outbox(client))
         try:
             await stop.wait()

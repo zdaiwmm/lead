@@ -291,6 +291,54 @@ def reviewed_channel_schema(mirror, sha, extra):
     return paths
 
 
+# This additive upgrade is installed separately, after backup/restore rehearsal.
+# Only these reviewed bytes are accepted; the application hook never runs DDL.
+FAULT_ISOLATION_FILES = {'scripts/fault_isolation_upgrade.py': '6fa2986893c3d1dbc50f84d51d85947a714f5cf2', 'infra/migrations/versions/0030_fault_isolation.py': '930763fed2ebf6eac3ab2c1238ec49adbc7e6955', 'scripts/service.py': '81d3285a63cbf0158dd2301060df33ccd2437077'}
+
+
+def fault_schema_query():
+    return """SELECT
+        (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0030_fault_isolation']
+        AND (SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity)
+             FROM pg_class WHERE oid IN (to_regclass('lead.runtime_issues'),to_regclass('lead.ui_revisions')))
+        AND (SELECT count(*)=4 FROM pg_policies WHERE schemaname='lead'
+             AND tablename IN ('runtime_issues','ui_revisions') AND policyname IN ('scope','member_scope'))
+        AND has_table_privilege('lead_runtime','lead.runtime_issues','SELECT')
+        AND has_table_privilege('lead_runtime','lead.runtime_issues','INSERT')
+        AND has_table_privilege('lead_runtime','lead.runtime_issues','UPDATE')
+        AND has_table_privilege('lead_runtime','lead.ui_revisions','SELECT')
+        AND has_table_privilege('lead_runtime','lead.ui_revisions','INSERT')
+        AND has_table_privilege('lead_runtime','lead.ui_revisions','UPDATE')
+        AND (SELECT count(*)=3 FROM pg_attribute WHERE attrelid='lead.admin_notifications'::regclass
+             AND NOT attisdropped AND (attname,atttypid) IN
+             (('muted','boolean'::regtype),('external_pending','boolean'::regtype),('external_available_at','timestamptz'::regtype)))
+        AND (SELECT count(*)=11 FROM pg_trigger WHERE tgname='ui_changed' AND tgenabled='O'
+             AND tgfoid=to_regprocedure('lead.touch_ui_revision()') AND tgrelid IN
+             ('lead.agents'::regclass,'lead.tasks'::regclass,'lead.chat_jobs'::regclass,
+              'lead.conversation_messages'::regclass,'lead.activity'::regclass,'lead.browser_runs'::regclass,
+              'lead.browser_steps'::regclass,'lead.assets'::regclass,'lead.runtime_issues'::regclass,
+              'lead.admin_notifications'::regclass,'lead.admin_notification_receipts'::regclass))
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.local_restore_ready()')
+                   AND md5(prosrc)='f0b323f641b48d4ab81322cc4f501b42' AND prosecdef)
+    """
+
+
+def reviewed_fault_isolation(mirror, sha, extra):
+    paths = extra.intersection(FAULT_ISOLATION_FILES)
+    if not paths:
+        return set()
+    for path in paths:
+        require(run('git', '--git-dir', mirror, 'rev-parse', f'{sha}:{path}') == FAULT_ISOLATION_FILES[path],
+                'fault isolation upgrade requires compatibility review')
+    site = TOOLS / 'home_live_maintenance.py'
+    require(site.is_file(), 'existing node database verifier required')
+    program = ('import runpy;read=runpy.run_path(' + repr(str(site)) + ')["site_sql"];print(read(' + repr(fault_schema_query()) + '))')
+    require(run('/usr/bin/python3', '-IB', '-c', program) == 't', 'fault isolation schema is not ready')
+    # scripts/service.py is a standalone template. Home services use their existing
+    # node-owned entrypoints; installing/changing those remains a separate operation.
+    return paths
+
+
 # These site units are installed and verified separately; only these reviewed blobs
 # are compatible with the home application's release. Future revisions need review.
 REDDIT_SITE_FILES = {
@@ -405,6 +453,7 @@ def deploy(sha):
         extra -= OPERATOR_ONLY_FILES
         extra -= reviewed_maintenance_files(mirror, sha, extra)
         extra -= reviewed_channel_schema(mirror, sha, extra)
+        extra -= reviewed_fault_isolation(mirror, sha, extra)
         extra -= reviewed_reddit_site(mirror, sha, extra)
         extra -= reviewed_runtime_files(mirror, sha, extra)
         if extra:

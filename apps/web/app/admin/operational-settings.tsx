@@ -712,12 +712,12 @@ function Runtime({ body, change }: { body: Row; change: (body: Row) => void }) {
         />
       </div>
       <NumberField
-        label="同类连续失败多少次后暂停"
+        label="同类连续失败多少次后重点提醒"
         value={body.pause_after_failures}
         min={1}
         max={20}
         onChange={(v) => field("pause_after_failures", v)}
-        help="对话、规划和发布分别累计；成功会清零，恢复运营后重新累计。"
+        help="对话、规划和发布分别累计；失败只影响对应工作，不改变你的运行设置，成功后清零。"
       />
       <p className="admin-help">
         发布任务开始时保留重试配置版本。外部操作结果不确定时只核对已有提交，不重新发布；工作时段和并发变化用于后续自动工作。
@@ -868,7 +868,7 @@ export function NotificationInbox({ aid = "" }: { aid?: string }) {
   }, []);
   useEffect(() => {
     void load();
-    const timer = setInterval(() => void load(), 30000);
+    const timer = setInterval(() => void load(), 15000);
     return () => clearInterval(timer);
   }, [load]);
   async function read(id: string) {
@@ -912,7 +912,7 @@ export function NotificationInbox({ aid = "" }: { aid?: string }) {
             <div className="admin-notification-heading">
               <strong>{item.title}</strong>
               <span className="muted small">
-                {item.resolved_at ? "已恢复" : item.read_at ? "已读" : "未读"}
+                {item.resolved_at ? "已恢复" : item.muted ? "故障仍在 · 已静音" : item.read_at ? "已读" : "未读"}
               </span>
             </div>
             <p>{item.message}</p>

@@ -12,6 +12,41 @@ from .reddit_member import ordinary_member
 from .scope import current_tenant
 
 
+def archive_account_work(c, aid, account):
+    """Keep identity/receipts immutable; recycle only demonstrably unsubmitted copy."""
+    account_id = account["id"]
+    if account["platform"] == "telegram":
+        archive_account_receipts(c, aid, account_id, account["external_account_id"])
+    from .browser_challenges import pending, save
+    from .runtime_issues import resolve
+    if (challenge := pending(c, account["profile_id"], account_id=account_id)):
+        save(c, aid, {**challenge, "state": "canceled"})
+        resolve(c, aid, "browser:" + str(challenge["profile_id"]))
+    c.execute("UPDATE lead.social_accounts SET state='disconnected',automation_enabled=false,binding_version=binding_version+1 WHERE id=%s", (account_id,))
+    c.execute("UPDATE lead.authorization_grants SET revoked_at=now() WHERE target_id IN (SELECT id FROM lead.account_targets WHERE account_id=%s) AND revoked_at IS NULL", (account_id,))
+    c.execute("UPDATE lead.account_targets SET state='disabled' WHERE account_id=%s", (account_id,))
+    c.execute("""UPDATE lead.interaction_cards SET state='canceled' WHERE state IN ('pending','accepted')
+        AND (payload->>'account_id'=%s OR payload->>'target_id' IN
+        (SELECT id::text FROM lead.account_targets WHERE account_id=%s))""", (str(account_id),account_id))
+    # Rows with dispatching/unknown/confirmed receipts are never reusable drafts.
+    canceled = c.execute("""UPDATE lead.tasks t SET state='canceled',completed_at=now(),version=version+1,
+        result=coalesce(result,'{}'::jsonb) || '{"reason":"account_archived"}'::jsonb
+        WHERE t.state IN ('planned','queued','running','waiting_user','failed') AND t.type<>'content.prepare'
+        AND ((t.input->>'platform'=%s AND t.input->>'account_id' IS NULL AND t.input->>'target_id' IS NULL AND NOT EXISTS(SELECT 1 FROM lead.social_accounts sibling WHERE sibling.platform=%s AND sibling.state='connected' AND sibling.automation_enabled) AND t.type NOT LIKE 'operating.%%' AND t.type NOT IN ('content.prepare','media.generate')) OR t.input->>'account_id'=%s OR t.input->>'target_id' IN
+        (SELECT id::text FROM lead.account_targets WHERE account_id=%s) OR EXISTS(
+        SELECT 1 FROM lead.actions a JOIN lead.account_targets x ON x.id=a.target_id
+        WHERE a.task_id=t.id AND x.account_id=%s))
+        AND coalesce(t.result->>'reply_state','') NOT IN ('dispatching','unknown')
+        AND coalesce(t.result->>'join_state','') NOT IN ('dispatching','unknown','pending_approval')
+        AND NOT EXISTS(SELECT 1 FROM lead.actions a WHERE a.task_id=t.id AND a.state IN ('dispatching','unknown','confirmed'))
+        RETURNING t.*""", (account["platform"],account["platform"],str(account_id),account_id,account_id)).fetchall()
+    from .content_backlog import recycle_unsubmitted
+    for task in canceled:
+        recycle_unsubmitted(c, aid, task)
+    c.execute("UPDATE lead.actions SET state='canceled' WHERE state IN ('prepared','not_applied') AND target_id IN (SELECT id FROM lead.account_targets WHERE account_id=%s)", (account_id,))
+    audit(c, aid, "account.archived", {"account_id":str(account_id),"platform":account["platform"]})
+
+
 def disconnect_account(aid, account_id, expected_verified_at):
     """Release an account claim without deleting its operational history."""
     with tx(aid) as c:
@@ -29,56 +64,10 @@ def disconnect_account(aid, account_id, expected_verified_at):
             archive_account_receipts(c, aid, account["id"], account["external_account_id"])
         if account["state"] == "disconnected":
             return {"ok": True, "duplicate": True}
-        from .browser_challenges import pending, save
-        if (challenge := pending(c, account["profile_id"])) and challenge["account_id"] == str(account_id):
-            save(c, aid, {**challenge, "state": "canceled"})
-        c.execute(
-            "UPDATE lead.social_accounts SET state='disconnected',automation_enabled=false,binding_version=binding_version+1 WHERE id=%s",
-            (account_id,),
-        )
-        c.execute(
-            "UPDATE lead.authorization_grants SET revoked_at=now() WHERE target_id IN (SELECT id FROM lead.account_targets WHERE account_id=%s) AND revoked_at IS NULL",
-            (account_id,),
-        )
-        c.execute(
-            "UPDATE lead.account_targets SET state='disabled' WHERE account_id=%s",
-            (account_id,),
-        )
-        c.execute(
-            """UPDATE lead.interaction_cards SET state='canceled'
-            WHERE state IN ('pending','accepted') AND
-              (payload->>'account_id'=%s OR payload->>'target_id' IN
-                (SELECT id::text FROM lead.account_targets WHERE account_id=%s))""",
-            (str(account_id), account_id),
-        )
-        # Submitted/unknown actions retain their receipts and reconciliation state.
-        c.execute(
-            "UPDATE lead.actions SET state='canceled' WHERE state IN ('prepared','not_applied') AND target_id IN (SELECT id FROM lead.account_targets WHERE account_id=%s)",
-            (account_id,),
-        )
-        c.execute(
-            """UPDATE lead.tasks t SET state='canceled',completed_at=now(),version=version+1
-            WHERE t.state IN ('planned','queued','running','waiting_user') AND
-              ((t.input->>'platform'=%s AND NOT EXISTS(SELECT 1 FROM lead.social_accounts sibling WHERE sibling.platform=%s AND sibling.automation_enabled AND sibling.state='connected')) OR t.input->>'account_id'=%s OR
-               t.input->>'target_id' IN (SELECT id::text FROM lead.account_targets WHERE account_id=%s) OR
-               EXISTS(SELECT 1 FROM lead.actions a JOIN lead.account_targets target ON target.id=a.target_id
-                      WHERE a.task_id=t.id AND target.account_id=%s))
-              AND NOT EXISTS(SELECT 1 FROM lead.actions a WHERE a.task_id=t.id AND a.state IN ('dispatching','unknown'))""",
-            (account["platform"], account["platform"], str(account_id), account_id, account_id),
-        )
-        isolated = one(
-            c,
-            "SELECT slot<>'default' AS yes FROM lead.browser_profiles WHERE id=%s",
-            (account["profile_id"],),
-        )["yes"]
-        # The browser commit gate and disconnect conflict on the same project control row.
-        c.execute(
-            "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+%s,version=version+1,updated_at=now() WHERE id=%s",
-            (0 if isolated else 1, aid),
-        )
-        c.execute(
-            "UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending') AND profile_id=%s",(account["profile_id"],)
-        )
+        archive_account_work(c, aid, account)
+        c.execute("UPDATE lead.social_accounts SET automation_enabled=false WHERE id=%s", (account_id,))
+        c.execute("UPDATE lead.agents SET version=version+1,updated_at=now() WHERE id=%s", (aid,))
+        c.execute("UPDATE lead.takeover_sessions SET state='ended',ended_at=now() WHERE state IN ('requested','active','ending') AND profile_id=%s", (account["profile_id"],))
         audit(
             c,
             aid,
@@ -91,7 +80,7 @@ def disconnect_account(aid, account_id, expected_verified_at):
 
 
 def store_account(
-    aid, platform, observed, prompt_target=True, *, expected_control_version=None, expected_binding=None
+    aid, platform, observed, prompt_target=True, *, expected_control_version=None, expected_binding=None, expected_account_snapshot=None
 ):
     with tx(aid) as c:
         agent = require_agent(c, aid, True)
@@ -111,6 +100,8 @@ def store_account(
         )
         if not account:
             raise ValueError("请先打开此账号的连接窗口")
+        if expected_account_snapshot is not None and any(account.get(k) != v for k,v in expected_account_snapshot.items()):
+            raise ValueError("账号连接已变化，请重新打开登录窗口并验证")
         if (
             expected_binding is not None
             and (str(account["id"]), account["binding_version"]) != expected_binding
@@ -120,24 +111,10 @@ def store_account(
             account["external_account_id"]
             and account["external_account_id"] != observed["external_account_id"]
         ):
-            if platform == "telegram":
-                archive_account_receipts(c, aid, account["id"], account["external_account_id"])
-            c.execute(
-                "UPDATE lead.authorization_grants SET revoked_at=now() WHERE target_id IN (SELECT id FROM lead.account_targets WHERE account_id=%s) AND revoked_at IS NULL",
-                (account["id"],),
-            )
-            c.execute(
-                "UPDATE lead.account_targets SET state='disabled' WHERE account_id=%s",
-                (account["id"],),
-            )
-            c.execute(
-                "UPDATE lead.interaction_cards SET state='canceled' WHERE type='manage_account' AND payload->>'account_id'=%s AND state='accepted'",
-                (str(account["id"]),),
-            )
-            c.execute(
-                "UPDATE lead.agents SET authorization_version=authorization_version+1,control_version=control_version+CASE WHEN EXISTS (SELECT 1 FROM lead.browser_profiles WHERE id=%s AND slot='default') THEN 1 ELSE 0 END WHERE id=%s",
-                (account["profile_id"], aid),
-            )
+            archive_account_work(c, aid, account)
+            account = one(c, """INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,state,automation_enabled)
+                VALUES(lead.ctx_tenant(),%s,%s,%s,'pending',%s) RETURNING *""",
+                (aid,account["profile_id"],platform,account["state"] == "disconnected" or account["automation_enabled"]))
         try:
             c.execute(
                 "UPDATE lead.social_accounts SET binding_version=binding_version+1,external_account_id=%s,display_name=%s,automation_enabled=CASE WHEN state='disconnected' THEN true ELSE automation_enabled END,state='connected',verified_at=now() WHERE id=%s",
@@ -177,6 +154,7 @@ def store_account(
         from .atomic_dispatch import refresh_connected
 
         refresh_connected(c, aid)
+        emit(c, aid, "supervisor.wake")
         return str(account["id"])
 
 

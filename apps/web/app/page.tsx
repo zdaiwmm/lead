@@ -78,6 +78,10 @@ export default function Lead() {
   const [detail, setDetail] = useState<Row | null>(null);
   const [health, setHealth] = useState<Row | null>(null);
   const [ready, setReady] = useState(false);
+  const [liveStatus, setLiveStatus] = useState<Row | null>(null);
+  const [statusIssue, setStatusIssue] = useState("");
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [clock, setClock] = useState(Date.now());
   const [loginUrl, setLoginUrl] = useState("");
   const [user, setUser] = useState<Row | null>(null);
   const readOnly = user?.role === "viewer";
@@ -103,14 +107,21 @@ export default function Lead() {
     }
     setWorkspace(identity.tenant_id);
     setUser(identity);
-    const [a, h] = await Promise.all([api("/agents"), api("/health")]);
-    setAgents(a);
-    setHealth(h);
     const id = selected.current;
-    if (id) {
-      const d = await api("/agents/" + id);
-      if (id === selected.current) setDetail(d);
-    }
+    const reads = await Promise.allSettled([api("/agents"), api("/health"), id ? api("/agents/" + id) : Promise.resolve(null),
+      id ? api("/agents/" + id + "/status").then((value) => { if (id === selected.current) setLiveStatus(value); }) : Promise.resolve(null)]);
+    const failed: string[] = [];
+    if (reads[0].status === "fulfilled") setAgents(reads[0].value);
+    else failed.push("Agent 列表");
+    if (reads[1].status === "fulfilled") setHealth(reads[1].value);
+    else failed.push("服务连接状态");
+    if (reads[2].status === "fulfilled") {
+      if (id && id === selected.current) setDetail(reads[2].value);
+    } else failed.push("当前任务状态");
+    if (reads[3].status === "rejected") failed.push("局部故障状态");
+    setStatusIssue(failed.length ? failed.join("、") + "暂未更新，显示上次结果；正在自动重试。" : "");
+    if (!failed.length) setLastUpdated(Date.now());
+
   }, []);
   useEffect(() => {
     let active = true;
@@ -150,7 +161,7 @@ export default function Lead() {
     const poll = async () => {
       if (polling) return;
       polling = true;
-      try { await refresh(); } catch { /* Retry on the next tick. */ }
+      try { await refresh(); } catch { setStatusIssue("暂时无法刷新，显示上次结果；正在自动重试。"); }
       finally { polling = false; }
     };
     events.onmessage = () => {
@@ -159,9 +170,11 @@ export default function Lead() {
     };
     events.onopen = poll;
     const timer = setInterval(poll, 15000);
+    const clockTimer = setInterval(() => setClock(Date.now()), 5000);
     return () => {
       events.close();
       clearInterval(timer);
+      clearInterval(clockTimer);
     };
   }, [ready, refresh]);
   useEffect(() => {
@@ -318,6 +331,7 @@ export default function Lead() {
       m.role === "user" && ["pending", "processing"].includes(m.job_status),
   );
   const latest = detail?.messages?.at(-1);
+  const currentIssues = (liveStatus?.agent_id === current ? liveStatus.runtime_issues : detail?.runtime_issues) || [];
   function composer() {
     return (
       <div className="composer">
@@ -536,10 +550,32 @@ export default function Lead() {
             )}
           </span>
           <span className="top-right">
-            {health?.worker ? "服务已连接" : "正在连接服务"}
+            {health?.worker ? "执行器在线" : "执行器连接待确认"}
             <span className={"dot " + (health?.worker ? "green" : "")} />
           </span>
         </header>
+        {(statusIssue || (lastUpdated && clock - lastUpdated > 30000)) && (
+          <div className="error" role="status">
+            <span>{statusIssue || "状态超过 30 秒未更新，正在重新连接。"}
+              {lastUpdated ? ` 上次完整更新：${new Date(lastUpdated).toLocaleTimeString()}` : ""}</span>
+            <button className="secondary" onClick={() => void refresh().catch(() => setStatusIssue("仍未连接，正在自动重试。"))}>重新刷新</button>
+          </div>
+        )}
+        {current && currentIssues.length > 0 && (
+          <div className="local-issues" role="status" aria-label="局部故障">
+            <strong>{currentIssues.length} 项工作需要留意</strong>
+            {currentIssues.slice(0, 5).map((issue: Row) => (
+              <p key={issue.scope}><b>{issue.label}：</b>{issue.message} <small>
+                {issue.needs_user ? "需要你处理" : issue.retry_at ? (new Date(issue.retry_at).getTime() <= Date.now() ? "已到重试时间，等待重新检查" : `可重试时间 ${new Date(issue.retry_at).toLocaleTimeString()}`) : "等待重新检查"}
+                {` · 最近发现 ${new Date(issue.last_seen_at).toLocaleTimeString()}`}
+              </small></p>
+            ))}
+            {currentIssues.length > 5 && <details>
+              <summary>查看其余 {currentIssues.length - 5} 项</summary>
+              {currentIssues.slice(5).map((issue: Row) => <p key={issue.scope}><b>{issue.label}：</b>{issue.message} {issue.needs_user ? "需要你处理" : "等待重新检查"}</p>)}
+            </details>}
+          </div>
+        )}
         {error && (
           <div className="error" role="alert">
             <span>{error}</span>

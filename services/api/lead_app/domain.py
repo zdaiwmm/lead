@@ -14,6 +14,8 @@ from .db import (
     tx,
     uid,
 )
+from .runtime_issues import active as active_issues
+from .runtime_issues import optional
 from .scope import actor_ref, current_tenant
 
 PLATFORMS = [
@@ -284,7 +286,7 @@ def list_agents():
         )
     for a in agents:
         with tx(str(a["id"])) as c:
-            a["metrics"] = metrics(c)
+            a["metrics"] = optional(c, str(a["id"]), "metrics", lambda: metrics(c), {"available": False})
             a["latest_work"] = one(
                 c,
                 "SELECT title,created_at FROM lead.activity ORDER BY created_at DESC LIMIT 1",
@@ -292,7 +294,21 @@ def list_agents():
     return agents
 
 
-def agent_detail(aid):
+def agent_status(aid):
+    from datetime import datetime, timezone
+    with tx(aid) as c:
+        agent = require_agent(c, aid)
+        return {
+            "agent_id": aid, "desired_state": agent["desired_state"],
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "runtime_issues": active_issues(c, aid),
+            "last_completed_work": one(c, """SELECT id,type,completed_at FROM lead.tasks
+                WHERE state='succeeded' AND type NOT IN ('operating.decision','operating.review')
+                ORDER BY completed_at DESC NULLS LAST LIMIT 1"""),
+        }
+
+
+def agent_detail(aid, *, chat=False, message_seq=None):
     with tx(aid) as c:
         a = require_agent(c, aid)
         a["business"] = one(
@@ -300,7 +316,8 @@ def agent_detail(aid):
         )
         a["messages"] = all_rows(
             c,
-            "SELECT m.*, job.status AS job_status, job.error_code,job.error_context->>'model_reference' AS request_model,job.error_context->>'provider' AS request_provider FROM lead.conversation_messages m LEFT JOIN lead.chat_jobs job ON job.message_id=m.id ORDER BY m.seq",
+            "SELECT * FROM (SELECT m.*, job.status AS job_status, job.error_code,job.error_context->>'model_reference' AS request_model,job.error_context->>'provider' AS request_provider FROM lead.conversation_messages m LEFT JOIN lead.chat_jobs job ON job.message_id=m.id WHERE (%s::bigint IS NULL OR m.seq<=%s) ORDER BY m.seq DESC LIMIT %s) recent ORDER BY seq",
+            (message_seq, message_seq, 40 if chat else 200),
         )
         a["accounts"] = all_rows(
             c,
@@ -344,7 +361,7 @@ def agent_detail(aid):
             c,
             "SELECT n.mode,n.state,n.expected_ip,n.verified_at FROM lead.network_identities n JOIN lead.browser_profiles p ON p.network_identity_id=n.id WHERE p.slot='default'",
         )
-        a["metrics"] = metrics(c)
+        a["metrics"] = {"available": False} if chat else optional(c, aid, "metrics", lambda: metrics(c), {"available": False})
         a["cards"] = all_rows(
             c,
             "SELECT id,type,state,version,payload,expires_at,expires_at>now() AS valid FROM lead.interaction_cards ORDER BY created_at",
@@ -355,7 +372,8 @@ def agent_detail(aid):
         )
         from .content_backlog import status as workflow_status
 
-        a["operating_workflow"] = workflow_status(c, a, a["business"])
+        a["operating_workflow"] = optional(c, aid, "workflow_status", lambda: workflow_status(c, a, a["business"]), {}) if not chat else {}
+        a["runtime_issues"] = active_issues(c, aid)
         return a
 
 

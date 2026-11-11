@@ -93,10 +93,25 @@ def test_channel_upgrade_joins_installed_restore_history(isolated_database, base
     upgrade(isolated_database, roles=False)
     upgrade(isolated_database, roles=False)
     with psycopg.connect(**isolated_database) as c:
-        assert c.execute("SELECT version_num FROM lead_migration_version").fetchall() == [("0029_merge_channel_restore",)]
+        assert c.execute("SELECT version_num FROM lead_migration_version").fetchall() == [("0030_fault_isolation",)]
         after = c.execute("""SELECT md5(prosrc),prosecdef,proconfig,proacl::text FROM pg_proc
             WHERE oid=to_regprocedure('lead.local_restore_ready()')""").fetchone()
         assert after[:3] == ("f0b323f641b48d4ab81322cc4f501b42", True, ["search_path=pg_catalog, lead"])
         if before:
             assert after == before
         assert c.execute("SELECT to_regclass('lead.pixel_first_landing') IS NOT NULL").fetchone()[0]
+
+
+def test_fault_isolation_attestation_and_additive_upgrade(isolated_database):
+    from scripts.home_systemd_release import fault_schema_query
+
+    upgrade(isolated_database, target='0029_merge_channel_restore')
+    upgrade(isolated_database, roles=False)
+    with psycopg.connect(**isolated_database) as c:
+        assert c.execute(fault_schema_query()).fetchone()[0]
+        c.execute('ALTER TABLE lead.tasks DISABLE TRIGGER ui_changed')
+        assert not c.execute(fault_schema_query()).fetchone()[0]
+        c.rollback()
+        c.execute('REVOKE INSERT ON lead.ui_revisions FROM lead_runtime')
+        assert not c.execute(fault_schema_query()).fetchone()[0]
+        c.rollback()

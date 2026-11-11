@@ -56,6 +56,13 @@ def persist(c, aid, action_id, observed, evidence_ref=None, now=None):
         state = "unknown"
     if state == "public" and observed.get("visibility") != "public":
         state = "unknown"
+    from .runtime_issues import report, resolve
+    if state == "public":
+        resolve(c, aid, "post:" + str(action_id))
+    else:
+        report(c, aid, "post:" + str(action_id), "distribution_" + state, LABELS[state],
+               retry_seconds=300 if state == "under_review" else 900,
+               needs_user=state in {"private", "restricted", "rejected"})
     old = (row["task_result"] or {}).get("delivery", {})
     delivery = {
         "state": state,
@@ -91,7 +98,7 @@ def persist(c, aid, action_id, observed, evidence_ref=None, now=None):
         c,
         """SELECT a.id,a.external_url,t.result->'delivery' AS delivery
         FROM lead.actions a JOIN lead.tasks t ON t.id=a.task_id WHERE a.target_id=%s
-        AND a.state='confirmed' AND coalesce(t.result->'delivery'->>'state','unknown')<>'public'
+        AND a.state='confirmed' AND t.input->>'bootstrap_verification'='true' AND coalesce(t.result->'delivery'->>'state','unknown')<>'public'
         ORDER BY a.created_at LIMIT 1""",
         (row["target_id"],),
     )
@@ -109,7 +116,7 @@ def persist(c, aid, action_id, observed, evidence_ref=None, now=None):
         else delivery
     )
     updated = {**permissions, "publication_delivery": target_delivery}
-    if pending:
+    if pending and not permissions.get("publishing_verified_formats"):
         formats = sorted(
             set(permissions.get("pending_publishing_formats", []))
             | set(permissions.get("publishing_verified_formats", []))
@@ -122,7 +129,8 @@ def persist(c, aid, action_id, observed, evidence_ref=None, now=None):
             publishing_verified=False,
         )
     elif (
-        agent["desired_state"] == "running"
+        state == "public"
+        and agent["desired_state"] == "running"
         and row["account_state"] == "connected"
         and row["automation_enabled"]
         and row["revoked_at"] is None
@@ -192,7 +200,7 @@ def due():
                     WHERE a.state='confirmed' AND s.platform='tiktok' AND s.state='connected'
                     AND s.automation_enabled AND target.state='active' AND agent.desired_state='running'
                     AND g.revoked_at IS NULL
-                    AND (coalesce(t.result->'delivery'->>'state','unknown')<>'public' OR target.verified_permissions ? 'pending_publishing_formats')
+                    AND (coalesce(t.result->'delivery'->>'state','unknown') IN ('unknown','under_review'))
                     AND coalesce((t.result->'delivery'->>'next_check_at')::timestamptz,'-infinity')<=now()
                     ORDER BY a.created_at""",
                     )

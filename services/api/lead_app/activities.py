@@ -24,7 +24,13 @@ from .operating_playbooks import (
     plan_snapshot,
     planning_context,
 )
-from .promotion import PROMOTER_VOICE, new_marker, promoter_voice, promotion_body
+from .promotion import (
+    PROMOTER_VOICE,
+    new_marker,
+    promoter_voice,
+    promotion_body,
+    tracking_required,
+)
 from .promotion import configuration as promotion_configuration
 from .reddit_member import ordinary_member
 from .scope import current_tenant, scoped_activity
@@ -87,25 +93,25 @@ async def chat_job(args: dict):
         c.execute(
             "UPDATE lead.chat_jobs SET status='processing' WHERE id=%s", (job_id,)
         )
-    detail = agent_detail(aid)
-    history = [
-        {
-            "role": m["role"],
-            "text": m["content"]["text"],
-            "asset_ids": m["content"].get("asset_ids", []),
-        }
-        for m in detail["messages"]
-        if m["seq"] <= message["seq"]
-        and m["content"].get("origin") != "development_validation"
-    ][-40:]
     browser = BrowserTools(
         aid, message["content"]["text"], message_id=str(message["id"])
     )
     page = None
     from .knowledge import search
 
-    knowledge = search(aid, message["content"]["text"])
     try:
+        detail = agent_detail(aid, chat=True, message_seq=message["seq"])
+        history = [
+            {
+                "role": m["role"],
+                "text": m["content"]["text"],
+                "asset_ids": m["content"].get("asset_ids", []),
+            }
+            for m in detail["messages"]
+            if m["seq"] <= message["seq"]
+            and m["content"].get("origin") != "development_validation"
+        ][-40:]
+        knowledge = search(aid, message["content"]["text"])
         from .adapters import target_in_message
 
         destination = target_in_message(message["content"]["text"])
@@ -991,6 +997,7 @@ async def _publication_cycle(args: dict):
         scheduled_wait = False
         prepared_wait = False
         shortlink_wait = False
+        information_wait = False
         for target in rows:
             if ordinary_member(target) and not (args.get("channel_clock") and requested_target):
                 continue
@@ -1003,7 +1010,7 @@ async def _publication_cycle(args: dict):
                 continue
             if platform == "telegram" and first_users(a) and audience_status(
                 target["verified_permissions"].get("owned_audience"), datetime.now(timezone.utc)
-            ) != "eligible":
+            ) == "empty":
                 if requested_target:
                     return {"delay": 21600, "reason": "频道尚无可核验的外部受众"}
                 continue
@@ -1021,6 +1028,7 @@ async def _publication_cycle(args: dict):
                 if schedule and schedule["question"]:
                     if requested_target:
                         return {"delay": 86400, "idle": True, "reason": "awaiting_business_information"}
+                    information_wait = True
                     waits.append(86400)
                     continue
                 if platform in {"telegram", "lab"} and schedule and schedule["remaining"] > 0:
@@ -1088,7 +1096,7 @@ async def _publication_cycle(args: dict):
                 continue
             from .outbound_links import configured_problem
 
-            if platform != "lab" and not ordinary_member(target) and configured_problem():
+            if platform != "lab" and not ordinary_member(target) and tracking_required(a) and configured_problem():
                 shortlink_wait = True
                 waits.append(300)
                 continue
@@ -1107,7 +1115,9 @@ async def _publication_cycle(args: dict):
             if waits:
                 return {
                     "delay": min(waits),
-                    "reason": "recovering_prepared_publication"
+                    "reason": "awaiting_business_information"
+                    if information_wait
+                    else "recovering_prepared_publication"
                     if prepared_wait
                     else "public_shortlink_required"
                     if shortlink_wait
@@ -1123,15 +1133,16 @@ async def _publication_cycle(args: dict):
                 (aid,),
             )
             return {"delay": 3600, "reason": "verified_target_or_media_required"}
-        performance = metrics(c)
+        from .runtime_issues import optional
+        performance = optional(c, aid, "metrics", lambda: metrics(c), {"available": False})
         current_review = one(
             c,
             "SELECT id,body FROM lead.memory_entries WHERE kind='observation' AND body->>'type'='operating_review' ORDER BY created_at DESC LIMIT 1",
         )
-        operating_playbooks = planning_context(
+        operating_playbooks = optional(c, aid, "publication_review", lambda: planning_context(
             c, targets, business, a["config_revision"]
-        )
-        weekly_review(c, aid, operating_playbooks)
+        ), {})
+        optional(c, aid, "weekly_review", lambda: weekly_review(c, aid, operating_playbooks))
         media = [
             m
             for m in media
@@ -1192,7 +1203,7 @@ async def _publication_cycle(args: dict):
                     and (not target_option.get("channel_language") or d["input"].get("channel_language") == target_option["channel_language"])
                     and d["input"]["format"]
                     in target_option.get("available_formats", ["text"])
-                    and (not plan or d["input"]["plan_id"] == plan)
+                    and (not plan or d["input"].get("recycled_from") or d["input"]["plan_id"] == plan)
                 ),
                 None,
             )
@@ -1433,10 +1444,12 @@ async def _publication_cycle(args: dict):
             ):
                 return {"delay": 3600, "reason": "invalid_destination"}
             body, published_link = promotion_body(
-                body, destination, marker, business["product_url"]
+                body, destination, marker, business["product_url"],
+                require_tracking=tracking_required(a)
             )
         else:
-            return {"delay": 3600, "reason": "public_business_link_required"}
+            # Native receipt matching still needs a unique operation marker.
+            body = body + "\n\n" + marker
         manifest = [
             {
                 "id": str(m["id"]),
@@ -1513,7 +1526,9 @@ async def _publication_cycle(args: dict):
         if content.action == "publish" and pending_publication(
             c, target["target_id"], current["config_revision"]
         ):
-            return {"delay": 300, "reason": "recovering_prepared_publication"}
+            return {"delay": 300, "reason": "awaiting_business_information"
+                    if information_wait
+                    else "recovering_prepared_publication"}
         if not one(
             c,
             "SELECT 1 FROM lead.social_accounts WHERE platform=%s AND state='connected' AND automation_enabled",
@@ -1669,7 +1684,7 @@ async def _publication_cycle(args: dict):
             scheduled(c, prepared_task["id"], task["id"])
         record(c, aid, "已规划下一项工作", content.rationale, task_id=task["id"])
         emit(c, aid, "task.enqueue", {"task_id": str(task["id"])})
-    return {"delay": cycle_delay(planned_delay)}
+    return {"delay": cycle_delay(planned_delay), "state": "queued", "task_id": str(task["id"])}
 
 
 def just_content(body, title, manifest):

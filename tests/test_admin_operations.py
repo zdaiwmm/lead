@@ -337,16 +337,14 @@ def test_workspace_parallel_limit_and_failure_stop_are_durable(workspace, monkey
         )
     assert operations.admission(second, "autonomous")["allowed"]
     assert not operations.failure(first, "planning", "TRANSIENT")["paused"]
-    assert operations.admission(first, "autonomous")["reason"] == "failure_backoff"
-    assert operations.failure(first, "planning", "TRANSIENT")["paused"]
+    assert operations.admission(first, "planning")["reason"] == "failure_backoff"
+    assert not operations.failure(first, "planning", "TRANSIENT")["paused"]
     with tx(first) as c:
-        assert one(c, "SELECT desired_state,health_state FROM lead.agents") == {
-            "desired_state": "paused",
-            "health_state": "needs_attention",
-        }
+        assert one(c, "SELECT desired_state FROM lead.agents")["desired_state"] == "running"
     domain.connect_lab(first)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "verification-only")
     monkeypatch.setenv("LEAD_MODEL_PROVIDER", "deepseek")
+    domain.set_control(first, "pause")
     domain.set_control(first, "resume")
     with tx(first) as c:
         assert one(c, "SELECT failures FROM lead.admin_runtime_state")["failures"] == 0

@@ -89,7 +89,6 @@ def current_guard(c, aid, business_id, revision, control_version):
     if (
         agent["desired_state"] in {"paused", "archived"}
         or agent["config_revision"] != revision
-        or agent["control_version"] != control_version
         or not business
         or str(business["id"]) != str(business_id)
     ):

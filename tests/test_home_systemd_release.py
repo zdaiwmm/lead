@@ -339,3 +339,27 @@ def test_operator_download_tool_is_not_installed_or_executed_by_application_rele
     assert "scripts/home_live_maintenance.py" not in hook.OPERATOR_ONLY_FILES
     builder = (Path(__file__).resolve().parents[1] / "scripts/build_home_image.sh").read_text()
     assert 'git archive "$sha" services apps/web infra/home-browser-frames' in builder
+
+
+def test_fault_isolation_requires_exact_reviewed_files_and_live_schema(hook, monkeypatch, tmp_path):
+    paths = set(hook.FAULT_ISOLATION_FILES)
+    answers = {'ready': 't'}
+
+    def run(*args, **kwargs):
+        if args[0] == 'git':
+            return hook.FAULT_ISOLATION_FILES[args[-1].split(':', 1)[1]]
+        assert args[:3] == ('/usr/bin/python3', '-IB', '-c')
+        assert 'site_sql' in args[3]
+        return answers['ready']
+
+    monkeypatch.setattr(hook, "TOOLS", tmp_path / "tools")
+    hook.TOOLS.mkdir()
+    (hook.TOOLS / 'home_live_maintenance.py').write_text('# existing verifier')
+    monkeypatch.setattr(hook, 'run', run)
+    assert hook.reviewed_fault_isolation('/mirror', 'b' * 40, paths) == paths
+    answers['ready'] = 'f'
+    with pytest.raises(hook.Refused, match='schema is not ready'):
+        hook.reviewed_fault_isolation('/mirror', 'b' * 40, paths)
+    monkeypatch.setattr(hook, 'run', lambda *a: 'unknown')
+    with pytest.raises(hook.Refused, match='compatibility review'):
+        hook.reviewed_fault_isolation('/mirror', 'b' * 40, paths)

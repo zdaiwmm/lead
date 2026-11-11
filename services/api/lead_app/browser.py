@@ -385,7 +385,7 @@ class Actor:
     def touch(self):
         self.used = time.monotonic()
 
-    def gate(self, c, action, *, account_setup=False):
+    def gate(self, c, action, *, account_setup=False, read_only=False):
         from .managed_network import policy
         from .resources import ensure_capacity
 
@@ -402,7 +402,7 @@ class Actor:
         ):
             raise ValueError("环境正在备份，已停止提交")
         if (
-            env().get("LEAD_DEPLOYMENT_MODE") == "production"
+            not read_only and env().get("LEAD_DEPLOYMENT_MODE") == "production"
             and not one(
                 c, "SELECT lead.backup_ready() AND lead.offsite_backup_ready() AS ready"
             )["ready"]

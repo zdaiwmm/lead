@@ -12,9 +12,9 @@ def stale_identity_tasks(c):
             c,
             """SELECT a.task_id FROM lead.actions a
       JOIN lead.account_targets t ON t.id=a.target_id JOIN lead.social_accounts s ON s.id=t.account_id
-      JOIN LATERAL (SELECT observed_account_id FROM lead.action_attempts
+      LEFT JOIN LATERAL (SELECT observed_account_id FROM lead.action_attempts
         WHERE action_id=a.id ORDER BY attempt DESC LIMIT 1) p ON true
-      WHERE a.state IN ('dispatching','unknown') AND p.observed_account_id<>s.external_account_id""",
+      WHERE a.state IN ('dispatching','unknown') AND (s.state='disconnected' OR p.observed_account_id<>s.external_account_id)""",
         )
     }
 

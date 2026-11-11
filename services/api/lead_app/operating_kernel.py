@@ -16,6 +16,7 @@ from .operating_feedback import (
     reconcile_handoffs,
     review,
 )
+from .runtime_issues import optional, report, resolve
 from .scope import current_tenant
 
 WORK_KINDS = {"journey", "opportunities", "strategy", "validate"}
@@ -115,10 +116,10 @@ def candidates(c, aid, agent, business, now=None):
 
     now = now or datetime.now(timezone.utc)
     tools, _ = effective(c, "models", aid)
-    seed_history(c, aid, agent, business)
+    optional(c, aid, "progress_history", lambda: seed_history(c, aid, agent, business))
     barriers = blocked(c)
     eligible = eligible_publish_targets(c, barriers)
-    reviewed = review(c, aid, agent, business)
+    reviewed = optional(c, aid, "review", lambda: review(c, aid, agent, business), {"review_id": None})
     pilot = trials.enabled(agent)
     experiments = trials.advance(c, aid, agent, business, now) if pilot else []
     from .operating_feedback import coalesce_environment_work
@@ -157,7 +158,7 @@ def candidates(c, aid, agent, business, now=None):
         )
         if row["platform"] in SPECS
     ]
-    reconcile_handoffs(c, aid, agent, business, reviewed["review_id"])
+    optional(c, aid, "handoffs", lambda: reconcile_handoffs(c, aid, agent, business, reviewed["review_id"]))
     if channels:
         # Old open work remains auditable. Do not spend another tick on an
         # unrelated URL because it was queued before a channel was connected.
@@ -197,10 +198,11 @@ def candidates(c, aid, agent, business, now=None):
                 "寻找当前自有渠道之外适合本业务的公开收录、投稿或合作入口，核对受众和参与条件。",
                 work_key="alternatives:public-discovery",
             )
+    from .browser_challenges import pending as pending_challenge
     busy = bool(
-        one(
+        pending_challenge(c, one(c, "SELECT id FROM lead.browser_profiles WHERE slot='default'")["id"]) or one(
             c,
-            "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now()",
+            "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now() AND profile_id IN (SELECT id FROM lead.browser_profiles WHERE slot='default')",
         )
         or one(
             c,
@@ -254,6 +256,7 @@ def candidates(c, aid, agent, business, now=None):
             return
         previous = lanes.get(key, {})
         if browser and busy:
+            deferred.append({"key": key, "kind": kind, "reason": "browser_waiting", "allowed": False})
             return
         if (
             previous.get("next_at")
@@ -405,7 +408,7 @@ def candidates(c, aid, agent, business, now=None):
             if audience == "due":
                 target_id = str(target["target_id"])
                 add("audience:" + target_id, "audience", 72, "确认频道是否已有可触达的受众。", browser=True, target_id=target_id)
-            if audience != "eligible":
+            if audience == "empty":
                 continue
         if publication_lane_key([target]) in publish_schedule:
             continue
@@ -680,7 +683,7 @@ async def run_work(aid, candidate, operating_plan=None, *, channel_clock=None):
                 "UPDATE lead.tasks SET state='succeeded',completed_at=now(),result=%s WHERE id=%s",
                 (j(result), task["id"]),
             )
-            result = after_task(c, aid, task, result)
+            result = optional(c, aid, "followups", lambda: after_task(c, aid, task, result), result)
             c.execute(
                 "UPDATE lead.tasks SET result=%s WHERE id=%s", (j(result), task["id"])
             )
@@ -790,11 +793,11 @@ async def run_work(aid, candidate, operating_plan=None, *, channel_clock=None):
                 c,
                 aid,
                 "运营任务等待恢复",
-                type(error).__name__ + "；其他独立任务继续。",
+                type(error).__name__ + "；本项工作已安排重试。",
                 "warning",
                 task_id=task["id"],
             )
-        return {"delay": 30, "reason": "operating_work_cooldown"}
+        return {"delay": 30, "reason": "operating_work_cooldown", "error_type": type(error).__name__}
 
 
 async def cycle(args):
@@ -830,13 +833,14 @@ async def cycle(args):
                 }
             if trials.chamber_campaign(agent):
                 from .community_feedback import refresh_observations
-                refresh_observations(c,aid,agent,business,now)
+                optional(c, aid, "community_observations", lambda: refresh_observations(c,aid,agent,business,now))
             choices, barriers, feedback = candidates(c, aid, agent, business, now)
             from .operating_plans import execution_reference, prioritize, sync
 
-            plan = sync(c, aid, agent, business, now)
-            plan_reference = execution_reference(plan)
-            choices = prioritize(choices, plan["mode"], plan["week"]["focus"])
+            plan = optional(c, aid, "plans", lambda: sync(c, aid, agent, business, now))
+            plan_reference = execution_reference(plan) if plan else {}
+            if plan:
+                choices = prioritize(choices, plan["mode"], plan["week"]["focus"])
             config = trials.policy(agent)
             pilot = trials.enabled(agent)
             order_state = {}
@@ -852,10 +856,10 @@ async def cycle(args):
                 choices = [ready, *(choice for choice in choices if choice is not ready)]
             selected = choices[0] if choices else None
             decision = {
-                "weekly_plan_id": plan["week"]["id"],
-                "daily_plan_id": plan["day"]["id"],
-                "daily_plan_version": plan["day"]["version"],
-                "acquisition_mode": plan["mode"]["mode"],
+                "weekly_plan_id": plan["week"]["id"] if plan else None,
+                "daily_plan_id": plan["day"]["id"] if plan else None,
+                "daily_plan_version": plan["day"]["version"] if plan else None,
+                "acquisition_mode": plan["mode"]["mode"] if plan else None,
                 "engine": "growth_trials_v1" if pilot else "value_budget_risk_v2",
                 "trial_order": order_state,
                 "goal": configuration(agent, business),
@@ -936,12 +940,24 @@ async def cycle(args):
         result.update(reason="experiment_working_budget",next_budget_reset_at=decision["budget"]["period_ends_at"])
     if trials.chamber_campaign(agent):
         from .community_feedback import sample_redirect
-        await sample_redirect(aid)
+        try:
+            await sample_redirect(aid)
+        except Exception as error:
+            with tx(aid) as c:
+                report(c, aid, "measurement", type(error).__name__, "流量观察暂不可用，稍后重试。")
     tracking = trials.runtime.set(action_context)
     try:
         from .activities import browser_rpc
         from .telegram_inbox import cycle as inbox_cycle
-        inbox_result = None if selected and selected.delivery_ready else await inbox_cycle(aid, browser_rpc)
+        inbox_result = None
+        if not (selected and selected.delivery_ready):
+            try:
+                inbox_result = await asyncio.wait_for(inbox_cycle(aid, browser_rpc), timeout=30)
+                with tx(aid) as c:
+                    resolve(c, aid, "inbox")
+            except Exception as error:
+                with tx(aid) as c:
+                    report(c, aid, "inbox", type(error).__name__, "收件箱处理暂不可用，稍后重试。")
         if inbox_result:
             result = inbox_result
             decision["deferred_selection"] = decision.get("selected")
@@ -1010,6 +1026,7 @@ async def cycle(args):
             "delay": 300,
             "reason": "lane_temporarily_unavailable",
             "error_type": type(error).__name__,
+            "error_code": str(getattr(error, "code", type(error).__name__))[:100],
         }
     finally:
         trials.runtime.reset(tracking)
@@ -1042,7 +1059,7 @@ async def cycle(args):
                 for k, v in state["lanes"].items()
                 if k in open_ids
                 or ":" in k
-                or k in {"account", "kits", "community_discovery", "community_progress"}
+                or k in {"account", "kits", "content", "community_discovery", "community_progress"}
             }
             # Independent ready work runs on the next product timer, even when the
             # selected lane returned a long account/research backoff.
@@ -1062,8 +1079,18 @@ async def cycle(args):
                 datetime.now(timezone.utc) + timedelta(seconds=delay)
             ).isoformat()
             from .community_progress import capture
-            state["business_progress"] = capture(c, aid, current)
+            state["business_progress"] = optional(c, aid, "progress", lambda: capture(c, aid, current), current["onboarding_state"].get("operating_kernel", {}).get("business_progress"))
             state["last_result"] = result
+            if selected:
+                failed = result.get("error_type") or result.get("state") in {"failed", "retry_scheduled", "budget_wait", "needs_verification", "waiting_user"}
+                reason = result.get("reason", "")
+                failed = failed or reason in {"model_not_configured", "media_production_retry", "public_shortlink_required", "human_verification_required", "invalid_destination"}
+                if failed:
+                    report(c, aid, "lane:" + selected.key, result.get("error_code") or result.get("error_type") or reason or result.get("state"),
+                           selected.reason + " 当前暂未完成，" + ("需要处理后再继续。" if result.get("state") in {"needs_verification", "waiting_user"} else "稍后重新检查。"),
+                           retry_seconds=result.get("delay",300), needs_user=result.get("state") in {"needs_verification", "waiting_user"})
+                elif result.get("state") in {"ready", "succeeded", "confirmed", "queued", "complete"} or result.get("operating_task_id") or result.get("prepared_channels"):
+                    resolve(c, aid, "lane:" + selected.key)
             c.execute(
                 "UPDATE lead.agents SET onboarding_state=onboarding_state || %s WHERE id=%s",
                 (j({"operating_kernel": state}), aid),
@@ -1077,7 +1104,7 @@ async def cycle(args):
                 c, "SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1"
             )
             from .operating_plans import sync
-            sync(c, aid, current, latest_business)
+            optional(c, aid, "plans", lambda: sync(c, aid, current, latest_business))
         return {
             **result,
             "delay": delay,

@@ -5,7 +5,9 @@ export function getAccess() {
   return access;
 }
 export function setWorkspace(value: string | null) {
+  const changed = workspace !== value;
   workspace = value;
+  if (changed && typeof window !== "undefined") window.dispatchEvent(new Event("lead:workspace-ready"));
 }
 export function getWorkspace() {
   return workspace;
@@ -17,6 +19,8 @@ export async function api(path: string, body?: Row, signal?: AbortSignal) {
   const scope =
     path === "/auth/me" || path === "/session" ? {} : workspaceHeaders();
   const dashboardRead = !body && /^\/agents\/[^/]+\/(plans|operations|analytics\/overview)(?:\?|$)/.test(path);
+  const deadline = AbortSignal.timeout(body ? 60000 : 5000);
+  const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const request = () => fetch("/api" + path, {
     method: body ? "POST" : "GET",
     headers: {
@@ -27,7 +31,7 @@ export async function api(path: string, body?: Row, signal?: AbortSignal) {
     },
     body: body ? JSON.stringify(body) : undefined,
     cache: "no-store",
-    signal,
+    signal: requestSignal,
   });
   let response: Response;
   for(let attempt=0;;attempt++){
@@ -38,10 +42,11 @@ export async function api(path: string, body?: Row, signal?: AbortSignal) {
       if(!dashboardRead || !unavailable || attempt>=2) break;
       await response.body?.cancel();
     } catch(error) {
+      if (deadline.aborted) throw Error("连接超时，正在等待下一次刷新");
       if(!dashboardRead || !(error instanceof TypeError) || signal?.aborted || attempt>=2) throw error;
     }
     await new Promise(resolve=>setTimeout(resolve,(attempt===0?1200:3500)+Math.random()*450));
-    signal?.throwIfAborted();
+    requestSignal.throwIfAborted();
     if(scope["X-Lead-Workspace"]!==workspaceHeaders()["X-Lead-Workspace"]) throw Error("工作区已切换");
   }
   if (!response.ok) {

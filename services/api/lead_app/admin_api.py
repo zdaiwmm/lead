@@ -536,9 +536,7 @@ def notification_recipients():
 
 @router.get("/admin/notifications")
 def notification_list(before: datetime | None = None, before_id: UUID | None = None):
-    from .admin_notifications import collect, visible
-
-    collect()
+    from .admin_notifications import visible
     with tx() as c:
         return visible(c, before=before, before_id=before_id)
 

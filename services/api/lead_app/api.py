@@ -554,7 +554,7 @@ async def verify_login(aid: UUID, body: Connection):
     aid = str(aid)
     with tx(aid) as c:
         control_version = require_agent(c, aid)["control_version"]
-        selected = one(c,"SELECT id,binding_version FROM lead.social_accounts WHERE platform=%s AND (%s::uuid IS NULL OR id=%s) ORDER BY created_at DESC LIMIT 1",(platform,body.account_id,body.account_id))
+        selected = one(c,"SELECT id,binding_version,state,verified_at,external_account_id,automation_enabled FROM lead.social_accounts WHERE platform=%s AND (%s::uuid IS NULL OR id=%s) ORDER BY created_at DESC LIMIT 1",(platform,body.account_id,body.account_id))
         inspect_body = {"platform": platform}
         if body.account_id:
             inspect_body["account_id"] = str(body.account_id)
@@ -587,6 +587,7 @@ async def verify_login(aid: UUID, body: Connection):
         platform not in auto and not (platform in ("reddit","facebook") and channel_pilot(aid)),
         expected_control_version=control_version,
         expected_binding=(str(selected["id"]),selected["binding_version"]) if selected else None,
+        expected_account_snapshot=selected,
     )
     with tx(aid) as c:
         c.execute(
@@ -763,6 +764,11 @@ def session(request: Request):
         "lead_session", token("owner"), httponly=True, samesite="strict", max_age=86400
     )
     return r
+
+
+@app.get("/api/agents/{aid}/status")
+def agent_runtime_status(aid: UUID):
+    return domain.agent_status(str(aid))
 
 
 @app.get("/api/health")

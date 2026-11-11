@@ -257,10 +257,16 @@ async def test_verified_channel_schedules_prepared_content_once(
 
     monkeypatch.setattr(activities, "run_model", publish)
     monkeypatch.setattr(activities, "emit", lambda *a, **k: None)
+    from lead_app import outbound_links
+
+    monkeypatch.setattr(
+        outbound_links, "configured_problem", lambda: "public_shortlink_required"
+    )
     result = await activities.autonomous_cycle({"agent_id": agent, "cycle_id": uid()})
     assert "reason" not in result, result
     with tx(agent) as c:
         task = one(c, "SELECT id,input FROM lead.tasks WHERE type='telegram.publish'")
+        assert task["input"]["link"].startswith("https://seka.one")
         draft = one(
             c, "SELECT result FROM lead.tasks WHERE id=%s", (prepared["task_id"],)
         )

@@ -41,6 +41,10 @@ def new_task_deadline(c):
         FROM lead.tasks WHERE type='content.prepare' AND created_at>now()-interval '24 hours'
         ORDER BY created_at DESC OFFSET %s LIMIT 1""", (DAILY_TASK_LIMIT - 1,))
     return row["deadline"] if row else None
+def preparation_platforms(c):
+    # Account rows describe channel choices, not permission to produce local copy.
+    rows = all_rows(c, "SELECT DISTINCT platform FROM lead.social_accounts WHERE automation_enabled AND platform<>'lab' ORDER BY platform")
+    return rows if rows or one(c, "SELECT 1 FROM lead.social_accounts LIMIT 1") else [{"platform": "telegram"}]
 
 
 def reserve(aid, operating_plan=None):
@@ -60,16 +64,7 @@ def reserve(aid, operating_plan=None):
             or not business["description"].strip()
         ):
             return None
-        # Once a verified target can operate, its normal planner owns production.
-        # This queue fills the otherwise idle period before a channel is usable.
-        accounts = all_rows(
-            c,
-            """SELECT DISTINCT s.platform FROM lead.social_accounts s
-          WHERE s.state='connected' AND s.automation_enabled AND s.platform<>'lab'
-          AND NOT EXISTS(SELECT 1 FROM lead.account_targets t WHERE t.account_id=s.id AND t.state='active'
-          AND jsonb_array_length(coalesce(t.verified_permissions->'publishing_verified_formats','[]'))>0)
-          ORDER BY s.platform""",
-        )
+        accounts = preparation_platforms(c)
         available = ready(c, business["id"], agent["config_revision"])
         recent = all_rows(
             c,
@@ -249,7 +244,6 @@ async def prepare_one(aid, operating_plan=None):
             if (
                 agent["desired_state"] != "running"
                 or agent["config_revision"] != payload["config_revision"]
-                or agent["control_version"] != payload["control_version"]
                 or str(latest["id"]) != payload["business_profile_id"]
             ):
                 c.execute(
@@ -334,11 +328,41 @@ async def prepare_one(aid, operating_plan=None):
                 c,
                 aid,
                 "内容准备等待恢复",
-                type(error).__name__ + " · 其他工作继续。",
+                type(error).__name__ + " · 已安排本项工作重试。",
                 "warning",
                 task_id=task_id,
             )
         return {"state": "retry_scheduled", "delay": 600}
+
+
+def recycle_unsubmitted(c, aid, task):
+    """Caller has canceled the task while holding the commit gate's Agent lock."""
+    if one(c, "SELECT 1 FROM lead.actions WHERE task_id=%s AND state IN ('dispatching','unknown','confirmed')", (task["id"],)):
+        return
+    data = task["input"]
+    if draft := data.get("prepared_content_id"):
+        c.execute("""UPDATE lead.tasks SET result=(result-'publication_task_id') || '{"status":"ready"}'::jsonb
+            WHERE id=%s AND type='content.prepare' AND result->>'publication_task_id'=%s""", (draft,str(task["id"])))
+        return
+    if not task["type"].endswith(".publish") or task["type"] == "lab.publish" or not data.get("body") or data.get("bootstrap_verification"):
+        return
+    business = one(c, "SELECT business_profile_id FROM lead.plans WHERE id=%s", (task.get("plan_id"),))
+    if not business:
+        return  # Unverified hand-written inputs cannot become approved inventory.
+    body = data["body"]
+    for value in (data.get("link"), data.get("marker")):
+        if value:
+            body = body.replace(value, "")
+    payload = {"platform": data.get("platform") or task["type"].removesuffix(".publish"),
+               "format": data.get("format", "text"), "plan_id": None,
+               "channel_language": data.get("channel_language"),
+               "business_profile_id": str(business["business_profile_id"]),
+               "config_revision": data.get("config_revision"), "recycled_from": str(task["id"])}
+    c.execute("""INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at,completed_at)
+        VALUES(lead.ctx_tenant(),%s,'content.prepare','succeeded',%s,%s,%s,now(),now()) ON CONFLICT DO NOTHING""",
+        (aid, "recycled:"+str(task["id"]), j(payload),
+         j({"status":"ready","title":data.get("title") or "待发布文案","body":body.strip(),
+            "asset_ids":[m["id"] for m in data.get("media",[])], "source_refs":[{"task_id":str(task["id"])}]})))
 
 
 def scheduled(c, draft_id, publication_task_id):
@@ -364,12 +388,7 @@ def next_due(c, agent, now=None):
     )
     if not business or not business["description"].strip():
         return None
-    platforms = all_rows(
-        c,
-        """SELECT DISTINCT s.platform FROM lead.social_accounts s WHERE s.state='connected'
-      AND s.automation_enabled AND s.platform<>'lab' AND NOT EXISTS(SELECT 1 FROM lead.account_targets t
-      WHERE t.account_id=s.id AND t.state='active' AND jsonb_array_length(coalesce(t.verified_permissions->'publishing_verified_formats','[]'))>0)""",
-    )
+    platforms = preparation_platforms(c)
     stock = ready(c, business["id"], agent["config_revision"])
     if not any(
         sum(d["input"]["platform"] == p["platform"] for d in stock)

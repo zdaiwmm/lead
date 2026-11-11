@@ -73,7 +73,7 @@ def guard(actor, c, task):
             "expected_control_version": p["control_version"],
             "expected_config_revision": p["config_revision"],
         },
-        account_setup=True,
+        account_setup=True, read_only=True,
     )
     return account
 

@@ -330,9 +330,10 @@ def destination(c, aid, monkeypatch, *, kind="webhook", enabled=True):
 
 
 def observe(c, aid, key=None, settings=None):
+    key = key or uid()
     notices.condition(
         c,
-        key or uid(),
+        key,
         "login_expired",
         True,
         aid=aid,
@@ -341,6 +342,10 @@ def observe(c, aid, key=None, settings=None):
         settings=settings or admin_settings.defaults("notifications"),
         now=datetime.now(timezone.utc) - timedelta(seconds=1),
     )
+    # Delivery fixtures explicitly represent the background enqueue step.
+    notification = one(c, "SELECT * FROM lead.admin_notifications WHERE condition_key=%s ORDER BY episode DESC LIMIT 1", (key,))
+    if notification:
+        delivery.enqueue(c, notification)
 
 
 @pytest.mark.asyncio
