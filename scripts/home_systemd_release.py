@@ -582,6 +582,8 @@ def provision_executor(sha, plan_path):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         baseline = current()
         release = image(sha)
+        require(release.stat().st_mode & 0o005 == 0o005,
+                'executor image root must be readable and traversable by the service user')
         mirror = STORE / 'lead.git'
         run('git', '-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', '--git-dir', mirror,
             'fetch', '--no-tags', 'https://github.com/zdaiwmm/lead.git',
@@ -769,7 +771,7 @@ def reviewed_executor_image_files(mirror, sha, extra):
     if name not in extra:
         return set()
     require(run('git', '--git-dir', mirror, 'rev-parse', f'{sha}:{name}') ==
-            'ba6cbd7ebe5af144346aacad40056e8a7a330daa', 'executor image builder requires compatibility review')
+            '7079b3b48ec7d727800c5959ba6f321dfb24c07c', 'executor image builder requires compatibility review')
     return {name}
 
 def probe(role, url):

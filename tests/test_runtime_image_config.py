@@ -1,6 +1,7 @@
 """An immutable executor image retains its runtime helpers and operator settings."""
 
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -56,6 +57,8 @@ def test_home_image_contains_runtime_dependencies_without_operator_files(tmp_pat
         cwd=checkout, env={**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"]},
         check=True,
     )
+    # SquashFS inherits this exact staging root; executors traverse it as non-root.
+    assert stat.S_IMODE(image.stat().st_mode) == 0o755
     assert (image / "REVISION").read_text() == sha + "\n"
     assert os.access(image / "scripts/browser_namespace.py", os.X_OK)
     assert not (image / "services/untracked-private.env").exists()
