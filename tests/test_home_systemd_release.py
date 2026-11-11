@@ -281,3 +281,51 @@ def test_only_reviewed_migrations_on_attested_database(hook, monkeypatch, tmp_pa
     live[0] = "mismatch"
     with pytest.raises(hook.Refused):
         hook.reviewed_channel_schema(tmp_path,"a"*40,paths)
+
+
+def test_runtime_manifest_and_tool_are_exact_reviewed_blobs(hook, monkeypatch, tmp_path):
+    monkeypatch.setattr(hook, "TOOLS", tmp_path)
+    (tmp_path / "home_live_maintenance.py").touch()
+    checked = []
+    monkeypatch.setattr(hook, "verify_model_runtime", lambda: checked.append(True))
+    blobs = {path: next(iter(values)) for path, values in hook.RUNTIME_COMPATIBILITY_FILES.items()}
+    monkeypatch.setattr(hook, "run", lambda *args: blobs[args[-1].split(":", 1)[1]])
+    paths = set(blobs) | {"scripts/unreviewed.py", "requirements.txt"}
+    assert hook.reviewed_runtime_files(tmp_path, "a" * 40, paths) == set(blobs)
+    assert checked == [True]
+    blobs["pyproject.toml"] = "new-dependency"
+    with pytest.raises(hook.Refused, match="separate compatibility review"):
+        hook.reviewed_runtime_files(tmp_path, "a" * 40, paths)
+    assert checked == [True]
+    blobs["scripts/verify_account_browser.py"] = "changed-tool"
+    with pytest.raises(hook.Refused, match="separate compatibility review"):
+        hook.reviewed_runtime_files(tmp_path, "a" * 40, {"scripts/verify_account_browser.py"})
+    assert not hook.reviewed_runtime_files(tmp_path, "a" * 40, {"scripts/unreviewed.py"})
+
+
+def test_runtime_dependency_probe_is_unprivileged_and_fails_closed(hook, monkeypatch):
+    commands = []
+    monkeypatch.setattr(hook, "process", lambda role: Path("/proc", str({"api": 2, "worker": 3, "browser": 4}[role])))
+    def probe(*args):
+        commands.append(args)
+        return "model-runtime-ready"
+    monkeypatch.setattr(hook, "run", probe)
+    hook.verify_model_runtime()
+    assert [args[2] for args in commands] == ["2", "3", "4"]
+    for args in commands:
+        assert "--reuid=lead-r-app" in args and "--clear-groups" in args
+        assert "-I" in args and "-e" not in args
+        assert "2.16.0" in args[-1] and "trust_env=False" in args[-1]
+    monkeypatch.setattr(hook, "run", lambda *args: "missing")
+    with pytest.raises(hook.Refused, match="dependency unavailable"):
+        hook.verify_model_runtime()
+    def missing(*args):
+        raise subprocess.CalledProcessError(1, args)
+    monkeypatch.setattr(hook, "run", missing)
+    with pytest.raises(subprocess.CalledProcessError):
+        hook.verify_model_runtime()
+    monkeypatch.setattr(hook, "run", probe)
+    processes = iter([Path("/proc/2"), Path("/proc/5")])
+    monkeypatch.setattr(hook, "process", lambda role: next(processes))
+    with pytest.raises(hook.Refused, match="changed during compatibility"):
+        hook.verify_model_runtime()
