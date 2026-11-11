@@ -61,7 +61,8 @@ export default function AccountBrowser({
   const preview = useRef(false);
   const frameController = useRef<AbortController | null>(null);
   const queue = useRef<Row[]>([]);
-  const draining = useRef(false);
+  const draining = useRef<Promise<boolean> | null>(null);
+  const inputController = useRef<AbortController | null>(null);
   const composing = useRef(false);
   const inputTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -127,6 +128,7 @@ export default function AccountBrowser({
     if (
       !mounted.current ||
       !active.current ||
+      draining.current ||
       frameController.current ||
       stopping.current
     )
@@ -162,57 +164,56 @@ export default function AccountBrowser({
     }
   }, [aid, readFrame]);
 
-  async function drain() {
-    if (draining.current || !active.current || stopping.current) return;
-    draining.current = true;
+  function drain(): Promise<boolean> {
+    if (draining.current) return draining.current;
+    if (!active.current) return Promise.resolve(false);
+    if (!queue.current.length) return Promise.resolve(true);
     frameController.current?.abort();
     const controller = new AbortController();
-    frameController.current = controller;
-    try {
-      while (
-        queue.current.length &&
-        active.current &&
-        !controller.signal.aborted
-      ) {
-        const command = queue.current.shift()!;
-        const body = { ...command, takeover: takeover.current };
-        // While catching up, send queued input in order; only its latest result needs a picture.
-        if (queue.current.length) {
+    inputController.current = controller;
+    const task = (async () => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
+      try {
+        while (
+          queue.current.length &&
+          active.current &&
+          !controller.signal.aborted
+        ) {
+          const command = queue.current.shift()!;
+          const body = { ...command, takeover: takeover.current };
+          timeout = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, 45_000);
+          // Input acknowledgement must not wait for screenshot capture or compression.
           await api(`/agents/${aid}/browser/input`, body, controller.signal);
-          continue;
+          clearTimeout(timeout);
         }
-        const started = performance.now();
-        const response = await fetch(
-          `/browser-control/${aid}?takeover=${takeover.current}`,
-          {
-            method: "POST",
-            cache: "no-store",
-            signal: controller.signal,
-            headers: {
-              ...workspaceHeaders(),
-              "Content-Type": "application/json",
-              "X-Lead-Request": "1",
-              "X-Lead-Frame-Tag": frameTag.current,
-            },
-            body: JSON.stringify(body),
-          },
-        );
-        await readFrame(response, controller, started, true);
+        return mounted.current && active.current && !controller.signal.aborted;
+      } catch (e) {
+        if (mounted.current && (timedOut || !controller.signal.aborted)) {
+          queue.current = [];
+          if ((e as Error).message === "接管已过期") expire();
+          else
+            setError(
+              timedOut
+                ? "输入响应超时，请检查当前画面后再验证；操作不会自动重发"
+                : (e as Error).message,
+            );
+        }
+        return false;
+      } finally {
+        clearTimeout(timeout);
+        if (inputController.current === controller) {
+          inputController.current = null;
+          draining.current = null;
+          nextFrame.current = performance.now();
+        }
       }
-    } catch (e) {
-      if (!controller.signal.aborted) {
-        queue.current = [];
-        if ((e as Error).message === "接管已过期") expire();
-        else setError((e as Error).message);
-      }
-    } finally {
-      if (frameController.current === controller)
-        frameController.current = null;
-      draining.current = false;
-      nextFrame.current = performance.now();
-      if (queue.current.length && mounted.current && !stopping.current)
-        inputTimer.current = setTimeout(drain, 0);
-    }
+    })();
+    draining.current = task;
+    return task;
   }
   function input(command: Row) {
     if (!active.current || stopping.current) return;
@@ -232,14 +233,28 @@ export default function AccountBrowser({
     inputTimer.current = setTimeout(drain, command.kind === "text" ? 35 : 0);
   }
   async function close(verify = false) {
-    if (draining.current || queue.current.length) {
-      setError("正在完成输入，请稍后再试");
-      return;
+    if (stopping.current) return;
+    // Flush the last debounced scroll before freezing new input.
+    if (scrollTimer.current) {
+      clearTimeout(scrollTimer.current);
+      scrollTimer.current = null;
+      input({
+        kind: "scroll",
+        y: Math.max(-800, Math.min(800, scrollDelta.current)),
+      });
+      scrollDelta.current = 0;
     }
     stopping.current = true;
+    if (inputTimer.current) clearTimeout(inputTimer.current);
+    frameController.current?.abort();
     setError("");
     verify ? setVerifying(true) : setClosing(true);
     try {
+      if ((draining.current || queue.current.length) && !(await drain())) {
+        stopping.current = false;
+        return;
+      }
+      if (!mounted.current) return;
       if (verify)
         await api(`/agents/${aid}/accounts/verify-login`, { platform, account_id: accountId.current, start_managed_targets: managedStart });
       if (state === "opening") {
@@ -311,6 +326,9 @@ export default function AccountBrowser({
       active.current = false;
       clearInterval(poll);
       frameController.current?.abort();
+      inputController.current?.abort();
+      inputController.current = null;
+      draining.current = null;
       if (inputTimer.current) clearTimeout(inputTimer.current);
       if (scrollTimer.current) clearTimeout(scrollTimer.current);
       scrollTimer.current = null;
@@ -393,7 +411,7 @@ export default function AccountBrowser({
                 ) : (
                   <Check size={15} />
                 )}
-                {managedStart ? "绑定并启动获客" : verifyLabel}
+                {verifying ? "正在完成验证…" : managedStart ? "绑定并启动获客" : verifyLabel}
               </button>
             )}
             <button
@@ -412,7 +430,7 @@ export default function AccountBrowser({
             <button
               className="icon"
               aria-label="浏览器后退"
-              disabled={state !== "ready"}
+              disabled={state !== "ready" || verifying || closing}
               onClick={() => input({ kind: "back" })}
             >
               <ArrowLeft size={16} />
@@ -420,7 +438,7 @@ export default function AccountBrowser({
             <button
               className="icon"
               aria-label="浏览器前进"
-              disabled={state !== "ready"}
+              disabled={state !== "ready" || verifying || closing}
               onClick={() => input({ kind: "forward" })}
             >
               <ArrowRight size={16} />
@@ -428,7 +446,7 @@ export default function AccountBrowser({
             <button
               className="icon"
               aria-label="重新加载网页"
-              disabled={state !== "ready"}
+              disabled={state !== "ready" || verifying || closing}
               onClick={() => input({ kind: "reload" })}
             >
               <RefreshCw size={15} />
@@ -440,7 +458,7 @@ export default function AccountBrowser({
           </span>
           <button
             className="text-button"
-            disabled={state !== "ready"}
+            disabled={state !== "ready" || verifying || closing}
             onClick={() => {
               setError("");
               shot();
@@ -509,7 +527,7 @@ export default function AccountBrowser({
             ref={keyboard}
             className="browser-keyboard"
             aria-label="浏览器键盘输入"
-            disabled={state !== "ready"}
+            disabled={state !== "ready" || verifying || closing}
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
