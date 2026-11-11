@@ -10,6 +10,7 @@ type GroupRecord = { name: string; at: string; detail?: string };
 type Totals = { count: number; records: GroupRecord[] };
 type Board = {
   metrics: Record<string, Totals>;
+  participation?: { scope: string[]; policy_reported: boolean; next_eligible_at: string | null; reason: string | null };
   resident?: {
     heartbeat_at: string | null; next_check_at: string | null;
     native_search_after: string | null; write_hold: string | null;
@@ -19,6 +20,7 @@ type Board = {
   autonomy?: { last_progress_at: string | null; progress_label: string; blocked_targets: number; blocked_accounts: number; next_check_at: string | null };
   execution?: {
     totals: Record<string, number>;
+    outcomes?: Record<string, number>;
     waiting: { name: string; state: string; checked_at: string | null; next_at: string | null; check_state: string | null; reason: string | null }[];
     gates: { rule: string; reason: string; count: number }[];
     timings: { phase: string; samples: number; average_seconds: number; p95_seconds: number; failures: number }[];
@@ -97,9 +99,18 @@ export default function TelegramGroupCard({ board, zone, history }: { board: Boa
       {resident.write_hold && <p className={styles.note}><b>账号写入</b><span>{resident.write_hold}</span></p>}
     </section>}
     <div className={styles.note}><b>最近卡点</b><span>{board.constraint || "今日暂无已记录的受阻原因。"}</span></div>
+    {board.participation && <details className={styles.execution}>
+      <summary>当前参与范围</summary>
+      <ul className={styles.list}>{board.participation.scope.map(item => <li key={item}>{item}</li>)}</ul>
+      {localTime(board.participation.next_eligible_at) && <p className={styles.note}>操作额度最早恢复：{localTime(board.participation.next_eligible_at)}。到期后仍会重新核对群规与账号状态。</p>}
+    </details>}
     <div className={styles.flow}><div><small><CircleDot/>当前行动</small><p>{board.current}</p></div><div><small><ArrowRight/>下一步行动</small><p>{board.next}</p></div><div><small><Hand/>需要你协助</small><p>{board.owner || "暂无待办"}</p></div></div>
     {board.execution && <details className={styles.execution}>
       <summary>执行进度与等待原因</summary>
+      {board.execution.outcomes && <p className={styles.note}>
+        今日结束的评估：跳过 {board.execution.outcomes.skipped || 0} 次，受阻 {board.execution.outcomes.blocked || 0} 次，
+        暂缓 {board.execution.outcomes.deferred || 0} 次，无变化 {board.execution.outcomes.no_change || 0} 次。以上均不计为确认发言或获客成果。
+      </p>}
       <dl className={styles.counts}>{[
         ["assessed","已评估群"],["joins_started","入群已发起"],["restricted","已加入但不可发言"],
         ["drafts_accepted","文案通过"],["drafts_repaired","尝试修正文案"],["drafts_rejected","文案校验未通过"],

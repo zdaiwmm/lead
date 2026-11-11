@@ -1847,6 +1847,11 @@ def candidate_already_assessed(c, url, *, focus=False, observation=False, proact
 
 
 def next_candidate(c, revision, focus, *, chamber=False, proactive=False, account=None, aid=None):
+    from .community_opportunities import next_rule_review
+
+    review = next_rule_review(c, aid, account, revision)
+    if review:
+        return review
     discoveries = c.execute(
         """SELECT id,result->'candidates' AS candidates FROM lead.tasks
         WHERE type='community.discover' AND state='succeeded'
@@ -1903,7 +1908,7 @@ RESTORE_UNFINISHED_RECEIPTS = """UPDATE lead.tasks t SET state='reconciling',com
         AND t.result->>'reply_state' IS NULL)"""
 
 
-async def community_cycle(aid, rpc, selection=None):
+async def community_cycle(aid, rpc, selection=None, *, supported_operations=None):
     from .model import run_model as invoke_model
 
     task = None
@@ -1971,6 +1976,8 @@ async def community_cycle(aid, rpc, selection=None):
         config = GrowthConfig.model_validate(
             a["onboarding_state"].get("community_growth", {})
         )
+        if supported_operations is not None and "leave_restricted" not in supported_operations:
+            config = config.model_copy(update={"allow_leave_restricted": False})
         if (
             not config.enabled
             or config.mode != "contextual_outreach"
@@ -2190,6 +2197,11 @@ async def community_cycle(aid, rpc, selection=None):
             )
             if not candidate or not account:
                 return
+            if candidate.get("rule_review_parent"):
+                from .community_opportunities import next_rule_review
+                rechecked = next_rule_review(c, aid, account, a["config_revision"])
+                if not rechecked or rechecked["rule_review_parent"] != candidate["rule_review_parent"]:
+                    return {"delay": 1, "reason": "community_selection_changed"}
             membership = one(
                 c,
                 "SELECT id FROM lead.tasks WHERE type='community.engage' AND input->'candidate'->>'telegram_url'=%s AND input->>'external_account_id'=%s AND result->>'join_submitted'='true' AND result->>'join_state'='confirmed' ORDER BY created_at DESC LIMIT 1",
