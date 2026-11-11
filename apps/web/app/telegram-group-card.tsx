@@ -113,7 +113,7 @@ export default function TelegramGroupCard({ board, zone, history }: { board: Boa
     {board.execution && <details className={styles.execution}>
       <summary>执行进度与等待原因</summary>
       <CadenceStatus value={board.execution.execution_cadence} zone={zone} />
-      {board.execution.facts && <p className={styles.note}>今日已确认入群 {fact("membership_confirmed")} 次，已确认回复 {fact("message_confirmed")} 条，待核对结果 {fact("pending_receipt")} 项。后续跳过发言不会抹去已确认入群。</p>}
+      {board.execution.facts && <p className={styles.note}>今日已确认入群 {fact("membership_confirmed")} 次，已确认回复 {fact("message_confirmed")} 条；当前待核对结果 {fact("pending_receipt")} 项。后续跳过发言不会抹去已确认入群。</p>}
       {board.execution.outcomes && <p className={styles.note}>
         今日结束的评估：跳过 {board.execution.outcomes.skipped || 0} 次，受阻 {board.execution.outcomes.blocked || 0} 次，
         暂缓 {board.execution.outcomes.deferred || 0} 次，无变化 {board.execution.outcomes.no_change || 0} 次。以上均不计为确认发言或获客成果。

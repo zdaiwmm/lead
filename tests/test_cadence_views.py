@@ -2,9 +2,33 @@
 
 from datetime import datetime, timezone
 
+import pytest
 from test_cadence_state import cadence_agent as cadence_agent
 from test_channel_authority import managed_pair as managed_pair
 from test_community_handoff import partial as partial
+
+
+@pytest.mark.parametrize('state', ['running','reconciling'])
+def test_api_execution_includes_live_confirmation_and_pending_stock(cadence_agent,state):
+    from datetime import timedelta
+    from uuid import UUID
+
+    from lead_app import operating_plans
+    from lead_app.db import j, tx
+    aid,_,_,task=cadence_agent
+    now=datetime.now(timezone.utc)
+    with tx(aid) as c:
+        c.execute("INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,description) SELECT tenant_id,id,1,'Language learning' FROM lead.agents WHERE id=%s",(aid,))
+        c.execute("UPDATE lead.tasks SET state=%s,completed_at=NULL,created_at=now()-interval '2 days',result=%s WHERE id=%s",(state,j({'join_submitted':True,'join_state':'confirmed','join_confirmed_at':now.isoformat(),'reply_state':'unknown'}),task['id']))
+    data=operating_plans.status(UUID(aid))['telegram_group_board']['execution']
+    assert data['facts']['membership_confirmed']==1
+    assert data['facts']['pending_receipt']==1
+    assert data['facts']['message_confirmed']==0
+    with tx(aid) as c:
+        c.execute("UPDATE lead.tasks SET result=result || %s WHERE id=%s",(j({'join_confirmed_at':(now-timedelta(days=1)).isoformat()}),task['id']))
+    data=operating_plans.status(UUID(aid))['telegram_group_board']['execution']
+    assert data['facts']['membership_confirmed']==0
+    assert data['facts']['pending_receipt']==1
 
 
 def test_account_waits_do_not_inherit_another_account_deadline(managed_pair):

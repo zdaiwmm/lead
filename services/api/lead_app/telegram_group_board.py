@@ -244,12 +244,26 @@ def execution(c, aid, day, now):
 
     outcomes = {}
     facts = {key:0 for key in outcome_facts({})}
-    for task in all_rows(c, """SELECT state,result FROM lead.tasks WHERE agent_id=%s
-        AND type='community.engage' AND completed_at BETWEEN %s AND %s""", (aid, day, now)):
-        kind = business_outcome(task)
-        outcomes[kind] = outcomes.get(kind, 0) + 1
+    for task in all_rows(c, """WITH observed AS (
+        SELECT state,result,completed_at,
+            coalesce((result->>'join_confirmed_at')::timestamptz,(result->>'join_checked_at')::timestamptz,completed_at,(result->>'join_dispatched_at')::timestamptz) AS joined_at,
+            coalesce((result->>'reply_confirmed_at')::timestamptz,(result->>'reply_dispatched_at')::timestamptz,completed_at) AS replied_at
+        FROM lead.tasks WHERE agent_id=%(aid)s AND type='community.engage'
+    ) SELECT * FROM observed WHERE completed_at BETWEEN %(day)s AND %(now)s
+        OR joined_at BETWEEN %(day)s AND %(now)s OR replied_at BETWEEN %(day)s AND %(now)s
+        OR state IN ('running','reconciling')
+        OR result->>'join_state' IN ('dispatching','unknown','pending_approval')
+        OR result->>'reply_state' IN ('dispatching','unknown')
+        OR (result->>'reply_state'='confirmed' AND (jsonb_typeof(result->'reply_external_id') IS DISTINCT FROM 'string' OR trim(result->>'reply_external_id')=''))
+        OR result#>>'{outcome,state}' IN ('unknown','pending_verification','pending_approval')""", args):
+        completed = task["completed_at"] is not None and day <= task["completed_at"] <= now
+        if completed:
+            kind = business_outcome(task)
+            outcomes[kind] = outcomes.get(kind, 0) + 1
         for key,confirmed in outcome_facts(task).items():
-            facts[key] += int(confirmed)
+            at = task["joined_at"] if key=="membership_confirmed" else task["replied_at"] if key=="message_confirmed" else task["completed_at"]
+            in_window = key=="pending_receipt" or (at is not None and day <= at <= now)
+            facts[key] += int(confirmed and in_window)
     from .cadence_views import for_task
     latest = one(c, "SELECT state,input,result FROM lead.tasks WHERE agent_id=%s AND type='community.engage' AND result ? 'execution_cadence' ORDER BY coalesce(completed_at,created_at) DESC,id DESC LIMIT 1", (aid,))
     return {"totals":totals, "waiting":waiting, "timings":timings, "gates":gates, "outcomes":outcomes,
