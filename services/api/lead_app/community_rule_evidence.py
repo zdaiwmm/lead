@@ -47,6 +47,8 @@ def description_kind(text: str, *, topic_matches: bool) -> Literal["substantive"
 def rules_status(*, description: str, pinned_complete: bool, external_rules_unresolved: bool) -> Literal["complete", "unresolved"]:
     if external_rules_unresolved:
         return "unresolved"
+    if re.search(r"(?:rules?|群规|群規).{0,24}(?:https?://|/rules\b)|(?:see|read|查看|参见|參見).{0,18}(?:https?://|/rules\b|完整群规|完整群規)", description, re.I):
+        return "unresolved"
     references_pins = re.search(
         r"(?:rules?|群规|群規).{0,20}(?:pinned|置顶|置頂)|"
         r"(?:see|read|查看|参见|參見).{0,18}(?:pinned|置顶|置頂)",

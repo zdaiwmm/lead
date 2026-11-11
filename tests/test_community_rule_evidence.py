@@ -44,3 +44,6 @@ def test_external_link_or_missing_pin_stays_unresolved(description, complete, ex
     from lead_app.community_rule_evidence import rules_status
 
     assert rules_status(description=description, pinned_complete=complete, external_rules_unresolved=external) == "unresolved"
+def test_complete_pins_do_not_resolve_external_rule_link():
+    from lead_app.community_rule_evidence import rules_status
+    assert rules_status(description="See rules at https://example.test/rules", pinned_complete=True, external_rules_unresolved=False)=="unresolved"
