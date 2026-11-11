@@ -388,6 +388,7 @@ class Actor:
         self.used = time.monotonic()
 
     def gate(self, c, action, *, account_setup=False, read_only=False):
+        from .backups import write_backup_ready
         from .managed_network import policy
         from .resources import ensure_capacity
 
@@ -405,9 +406,7 @@ class Actor:
             raise ValueError("环境正在备份，已停止提交")
         if (
             not read_only and env().get("LEAD_DEPLOYMENT_MODE") == "production"
-            and not one(
-                c, "SELECT lead.backup_ready() AND lead.offsite_backup_ready() AS ready"
-            )["ready"]
+            and not write_backup_ready(c)
         ):
             raise ValueError("数据库恢复点已过期，已停止新的发布")
         platform = action["intent"].get("platform")

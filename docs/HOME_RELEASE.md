@@ -123,6 +123,8 @@ PR #26 新增 `httpx2` 后，家庭节点共享解释器须已经由节点维护
 
 Reddit 现有 Worker 使用同一镜像内 `services/channel_adapters/reddit/entry.py`，保持原有持久队列。`LEAD_RESIDENT_CYCLE_AGENT_IDS` 是已有专用执行器接管项目主循环的显式 UUID 清单；迁移原 Worker 包装前先配置同一归属，不能让两个进程同时接管主循环。此配置不拦截 Reddit 的独立渠道时钟。Telegram 保留独立服务、资料与出口，先对账私有平台行为，再迁移到显式适配器；不能拿通用测试替代私有适配器的授权、回执及本地模型限制验收。
 
+对账必须包含原进程实际加载的全部公共模块及配置入口。既有 `LEAD_IPV6_TUNNEL_<agent>` 仅允许用于绑定 IPv6 身份的受控 `socks5+unix` 路由，DNS 与连接必须经过同一 Profile 代理，失败不得改用直连。既有 `LEAD_BACKUP_POLICY=verified_local` 继续调用严格的 `lead.local_restore_ready()`，不由迁移自动启用；未配置时仍要求原异地备份证明。本地策略下数据库备份须保存同一导出快照的四表计数，供独立恢复核验。发送失败后的成功读取只有满足原等待期限和权限证据变化才能解除屏障。
+
 发布前逐个保存旧服务/绑定/适配器与恢复清单；在各执行器安全点按渠道分别切换和回读，不把两个渠道加入同一 restart 命令。公共应用仍通过原正式取件、备份和审批入口交付。应用切换内部的检查只覆盖应用，最终验收则由 root 持有的 `executors.json` 登记所有渠道，例如 `{"version":1,"executors":[{"service":"lead-telegram.service","channel":"telegram","binding":"/etc/lead-home-release/telegram.json"},{"service":"lead-home-worker.service","channel":"reddit","binding":"/etc/lead-home-release/reddit.json"}]}`。这里是格式示例，服务名及配置需据真实节点盘点生成。
 
 正式节点工具 `home_systemd_release.py executors <SHA>` 独立核对两个渠道的 PID、InvocationID、命令、配置、内核挂载、公共代码、适配器及启动证明。注册后，发布轮询调用的最终 `verify <SHA>` 同样必须通过这项核验；缺少任一渠道、旧进程证明、旧模块覆盖或摘要变化均拒绝成功回传。`current` 仍是主应用版本，不单独证明渠道已交付。未完成首次注册的节点不能据旧 `verify` 宣称渠道统一完成。
