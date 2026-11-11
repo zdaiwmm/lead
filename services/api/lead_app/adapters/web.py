@@ -271,19 +271,9 @@ class WebAdapter:
             identity = await signed_in_username(page)
             await check_surface(page, self.hosts)
         elif self.platform == "facebook":
-            cookies = await page.context.cookies(["https://www.facebook.com"])
-            own = next((c["value"] for c in cookies if c["name"] == "c_user"), None)
-            if (
-                not own
-                or not own.isdigit()
-                or not await page.locator(
-                    '[aria-label="Your profile"],[aria-label="Account"]'
-                )
-                .filter(visible=True)
-                .count()
-            ):
-                raise NeedsAuth("请先登录 Facebook 并打开自己的主页")
-            identity = own
+            from .facebook import signed_in_id
+
+            identity = await signed_in_id(page)
         elif self.platform == "whatsapp":
             # Only the current owner's WID, never contacts, chats or auth keys.
             raw = await page.evaluate(
