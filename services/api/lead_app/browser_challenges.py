@@ -138,6 +138,9 @@ def block(actor, platform, action_id=None, *, challenge_page=None):
                 "browser.challenge.detected",
                 {"challenge_id": challenge["id"], "platform": platform},
             )
+        from .runtime_issues import report
+        report(c, actor.aid, "browser:" + str(challenge["profile_id"]), "HUMAN_VERIFICATION_REQUIRED",
+               platform + " 需要真人验证，请在社媒账号中打开原窗口处理。", needs_user=True)
         result = waiting_result(challenge)
         if action_id:
             c.execute(
@@ -263,6 +266,8 @@ def finish(actor, challenge_id, observed):
         )
         if resume:
             emit(c, actor.aid, "supervisor.wake")
+        from .runtime_issues import resolve
+        resolve(c, actor.aid, "browser:" + str(challenge["profile_id"]))
         response = {
             "ok": True,
             "resumed_tasks": resumed,

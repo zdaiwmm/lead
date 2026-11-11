@@ -92,4 +92,4 @@ async def test_notification_failure_does_not_rebootstrap_successful_outbox(
     monkeypatch.setattr(admin_notifications, "collect", unavailable)
     with pytest.raises(asyncio.CancelledError):
         await worker.publish_outbox(None)
-    assert configured_calls == [False, True, True]
+    assert configured_calls == [False] + [True] * 9

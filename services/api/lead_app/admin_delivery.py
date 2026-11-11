@@ -28,6 +28,7 @@ CATEGORIES = [
     "uncertain_action",
     "knowledge_expired",
     "measurement_stale",
+            "local_failure",
     "analytics_ingest_backlog",
     "analytics_delivery_failure",
     "analytics_report_failure",
@@ -222,10 +223,28 @@ def enqueue(c, notification):
                 destination["id"],
                 "external-notifications/default@" + str(row["published_version"]),
                 j(destination),
-                notification["available_at"],
+                notification.get("external_available_at") or notification["available_at"],
                 destination["max_attempts"],
             ),
         )
+
+
+def enqueue_pending(limit=50):
+    """External configuration failure cannot rollback in-app incident facts."""
+    with tx() as c:
+        ids = all_rows(c, "SELECT id FROM lead.admin_notifications WHERE external_pending ORDER BY created_at LIMIT %s", (limit,))
+    for row in ids:
+        try:
+            with tx() as c:
+                notice = one(c, "SELECT * FROM lead.admin_notifications WHERE id=%s AND external_pending FOR UPDATE SKIP LOCKED", (row["id"],))
+                if not notice:
+                    continue
+                if not notice["muted"] and not notice["resolved_at"]:
+                    enqueue(c, notice)
+                c.execute("UPDATE lead.admin_notifications SET external_pending=false WHERE id=%s", (row["id"],))
+        except Exception as error:
+            import logging
+            logging.warning("External notification preparation unavailable (%s)", type(error).__name__)
 
 
 async def webhook(secret, payload, event_id):
@@ -316,7 +335,7 @@ def claim(c):
     )
     row = one(
         c,
-        "SELECT d.*,n.title,n.message,n.category,n.severity,n.resolved_at FROM lead.notification_deliveries d JOIN lead.admin_notifications n ON n.id=d.notification_id WHERE d.state IN ('pending','retry') AND d.available_at<=now() ORDER BY d.available_at,d.id FOR UPDATE OF d SKIP LOCKED LIMIT 1",
+        "SELECT d.*,n.title,n.message,n.category,n.severity,n.resolved_at,n.muted FROM lead.notification_deliveries d JOIN lead.admin_notifications n ON n.id=d.notification_id WHERE d.state IN ('pending','retry') AND d.available_at<=now() ORDER BY d.available_at,d.id FOR UPDATE OF d SKIP LOCKED LIMIT 1",
     )
     if not row:
         return None
@@ -339,6 +358,7 @@ def claim(c):
     if (
         not destination
         or row["resolved_at"]
+        or row.get("muted")
         or destination["kind"] != row["destination_snapshot"]["kind"]
     ):
         c.execute(

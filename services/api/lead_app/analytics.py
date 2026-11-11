@@ -102,8 +102,6 @@ def promotion(aid: UUID):
 
 @router.post("/api/agents/{aid}/analytics/promotion")
 def save_promotion(aid: UUID, body: PromotionSetup):
-    from .domain import snapshot_preferences
-
     destination = body.destination_url.strip()
     resolve_public(destination)
     # Normalize existing attribution so pasted promotional links don't stack it.
@@ -127,7 +125,17 @@ def save_promotion(aid: UUID, body: PromotionSetup):
             "UPDATE lead.agents SET onboarding_state=jsonb_set(onboarding_state,'{promotion}',%s),updated_at=now() WHERE id=%s",
             (j(value), aid),
         )
-        snapshot_preferences(c, aid)
+        # Only unsent publications with a destination depend on this URL.
+        from .content_backlog import recycle_unsubmitted
+        canceled = all_rows(c, """UPDATE lead.tasks t SET state='canceled',completed_at=now()
+            WHERE type LIKE '%%.publish' AND state IN ('planned','queued','running','waiting_user')
+            AND coalesce(input->>'link','')<>''
+            AND NOT EXISTS(SELECT 1 FROM lead.actions a WHERE a.task_id=t.id AND a.state IN ('dispatching','unknown','confirmed'))
+            RETURNING t.*""")
+        for task in canceled:
+            recycle_unsubmitted(c, aid, task)
+            c.execute("UPDATE lead.actions SET state='canceled' WHERE task_id=%s AND state IN ('prepared','not_applied')", (task["id"],))
+        emit(c, aid, "supervisor.wake")
         audit(c, aid, "promotion.updated", {"before": old, "after": value})
         record(c, aid, "已更新推广链接", "后续推广将自动使用新链接并标记社媒来源。")
         emit(c, aid, "agent.updated")

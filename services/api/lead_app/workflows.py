@@ -15,6 +15,13 @@ RETRY = RetryPolicy(
 LEGACY_CYCLE_GAP_SECONDS = 480
 
 
+def activity_queue(kind):
+    # Recorded patch preserves old histories; custom/test queues remain local.
+    isolated = workflow.patched("isolated-activity-capacity-" + kind + "-v1")
+    queue = workflow.info().task_queue
+    return "lead-" + kind if isolated and queue == "lead" else queue
+
+
 @workflow.defn
 class ChannelPreparationWorkflow:
     @workflow.run
@@ -107,6 +114,7 @@ class ChatWorkflow:
                     "chat_job",
                     {"agent_id": agent_id, "job_id": job},
                     start_to_close_timeout=timedelta(minutes=4),
+                    task_queue=activity_queue("chat"),
                     retry_policy=RETRY,
                 )
             except ActivityError:
@@ -128,6 +136,7 @@ class PublishWorkflow:
                 "execution_policy",
                 args,
                 start_to_close_timeout=timedelta(seconds=30),
+                task_queue=activity_queue("publish"),
                 retry_policy=RETRY,
             )
             policy = RetryPolicy(
@@ -150,6 +159,7 @@ class PublishWorkflow:
                         "execute_task",
                         args,
                         start_to_close_timeout=timedelta(minutes=4),
+                        task_queue=activity_queue("publish"),
                         retry_policy=policy,
                     )
                 except ActivityError:
@@ -157,6 +167,7 @@ class PublishWorkflow:
                         "mark_task_failed",
                         args,
                         start_to_close_timeout=timedelta(seconds=30),
+                        task_queue=activity_queue("publish"),
                         retry_policy=RETRY,
                     )
                     if stopped and stopped.get("state") == "unknown":
@@ -176,6 +187,7 @@ class PublishWorkflow:
                     "execute_task",
                     args,
                     start_to_close_timeout=timedelta(minutes=4),
+                    task_queue=activity_queue("publish"),
                     retry_policy=policy,
                 )
             return result
@@ -201,6 +213,7 @@ class PublishWorkflow:
                 "execute_task",
                 args,
                 start_to_close_timeout=timedelta(minutes=4),
+                task_queue=activity_queue("publish"),
                 retry_policy=policy,
                 schedule_to_close_timeout=timedelta(days=1) if resilient else None,
             )
@@ -209,6 +222,7 @@ class PublishWorkflow:
                 "mark_task_failed",
                 args,
                 start_to_close_timeout=timedelta(seconds=30),
+                task_queue=activity_queue("publish"),
                 retry_policy=RETRY,
             )
             return {"state": "failed"}
@@ -221,6 +235,7 @@ class PublishWorkflow:
                     "execute_task",
                     args,
                     start_to_close_timeout=timedelta(minutes=4),
+                    task_queue=activity_queue("publish"),
                     retry_policy=policy,
                     schedule_to_close_timeout=timedelta(days=1) if resilient else None,
                 )
@@ -230,6 +245,7 @@ class PublishWorkflow:
                 "execute_task",
                 args,
                 start_to_close_timeout=timedelta(minutes=4),
+                task_queue=activity_queue("publish"),
                 retry_policy=policy,
                 schedule_to_close_timeout=timedelta(days=1) if resilient else None,
             )

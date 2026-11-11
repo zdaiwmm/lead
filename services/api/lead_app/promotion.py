@@ -110,6 +110,11 @@ def configuration(agent, business=None):
     }
 
 
+def tracking_required(agent):
+    from .growth_experiments import chamber_campaign
+    return bool(agent["onboarding_state"].get("promotion", {}).get("require_tracking")) or chamber_campaign(agent)
+
+
 def telegram_link_line(body, link):
     """Give Telegram a bare URL line, keeping continuation text with its sentence."""
     if not link or body.count(link) != 1:
@@ -128,10 +133,18 @@ def telegram_link_line(body, link):
     return "\n".join(lines)
 
 
-def promotion_body(body, destination, marker, product_url=None):
+def promotion_body(body, destination, marker, product_url=None, *, require_tracking=False):
     """Replace product URLs in model copy with one configured, attributed CTA."""
     attributed_url(destination, marker)  # Preserve destination validation.
-    link = tracking_url(marker)
+    from .outbound_links import configured_problem, external_url_problem
+    if external_url_problem(destination):
+        raise ValueError("推广目标必须是公开网站")
+    if configured_problem():
+        if require_tracking:
+            raise ValueError("public_shortlink_required")
+        link = attributed_url(destination, marker)
+    else:
+        link = tracking_url(marker)
     hosts = {urlsplit(url).hostname for url in (destination, product_url) if url}
     used = False
 

@@ -253,3 +253,9 @@ def settle(
                     j(measured),
                 ),
             )
+        remaining = available(c, aid)
+        if remaining["available_units"] == 0:
+            from .runtime_issues import report
+            report(c, aid, "model_budget", "daily_budget_exhausted",
+                   "今日模型额度已用尽，新的模型调用等待额度恢复；已生成内容和结果核对仍可执行。",
+                   retry_seconds=300)

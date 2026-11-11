@@ -8,7 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from .config import env
-from .db import all_rows, one
+from .db import all_rows
 from .db import pooled_tx as tx
 from .scope import current_tenant, tenant_scope
 
@@ -17,38 +17,8 @@ router = APIRouter()
 
 def revision():
     with tx() as c:
-        payload = {
-            "agents": all_rows(
-                c,
-                "SELECT id,name,desired_state,health_state,config_revision,control_version,authorization_version,version,analytics_revision FROM lead.agents WHERE desired_state<>'archived' ORDER BY id",
-            ),
-            "messages": one(
-                c, "SELECT coalesce(sum(next_seq),0) AS n FROM lead.conversations"
-            ),
-            "jobs": all_rows(
-                c,
-                "SELECT status,count(*) AS n FROM lead.chat_jobs GROUP BY status ORDER BY status",
-            ),
-            "tasks": all_rows(
-                c,
-                "SELECT state,count(*) AS n FROM lead.tasks GROUP BY state ORDER BY state",
-            ),
-            "activity": one(
-                c, "SELECT count(*) AS n,max(created_at) AS last FROM lead.activity"
-            ),
-            "browser": all_rows(
-                c,
-                "SELECT state,count(*) AS n,max(ended_at) AS last FROM lead.browser_steps GROUP BY state ORDER BY state",
-            ),
-            "runs": all_rows(
-                c,
-                "SELECT state,count(*) AS n FROM lead.browser_runs GROUP BY state ORDER BY state",
-            ),
-            "assets": one(
-                c,
-                "SELECT count(*) AS n,max(created_at) AS last FROM lead.assets WHERE state='ready'",
-            ),
-        }
+        payload = all_rows(c, "SELECT agent_id,version FROM lead.ui_revisions ORDER BY agent_id")
+
     return hashlib.sha256(
         json.dumps(payload, default=str, sort_keys=True).encode()
     ).hexdigest()

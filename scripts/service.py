@@ -10,14 +10,22 @@ from lead_app.config import ROOT, STATE, env
 from lead_app.temporal_client import connection_options
 
 
-def preflight():
+def preflight(name):
     values = env()
     if values.get("LEAD_DEPLOYMENT_MODE") != "production":
         raise ValueError("此入口只用于正式服务")
-    settings()
-    connection_options()
+    if os.geteuid() == 0:
+        raise ValueError("正式服务需要独立的普通系统用户")
+    if name == "web":
+        return
+    if name == "api":
+        settings()
+    if name in {"worker", "analytics"}:
+        connection_options()
     if values.get("LEAD_DB_SSLMODE") != "verify-full":
         raise ValueError("正式数据库需要验证服务器证书")
+    if name not in {"browser", "maintenance"}:
+        return
     if not values.get("LEAD_BACKUP_S3_URI"):
         raise ValueError("正式服务需要已配置的异地加密备份")
     key = Path(
@@ -29,12 +37,11 @@ def preflight():
         raise ValueError("正式服务需要独立的普通系统用户")
     from lead_app.installation import storage_encryption
 
-    if storage_encryption() is not True:
+    if name == "browser" and storage_encryption() is not True:
         raise ValueError("正式环境的活动登录资料需要位于已核验的加密卷")
 
 
 def main():
-    preflight()
     name = sys.argv[1] if len(sys.argv) == 2 else ""
     commands = {
         "api": [
@@ -74,6 +81,7 @@ def main():
     }
     if name not in commands:
         raise ValueError("服务名称不可用")
+    preflight(name)
     os.chdir(ROOT / "apps/web" if name == "web" else ROOT)
     os.environ["PYTHONPATH"] = str(ROOT / "services/api")
     os.execvp(commands[name][0], commands[name])

@@ -174,8 +174,8 @@ def test_release_cancels_unsubmitted_work_and_preserves_receipts_and_other_chann
     channels.disconnect_account(aid, account["id"], account["verified_at"])
     with tx(aid) as c:
         after = one(c, "SELECT * FROM lead.agents")
-        assert after["control_version"] == before["control_version"] + 1
-        assert after["authorization_version"] == before["authorization_version"] + 1
+        assert after["control_version"] == before["control_version"]
+        assert after["authorization_version"] == before["authorization_version"]
         for state, (task_id, action_id) in actions.items():
             row = one(c, "SELECT * FROM lead.actions WHERE id=%s", (action_id,))
             assert row["state"] == (

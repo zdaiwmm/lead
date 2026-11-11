@@ -68,10 +68,10 @@ def finish_delivery(tenant, agent, scope, row, success):
 
 
 async def deliver_scope(client, tenant, agent, scope, limit=20):
-    reconcile(tenant, agent, scope)
+    await asyncio.to_thread(reconcile, tenant, agent, scope)
     count = 0
     for _ in range(limit):
-        row = claim_delivery(tenant, agent, scope)
+        row = await asyncio.to_thread(claim_delivery, tenant, agent, scope)
         if not row:
             break
         try:
@@ -86,9 +86,9 @@ async def deliver_scope(client, tenant, agent, scope, limit=20):
         except WorkflowAlreadyStartedError:
             pass  # A previous request was accepted but its acknowledgement was lost.
         except Exception:
-            finish_delivery(tenant, agent, scope, row, False)
+            await asyncio.to_thread(finish_delivery, tenant, agent, scope, row, False)
             break
-        finish_delivery(tenant, agent, scope, row, True)
+        await asyncio.to_thread(finish_delivery, tenant, agent, scope, row, True)
         count += 1
     return count
 
@@ -119,8 +119,10 @@ async def deliver_analytics(client, tenant):
 
     changed = 0
     with tenant_scope(tenant, None), service_scope():
-        with tx() as c:
-            agents = all_rows(c, "SELECT id,desired_state FROM lead.agents ORDER BY id")
+        def agents_snapshot():
+            with tx() as c:
+                return all_rows(c, "SELECT id,desired_state FROM lead.agents ORDER BY id")
+        agents = await asyncio.to_thread(agents_snapshot)
         active = [a for a in agents if a["desired_state"] != "archived"]
         archived = [a for a in agents if a["desired_state"] == "archived"]
         # Historical applications get bounded round-robin work; they cannot
@@ -135,10 +137,10 @@ async def deliver_analytics(client, tenant):
             _archived_offsets[tenant] = (offset + len(historical)) % len(archived)
         for agent in active + historical:
             aid = str(agent["id"])
-            with tx(aid, tenant_id=tenant) as c:
-                tests = all_rows(
-                    c, "SELECT id FROM lead.pixel_tests ORDER BY created_at"
-                )
+            def tests_snapshot():
+                with tx(aid, tenant_id=tenant) as c:
+                    return all_rows(c, "SELECT id FROM lead.pixel_tests ORDER BY created_at")
+            tests = await asyncio.to_thread(tests_snapshot)
             for scope in ["live"] + [str(test["id"]) for test in tests]:
                 changed += await deliver_partition(client, tenant, aid, scope)
     return changed

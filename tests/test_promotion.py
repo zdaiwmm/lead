@@ -158,7 +158,7 @@ def test_promotion_configuration_versions_and_fences_old_queue(agent):
         ]
         assert (
             one(c, "SELECT count(*) AS n FROM lead.tasks WHERE state='canceled'")["n"]
-            == 1
+            == 0
         )
         assert (
             one(c, "SELECT count(*) AS n FROM lead.tasks WHERE state='running'")["n"]

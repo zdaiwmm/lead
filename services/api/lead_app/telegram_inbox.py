@@ -17,7 +17,7 @@ class Reply(BaseModel):
     reason: str = Field(max_length=500)
 
 
-def guard(actor, c, task=None):
+def guard(actor, c, task=None, *, read_only=False):
     from .admin_controls import enforce_channel
     enforce_channel(c, actor.aid, 'telegram', operation='community')
     a = require_agent(c, actor.aid, True)
@@ -30,7 +30,7 @@ def guard(actor, c, task=None):
     payload = task['input'] if task else {'control_version': a['control_version'], 'config_revision': a['config_revision']}
     if task and (task['type'] != 'inbox.reply' or task['state'] not in ('running','reconciling') or payload['external_account_id'] != account['external_account_id']):
         raise ValueError('来信任务身份或状态已变化')
-    actor.gate(c, {'intent': {'platform': 'telegram'}, 'expected_control_version': payload['control_version'], 'expected_config_revision': payload['config_revision']}, account_setup=True)
+    actor.gate(c, {'intent': {'platform': 'telegram'}, 'expected_control_version': payload['control_version'], 'expected_config_revision': payload['config_revision']}, account_setup=True, read_only=read_only)
     return a, account
 
 
@@ -40,7 +40,7 @@ async def browser_step(actor, operation, task_id=None):
         actor.touch()
         with tx(actor.aid) as c:
             task = one(c, 'SELECT * FROM lead.tasks WHERE id=%s', (task_id,)) if task_id else None
-            a, account = guard(actor, c, task)
+            a, account = guard(actor, c, task, read_only=operation in {"scan", "read", "receipt"})
         await telegram.open_account(actor.page, account['external_account_id'])
         if operation == 'scan':
             # Only the account's own existing dialog list; never group members.
@@ -108,7 +108,12 @@ async def browser_step(actor, operation, task_id=None):
 async def cycle(aid, rpc):
     from .community_runtime import digest
     from .model import run_model
-    from .promotion import PROMOTER_VOICE, configuration, promotion_body
+    from .promotion import (
+        PROMOTER_VOICE,
+        configuration,
+        promotion_body,
+        tracking_required,
+    )
     now = datetime.now(timezone.utc)
     with tx(aid) as c:
         a = require_agent(c, aid)
@@ -163,7 +168,7 @@ async def cycle(aid, rpc):
                             from .distribution import register
                             link = register(c, aid, "telegram", destination, intent="inbox:" + str(task["id"]),
                                             placement="inbox_reply", account=account["id"])
-                            body,_ = promotion_body(body,destination,link["public_code"],business.get("product_url"))
+                            body,_ = promotion_body(body,destination,link["public_code"],business.get("product_url"), require_tracking=tracking_required(a))
                         else:
                             link=None
                     else:

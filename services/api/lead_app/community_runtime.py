@@ -19,7 +19,7 @@ from . import community_checkpoints, community_health
 from .community_growth import CHAMBER_BRIEF, GrowthConfig
 from .db import j, one, record, require_agent, tx, uid
 from .growth_experiments import chamber_campaign, first_users
-from .promotion import asked_role, promoter_copy_ok, promoter_voice
+from .promotion import asked_role, promoter_copy_ok, promoter_voice, tracking_required
 from .scope import current_tenant
 
 HISTORY_ADAPTER_VERSION = "16"
@@ -225,7 +225,7 @@ def digest(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def guard(actor, c, task, *, editing_confirmed=False, reading_receipt=False):
+def guard(actor, c, task, *, editing_confirmed=False, reading_receipt=False, read_only=False):
     from .admin_controls import enforce_channel
 
     enforce_channel(c, actor.aid, "telegram", operation="community")
@@ -272,7 +272,7 @@ def guard(actor, c, task, *, editing_confirmed=False, reading_receipt=False):
             "expected_control_version": task["input"]["control_version"],
             "expected_config_revision": task["input"]["config_revision"],
         },
-        account_setup=True,
+        account_setup=True, read_only=read_only or reading_receipt,
     )
     return account, config
 
@@ -1147,7 +1147,7 @@ async def browser_step(actor, task_id, operation):
                               (j(retry),task["id"]))
                     return {"state":retry["state"]}
             else:
-                account, config = guard(actor,c,task, reading_receipt=operation == "receipt")
+                account, config = guard(actor,c,task, reading_receipt=operation == "receipt", read_only=(operation in {"receipt", "observe", "scan_pending"} or (operation == "reply" and (task["result"] or {}).get("reply_state") in {"unknown", "dispatching"}) or (operation == "join" and (task["result"] or {}).get("join_state") in {"unknown", "dispatching", "pending_approval"})))
             saved = task["result"] or {}
             if operation in {"reply", "join"} and not (saved.get("reply_state") in {"unknown", "dispatching"} or saved.get("join_state") in {"unknown", "dispatching", "pending_approval"}):
                 if community_health.blocked(c, actor.aid, task):
@@ -1185,7 +1185,7 @@ async def browser_step(actor, task_id, operation):
                 document.querySelectorAll('.chatlist [data-peer-id],.chatlist-container [data-peer-id]'),
                 e=>e.dataset.peerId).filter(s=>/^-[0-9]+$/.test(s)))].slice(0,500)""")
             with tx(actor.aid) as c:
-                guard(actor,c,task)
+                guard(actor,c,task,read_only=True)
                 # Sidebar presence is a hint, never proof of membership. Mark
                 # the hints without moving every pending group to the write queue.
                 c.execute("""UPDATE lead.tasks SET result=result || %s WHERE type='community.engage'
@@ -1235,7 +1235,7 @@ async def browser_step(actor, task_id, operation):
             if native_membership(observed):
                 observed["joined"] = True
         with tx(actor.aid) as c:
-            guard(actor, c, task)
+            guard(actor, c, task, read_only=operation == "observe")
             c.execute(
                 "UPDATE lead.tasks SET result=coalesce(result,'{}') || %s WHERE id=%s",
                 (j({"target_id": observed["target_id"]}), task_id),
@@ -2699,7 +2699,7 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
                             link = register(c, aid, "telegram", destination, intent="community:" + str(task["id"]),
                                             placement="community_post" if standalone else "community_reply",
                                             account=task["input"]["account_id"], location=task["input"]["candidate"]["telegram_url"])
-                            reply_body, _ = promotion_body(reply_body, destination, link["public_code"], business.get("product_url"))
+                            reply_body, _ = promotion_body(reply_body, destination, link["public_code"], business.get("product_url"), require_tracking=tracking_required(current))
                             tracking_id = str(link["id"])
                         c.execute(
                             "UPDATE lead.tasks SET input=input || %s WHERE id=%s",

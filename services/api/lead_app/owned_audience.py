@@ -8,6 +8,11 @@ from .db import j, one, tx
 
 
 def status(observation, now):
+    if observation and observation.get("retry_at"):
+        if datetime.fromisoformat(observation["retry_at"]) <= now:
+            return "due"
+        count = observation.get("count")
+        return "eligible" if count is not None and count > 1 else "unknown"
     if (
         not observation
         or datetime.fromisoformat(observation["checked_at"]) + timedelta(hours=6) <= now
@@ -20,7 +25,13 @@ def status(observation, now):
 
 
 def save(c, target_id, count):
-    observation = {"count": count, "checked_at": datetime.now(timezone.utc).isoformat()}
+    now = datetime.now(timezone.utc)
+    old = one(c, "SELECT verified_permissions->'owned_audience' AS value FROM lead.account_targets WHERE id=%s", (target_id,))
+    if count is None:
+        observation = {**((old or {}).get("value") or {}), "failed_at": now.isoformat(),
+                       "retry_at": (now + timedelta(minutes=1)).isoformat()}
+    else:
+        observation = {"count": count, "checked_at": now.isoformat()}
     c.execute(
         "UPDATE lead.account_targets SET verified_permissions=verified_permissions || %s WHERE id=%s",
         (j({"owned_audience": observation}), target_id),
@@ -58,4 +69,4 @@ async def inspect(aid, target_id):
             if count <= 1
             else "频道已有其他订阅，可安排分发"
         )
-    return {"delay": 21600, "reason": reason, "audience_count": count}
+    return {"delay": 60 if count is None else 21600, "reason": reason, "audience_count": count}

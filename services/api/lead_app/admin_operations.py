@@ -1,4 +1,4 @@
-"""Durable work-hour gates, bounded parallelism and automatic failure stops."""
+"""Durable work-hour gates, bounded parallelism and scoped failure backoff."""
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from temporalio import activity
 
 from .admin_settings import effective
-from .db import all_rows, audit, emit, j, one, record, require_agent, tx
+from .db import all_rows, emit, j, one, record, require_agent, tx
 
 
 def work_window(hours, now=None):
@@ -67,7 +67,7 @@ def configuration_published(c, kind, aid):
         )
         if not aid and override and override["body"] is not None:
             continue
-        if kind in {"brand", "attribution"}:
+        if kind == "brand":
             c.execute("SELECT set_config('app.agent_id',%s,true)", (agent_id,))
             snapshot_preferences(c, agent_id)
             record(
@@ -98,7 +98,7 @@ def configuration_published(c, kind, aid):
 def failure(aid, category, error_code):
     """Count real failures, preserve uncertain actions and fence future writes."""
     with tx(aid) as c:
-        agent = require_agent(c, aid, True)
+        require_agent(c, aid, True)
         policy, _ = effective(c, "runtime", aid)
         row = one(
             c,
@@ -108,38 +108,20 @@ def failure(aid, category, error_code):
             last_error=excluded.last_error,next_retry_at=excluded.next_retry_at,updated_at=now() RETURNING failures""",
             (aid, category, error_code[:80], policy["retry_interval_seconds"]),
         )
-        stopped = row["failures"] >= policy["pause_after_failures"]
-        if stopped and agent["desired_state"] == "running":
-            c.execute(
-                "UPDATE lead.agents SET desired_state='paused',health_state='needs_attention',control_version=control_version+1 WHERE id=%s",
-                (aid,),
-            )
-            record(
-                c,
-                aid,
-                "连续失败，已自动暂停运营",
-                "请查看异常记录，处理后可在工作台恢复。",
-                "warning",
-            )
-            audit(
-                c,
-                aid,
-                "runtime.automatic_pause",
-                {
-                    "category": category,
-                    "error_code": error_code[:80],
-                    "failures": row["failures"],
-                },
-            )
-        return {
-            "paused": stopped,
-            "failures": row["failures"],
-            "delay": policy["retry_interval_seconds"],
-        }
+        from .runtime_issues import report
+
+        report(c, aid, "runtime:" + category, error_code,
+               "本次对话未完成，可以在对话中重试或检查模型连接。" if category == "chat" else "这类工作暂时失败，正在等待重新检查。",
+               retry_seconds=policy["retry_interval_seconds"], needs_user=category == "chat")
+        return {"paused": False, "scope": category, "failures": row["failures"],
+                "delay": policy["retry_interval_seconds"]}
+
 
 
 def success(aid, category):
+    from .runtime_issues import resolve
     with tx(aid) as c:
+        resolve(c, aid, "runtime:" + category)
         c.execute(
             "UPDATE lead.admin_runtime_state SET failures=0,last_error=NULL,next_retry_at=NULL,updated_at=now() WHERE category=%s",
             (category,),
@@ -147,6 +129,7 @@ def success(aid, category):
 
 
 def reset_failures(c, aid):
+    c.execute("UPDATE lead.runtime_issues SET resolved_at=now(),retry_at=NULL WHERE agent_id=%s AND scope LIKE 'runtime:%%' AND resolved_at IS NULL", (aid,))
     c.execute(
         "UPDATE lead.admin_runtime_state SET failures=0,last_error=NULL,next_retry_at=NULL,updated_at=now() WHERE agent_id=%s",
         (aid,),
@@ -167,7 +150,7 @@ def admission(aid, category, *, lane=None):
         backoff = one(
             c,
             "SELECT max(next_retry_at) AS due FROM lead.admin_runtime_state WHERE agent_id=%s AND category=%s",
-            (aid, "planning" if category in ("autonomous", "channel_delivery", "channel_research") else category),
+            (aid, category),
         )
         if backoff["due"] and backoff["due"] > datetime.now(timezone.utc):
             return {
@@ -188,8 +171,7 @@ def admission(aid, category, *, lane=None):
         )
         agents = {str(row["agent_id"]) for row in leases}
         occupied = {row["category"] for row in leases if str(row["agent_id"]) == aid}
-        exclusive = any(not name.startswith("channel:") for name in occupied)
-        if (lane in occupied or (lane is None and exclusive) or
+        if ((lane or category) in occupied or
             (aid not in agents and len(agents) >= min(policy["max_concurrent_agents"], global_policy["max_concurrent_agents"]))):
             return {"allowed": False, "delay": 10, "reason": "concurrency_limit"}
         lease = one(
