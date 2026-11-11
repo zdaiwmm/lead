@@ -128,6 +128,17 @@ async def test_member_real_first_post_recovers_without_duplicate(
         return await browser.publish_action(aid, browser.PublishRequest(**data))
 
     monkeypatch.setattr(activities, "browser_rpc", rpc)
+    from lead_app import admin_operations
+
+    admission = admin_operations.admission
+    publish_lanes = []
+
+    def record_admission(aid, category, **kwargs):
+        if category == "publish":
+            publish_lanes.append(kwargs.get("lane"))
+        return admission(aid, category, **kwargs)
+
+    monkeypatch.setattr(admin_operations, "admission", record_admission)
     try:
         adapter = WebAdapter("reddit")
         await actor.page.goto(TARGETS["reddit"])
@@ -331,6 +342,9 @@ async def test_member_real_first_post_recovers_without_duplicate(
             )
         )["state"] == "confirmed"
         assert len(site.posts) == 2
+        assert publish_lanes and set(publish_lanes) == {
+            "channel:browser:" + str(profile["id"])
+        }
         with tx(aid) as c:
             assert domain.metrics(c)["published"] == 2
         prepared = await adapter.prepare(actor.page, target, task["input"], [], [])
