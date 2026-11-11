@@ -82,8 +82,8 @@ def review_workspace(aid):
                 c,
                 """SELECT count(*) AS n FROM lead.actions a
                 JOIN lead.account_targets t ON t.id=a.target_id JOIN lead.tasks task ON task.id=a.task_id
-                WHERE t.account_id=%s AND task.type='reddit.publish' AND a.state='confirmed' AND a.confirmed_at>now()-interval '7 days'
-                AND coalesce(task.input->>'bootstrap_verification','false')<>'true'""",
+                WHERE t.account_id=%s AND (task.type='reddit.publish' OR task.input->>'member_contribution'='true') AND a.state='confirmed' AND a.confirmed_at>now()-interval '7 days'
+                AND (coalesce(task.input->>'bootstrap_verification','false')<>'true' OR task.input->>'member_contribution'='true')""",
                 (account["id"],),
             )["n"]
             result = {

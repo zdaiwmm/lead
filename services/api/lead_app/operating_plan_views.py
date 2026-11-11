@@ -203,7 +203,7 @@ SNAPSHOTS = """FROM lead.memory_entries WHERE agent_id=%s AND kind='observation'
 BUSINESS_ACTIVITY = """FROM lead.activity a JOIN lead.tasks t ON t.id=a.task_id AND t.agent_id=a.agent_id
     WHERE a.agent_id=%s AND (t.type IN ('content.prepare','community.discover','community.engage','operating.journey','operating.opportunities',
     'operating.validate','operating.strategy') OR t.type LIKE '%%.publish')
-    AND coalesce(t.input->>'bootstrap_verification','false')<>'true'"""
+    AND (coalesce(t.input->>'bootstrap_verification','false')<>'true' OR t.input->>'member_contribution'='true')"""
 
 
 def history_zone(c, agent):

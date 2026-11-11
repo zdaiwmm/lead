@@ -181,7 +181,7 @@ def evidence(
           FROM lead.actions a JOIN lead.tasks t ON t.id=a.task_id
           JOIN lead.account_targets target ON target.id=a.target_id JOIN lead.social_accounts s ON s.id=target.account_id
           WHERE a.state='confirmed' AND a.target_id=%s
-            AND coalesce(t.input->>'bootstrap_verification','false')<>'true'
+            AND (coalesce(t.input->>'bootstrap_verification','false')<>'true' OR t.input->>'member_contribution'='true')
         ), published AS (
           SELECT ci.id, p.body->'operating_strategy'->>'plan_id' AS plan_id,
             min(a.public_at) AS published_at

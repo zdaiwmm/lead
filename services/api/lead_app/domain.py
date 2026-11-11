@@ -406,7 +406,7 @@ def metrics(c):
     projected = materialized_metrics(c, policy["objective"])
     posted = one(
         c,
-        "SELECT count(*) AS n FROM lead.actions a JOIN lead.account_targets t ON t.id=a.target_id JOIN lead.social_accounts s ON s.id=t.account_id JOIN lead.tasks task ON task.id=a.task_id WHERE a.state='confirmed' AND s.platform<>'lab' AND coalesce(task.input->>'bootstrap_verification','false')<>'true' AND CASE WHEN task.result ? 'delivery' THEN task.result->'delivery'->>'state'='public' AND (s.platform<>'tiktok' OR task.result->'delivery'->>'visibility'='public') ELSE s.platform<>'tiktok' END",
+        "SELECT count(*) AS n FROM lead.actions a JOIN lead.account_targets t ON t.id=a.target_id JOIN lead.social_accounts s ON s.id=t.account_id JOIN lead.tasks task ON task.id=a.task_id WHERE a.state='confirmed' AND s.platform<>'lab' AND (coalesce(task.input->>'bootstrap_verification','false')<>'true' OR task.input->>'member_contribution'='true') AND CASE WHEN task.result ? 'delivery' THEN task.result->'delivery'->>'state'='public' AND (s.platform<>'tiktok' OR task.result->'delivery'->>'visibility'='public') ELSE s.platform<>'tiktok' END",
     )["n"]
     server = one(
         c,

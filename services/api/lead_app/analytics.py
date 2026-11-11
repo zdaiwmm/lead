@@ -224,7 +224,7 @@ def trend(aid: UUID):
               JOIN lead.account_targets t ON t.id=a.target_id
               JOIN lead.social_accounts s ON s.id=t.account_id
               JOIN lead.tasks task ON task.id=a.task_id
-              WHERE a.state='confirmed' AND coalesce(task.input->>'bootstrap_verification','false')<>'true'
+              WHERE a.state='confirmed' AND (coalesce(task.input->>'bootstrap_verification','false')<>'true' OR task.input->>'member_contribution'='true')
               GROUP BY s.platform
             ), converted AS (
               SELECT l.platform,count(*) AS conversions FROM lead.conversion_events e

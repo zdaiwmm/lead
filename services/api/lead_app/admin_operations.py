@@ -211,7 +211,7 @@ def managed_execution(category):
             aid = args["agent_id"]
             with tx(aid) as c:
                 agent = one(
-                    c, "SELECT desired_state FROM lead.agents WHERE id=%s", (aid,)
+                    c, "SELECT desired_state,onboarding_state FROM lead.agents WHERE id=%s", (aid,)
                 )
             if not agent or agent["desired_state"] == "archived":
                 return (
@@ -239,10 +239,11 @@ def managed_execution(category):
                         (args["task_id"],),
                     )
                     from .atomic_dispatch import channel_pilot
-                    if task and channel_pilot(aid):
+                    if task and (channel_pilot(aid) or agent["onboarding_state"].get("reddit_member_delivery") is True):
                         profile = one(c, """SELECT p.id FROM lead.tasks task JOIN lead.account_targets t ON t.id::text=task.input->>'target_id'
                             JOIN lead.social_accounts s ON s.id=t.account_id JOIN lead.browser_profiles p ON p.id=s.profile_id
-                            WHERE task.id=%s AND task.input ? 'channel_clock' AND p.slot<>'default'""", (args["task_id"],))
+                            WHERE task.id=%s AND (task.input ? 'channel_clock' OR task.input->>'member_contribution'='true')
+                            AND p.slot<>'default'""", (args["task_id"],))
                         if profile:
                             lane = "channel:browser:" + str(profile["id"])
                 if task and task["type"] == "lab.publish":

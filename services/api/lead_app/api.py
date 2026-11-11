@@ -476,6 +476,18 @@ def edit_channel_control(aid: UUID, platform: str, body: ChannelControl):
     return domain.channel_control(str(aid), platform, body.enabled)
 
 
+class RedditMemberScope(BaseModel):
+    account_id: UUID
+    binding_version: int = Field(ge=1)
+
+
+@app.post("/api/agents/{aid}/reddit/member-scope")
+def authorize_reddit_member(aid: UUID, body: RedditMemberScope):
+    from .reddit_member import authorize
+
+    return authorize(str(aid), str(body.account_id), body.binding_version)
+
+
 class RevisionRequest(BaseModel):
     expected_revision: int = Field(ge=1)
 

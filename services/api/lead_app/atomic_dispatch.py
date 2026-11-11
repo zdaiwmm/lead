@@ -75,9 +75,9 @@ def enqueue_connected(c, aid, agent, business):
     )
     for account in accounts:
         platform = account["platform"]
-        if not channel_for(platform):
+        from .channel_delivery import enroll, owns
+        if not channel_for(platform) or not owns(agent, platform):
             continue
-        from .channel_delivery import enroll
 
         enroll(c, aid, agent, platform)
         _, version = channel_config(c, aid, platform)
@@ -114,7 +114,8 @@ def enqueue_connected(c, aid, agent, business):
 
 
 def refresh_connected(c, aid):
-    if not channel_pilot(aid):
+    agent = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
+    if not channel_pilot(aid) and not agent["onboarding_state"].get("reddit_member_delivery"):
         return
     agent = one(c, "SELECT * FROM lead.agents WHERE id=%s FOR NO KEY UPDATE", (aid,))
     business = one(
@@ -148,7 +149,7 @@ def connected_inputs(c, aid, task_id, generation, pack=None):
         c, "SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1"
     )
     allowed = (
-        channel_pilot(aid)
+        (channel_pilot(aid) or (platform == "reddit" and agent["onboarding_state"].get("reddit_member_delivery") is True))
         and agent["desired_state"] == "running"
         and business
         and str(business["id"]) == intent["business_id"]

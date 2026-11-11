@@ -7,6 +7,7 @@ from .adapters.core import NeedsAuth, PreparationNotStarted, ScopeChanged
 from .assets import resolve
 from .config import STATE
 from .db import j, one, tx, uid
+from .reddit_member import ordinary_member
 from .scope import current_tenant
 
 
@@ -379,6 +380,22 @@ def gate(actor, c, action):
         "SELECT * FROM lead.authorization_grants WHERE id=%s AND revoked_at IS NULL",
         (action["grant_id"],),
     )
+    if not grant:
+        raise ScopeChanged("目标授权已撤销")
+    if ordinary_member(target):
+        from datetime import datetime, timedelta, timezone
+
+        from .reddit_member import member_scope
+
+        account = one(c, "SELECT * FROM lead.social_accounts WHERE id=%s", (target["account_id"],))
+        scope = member_scope(c, account)
+        rules = target["verified_permissions"].get("rules", {})
+        if (not account["automation_enabled"] or not scope or str(scope["id"]) != grant["limits"].get("member_scope_id")
+            or action["intent"].get("reddit_rules_sha256") != rules.get("sha256")
+            or action["intent"].get("format", "text") != "text" or action["intent"].get("media")
+            or not rules.get("checked_at")
+            or datetime.fromisoformat(rules["checked_at"]) < datetime.now(timezone.utc) - timedelta(days=1)):
+            raise ScopeChanged("普通成员投稿范围或社区规则已过期，需要重新核对")
     scope_id = grant["limits"].get("managed_scope_id")
     if scope_id and not one(c, """SELECT 1 FROM lead.interaction_cards scope JOIN lead.social_accounts s
             ON s.id::text=scope.payload->>'account_id' AND s.external_account_id=scope.payload->>'external_account_id'

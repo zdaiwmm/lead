@@ -29,7 +29,7 @@ def evidence_options(c, aid, platform, target=None):
       FROM lead.actions a JOIN lead.tasks task ON task.id=a.task_id JOIN lead.account_targets t ON t.id=a.target_id
       JOIN lead.content_items ci ON ci.id=a.content_id JOIN lead.plans p ON p.id=ci.plan_id JOIN lead.agent_revisions r ON r.id=p.agent_revision_id
       WHERE a.agent_id=%s AND a.state='confirmed' AND a.intent->>'platform'=%s AND (%s::uuid IS NULL OR a.target_id=%s)
-      AND coalesce(task.input->>'bootstrap_verification','false')<>'true' ORDER BY a.confirmed_at DESC,a.id DESC LIMIT 30""",
+      AND (coalesce(task.input->>'bootstrap_verification','false')<>'true' OR task.input->>'member_contribution'='true') ORDER BY a.confirmed_at DESC,a.id DESC LIMIT 30""",
         (aid, platform, target, target),
     )
 
