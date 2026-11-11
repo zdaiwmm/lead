@@ -293,6 +293,8 @@ def reviewed_channel_schema(mirror, sha, extra):
 
 # This additive upgrade is installed separately, after backup/restore rehearsal.
 # Only these reviewed bytes are accepted; the application hook never runs DDL.
+# Install this verifier from the successful release candidate's tool bundle before
+# upgrading the database; an application image does not update node-owned tools.
 FAULT_ISOLATION_FILES = {'scripts/fault_isolation_upgrade.py': '6fa2986893c3d1dbc50f84d51d85947a714f5cf2', 'infra/migrations/versions/0030_fault_isolation.py': '930763fed2ebf6eac3ab2c1238ec49adbc7e6955', 'scripts/service.py': '81d3285a63cbf0158dd2301060df33ccd2437077'}
 
 
