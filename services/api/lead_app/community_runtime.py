@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import BaseModel, Field
 
+from .cadence_state import create_read_task
 from . import community_checkpoints, community_health
 from .community_growth import CHAMBER_BRIEF, GrowthConfig
 from .db import j, one, record, require_agent, tx, uid
@@ -2153,14 +2154,7 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
                 if previous and previous["was_review"] and not (prefer_outreach and (review["result"].get("history_observation") or {}).get("can_reply")):
                     fresh = next_candidate(c, a["config_revision"], focus, chamber=chamber_campaign(a), proactive=config.allow_proactive_post)
             if review and not fresh:
-                task = one(
-                    c,
-                    "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,input,started_at,scheduled_at,workflow_id) VALUES(%s,%s,'community.engage','running',%s,now(),now(),%s) RETURNING *",
-                    (
-                        current_tenant(),
-                        aid,
-                        j(
-                            {
+                task = create_read_task(c, aid, {
                                 **{
                                     key: review["input"][key]
                                     for key in (
@@ -2176,11 +2170,7 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
                                 "decision_version": DECISION_VERSION,
                                 "control_version": a["control_version"],
                                 "config_revision": a["config_revision"],
-                            }
-                        ),
-                        "community.engage:" + uid(),
-                    ),
-                )
+                            }, "community.engage:" + uid())
         if not task:
             candidate = fresh if fresh is not None else next_candidate(c, a["config_revision"], focus, chamber=chamber_campaign(a), proactive=config.allow_proactive_post)
             if not candidate and not chamber_campaign(a):
@@ -2207,14 +2197,7 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
                 "SELECT id FROM lead.tasks WHERE type='community.engage' AND input->'candidate'->>'telegram_url'=%s AND input->>'external_account_id'=%s AND result->>'join_submitted'='true' AND result->>'join_state'='confirmed' ORDER BY created_at DESC LIMIT 1",
                 (candidate["telegram_url"], account["external_account_id"]),
             )
-            task = one(
-                c,
-                "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,input,started_at,scheduled_at,workflow_id) VALUES(%s,%s,'community.engage','running',%s,now(),now(),%s) RETURNING *",
-                (
-                    current_tenant(),
-                    aid,
-                    j(
-                        {
+            task = create_read_task(c, aid, {
                             "candidate": candidate,
                             **({"observation_admission": 2 if config.allow_proactive_post else 1} if chamber_campaign(a) and candidate.get("selection_basis") == "observe_recent_chat" else {}),
                             "decision_version": DECISION_VERSION,
@@ -2231,11 +2214,7 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
                             "delegation_id": str(account["delegation_id"]),
                             "control_version": a["control_version"],
                             "config_revision": a["config_revision"],
-                        }
-                    ),
-                    "community.engage:" + uid(),
-                ),
-            )
+                        }, "community.engage:" + uid())
         if (
             task["input"]["control_version"] != a["control_version"]
             or task["input"]["config_revision"] != a["config_revision"]

@@ -172,12 +172,18 @@ def get_strategy(aid):
 
 
 def set_strategy(aid, config):
+    supplied_policy = config.get("participation_policy", {}) if isinstance(config, dict) else config.participation_policy
+    explicit_fields = sorted(supplied_policy if isinstance(supplied_policy, dict) else supplied_policy.model_fields_set)
     config = GrowthConfig.model_validate(config)
     with tx(aid) as c:
-        require_agent(c, aid, True)
+        agent = require_agent(c, aid, True)
+        patch = {"community_growth": config.model_dump()}
+        cadence = agent["onboarding_state"].get("execution_cadence", {})
+        if cadence.get("mode") == "active":
+            patch["execution_cadence"] = {**cadence, "mode": "paused", "pause_reason": "strategy_changed"}
         c.execute(
             "UPDATE lead.agents SET onboarding_state=onboarding_state || %s,version=version+1,updated_at=now() WHERE id=%s",
-            (j({"community_growth": config.model_dump()}), aid),
+            (j(patch), aid),
         )
         if config.enabled and config.mode == "contextual_outreach":
             for account in all_rows(
@@ -213,7 +219,7 @@ def set_strategy(aid, config):
                             ),
                         ),
                     )
-        audit(c, aid, "community.strategy_updated", config.model_dump())
+        audit(c, aid, "community.strategy_updated", {**config.model_dump(), "_explicit_policy_fields": explicit_fields})
         record(
             c,
             aid,
