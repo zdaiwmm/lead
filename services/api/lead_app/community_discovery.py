@@ -1714,13 +1714,21 @@ async def advance(aid):
                          sum(item.get("source_url") == source_url for item in candidates), saved.get("campaign_id") or str(task["id"]))
             saved["assessed_urls"].extend(x["telegram_url"] for x in pending)
             saved["model_attempts"] = 0
-            if candidates:
+            if candidates or len(saved.get("qualified_candidate_checkpoints", {})) >= config.max_candidates_per_run:
                 from .community_handoff import publish_candidate, read_authority
                 account = one(c, "SELECT * FROM lead.social_accounts WHERE id::text=%s", (payload.get("account_id"),))
                 partial_authority = read_authority(c, aid, account, a["config_revision"], task["id"]) if account else None
-                phase = next_phase(payload, saved, native_queries) if partial_authority else "completed"
-                prior = {item["telegram_url"].casefold(): item for item in saved.get("candidates", [])}
-                prior.update({item["telegram_url"].casefold(): item for item in candidates})
+                prior = {item["telegram_url"].casefold().rstrip("/"): item for item in saved.get("candidates", [])}
+                admitted = set(saved.get("qualified_candidate_checkpoints", {})) | set(prior)
+                accepted = []
+                for item in candidates:
+                    key = item["telegram_url"].casefold().rstrip("/")
+                    if key in admitted or len(admitted) < config.max_candidates_per_run:
+                        admitted.add(key)
+                        prior[key] = item
+                        accepted.append(item)
+                candidates = accepted
+                phase = next_phase(payload, saved, native_queries) if partial_authority and len(admitted) < config.max_candidates_per_run else "completed"
                 saved.update(phase=phase, candidates=list(prior.values()), summary=result.summary, execution_scope="discovery_only")
                 c.execute(
                     "UPDATE lead.tasks SET state=%s,result=%s,completed_at=CASE WHEN %s THEN now() ELSE NULL END WHERE id=%s",

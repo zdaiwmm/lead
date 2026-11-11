@@ -6,6 +6,35 @@ from lead_app.scope import current_tenant
 from test_cadence_state import cadence_agent as cadence_agent
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cleared', [False,True])
+async def test_partial_assessment_preserves_cumulative_limit_after_restart(partial,monkeypatch,cleared):
+    from lead_app import community_discovery as discovery
+    from lead_app import community_handoff, community_sources, model
+    from lead_app.community_growth import Candidate, Discovery, GrowthConfig
+    aid,_,_,batch,item,snapshot=partial
+    prior=[{**item,'telegram_url':'https://t.me/prior_'+str(i)} for i in range(2)]
+    fresh=[{**item,'telegram_url':'https://t.me/fresh_'+str(i)} for i in range(2)]
+    with tx(aid) as c:
+        c.execute("INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,description) VALUES(%s,%s,1,'Language learning')",(current_tenant(),aid))
+        for candidate in prior:
+            c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{candidates}',%s) WHERE id=%s",(j([candidate]),batch['id']))
+            community_handoff.publish_candidate(c,aid,str(batch['id']),candidate,snapshot)
+        c.execute("UPDATE lead.tasks SET input=input || %s,result=result || %s WHERE id=%s",(j({'checkpoint_version':'2','native_queries':[]}),j({'phase':'assess','candidates':[] if cleared else prior,'observed_candidates':fresh,'assessed_urls':[],'sources':[],'errors':[],'queue':[],'cursor':0,'link_extractor_version':5,'repository_context_version':1,'link_context_version':2,'native_cursor':0,'native_selector_version':8,'demand_queries_added':True}),batch['id']))
+    monkeypatch.setattr(discovery,'discovery_config',lambda *a:GrowthConfig(enabled=True,mode='contextual_outreach',max_candidates_per_run=3))
+    monkeypatch.setattr(discovery,'live_snapshot',lambda *a:True)
+    monkeypatch.setattr(discovery,'verified_candidates',lambda *a,**k:fresh)
+    monkeypatch.setattr(community_sources,'remember',lambda *a,**k:None)
+    async def assess(*a,**k):return Discovery(candidates=[Candidate(name='Language exchange',telegram_url=x['telegram_url'],source_url='https://example.test',reading_need='Language learners',rules_summary='Known') for x in fresh],summary='Qualified')
+    monkeypatch.setattr(model,'run_model',assess)
+    await discovery.advance(aid)
+    with tx(aid) as c:
+        saved=one(c,"SELECT * FROM lead.tasks WHERE id=%s",(batch['id'],))
+        assert len(saved['result']['qualified_candidate_checkpoints'])==3, saved['result']
+        assert saved['state']=='succeeded'
+        assert len(all_rows(c,"SELECT id FROM lead.memory_entries WHERE body->>'type'='community_candidate_handoff' AND body->>'discovery_task_id'=%s",(str(batch['id']),)))==3
+
+
 @pytest.fixture
 def partial(cadence_agent):
     aid, account, card, old = cadence_agent
