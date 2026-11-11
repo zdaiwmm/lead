@@ -1126,6 +1126,9 @@ OPERATOR_ONLY_FILES = {
     "scripts/home_systemd_release.py",
 }
 
+# Local verification sources stay outside tool bundles and application images.
+LOCAL_VERIFICATION_FILES = {"scripts/verify_cadence_ui.py"}
+
 
 def verify_model_runtime():
     # Use the existing, root-provisioned interpreter, no candidate program and no
@@ -1191,6 +1194,7 @@ def deploy(sha):
         extra = {name for name in changes.split("\0") if name and not name.startswith(allowed)
                  and name not in allowed_files}
         extra -= OPERATOR_ONLY_FILES
+        extra -= LOCAL_VERIFICATION_FILES
         extra -= reviewed_maintenance_files(mirror, sha, extra)
         extra -= reviewed_channel_schema(mirror, sha, extra)
         extra -= reviewed_fault_isolation(mirror, sha, extra)
