@@ -183,6 +183,12 @@ def test_workflow_contract_connects_scope_gate_tests_and_builds():
     assert set(jobs["verified"]["needs"]) == {"scope", "checks", "backend", "frontend", "namespace", "delivery"}
     assert jobs["tool-bundle"]["needs"] == ["scope", "verified"]
     assert "needs.scope.outputs.tools == 'true'" in jobs["tool-bundle"]["if"]
+    # GitHub propagates skipped *transitive* dependencies, even through an
+    # always-running successful gate. Packaging must override that default,
+    # while still explicitly requiring the gate and scope to have succeeded.
+    assert jobs["tool-bundle"]["if"].startswith("always() &&")
+    assert "needs.scope.result == 'success'" in jobs["tool-bundle"]["if"]
+    assert "needs.verified.result == 'success'" in jobs["tool-bundle"]["if"]
     assert "needs.scope.outputs.kind != 'docs'" in jobs["namespace"]["if"]
     steps = jobs["namespace"]["steps"]
     assert any("tests/home_mount_drill.py" in s.get("run", "") for s in steps)

@@ -196,7 +196,7 @@ jobs:
         run: echo 'Fast PR checks passed; release verification runs on main'
   tool-bundle:
     needs: [scope, verified]
-    if: github.event_name != 'pull_request' && needs.scope.outputs.tools == 'true'
+    if: always() && github.event_name != 'pull_request' && needs.scope.result == 'success' && needs.verified.result == 'success' && needs.scope.outputs.tools == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
