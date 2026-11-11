@@ -7,6 +7,31 @@ from test_channel_authority import managed_pair as managed_pair
 from test_community_handoff import partial as partial
 
 
+def test_account_waits_do_not_inherit_another_account_deadline(managed_pair):
+    from datetime import timedelta
+
+    from lead_app import domain
+    from lead_app.channel_authority import authorize_managed_scope
+    from lead_app.db import j, one, tx
+    from lead_app.execution_cadence import Scope, WaitEvidence, decide
+    aid,a,b=managed_pair
+    for account in (a,b):
+        authorize_managed_scope(aid,str(account['id']),account['binding_version'],1)
+    now=datetime.now(timezone.utc)
+    decisions=[]
+    for account in (a,b):
+        scope=Scope(agent_id=aid,account_id=str(account['id']),binding_version=account['binding_version'],target_id=str(account['id']),operation='publish')
+        evidence=WaitEvidence(scope=scope,source='capability',reason_code='awaiting_validated_opportunity' if account==a else 'legacy_unverified_target_window',evidence_ref='fixture',observed_at=now,policy_version=1,**({'resume_event':'candidate_validated'} if account==a else {'not_before':now+timedelta(hours=1)}))
+        decisions.append(decide([evidence],now,subject=scope).model_dump(mode='json'))
+    with tx(aid) as c:
+        clock=one(c,"SELECT id FROM lead.tasks WHERE type='channel.clock' AND input->>'lane'='delivery'")
+        c.execute("UPDATE lead.tasks SET result=%s WHERE id=%s",(j({'execution_cadence':decisions[1],'waiting_targets':{'a':decisions[0],'b':decisions[1]}}),clock['id']))
+    accounts={str(row['id']):row for row in domain.agent_detail(aid)['accounts']}
+    def delivery(account):return next(row['execution_cadence'] for row in accounts[str(account['id'])]['channel_waits'] if row['lane']=='delivery')
+    assert delivery(a)['state']=='waiting_event' and delivery(a)['next_at'] is None
+    assert delivery(b)['state']=='waiting_time' and delivery(b)['next_at'] is not None
+
+
 def test_join_fact_survives_skipped_reply():
     from lead_app.community_participation import outcome_facts
 

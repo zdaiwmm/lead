@@ -146,6 +146,35 @@ def safe_project(raw, **kwargs):
         return _unverified()
 
 
+def for_account(clock, account):
+    """A channel's chosen target never becomes another account's wait."""
+    try:
+        def belongs(item):
+            return item.scope.account_id in (None,str(account["id"])) and item.scope.binding_version in (None,account["binding_version"])
+        raw = clock.get("cadence")
+        root = Decision.model_validate(raw) if raw else None
+        if root and root.constraints and all(item.scope.account_id is None for item in root.constraints):
+            return safe_project(raw)
+        choices = []
+        for value in (clock.get("waiting_targets") or {}).values():
+            decision = Decision.model_validate(value)
+            if decision.constraints and all(belongs(item) for item in decision.constraints):
+                choices.append(decision)
+        if not choices:
+            return safe_project(raw) if root and all(belongs(item) for item in root.constraints) else _unverified()
+        timed = [item for item in choices if item.state=="waiting_time" and item.next_at]
+        if timed:
+            return safe_project(min(timed,key=lambda item:item.next_at).model_dump(mode="json"))
+        events = [item for item in choices if item.state=="waiting_event"]
+        if events:
+            result = Decision(state="waiting_event",constraints=tuple(item for choice in events for item in choice.constraints),
+                resume_events=tuple(sorted({event for choice in events for event in choice.resume_events})))
+            return safe_project(result.model_dump(mode="json"))
+        return safe_project(choices[0].model_dump(mode="json"))
+    except Exception:
+        return _unverified()
+
+
 def for_task(task, **kwargs):
     from .community_participation import outcome_facts
 
