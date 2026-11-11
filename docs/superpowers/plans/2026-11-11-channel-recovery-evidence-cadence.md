@@ -1,6 +1,6 @@
 # 多渠道恢复与证据节奏实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development to implement this plan task-by-task after the user authorizes implementation and chooses an execution method. Checkboxes below are planned work, not completed work.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development to implement this plan task-by-task after the user authorizes implementation and chooses an execution method. Original checkboxes retain the approved task brief; actual completion and evidence are recorded in the linked requirement record.
 
 **Goal:** 恢复三个渠道各自获准的工作，让等待有依据、可恢复，不再由无来源的共用日额度阻断运营。
 
@@ -12,9 +12,9 @@
 
 ## 当前范围与基线
 
-用户已认可设计，仅授权细化实施计划，并明确暂不修改线上。本轮没有执行下列产品任务、测试迁移、社媒动作或发布操作。
+用户已认可设计与本实施计划，并授权依顺序完成本地开发和隔离验证，明确暂不修改线上。完成状态、候选版本和实际测试证据见需求记录；本轮不推送、合并或发布。
 
-当前设计目录保持 `b05e842`，只编辑文档。本轮从 GitHub 核实的 main 为 `355a87bf046852f661da014b0a8f203e2000392a`，已只读同步引用、阅读同版规则和相关代码。未来产品任务从该主线或开工时重新核实的兼容主线创建独立分支；不能把旧目录源码覆盖到新主线。新的局部故障隔离已在主线，复用其 `runtime_issues`、账号换绑归档及队列放行保护，不重复建设、不假定它已经部署。
+设计起点为 `b05e842`。本轮从 GitHub 核实的 main 为 `355a87bf046852f661da014b0a8f203e2000392a`，已只读同步引用、阅读同版规则和相关代码。未来产品任务从该主线或开工时重新核实的兼容主线创建独立分支；不能把旧目录源码覆盖到新主线。本地实施开工重新核实并采用 `7614e602973644d09e4c648d28e83deda576f43f` 为基线。新的局部故障隔离已在主线，复用其 `runtime_issues`、账号换绑归档及队列放行保护，不重复建设、不假定它已经部署。
 
 ## Global Constraints
 
