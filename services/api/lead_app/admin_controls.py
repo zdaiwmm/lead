@@ -226,7 +226,7 @@ def validate_experience(c, aid, data):
           WHERE a.id=ANY(%s::uuid[]) AND a.agent_id=%s AND a.state='confirmed' AND a.intent->>'platform'=%s
           AND (%s::uuid IS NULL OR a.target_id=%s) AND p.business_profile_id=%s
           AND (%s='' OR p.body->'operating_strategy'->>'plan_id'=%s)
-          AND coalesce(t.input->>'bootstrap_verification','false')<>'true'""",
+          AND (coalesce(t.input->>'bootstrap_verification','false')<>'true' OR t.input->>'member_contribution'='true')""",
             (
                 data["evidence_action_ids"],
                 aid,

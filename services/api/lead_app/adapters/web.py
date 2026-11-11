@@ -272,19 +272,9 @@ class WebAdapter:
             identity = await signed_in_username(page)
             await check_surface(page, self.hosts)
         elif self.platform == "facebook":
-            cookies = await page.context.cookies(["https://www.facebook.com"])
-            own = next((c["value"] for c in cookies if c["name"] == "c_user"), None)
-            if (
-                not own
-                or not own.isdigit()
-                or not await page.locator(
-                    '[aria-label="Your profile"],[aria-label="Account"]'
-                )
-                .filter(visible=True)
-                .count()
-            ):
-                raise NeedsAuth("请先登录 Facebook 并打开自己的主页")
-            identity = own
+            from .facebook import signed_in_id
+
+            identity = await signed_in_id(page)
         elif self.platform == "whatsapp":
             # Only the current owner's WID, never contacts, chats or auth keys.
             raw = await page.evaluate(
@@ -377,7 +367,7 @@ class WebAdapter:
             + (identity[:10] if self.platform == "whatsapp" else identity),
         }
 
-    async def target(self, page, url, expected_account):
+    async def target(self, page, url, expected_account, *, member=False):
         canonical = target_url(self.platform, url)
         # Restore the validated platform before checking the bound identity.
         if urlsplit(page.url).hostname not in self.hosts:
@@ -450,15 +440,21 @@ class WebAdapter:
                 .count()
             ):
                 raise ScopeChanged("无法确认 Facebook Page 管理权限")
-        if (
-            self.platform == "reddit"
-            and not await page.locator(
+        member_rules = None
+        if self.platform == "reddit":
+            if member:
+                from ..reddit_member import read_rules
+
+                member_rules = await read_rules(page, canonical)
+                await page.goto(canonical.rstrip("/") + "/submit", wait_until="domcontentloaded")
+                if (await self.account(page))["external_account_id"] != expected_account:
+                    raise ScopeChanged("投稿页面账号已变化")
+                await first_visible(page, ('textarea[name="title"]', 'textarea[placeholder="Title"]'), timeout=3000)
+                await first_visible(page, EDITORS["reddit"], timeout=3000)
+            elif not await page.locator(
                 f'a[href*="/mod/{target_id}"],a[href*="/r/{target_id}/about/modqueue"]'
-            )
-            .filter(visible=True)
-            .count()
-        ):
-            raise ScopeChanged("当前仅开放自有或有版主管理权限的社区")
+            ).filter(visible=True).count():
+                raise ScopeChanged("未核对管理权限；普通成员投稿需要单独的社区参与范围")
         if (
             self.platform == "linkedin"
             and parts[0] == "company"
@@ -482,8 +478,9 @@ class WebAdapter:
             "target_type": self.spec.target_type
             if self.platform != "linkedin" or parts[0] == "in"
             else "page",
-            "verified_permissions": ["publish", "upload_media"],
+            "verified_permissions": ["publish"] if member_rules else ["publish", "upload_media"],
             "adapter_version": self.spec.version,
+            **({"access_mode": "ordinary_member", "rules": member_rules} if member_rules else {}),
         }
 
     async def prepare(self, page, target, publication, media, paths, checkpoint=None):
@@ -505,7 +502,12 @@ class WebAdapter:
                     timeout=45000,
                 )
             own = await self.account(page)
-            await self.target(page, target["canonical_url"], own["external_account_id"])
+            member = target.get("verified_permissions", {}).get("access_mode") == "ordinary_member"
+            if member and kind != "text":
+                raise ScopeChanged("当前普通成员范围仅包含文字投稿")
+            checked = await self.target(page, target["canonical_url"], own["external_account_id"], member=member)
+            if member and checked["rules"]["sha256"] != target["verified_permissions"]["rules"]["sha256"]:
+                raise ScopeChanged("社区规则已更新，请重新核对选题与参与范围")
         except HumanVerificationRequired as error:
             # Identity/target navigation has not touched the editor or upload.
             error.safe_to_restart = True
@@ -1161,6 +1163,16 @@ class WebAdapter:
         if not await button.is_enabled():
             raise LayoutChanged("发布按钮不再可用")
         await verify_fields(page, observation["fields"])
+        if self.platform == "reddit" and target.get("verified_permissions", {}).get("access_mode") == "ordinary_member":
+            from ..reddit_member import read_rules
+
+            check = await page.context.new_page()
+            try:
+                rules = await read_rules(check, target["canonical_url"])
+                if rules["sha256"] != target["verified_permissions"]["rules"]["sha256"]:
+                    raise ScopeChanged("提交前社区规则已变化，未点击发布")
+            finally:
+                await check.close()
         if self.platform == "tiktok" and observation.get("disclosures"):
             await self.tiktok_declarations(
                 page, observation["disclosures"]["ai_generated"], verify=True
@@ -1204,6 +1216,8 @@ class WebAdapter:
                 r"whatsapp\.com/channel/",
             )
         containers, pattern, author = RECEIPTS[self.platform]
+        if self.platform == "reddit":
+            pattern = r"^https://(?:www\.)?reddit\.com/r/" + re.escape(target["external_target_id"]) + r"/comments/[A-Za-z0-9]+(?:/|$)"
         match = publication
         if self.platform == "reddit" and observation.get("kind") != "text":
             match = {**publication, "body": publication["title"]}

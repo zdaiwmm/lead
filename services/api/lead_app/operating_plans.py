@@ -334,7 +334,7 @@ def business_tasks(c, agent, business, day, end):
           WHERE task_id=t.id ORDER BY created_at DESC LIMIT 1) a ON true
         LEFT JOIN lead.content_items ci ON ci.id=NULLIF(t.input->>'content_id','')::uuid
         WHERE (t.type IN ('content.prepare','community.discover','community.engage') OR t.type IN ('operating.journey','operating.opportunities','operating.validate','operating.strategy') OR t.type LIKE '%%.publish')
-        AND coalesce(t.input->>'bootstrap_verification','false')<>'true'
+        AND (coalesce(t.input->>'bootstrap_verification','false')<>'true' OR t.input->>'member_contribution'='true')
         AND (coalesce(nullif(t.result->'delivery'->>'public_at','')::timestamptz,t.completed_at) >= %s AND coalesce(nullif(t.result->'delivery'->>'public_at','')::timestamptz,t.completed_at) < %s OR
           (t.input->>'config_revision'=%s OR t.input->>'config_revision' IS NULL)
           AND (t.input->>'business_profile_id'=%s OR t.input->>'business_profile_id' IS NULL)

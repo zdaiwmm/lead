@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import re
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -523,6 +523,7 @@ def prepare_action(aid, task_id):
                                 "link",
                                 "made_for_kids",
                                 "commercial_disclosure",
+                                "reddit_rules_sha256",
                             )
                             if k in task["input"]
                         },
@@ -777,7 +778,7 @@ def record_publish_result(aid, task_id, task, action, result):
                 "本地测试发布已确认"
                 if platform == "lab"
                 else "频道连接验证已确认"
-                if task["input"].get("bootstrap_verification")
+                if task["input"].get("bootstrap_verification") and not task["input"].get("member_contribution")
                 else "频道发布已确认"
             )
             if state == "succeeded"
@@ -787,7 +788,7 @@ def record_publish_result(aid, task_id, task, action, result):
             "本地测试不计入获客效果。"
             if platform == "lab"
             else "连接验证不计为推广成果。"
-            if task["input"].get("bootstrap_verification")
+            if task["input"].get("bootstrap_verification") and not task["input"].get("member_contribution")
             else "",
             task_id=task_id,
         )
@@ -885,8 +886,8 @@ def pending_publication(c, target_id, config_revision):
     return one(
         c,
         """SELECT t.id,t.state,t.result FROM lead.tasks t LEFT JOIN lead.actions a ON a.task_id=t.id
-        WHERE t.input->>'target_id'=%s AND t.type LIKE '%%.publish'
-        AND coalesce(t.input->>'bootstrap_verification','false')<>'true'
+        WHERE t.input->>'target_id'=%s AND (t.type LIKE '%%.publish' OR t.input->>'member_contribution'='true')
+        AND (coalesce(t.input->>'bootstrap_verification','false')<>'true' OR t.input->>'member_contribution'='true')
         AND coalesce(t.input->>'config_revision',a.expected_config_revision::text)=%s
         AND t.state IN ('planned','queued','running','waiting_user','failed','reconciling')
         AND (a.state='prepared' OR a.id IS NULL AND t.state IN ('planned','queued','running'))
@@ -990,6 +991,8 @@ async def _publication_cycle(args: dict):
         prepared_wait = False
         shortlink_wait = False
         for target in rows:
+            if target["verified_permissions"].get("access_mode") == "ordinary_member" and not (args.get("channel_clock") and requested_target):
+                continue
             if target_blocked(target, barriers):
                 continue
             if launch and str(target["target_id"]) != launch["result"]["target_id"]:
@@ -1084,7 +1087,7 @@ async def _publication_cycle(args: dict):
                 continue
             from .outbound_links import configured_problem
 
-            if platform != "lab" and configured_problem():
+            if platform != "lab" and target["verified_permissions"].get("access_mode") != "ordinary_member" and configured_problem():
                 shortlink_wait = True
                 waits.append(300)
                 continue
@@ -1149,7 +1152,7 @@ async def _publication_cycle(args: dict):
         )
         recent = all_rows(
             c,
-            "SELECT intent,result FROM lead.actions a JOIN lead.tasks t ON t.id=a.task_id WHERE a.state='confirmed' AND coalesce(t.input->>'bootstrap_verification','false')<>'true' ORDER BY a.created_at DESC LIMIT 10",
+            "SELECT intent,result FROM lead.actions a JOIN lead.tasks t ON t.id=a.task_id WHERE a.state='confirmed' AND (coalesce(t.input->>'bootstrap_verification','false')<>'true' OR t.input->>'member_contribution'='true') ORDER BY a.created_at DESC LIMIT 10",
         )
         recent_production = all_rows(
             c,
@@ -1172,6 +1175,8 @@ async def _publication_cycle(args: dict):
     reusable = None
     if not launch:
         for target_option in targets:
+            if target_option["verified_permissions"].get("access_mode") == "ordinary_member":
+                continue
             plan = (
                 operating_playbooks.get(str(target_option["target_id"]), {}).get(
                     "selected_plan"
@@ -1193,7 +1198,26 @@ async def _publication_cycle(args: dict):
             if draft:
                 reusable = (target_option, draft)
                 break
-    if reusable:
+    member_draft = None
+    member_target = targets[0] if len(targets) == 1 and targets[0]["verified_permissions"].get("access_mode") == "ordinary_member" else None
+    if member_target:
+        from .reddit_member import prepare_first
+
+        evidence = (args.get("operating_plan") or {}).get("channel_opportunity")
+        if not evidence:
+            return {"delay": 900, "reason": "community_evidence_required"}
+        rules = member_target["verified_permissions"]["rules"]
+        if datetime.fromisoformat(rules["checked_at"]) < datetime.now(timezone.utc) - timedelta(days=1):
+            return {"delay": 300, "reason": "community_rules_refresh_required"}
+        with tx(aid) as c:
+            member_account = one(c, "SELECT * FROM lead.social_accounts WHERE id=%s", (member_target["account_id"],))
+        member_draft = await prepare_first(aid, dict(account_id=member_account["id"], binding_version=member_account["binding_version"], evidence_id=evidence["evidence_task_id"]),
+                                          dict(canonical_url=member_target["canonical_url"], rules=rules))
+        if not member_draft["suitable"]:
+            return {"delay": 1800, "reason": "community_rules_do_not_fit"}
+        content = ContentDecision(action="publish", target_id=str(member_target["target_id"]), body=member_draft["body"], title=member_draft["title"], rationale=member_draft["reason"])
+        sources = [evidence["source_url"]]
+    elif reusable:
         target_option, draft = reusable
         content = ContentDecision(
             action="publish",
@@ -1287,7 +1311,7 @@ async def _publication_cycle(args: dict):
         return {"delay": 600, "reason": "invalid_target"}
     platform = target["platform"]
     prepared_task = None
-    if content.action == "publish" and not launch:
+    if content.action == "publish" and not launch and not member_draft:
         selected_plan = (
             operating_playbooks.get(str(target["target_id"]), {}).get("selected_plan")
             or {}
@@ -1323,14 +1347,16 @@ async def _publication_cycle(args: dict):
     manifest = []
     selected = []
     media_job_id = None
-    if content.action == "publish" and target.get("calendar"):
+    if content.action == "publish" and target.get("calendar") and not member_draft:
         try:
             await prepare_profile_assets(aid, platform)
         except (ValueError, LookupError, asyncio.TimeoutError) as error:
             # Optional profile art must not hold up valid scheduled content.
             with tx(aid) as c:
                 record(c, aid, "渠道资料素材暂未完成", str(error)[:240], "warning")
-    if content.action == "publish" and platform != "lab":
+    if member_draft:
+        marker = member_draft["disclosure"]
+    elif content.action == "publish" and platform != "lab":
         allowed = {str(m["id"]): m for m in media}
         if any(x not in allowed for x in content.asset_ids):
             return {"delay": 600, "reason": "invalid_media"}
@@ -1440,6 +1466,8 @@ async def _publication_cycle(args: dict):
         ),
         "media_job_id": media_job_id,
     }
+    if platform == "reddit" and target["verified_permissions"].get("access_mode") == "ordinary_member":
+        publication["reddit_rules_sha256"] = target["verified_permissions"]["rules"]["sha256"]
     if platform == "reddit" and manifest and marker:
         # Native media posts may expose only a title; keep the receipt marker
         # visible there rather than depending on an unsupported caption field.

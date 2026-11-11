@@ -222,6 +222,31 @@ def store_target(aid, account_id, observed, *, notify=True, expected_binding=Non
             if not owner or owner["input"]["platform"] != account["platform"] or not account["automation_enabled"]:
                 raise ValueError("核对目标时渠道已暂停")
         spec = SPECS[account["platform"]]
+        member = observed.get("access_mode") == "ordinary_member"
+        previous = one(c, "SELECT * FROM lead.account_targets WHERE account_id=%s AND external_target_id=%s",
+                       (account_id, observed["external_target_id"]))
+        member_authority = None
+        if member:
+            from .reddit_member import member_scope
+
+            member_authority = member_scope(c, account)
+            if account["platform"] != "reddit" or not member_authority or not channel_clock:
+                raise ValueError("普通成员投稿缺少当前账号的明确授权")
+            first = observed.get("first_publication", {})
+            if not first.get("suitable") or not first.get("body") or not first.get("title") or not observed.get("rules"):
+                raise ValueError("普通成员首帖必须是已核对规则的真实内容")
+            if previous and previous["verified_permissions"].get("access_mode") != "ordinary_member":
+                c.execute("UPDATE lead.authorization_grants SET revoked_at=now() WHERE target_id=%s AND revoked_at IS NULL", (previous["id"],))
+                c.execute("UPDATE lead.account_targets SET verified_permissions=verified_permissions-'publishing_verified_formats'-'publishing_verified' WHERE id=%s", (previous["id"],))
+            if previous and previous["verified_permissions"].get("rules", {}).get("sha256") != observed["rules"]["sha256"]:
+                # Only unsubmitted work may be replaced after new rules. Unknown sends retain their ledger.
+                canceled = c.execute("""UPDATE lead.actions SET state='canceled' WHERE target_id=%s
+                    AND state IN ('prepared','not_applied') RETURNING task_id""", (previous["id"],)).fetchall()
+                for item in canceled:
+                    c.execute("UPDATE lead.tasks SET state='canceled',completed_at=now(),result=coalesce(result,'{}')||%s WHERE id=%s",
+                              (j({"reason": "community_rules_changed"}), item["task_id"]))
+                c.execute("""UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE input->>'target_id'=%s
+                    AND state IN ('planned','queued','waiting_user') AND NOT EXISTS(SELECT 1 FROM lead.actions a WHERE a.task_id=lead.tasks.id)""", (str(previous["id"]),))
         target = one(
             c,
             "INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,external_target_id,canonical_url,display_name,verified_permissions,state) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'active') ON CONFLICT(account_id,target_type,external_target_id) DO UPDATE SET canonical_url=excluded.canonical_url,display_name=excluded.display_name,verified_permissions=lead.account_targets.verified_permissions || excluded.verified_permissions,state='active' RETURNING *",
@@ -238,16 +263,26 @@ def store_target(aid, account_id, observed, *, notify=True, expected_binding=Non
                         "actions": observed["verified_permissions"],
                         "public_url": observed.get("public_url"),
                         "adapter_version": spec.version,
+                        **({"access_mode": "ordinary_member", "rules": observed["rules"],
+                            "first_publication": observed["first_publication"],
+                            "evidence_task_id": observed["evidence_task_id"]} if member else {}),
                     }
                 ),
             ),
         )
-        authority = managed_scope(c,account) if channel_clock else None
-        if (not notify or authority) and one(
+        authority = member_authority or (managed_scope(c,account) if channel_clock else None)
+        existing_grant = one(
             c,
             "SELECT id FROM lead.authorization_grants WHERE target_id=%s AND revoked_at IS NULL",
             (target["id"],),
-        ):
+        )
+        if (not notify or authority) and existing_grant:
+            if member and not target["verified_permissions"].get("publishing_verified_formats") and not one(c,
+                """SELECT 1 FROM lead.tasks t LEFT JOIN lead.actions x ON x.task_id=t.id
+                WHERE t.input->>'target_id'=%s AND t.input->>'member_contribution'='true'
+                AND (t.state<>'canceled' OR x.state IN ('dispatching','unknown','confirmed'))""", (str(target["id"]),)):
+                probe = probe_in_tx(c, aid, {**target, "platform": account["platform"]}, existing_grant["id"], a["authorization_version"], notify=False)
+                accept_card(aid, str(probe["card_id"]), probe["version"], True, delegation_id=str(authority["id"]), connection=c)
             return {"target_id": target["id"], "card_id": None}
         existing = one(
             c,
@@ -268,8 +303,8 @@ def store_target(aid, account_id, observed, *, notify=True, expected_binding=Non
                         "target_name": target["display_name"],
                         "allowed_actions": ["publish"] if authority else ["publish","upload_media"],
                         "formats": ["text"] if authority else list(spec.formats),
-                         "limits": {"publish_per_day": None if spec.platform == "telegram" else 3, "read_others": False,
-                                   **({"managed_scope_id":str(authority["id"])} if authority else {})},
+                         "limits": {"publish_per_day": 1 if member else None if spec.platform == "telegram" else 3, "read_others": False,
+                                   **({("member_scope_id" if member else "managed_scope_id"):str(authority["id"])} if authority else {})},
                         "expected_authorization_version": a["authorization_version"],
                     }
                 ),
@@ -347,6 +382,12 @@ def probe_in_tx(
         "made_for_kids": made_for_kids,
         "commercial_disclosure": "own_brand",
     }
+    member = target["verified_permissions"].get("access_mode") == "ordinary_member"
+    if member:
+        first = target["verified_permissions"]["first_publication"]
+        if media or not first.get("suitable"):
+            raise ValueError("普通成员首次投稿仅允许已核对的文字内容")
+        publication.update(title=first["title"], body=first["body"], marker=first["disclosure"], commercial_disclosure="independent_promoter")
     kind = validate(target["platform"], publication, records)
     payload = {
         **publication,
@@ -354,7 +395,11 @@ def probe_in_tx(
         "target_id": str(target["id"]),
         "grant_id": str(grant_id),
         "expected_authorization_version": authorization_version,
+        **({"member_contribution": True, "reddit_rules_sha256": target["verified_permissions"]["rules"]["sha256"]} if member else {}),
     }
+    if member:
+        from .channel_delivery import opportunity
+        payload["operating_plan"] = {"channel_opportunity": opportunity(c, target["id"])}
     if one(
         c,
         "SELECT lead.owner_browser_pilot_allowed(%s,%s) allowed",
@@ -460,7 +505,8 @@ def accept_card(
                 (target["account_id"],),
             )
             if target["platform"] in ("reddit","facebook"):
-                scope = managed_scope(c,account)
+                from .reddit_member import member_scope
+                scope = member_scope(c, account) if target["verified_permissions"].get("access_mode") == "ordinary_member" else managed_scope(c,account)
                 if (not scope or str(scope["id"]) != str(delegation_id) or a["desired_state"] != "running"
                     or not account["automation_enabled"] or target["slot"]=="default"
                     or "publish" not in target["verified_permissions"].get("actions",[]) or
@@ -576,8 +622,8 @@ def accept_card(
             record(
                 c,
                 aid,
-                "已安排连接验证",
-                "仅用于连接验证，不计推广成果。",
+                "已安排社区投稿" if payload.get("member_contribution") else "已安排连接验证",
+                "核对公开回执后计入真实产物。" if payload.get("member_contribution") else "仅用于连接验证，不计推广成果。",
                 task_id=task["id"],
             )
         else:

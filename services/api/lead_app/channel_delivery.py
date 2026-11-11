@@ -16,7 +16,7 @@ from .scope import current_tenant, scoped_activity
 def owns(agent, platform):
     # Experiments already own scheduling/admission and their budgets.
     return bool(
-        channel_pilot(agent["id"])
+        (channel_pilot(agent["id"]) or (platform == "reddit" and agent["onboarding_state"].get("reddit_member_delivery") is True))
         and channel_for(platform)
         and not growth_experiments.enabled(agent)
     )
@@ -115,7 +115,7 @@ def opportunity(c, target_id):
         key = fingerprint([finding["source_url"].rstrip("/"), finding["observation"]])
         consumed = one(
             c,
-            """SELECT 1 FROM lead.tasks WHERE type LIKE '%%.publish'
+            """SELECT 1 FROM lead.tasks WHERE (type LIKE '%%.publish' OR input->>'member_contribution'='true')
             AND input->>'target_id'=%s AND input#>>'{operating_plan,channel_opportunity,source_key}'=%s
             AND state<>'canceled' LIMIT 1""",
             (str(target_id), key),

@@ -1460,8 +1460,13 @@ async def inspect_target(aid: UUID, body: TelegramTargetRequest):
             raise ValueError("请先结束浏览器接管")
     actor = await gateway.get(aid, account["profile_id"])
     async with actor.lock:
+        options = {}
+        if account["platform"] == "reddit":
+            from .reddit_member import member_scope
+            with tx(aid) as c:
+                options["member"] = bool(member_scope(c, account))
         return await get_adapter(account["platform"]).target(
-            actor.page, body.url, account["external_account_id"]
+            actor.page, body.url, account["external_account_id"], **options
         )
 
 
