@@ -4,7 +4,7 @@ Control changes never revive old task payloads. The caller creates a new read
 with current versions and checks authority again before any external action.
 """
 
-from . import community_health
+from . import community_health, executor_scope
 from .db import all_rows
 
 
@@ -94,6 +94,7 @@ def discovery_pressure(c, agent, config, now):
     if now.minute % 15 < 2:
         return None
     aid = str(agent["id"])
+    profile_id = executor_scope.selected_profile(aid)
     accounts = all_rows(
         c,
         """SELECT DISTINCT s.id,s.external_account_id FROM lead.social_accounts s
@@ -102,8 +103,9 @@ def discovery_pressure(c, agent, config, now):
           AND card.payload->>'purpose'='bounded_candidate_participation'
           AND card.payload->>'account_id'=s.id::text AND card.payload->>'external_account_id'=s.external_account_id
           AND card.payload->'allowed_actions' ?& ARRAY['join_public_group','read_recent_history']
-        WHERE s.agent_id=%s AND s.platform='telegram' AND s.state='connected' AND s.automation_enabled""",
-        (aid,),
+        WHERE s.agent_id=%s AND s.platform='telegram' AND s.state='connected' AND s.automation_enabled"""
+        + (" AND s.profile_id=%s" if profile_id else ""),
+        (aid, profile_id) if profile_id else (aid,),
     )
     for account in accounts:
         if next_rule_review(c, aid, account, agent["config_revision"]):

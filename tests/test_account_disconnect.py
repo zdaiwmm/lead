@@ -340,9 +340,12 @@ async def test_account_inspection_ignores_released_history_but_preserves_login_r
     selected = []
     page = object()
 
-    async def get_actor(requested):
+    async def get_actor(requested, profile_id):
         assert requested == aid
-        return SimpleNamespace(lock=asyncio.Lock(), page=page)
+        assert profile_id == account["profile_id"]
+        return SimpleNamespace(
+            lock=asyncio.Lock(), page=page, profile={"id": profile_id}
+        )
 
     async def select_account(actual_page, identity):
         assert actual_page is page
@@ -414,10 +417,13 @@ async def test_release_then_verify_another_telegram_login_through_native_gateway
                 ),
             )
             await page.goto("https://web.telegram.org/k/?account=" + slot)
-            actor = SimpleNamespace(page=page, lock=asyncio.Lock())
+            actor = SimpleNamespace(
+                page=page, lock=asyncio.Lock(), profile={"id": account["profile_id"]}
+            )
 
-            async def get_actor(requested):
+            async def get_actor(requested, profile_id):
                 assert requested == aid
+                assert profile_id == account["profile_id"]
                 return actor
 
             async def inspect_gateway(path, body):

@@ -6,12 +6,14 @@ import time
 from contextlib import AsyncExitStack
 from datetime import timedelta
 
+from temporalio import activity
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
-from .activities import autonomous_cycle, chat_job, execute_task, mark_task_failed
+from .activities import autonomous_cycle as managed_autonomous_cycle
+from .activities import chat_job, execute_task, mark_task_failed
 from .admin_operations import execution_policy
 from .analytics_ingest import TASK_QUEUE as ANALYTICS_QUEUE
 from .analytics_ingest import process_analytics_ingest
@@ -23,6 +25,7 @@ from .config import STATE, any_model_configured, env, model_config
 from .db import all_rows, emit, one
 from .db import pooled_tx as tx
 from .identity_store import execution_tenants
+from .resident_ownership import resident_cycle_agent_ids
 from .scope import service_scope, tenant_scope
 from .temporal_client import connect
 from .workflows import (
@@ -33,6 +36,15 @@ from .workflows import (
     PublishWorkflow,
     SupervisorWorkflow,
 )
+
+
+@activity.defn(name="autonomous_cycle")
+async def autonomous_cycle(args: dict):
+    # Route before scoped/managed execution acquires any shared business resources.
+    # A resident owns only this supervisor cycle, never channel.clock delivery queues.
+    if str(args["agent_id"]) in resident_cycle_agent_ids(env()):
+        return {"delay": 300, "cadence_version": 1, "reason": "device_resident_owns_cycle"}
+    return await managed_autonomous_cycle(args)
 
 
 def model_became_available():
@@ -338,6 +350,8 @@ async def await_release_window(stop):
 
 
 async def main():
+    # Fail closed before connecting or starting any queue when operator routing is invalid.
+    resident_cycle_agent_ids(env())
     client = await connect()
     activity_slots = max(1, int(env().get("LEAD_ACTIVITY_SLOTS") or 12))
     workflow_slots = max(1, int(env().get("LEAD_WORKFLOW_SLOTS") or 12))

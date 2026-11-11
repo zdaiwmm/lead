@@ -114,3 +114,29 @@ PR #26 新增 `httpx2` 后，家庭节点共享解释器须已经由节点维护
 `verify_account_browser.py` 是开发验收工具，不由生产服务调用。发布入口仅识别 PR #28/#29 对应的精确 blob，不开放其他脚本，也不执行该工具。未来修改须重新审阅并更新对应核验。登记节点工具按本需求/环境授权，使用 tool_release.py 的已验证工具包、备份和独立回读，不因合并 SHA 变化重复询问。
 
 预先撤除模型临时覆盖且持有维护状态时，如果正式入口在切换前拒绝，不要让维护状态等待下一轮 CI。先只读确认 selector 未变、独立核验旧映像，再恢复备份的原配置和服务，健康检查通过后通过 `home_live_maintenance.py restore <本次SHA>` 解除维护；记录原覆盖仍存在和本次未上线。禁止把旧请求改写成成功，后续使用新的已确认正式请求。
+
+## 独立渠道执行器
+
+配置及启动入口为 `lead_app.channel_executor`。公共代码来自同轮只读应用镜像，私有平台代码放在独立只读适配器目录，禁止用旧 `browser.py`、`backups.py`、`budget.py` 等覆盖公共包。账号由当前 Profile 绑定解析，配置只选择项目和资料槽，不固化外部账号。现有家庭节点的依赖继续从已核验、只读的 `/run/lead-home/bin/site` 加载；不继承任意 `PYTHONPATH`。
+
+每个进程使用独立绑定文件、适配器、回执目录与服务生命周期。绑定文件字段由 `channel_executor.Binding` 定义；操作员保存在 `/etc/lead-home-release/`，root 持有且组/其他用户不可写。`release` 为进程内稳定路径（例如 `/run/lead-executor/release`），必须完整只读绑定到指定主线镜像。`adapter_root` 为另一完整只读绑定，清单逐个覆盖所有 Python 文件，不允许未登记二进制、字节码或链接。`receipt` 放在该执行器独享、权限 0700 的可写目录。启动命令为 Python 的 `-I -B`、镜像中的 `services/api/lead_app/channel_executor.py` 及绑定文件绝对路径。
+
+Reddit 现有 Worker 使用同一镜像内 `services/channel_adapters/reddit/entry.py`，保持原有持久队列。`LEAD_RESIDENT_CYCLE_AGENT_IDS` 是已有专用执行器接管项目主循环的显式 UUID 清单；迁移原 Worker 包装前先配置同一归属，不能让两个进程同时接管主循环。此配置不拦截 Reddit 的独立渠道时钟。Telegram 保留独立服务、资料与出口，先对账私有平台行为，再迁移到显式适配器；不能拿通用测试替代私有适配器的授权、回执及本地模型限制验收。
+
+发布前逐个保存旧服务/绑定/适配器与恢复清单；在各执行器安全点按渠道分别切换和回读，不把两个渠道加入同一 restart 命令。公共应用仍通过原正式取件、备份和审批入口交付。应用切换内部的检查只覆盖应用，最终验收则由 root 持有的 `executors.json` 登记所有渠道，例如 `{"version":1,"executors":[{"service":"lead-telegram.service","channel":"telegram","binding":"/etc/lead-home-release/telegram.json"},{"service":"lead-home-worker.service","channel":"reddit","binding":"/etc/lead-home-release/reddit.json"}]}`。这里是格式示例，服务名及配置需据真实节点盘点生成。
+
+正式节点工具 `home_systemd_release.py executors <SHA>` 独立核对两个渠道的 PID、InvocationID、命令、配置、内核挂载、公共代码、适配器及启动证明。注册后，发布轮询调用的最终 `verify <SHA>` 同样必须通过这项核验；缺少任一渠道、旧进程证明、旧模块覆盖或摘要变化均拒绝成功回传。`current` 仍是主应用版本，不单独证明渠道已交付。未完成首次注册的节点不能据旧 `verify` 宣称渠道统一完成。
+
+启动证明只说明该进程的代码和绑定；真实业务验收还须分别记录任务、账号/Profile/出口、执行归属、平台结果/回执以及恢复情况。平台许可不足保持等待；未知发送先核对原结果，不发送额外测试内容。
+
+### 已有渠道的首次纳管
+
+正式工具同轮新增 `provision-executor <SHA> /etc/lead-home-release/<channel>-provision.json` 与 `register-executors <SHA>`。先通过 `tool_release.py` 安装该 SHA 的工具包，再使用同轮已验证只读镜像中的 `services/channel_adapters/systemd/executor.conf.in`。不把本地临时脚本装入生产。
+
+操作员先只读盘点现有单元、全部 drop-in、真实进程、挂载、凭据来源和私有策略摘要，生成 root 私有计划。计划明确一个服务、完整 Binding、`main-current` 或 `independent` 来源模式、保留的只读挂载，以及旧主单元/drop-in/绑定/selector 的预期摘要。固定输出在 `/etc/lead-home-release/`、该服务的 `zzzz-lead-executor.conf` 和发布仓库 `executors/<channel>/`；不能指定任意写入目的地或原始 systemd 文本。私有适配器暂存到清单摘要命名的目录，文件集必须与 Binding 完全一致；不把源码或业务资料提交到公开仓库。
+
+凭据保持原 EnvironmentFile 或现有只读数据绑定；公共代码新位置需要读取外置 dotenv 时，用进程环境 `LEAD_ENV_FILE` 指定绝对普通文件，显式无效路径拒绝、不回落。该设置保留逐次重读与进程环境优先级。新镜像包含浏览器隔离、研究、备份和迁移运行依赖，不依赖旧私有公共代码。
+
+经原维护入口取得本次 SHA 的安全点后，逐次调用一个渠道的纳管命令。工具持共享发布锁，只读核对维护指纹和空闲状态，持久保存旧字节，停止单个服务、安装模板、启动并核对实际进程证明。可知失败恢复原文件和服务；中断留下 journal，下次仅回读，不重放切换。工具不改变业务授权、不自动解除维护、不替换主应用 `current`。`main-current` 须先由正式应用发布切到候选；`independent` 可在主应用切换前单独准备获批版本。
+
+两个渠道各自验证成功后，调用 `register-executors <SHA>` 进行最后登记；它再次检查两个实际进程且不重启服务。随后从独立连接执行 `executors <SHA>` 和正式 `verify <SHA>`，核对账号/Profile/出口及原任务后再经原入口恢复运营。首次纳管、后续升级与回退均保存同一套逐渠道证据；未知发送不因迁移而重新提交。

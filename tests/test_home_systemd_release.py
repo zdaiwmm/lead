@@ -116,10 +116,17 @@ def test_prior_request_recovered_before_new_deploy(hook, monkeypatch):
     assert not (hook.STORE / "8.started").exists()
 
 
-def test_deploy_path_checks_compatibility_and_skips_repeats(hook, monkeypatch):
+@pytest.mark.parametrize("application_path", (
+    "services/api/lead_app/app.py", "services/channel_adapters/reddit/entry.py",
+    "services/channel_adapters/systemd/executor.conf.in",
+))
+@pytest.mark.parametrize("unreviewed_path", ("infra/migrations/new.py", "scripts/unreviewed.py"))
+def test_deploy_path_checks_compatibility_and_skips_repeats(
+    hook, monkeypatch, application_path, unreviewed_path,
+):
     new = "b" * 40
     commands = []
-    changes = "infra/migrations/new.py\0"
+    changes = unreviewed_path + "\0"
 
     def command(*args, **kwargs):
         commands.append(args)
@@ -156,7 +163,7 @@ def test_deploy_path_checks_compatibility_and_skips_repeats(hook, monkeypatch):
         hook.deploy(new)
     assert activations == [] and not any("start" in c for c in commands)
 
-    changes = "services/api/lead_app/app.py\0"
+    changes = application_path + "\0"
     hook.deploy(new)
     hook.deploy(new)
     assert [c[2] for c in commands if c[:2] == ("systemctl", "start")] == [
@@ -363,3 +370,633 @@ def test_fault_isolation_requires_exact_reviewed_files_and_live_schema(hook, mon
     monkeypatch.setattr(hook, 'run', lambda *a: 'unknown')
     with pytest.raises(hook.Refused, match='compatibility review'):
         hook.reviewed_fault_isolation('/mirror', 'b' * 40, paths)
+
+
+@pytest.fixture
+def executors(hook, monkeypatch, tmp_path):
+    """Synthetic proc trees; only kernel mount identity and owner uid are substituted."""
+    import hashlib
+    import json
+    from types import SimpleNamespace
+
+    revision = 'a' * 40
+    release = hook.STORE / revision
+    core = release / 'services/api/lead_app'
+    core.mkdir(parents=True)
+    (core / '__init__.py').write_text('')
+    (core / 'channel_executor.py').write_text('# fixture launcher\n')
+    (release / 'REVISION').write_text(revision)
+    proc_base = tmp_path / 'proc'
+    registry = tmp_path / 'config/executors.json'
+    registry.parent.mkdir(mode=0o700)
+    entries, bindings, proofs, props = [], {}, {}, {}
+    interpreter = tmp_path / 'trusted/python3.12'
+    interpreter.parent.mkdir()
+    interpreter.write_bytes(b'fixture interpreter')
+    interpreter.chmod(0o755)
+    monkeypatch.setattr(hook, 'EXECUTOR_PYTHON_SOURCE', interpreter, raising=False)
+    def digest(data):
+        return hashlib.sha256(data).hexdigest()
+    core_files = {p.name: digest(p.read_bytes()) for p in core.iterdir()}
+    for i, channel in enumerate(('telegram', 'reddit'), 10):
+        service = f'lead-test-{channel}.service'
+        pid, invocation = str(i), str(i) * 16
+        proc = proc_base / pid
+        root = proc / 'root'
+        target = '/run/lead-executor/release'
+        view = root / target.lstrip('/')
+        view.mkdir(parents=True)
+        # Hard links model identity of the exact mounted image files, avoiding symlinks.
+        import shutil
+        shutil.copytree(release, view, dirs_exist_ok=True)
+        adapter = root / f'run/lead-executors/{channel}/adapter'
+        adapter.mkdir(parents=True)
+        (adapter / 'main.py').write_text('async def run(binding): pass\n')
+        binding_file = registry.parent / f'{channel}.json'
+        binding = dict(version=1, channel=channel, executor_id=f'test-{channel}',
+                       agent_id='00000000-0000-0000-0000-000000000001', profile_slot=channel,
+                       release=target, adapter_root='/' + str(adapter.relative_to(root)),
+                       entrypoint='main:run', adapter_files={'main.py': digest((adapter / 'main.py').read_bytes())},
+                       receipt=f'/run/lead-executors/{channel}/receipt/boot.json')
+        binding_file.write_text(json.dumps(binding))
+        binding_file.chmod(0o600)
+        process_binding = root / str(binding_file).lstrip('/')
+        process_binding.parent.mkdir(parents=True)
+        process_binding.write_bytes(binding_file.read_bytes())
+        process_binding.chmod(0o600)
+        receipt = root / binding['receipt'].lstrip('/')
+        receipt.parent.mkdir(parents=True, mode=0o700)
+        proof = dict(version=1, channel=channel, executor_id=binding['executor_id'], revision=revision,
+                     pid=int(pid), invocation=invocation, core_files=core_files, adapter_files=binding['adapter_files'],
+                     binding_sha256=digest(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()),
+                     boot_sha256=core_files['channel_executor.py'])
+        receipt.write_text(json.dumps(proof))
+        receipt.chmod(0o600)
+        (proc / 'exe').symlink_to(interpreter)
+        process_python = root / 'run/lead-home/bin/py/bin/python3.12'
+        process_python.parent.mkdir(parents=True)
+        process_python.symlink_to(interpreter)
+        (proc / 'mountinfo').write_text(
+            '10 1 1:3 / / ro - ext4 disk ro\n'
+            '20 10 1:4 /py /run/lead-home/bin/py ro - ext4 disk rw\n'
+            f'30 20 1:1 / {target} ro - squashfs image ro\n'
+            f'31 20 1:2 /adapter {binding["adapter_root"]} ro - ext4 disk rw\n')
+        (proc / 'cmdline').write_bytes(b'\0'.join(s.encode() for s in [
+            '/run/lead-home/bin/py/bin/python3.12', '-I', '-B', target + '/services/api/lead_app/channel_executor.py', str(binding_file)]) + b'\0')
+        props[service] = dict(MainPID=pid, InvocationID=invocation, ActiveState='active')
+        entries.append(dict(service=service, channel=channel, binding=str(binding_file)))
+        bindings[channel], proofs[channel] = binding, proof
+    registry.write_text(json.dumps(dict(version=1, executors=entries)))
+    registry.chmod(0o600)
+    monkeypatch.setattr(hook, 'EXECUTOR_REGISTRY', registry, raising=False)
+    monkeypatch.setattr(hook, 'PROC', proc_base, raising=False)
+    monkeypatch.setattr(hook, 'image', lambda sha: hook.STORE / sha)
+    monkeypatch.setattr(hook, 'property_of', lambda service, prop: props[service][prop])
+    # We cannot chown root or bind mount in this unprivileged unit-test environment.
+    actual_lstat, actual_samefile = Path.lstat, Path.samefile
+    def lstat(path):
+        st = actual_lstat(path)
+        return SimpleNamespace(st_mode=st.st_mode, st_uid=0, st_size=st.st_size)
+    monkeypatch.setattr(Path, 'lstat', lstat)
+    def samefile(path, other):
+        if path in [proc_base / str(i) / 'root' / bindings[c]['release'].lstrip('/')
+                    for i, c in enumerate(('telegram', 'reddit'), 10)] and other == release:
+            return True
+        return actual_samefile(path, other)
+    monkeypatch.setattr(Path, 'samefile', samefile)
+    return SimpleNamespace(hook=hook, revision=revision, registry=registry, entries=entries,
+                           bindings=bindings, proofs=proofs, props=props, proc=proc_base,
+                           save=lambda p, data: p.write_text(json.dumps(data)))
+
+
+def test_executor_registry_attests_both_independent_processes(executors):
+    e = executors
+    proofs = e.hook.verify_executors(e.revision)
+    assert {p['channel'] for p in proofs} == {'telegram', 'reddit'}
+    assert {p['pid'] for p in proofs} == {10, 11}
+
+
+@pytest.mark.parametrize('fault', ['missing-channel', 'duplicate-service', 'duplicate-executor', 'shared-pid',
+                                    'wrong-channel', 'unsafe-unit', 'unsafe-registry', 'symlink-registry',
+                                    'writable-binding', 'binding-drift', 'stale-receipt', 'public-receipt',
+                                    'wrong-revision', 'core-drift', 'boot-drift', 'adapter-drift',
+                                    'extra-pyc', 'extra-so', 'adapter-symlink', 'core-overlay', 'adapter-overlay',
+                                    'writable-adapter', 'wrong-mount', 'wrong-launcher'])
+def test_executor_evidence_rejects_drift(executors, monkeypatch, fault):
+    e = executors
+    b = e.bindings['telegram']
+    root = e.proc / '10/root'
+    receipt = root / b['receipt'].lstrip('/')
+    adapter = root / b['adapter_root'].lstrip('/')
+    core = root / b['release'].lstrip('/') / 'services/api/lead_app'
+    binding_file = Path(e.entries[0]['binding'])
+    if fault == 'missing-channel':
+        e.entries.pop()
+    if fault == 'duplicate-service':
+        e.entries[1]['service'] = e.entries[0]['service']
+    if fault == 'duplicate-executor':
+        other = e.bindings['reddit']
+        other['executor_id'] = b['executor_id']
+        e.save(Path(e.entries[1]['binding']), other)
+    if fault == 'shared-pid':
+        e.props[e.entries[1]['service']]['MainPID'] = '10'
+    if fault == 'wrong-channel':
+        e.entries[0]['channel'] = 'reddit'
+    if fault == 'unsafe-unit':
+        e.entries[0]['service'] = '../other.service'
+    if fault == 'unsafe-registry':
+        e.registry.chmod(0o666)
+    if fault == 'writable-binding':
+        binding_file.chmod(0o666)
+    if fault == 'binding-drift':
+        (root / str(binding_file).lstrip('/')).write_text('{}')
+    if fault == 'stale-receipt':
+        e.proofs['telegram']['invocation'] = 'f' * 32
+        e.save(receipt, e.proofs['telegram'])
+    if fault == 'public-receipt':
+        receipt.chmod(0o644)
+    if fault == 'wrong-revision':
+        (root / b['release'].lstrip('/') / 'REVISION').write_text('b' * 40)
+    if fault == 'core-drift':
+        (core / 'changed.py').write_text('pass')
+    if fault == 'boot-drift':
+        e.proofs['telegram']['boot_sha256'] = '0' * 64
+        e.save(receipt, e.proofs['telegram'])
+    if fault == 'adapter-drift':
+        (adapter / 'main.py').write_text('changed')
+    if fault == 'extra-pyc':
+        (adapter / 'hidden.pyc').write_bytes(b'code')
+    if fault == 'extra-so':
+        (adapter / 'hidden.so').write_bytes(b'code')
+    if fault == 'adapter-symlink':
+        (adapter / 'link.py').symlink_to(adapter / 'main.py')
+    mounts = e.proc / '10/mountinfo'
+    if fault in ('core-overlay', 'adapter-overlay'):
+        target = b['release'] if fault == 'core-overlay' else b['adapter_root']
+        mounts.write_text(mounts.read_text() + f'33 30 1:3 / {target}/hidden ro - ext4 disk rw\n')
+    if fault == 'writable-adapter':
+        mounts.write_text(mounts.read_text().replace(f'{b["adapter_root"]} ro', f'{b["adapter_root"]} rw'))
+    if fault == 'wrong-mount':
+        monkeypatch.setattr(Path, 'samefile', lambda *a: False)
+    if fault == 'wrong-launcher':
+        (e.proc / '10/cmdline').write_bytes(b'/usr/bin/python3\0-c\0pass\0')
+    e.save(e.registry, dict(version=1, executors=e.entries))
+    if fault == 'symlink-registry':
+        backing = e.registry.with_suffix('.real')
+        e.registry.rename(backing)
+        e.registry.symlink_to(backing)
+    with pytest.raises((e.hook.Refused, ValueError)):
+        e.hook.verify_executors(e.revision)
+
+
+def test_executor_process_rechecked_after_all_evidence(executors, monkeypatch):
+    e = executors
+    original = e.hook.property_of
+    counts = {}
+    def changing(service, prop):
+        key = service, prop
+        counts[key] = counts.get(key, 0) + 1
+        if prop == 'InvocationID' and counts[key] > 1:
+            return 'f' * 32
+        return original(service, prop)
+    monkeypatch.setattr(e.hook, 'property_of', changing)
+    with pytest.raises(e.hook.Refused, match='changed'):
+        e.hook.verify_executors(e.revision)
+
+
+def test_executor_rejects_source_ancestor_symlink(executors):
+    e = executors
+    root = e.proc / '10/root' / e.bindings['telegram']['release'].lstrip('/')
+    services = root / 'services'
+    moved = root / 'elsewhere'
+    services.rename(moved)
+    services.symlink_to(moved, target_is_directory=True)
+    with pytest.raises(e.hook.Refused, match='redirected'):
+        e.hook.verify_executors(e.revision)
+
+
+def test_executor_cli_is_separate_from_application_verification(executors, monkeypatch, capsys):
+    import json
+    e = executors
+    monkeypatch.setattr(e.hook.sys, 'argv', ['hook', 'executors', e.revision])
+    monkeypatch.setattr(e.hook, 'verify', lambda *a: pytest.fail('application verifier must stay separate'))
+    monkeypatch.setattr(e.hook, 'deploy', lambda *a: pytest.fail('executor verification is read only'))
+    e.hook.main()
+    assert {proof['channel'] for proof in json.loads(capsys.readouterr().out)} == {'telegram', 'reddit'}
+
+
+def test_executor_rechecks_mount_namespace_after_evidence(executors, monkeypatch):
+    e = executors
+    original = e.hook.property_of
+    reads = 0
+    def changing(service, prop):
+        nonlocal reads
+        if service == e.entries[0]['service'] and prop == 'InvocationID':
+            reads += 1
+            if reads == 2:
+                mounts = e.proc / '10/mountinfo'
+                mounts.write_text(mounts.read_text() + '50 20 1:9 / /new-mount ro - tmpfs tmpfs ro\n')
+        return original(service, prop)
+    monkeypatch.setattr(e.hook, 'property_of', changing)
+    with pytest.raises(e.hook.Refused, match='mount.*changed'):
+        e.hook.verify_executors(e.revision)
+
+
+@pytest.mark.parametrize('registered', [False, True])
+def test_final_verify_cli_attests_registered_executors(hook, monkeypatch, tmp_path, registered):
+    registry = tmp_path / 'executors.json'
+    if registered:
+        registry.write_text('{}')
+    monkeypatch.setattr(hook, 'EXECUTOR_REGISTRY', registry)
+    calls = []
+    monkeypatch.setattr(hook, 'verify', lambda sha: calls.append(('application', sha)))
+    monkeypatch.setattr(hook, 'verify_executors', lambda sha: calls.append(('executors', sha)))
+    monkeypatch.setattr(hook.sys, 'argv', ['hook', 'verify', 'a' * 40])
+    hook.main()
+    assert calls == [('application', 'a' * 40)] + ([('executors', 'a' * 40)] if registered else [])
+
+
+def test_final_verify_cli_rejects_broken_registry_symlink(hook, monkeypatch, tmp_path):
+    registry = tmp_path / 'executors.json'
+    registry.symlink_to(tmp_path / 'missing')
+    monkeypatch.setattr(hook, 'EXECUTOR_REGISTRY', registry)
+    monkeypatch.setattr(hook, 'verify', lambda sha: None)
+    monkeypatch.setattr(hook, 'image', lambda sha: hook.STORE / sha)
+    core = hook.STORE / ('a' * 40) / 'services/api/lead_app'
+    core.mkdir(parents=True)
+    (core / 'channel_executor.py').write_text('# fixture')
+    monkeypatch.setattr(hook.sys, 'argv', ['hook', 'verify', 'a' * 40])
+    with pytest.raises(SystemExit):
+        hook.main()
+
+
+@pytest.mark.parametrize('fault', ['argv', 'actual-exe', 'writable-source', 'writable-mount'])
+def test_executor_requires_trusted_actual_interpreter(executors, fault):
+    e = executors
+    proc = e.proc / '10'
+    if fault == 'argv':
+        command = proc / 'cmdline'
+        command.write_bytes(command.read_bytes().replace(
+            b'/run/lead-home/bin/py/bin/python3.12', b'/tmp/untrusted-replacement-interpreter', 1))
+    elif fault == 'actual-exe':
+        replacement = e.proc / 'replacement-python'
+        replacement.write_bytes(b'untrusted executable')
+        (proc / 'exe').unlink()
+        (proc / 'exe').symlink_to(replacement)
+    elif fault == 'writable-source':
+        e.hook.EXECUTOR_PYTHON_SOURCE.chmod(0o777)
+    else:
+        mounts = proc / 'mountinfo'
+        mounts.write_text(mounts.read_text().replace('/run/lead-home/bin/py ro', '/run/lead-home/bin/py rw'))
+    with pytest.raises(e.hook.Refused, match='interpreter'):
+        e.hook.verify_executors(e.revision)
+
+
+def test_executor_accepts_root_owned_interpreter_symlink(executors, monkeypatch):
+    e = executors
+    original = e.hook.EXECUTOR_PYTHON_SOURCE
+    link = original.with_name('python-link')
+    link.symlink_to(original)
+    monkeypatch.setattr(e.hook, 'EXECUTOR_PYTHON_SOURCE', link)
+    assert len(e.hook.verify_executors(e.revision)) == 2
+
+
+def test_single_executor_can_be_verified_before_registry_registration(executors):
+    e = executors
+    e.registry.unlink()
+    proof = e.hook.verify_executor_entry(e.revision, e.entries[0])
+    assert proof['channel'] == 'telegram'
+    assert proof['pid'] == 10
+
+
+@pytest.fixture
+def provisioning(hook, monkeypatch, tmp_path):
+    import hashlib
+    import json
+    import os
+    from types import SimpleNamespace
+
+    h = hook
+    channel, sha = 'telegram', 'b' * 40
+    config_root = tmp_path / 'etc/lead-home-release'
+    config_root.mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(h, 'EXECUTOR_REGISTRY', config_root / 'executors.json')
+    systemd = tmp_path / 'etc/systemd/system'
+    systemd.mkdir(parents=True)
+    monkeypatch.setattr(h, 'EXECUTOR_SYSTEMD', systemd, raising=False)
+    template = Path(__file__).resolve().parents[1] / 'services/channel_adapters/systemd/executor.conf.in'
+    bundled = h.STORE / sha / 'services/channel_adapters/systemd/executor.conf.in'
+    bundled.parent.mkdir(parents=True)
+    bundled.write_bytes(template.read_bytes())
+    source = b'async def run(binding): pass\n'
+    manifest = {'entry.py': hashlib.sha256(source).hexdigest()}
+    def canonical(value):
+        return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+    digest = hashlib.sha256(canonical(manifest)).hexdigest()
+    base = h.STORE / 'executors' / channel
+    adapter = base / 'adapters' / digest
+    adapter.mkdir(parents=True)
+    (adapter / 'entry.py').write_bytes(source)
+    (config_root / f'{channel}.env').write_text('LEAD_ENV_FILE=/run/site/.env\n')
+    (config_root / f'{channel}.env').chmod(0o600)
+    preserved = tmp_path / 'preserved.env'
+    preserved.write_text('fixture=true\n')
+    preserved.chmod(0o600)
+    service = 'lead-fixture-telegram.service'
+    fragment = systemd / service
+    fragment.write_text('[Service]\nExecStart=/legacy\n')
+    plan = dict(version=1, channel=channel, service=service, core_mode='independent',
+                binding=dict(version=1, channel=channel, executor_id='fixture-telegram',
+                             agent_id='00000000-0000-0000-0000-000000000001', profile_slot='fixture',
+                             release='/run/lead-executor/release', adapter_root='/run/lead-executor/adapter',
+                             entrypoint='entry:run', adapter_files=manifest,
+                             receipt='/run/lead-executor/receipt/boot.json'),
+                preserved_readonly_bindings=[dict(source=str(preserved), target='/run/site/.env')],
+                expected=dict(fragment_sha256=hashlib.sha256(fragment.read_bytes()).hexdigest(), dropins={},
+                              binding_sha256=None, selector=None))
+    plan_path = config_root / f'{channel}-provision.json'
+    plan_path.write_bytes(canonical(plan))
+    plan_path.chmod(0o600)
+    props = dict(FragmentPath=str(fragment), DropInPaths='', MainPID='10', InvocationID='a' * 32,
+                 ActiveState='active', User='fixture', Group='fixture',
+                 ExecStart='{ path=/legacy ; argv[]=/legacy ; ignore_errors=no ; pid=10 ; status=0/0 }',
+                 BindReadOnlyPaths=str(preserved) + ':/run/site/.env:rbind', EnvironmentFiles='')
+    commands, holds = [], []
+    dropin = systemd / (service + '.d') / 'zzzz-lead-executor.conf'
+    def run(*args, **kwargs):
+        commands.append(args)
+        if args[:2] == ('systemctl', 'stop'):
+            props['ActiveState'] = 'inactive'
+        if args[:2] == ('systemctl', 'start'):
+            props['ActiveState'] = 'active'
+        if args[:2] == ('systemctl', 'daemon-reload'):
+            executable = '/new' if dropin.exists() else '/legacy'
+            props['ExecStart'] = '{ path=' + executable + ' ; argv[]=' + executable + ' ; ignore_errors=no ; pid=20 ; status=0/0 }'
+        return ''
+    monkeypatch.setattr(h, 'run', run)
+    monkeypatch.setattr(h, 'property_of', lambda service, prop: props[prop])
+    monkeypatch.setattr(h, 'image', lambda rev: h.STORE / rev)
+    monkeypatch.setattr(h, 'current', lambda: sha)
+    monkeypatch.setattr(h, 'executor_maintenance', lambda rev, aid: holds.append((rev, aid)), raising=False)
+    monkeypatch.setattr(h, 'verify_executor_entry', lambda rev, entry: dict(channel=entry['channel'], revision=rev))
+    monkeypatch.setattr(h, 'wait_executor_entry', lambda rev, entry: h.verify_executor_entry(rev, entry), raising=False)
+    monkeypatch.setattr(h.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(h.os, 'chown', lambda *a, **kw: None)
+    actual = Path.lstat
+    def lstat(path):
+        value = actual(path)
+        return SimpleNamespace(st_mode=value.st_mode, st_uid=0, st_gid=0, st_size=value.st_size)
+    monkeypatch.setattr(Path, 'lstat', lstat)
+    import grp
+    import pwd
+    monkeypatch.setattr(pwd, 'getpwnam', lambda name: SimpleNamespace(pw_uid=os.getuid() or 1234, pw_gid=os.getgid() or 1234))
+    monkeypatch.setattr(grp, 'getgrnam', lambda name: SimpleNamespace(gr_gid=os.getgid() or 1234))
+    return SimpleNamespace(h=h, sha=sha, channel=channel, service=service, plan=plan, path=plan_path,
+                           base=base, commands=commands, props=props, holds=holds, dropin=dropin,
+                           config=config_root / f'{channel}.json', adapter=adapter,
+                           save=lambda: plan_path.write_bytes(canonical(plan)))
+
+
+def test_provision_executor_is_single_service_and_durable(provisioning):
+    import json
+    p = provisioning
+    result = p.h.provision_executor(p.sha, p.path)
+    assert result['channel'] == p.channel
+    assert json.loads(p.config.read_text()) == p.plan['binding']
+    assert (p.base / 'current').readlink() == p.h.STORE / p.sha
+    assert 'ExecStart=/run/lead-home/bin/py/bin/python3.12 -I -B' in p.dropin.read_text()
+    assert not p.h.EXECUTOR_REGISTRY.exists()
+    assert p.holds
+    actions = [a for a in p.commands if a[:2] in (('systemctl', 'stop'), ('systemctl', 'start'))]
+    assert actions == [('systemctl', 'stop', p.service), ('systemctl', 'start', p.service)]
+    journal = json.loads((p.base / 'journal' / (p.sha + '.json')).read_text())
+    assert journal['state'] == 'verified'
+    count = len(actions)
+    p.h.provision_executor(p.sha, p.path)
+    assert len([a for a in p.commands if a[:2] in (('systemctl', 'stop'), ('systemctl', 'start'))]) == count
+
+
+@pytest.mark.parametrize('fault', ['bad-schema', 'unsafe-plan', 'adapter-drift', 'unit-drift',
+                                  'overlay', 'other-current', 'not-held'])
+def test_provision_rejects_before_service_mutation(provisioning, monkeypatch, fault):
+    p = provisioning
+    if fault == 'bad-schema':
+        p.plan['arbitrary_output'] = '/etc/unrelated'
+    if fault == 'unsafe-plan':
+        p.path.chmod(0o666)
+    if fault == 'adapter-drift':
+        (p.adapter / 'hidden.pyc').write_bytes(b'code')
+    if fault == 'unit-drift':
+        p.plan['expected']['fragment_sha256'] = '0' * 64
+    if fault == 'overlay':
+        p.plan['preserved_readonly_bindings'][0]['target'] = '/run/lead-executor/release/patched.py'
+    if fault == 'other-current':
+        p.plan['core_mode'] = 'main-current'
+        monkeypatch.setattr(p.h, 'current', lambda: 'a' * 40)
+    if fault == 'not-held':
+        def unavailable(*args):
+            raise p.h.Refused('maintenance unavailable')
+        monkeypatch.setattr(p.h, 'executor_maintenance', unavailable)
+    p.save()
+    with pytest.raises((p.h.Refused, ValueError)):
+        p.h.provision_executor(p.sha, p.path)
+    assert not any(a[:2] in (('systemctl', 'stop'), ('systemctl', 'start')) for a in p.commands)
+    assert not p.dropin.exists()
+
+
+def test_provision_rolls_back_files_and_only_same_service(provisioning, monkeypatch):
+    import json
+    p = provisioning
+    old_config = b'{"previous":"exact bytes"}\n'
+    p.config.write_bytes(old_config)
+    p.config.chmod(0o640)
+    import hashlib
+    p.plan['expected']['binding_sha256'] = hashlib.sha256(old_config).hexdigest()
+    p.save()
+    def failed(*args):
+        raise p.h.Refused('fixture boot failure')
+    monkeypatch.setattr(p.h, 'verify_executor_entry', failed)
+    with pytest.raises(p.h.Refused, match='restored'):
+        p.h.provision_executor(p.sha, p.path)
+    assert p.config.read_bytes() == old_config
+    assert p.config.stat().st_mode & 0o777 == 0o640
+    assert not p.dropin.exists()
+    assert not (p.base / 'current').exists()
+    assert p.props['ActiveState'] == 'active'
+    assert json.loads((p.base / 'journal' / (p.sha + '.json')).read_text())['state'] == 'rolled-back'
+    assert all(a[-1] == p.service for a in p.commands if a[:2] in (('systemctl', 'stop'), ('systemctl', 'start')))
+
+
+def test_incomplete_provision_resumes_readback_without_replaying(provisioning, monkeypatch):
+    import json
+    p = provisioning
+    p.h.provision_executor(p.sha, p.path)
+    journal_path = p.base / 'journal' / (p.sha + '.json')
+    journal = json.loads(journal_path.read_text())
+    journal['state'] = 'installed'
+    journal_path.write_text(json.dumps(journal))
+    p.commands.clear()
+    def unknown(*args):
+        raise p.h.Refused('not yet verified')
+    monkeypatch.setattr(p.h, 'verify_executor_entry', unknown)
+    with pytest.raises(p.h.Refused, match='incomplete'):
+        p.h.provision_executor(p.sha, p.path)
+    assert not any(a[0] == 'systemctl' for a in p.commands)
+
+
+def test_reviewed_executor_image_builder_is_exact(hook, monkeypatch):
+    name = 'scripts/build_home_image.sh'
+    monkeypatch.setattr(hook, 'run', lambda *a: 'ba6cbd7ebe5af144346aacad40056e8a7a330daa')
+    assert hook.reviewed_executor_image_files('/mirror', 'a' * 40, {name, 'scripts/arbitrary.py'}) == {name}
+    monkeypatch.setattr(hook, 'run', lambda *a: 'other')
+    with pytest.raises(hook.Refused, match='image builder'):
+        hook.reviewed_executor_image_files('/mirror', 'a' * 40, {name})
+
+
+def test_independent_executor_can_precede_main_application_cutover(provisioning, monkeypatch):
+    p = provisioning
+    monkeypatch.setattr(p.h, 'current', lambda: 'a' * 40)
+    assert p.h.provision_executor(p.sha, p.path)['revision'] == p.sha
+
+
+def test_maintenance_check_uses_only_trusted_readonly_query(hook, monkeypatch, tmp_path):
+    site = tmp_path / 'tools/home_live_maintenance.py'
+    site.parent.mkdir()
+    site.write_text('# trusted fixture')
+    monkeypatch.setattr(hook, 'TOOLS', site.parent)
+    monkeypatch.setattr(hook, 'executor_host_file', lambda p: b'trusted')
+    programs = []
+    def run(*args):
+        assert args[:3] == ('/usr/bin/python3', '-IB', '-c')
+        programs.append(args[3])
+        return 't'
+    monkeypatch.setattr(hook, 'run', run)
+    hook.executor_maintenance('a' * 40, '00000000-0000-0000-0000-000000000001')
+    import runpy
+    queries = []
+    monkeypatch.setattr(runpy, 'run_path', lambda path: {
+        'KEY': 'home_release_maintenance', 'BUSY': 'FALSE', 'FINGERPRINT': "jsonb_build_object('version',a.version)",
+        'site_sql': lambda query: queries.append(query) or 't',
+    })
+    exec(compile(programs[0], '<trusted-maintenance-query>', 'exec'), {})
+    assert len(queries) == 1 and queries[0].startswith('SELECT ')
+    assert "desired_state='running'" in queries[0]
+    assert "home_release_maintenance,sha" in queries[0]
+    assert "home_release_maintenance,before" in queries[0]
+    assert all(token not in queries[0] for token in ('UPDATE ', 'DELETE ', 'INSERT '))
+
+
+def test_executor_start_wait_is_bounded_and_readonly(hook, monkeypatch):
+    attempts = []
+    def verify(sha, entry):
+        attempts.append(entry)
+        if len(attempts) < 3:
+            raise FileNotFoundError('boot receipt pending')
+        return {'revision': sha}
+    monkeypatch.setattr(hook, 'verify_executor_entry', verify)
+    monkeypatch.setattr(hook.time, 'sleep', lambda seconds: None)
+    assert hook.wait_executor_entry('a' * 40, {'channel': 'telegram'}) == {'revision': 'a' * 40}
+    assert len(attempts) == 3
+
+
+def test_registry_registration_requires_both_completed_channels(provisioning, monkeypatch):
+    p = provisioning
+    p.h.provision_executor(p.sha, p.path)
+    with pytest.raises((p.h.Refused, OSError)):
+        p.h.register_executors(p.sha)
+    assert not p.h.EXECUTOR_REGISTRY.exists()
+
+
+def test_registry_registration_is_final_readonly_service_step(provisioning, monkeypatch):
+    import copy
+    import json
+    import shutil
+
+    p = provisioning
+    p.h.provision_executor(p.sha, p.path)
+    other = copy.deepcopy(p.plan)
+    other['channel'] = 'reddit'
+    other['service'] = 'lead-fixture-reddit.service'
+    other['binding']['channel'] = 'reddit'
+    other['binding']['executor_id'] = 'fixture-reddit'
+    other_path = p.path.with_name('reddit-provision.json')
+    other_path.write_text(json.dumps(other))
+    other_path.chmod(0o600)
+    environment = p.path.with_name('reddit.env')
+    environment.write_bytes(p.path.with_name('telegram.env').read_bytes())
+    environment.chmod(0o600)
+    shutil.copytree(p.base / 'adapters', p.h.STORE / 'executors/reddit/adapters')
+    p.h.provision_executor(p.sha, other_path)
+    entries_seen = []
+    def verify_entries(sha, entries, **kwargs):
+        entries_seen.append(entries)
+        assert {entry['channel'] for entry in entries} == {'telegram', 'reddit'}
+        assert len({entry['service'] for entry in entries}) == 2
+        return [{'channel': entry['channel'], 'revision': sha} for entry in entries]
+    monkeypatch.setattr(p.h, 'verify_executor_entries', verify_entries)
+    p.commands.clear()
+    proofs = p.h.register_executors(p.sha)
+    assert {proof['channel'] for proof in proofs} == {'telegram', 'reddit'}
+    assert len(json.loads(p.h.EXECUTOR_REGISTRY.read_text())['executors']) == 2
+    assert p.h.EXECUTOR_REGISTRY.stat().st_mode & 0o777 == 0o600
+    assert not any(command[0] == 'systemctl' for command in p.commands)
+    assert len(entries_seen) == 2
+    assert p.h.register_executors(p.sha) == proofs
+
+
+def test_provision_honors_shared_deployment_lock(provisioning):
+    import fcntl
+    p = provisioning
+    with (p.h.STORE / 'deploy.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(BlockingIOError):
+            p.h.provision_executor(p.sha, p.path)
+    assert p.commands == []
+
+
+def test_provision_inherits_exact_existing_bin_and_data_mounts(provisioning, monkeypatch):
+    import socket
+    import tempfile
+    p = provisioning
+    host_bin = p.h.STORE / 'trusted-bin'
+    host_bin.mkdir()
+    monkeypatch.setattr(p.h, 'EXECUTOR_PYTHON_SOURCE', host_bin / 'py/bin/python3.12')
+    data = p.h.STORE / 'app-owned-data'
+    data.mkdir(mode=0o777)
+    data.chmod(0o777)
+    with tempfile.TemporaryDirectory(prefix='lead-sock-', dir='/tmp') as directory, socket.socket(socket.AF_UNIX) as sock:
+        sock_path = Path(directory) / 'sock'
+        sock.bind(str(sock_path))
+        inherited = [dict(source=str(host_bin), target=str(p.h.BIN)),
+                     dict(source=str(data), target='/run/lead-home/state'),
+                     dict(source=str(sock_path), target='/run/model.sock')]
+        p.plan['preserved_readonly_bindings'] = inherited
+        p.props['BindReadOnlyPaths'] = ' '.join(item['source'] + ':' + item['target'] + ':rbind' for item in inherited)
+        p.save()
+        assert p.h.provision_executor(p.sha, p.path)['channel'] == p.channel
+
+
+def test_provision_refuses_new_data_access_not_in_existing_unit(provisioning):
+    p = provisioning
+    p.plan['preserved_readonly_bindings'][0]['target'] = '/run/new-private-data'
+    p.save()
+    with pytest.raises(p.h.Refused, match='existing'):
+        p.h.provision_executor(p.sha, p.path)
+    assert not any(command[0] == 'systemctl' for command in p.commands)
+
+
+def test_provision_allows_only_existing_environment_file_at_fixed_env_target(provisioning):
+    p = provisioning
+    item = p.plan['preserved_readonly_bindings'][0]
+    p.props['BindReadOnlyPaths'] = ''
+    p.props['EnvironmentFiles'] = item['source'] + ' (ignore_errors=no)'
+    item['target'] = '/run/lead-home/model.env'
+    p.save()
+    assert p.h.provision_executor(p.sha, p.path)['channel'] == p.channel
+
+
+def test_executor_command_identity_ignores_systemd_runtime_counters(hook):
+    first = '{ path=/python ; argv[]=/python -B /entry.py ; ignore_errors=no ; start_time=[Wed] ; stop_time=[n/a] ; pid=10 ; code=(null) ; status=0/0 }'
+    next_run = first.replace('[Wed]', '[Thu]').replace('pid=10', 'pid=11').replace('code=(null)', 'code=exited')
+    assert hook.executor_command_identity(first) == hook.executor_command_identity(next_run)
+    assert hook.executor_command_identity(first) != hook.executor_command_identity(first.replace('/entry.py', '/other.py'))

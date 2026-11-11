@@ -14,9 +14,25 @@ BROWSER_BUILD = "official/156.0.1-beta.36"
 BROWSER_SDK = "0.5.8"
 
 
+def environment_file():
+    """An operator may bind configuration separately from an immutable image.
+
+    Only the process environment selects this path; file contents cannot redirect
+    it. Node provisioning owns the trusted, read-only mount and its permissions.
+    """
+    value = os.environ.get("LEAD_ENV_FILE")
+    if value is None:
+        return ROOT / ".env"
+    path = Path(value)
+    if (not path.is_absolute() or str(path) != value or ".." in path.parts
+            or path.is_symlink() or not path.is_file()):
+        raise ValueError("LEAD_ENV_FILE must name an absolute regular configuration file")
+    return path
+
+
 def env():
     # Read on every call: filling in the key does not require a restart.
-    return {**dotenv_values(ROOT / ".env"), **os.environ}
+    return {**dotenv_values(environment_file()), **os.environ}
 
 
 def model_config(provider=None):

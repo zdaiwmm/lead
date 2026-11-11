@@ -239,12 +239,15 @@ def current_binding_sql(alias="t", *, legacy_receipts=False):
              OR {alias}.result->>'reply_state' IN ('dispatching','unknown'))))))"""
 
 
-def eligible_sql(alias="t", *, legacy_receipts=False):
-    """Read scheduling gate. All dynamic SQL names are internal constants."""
+def eligible_sql(alias="t", *, legacy_receipts=False, write=False):
+    """Account-bound scheduling: a read probe never clears a write hold."""
+    if write and legacy_receipts:
+        raise ValueError("legacy receipt scope cannot authorize writes")
+    cooling = "" if write else "AND (health.body->>'read_after')::timestamptz>now()"
     return current_binding_sql(alias, legacy_receipts=legacy_receipts) + f""" AND NOT EXISTS (SELECT 1 FROM lead.memory_entries health
         WHERE health.agent_id={alias}.agent_id AND health.body->>'type'='{TYPE}'
         AND health.body->>'account'={alias}.input->>'external_account_id'
-        AND health.body->>'state'='blocked' AND (health.body->>'read_after')::timestamptz>now()
+        AND health.body->>'state'='blocked' {cooling}
         AND (health.body->>'peer'='*' OR health.body->>'peer'={alias}.result->>'target_id'
              OR health.body->'urls' ? rtrim(lower({alias}.input#>>'{{candidate,telegram_url}}'),'/')
                 AND (coalesce({alias}.result->>'target_id','')='' OR coalesce(health.body->>'peer','')='')))"""
