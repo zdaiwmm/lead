@@ -76,22 +76,15 @@ jobs:
       - run: .venv/bin/python scripts/check_repository.py
       - name: Native Linux browser and namespace prerequisites
         run: |
-          # Validate the official backups before excluding the runner's failing
-          # Azure mirror. Keep the existing suites and Ubuntu signing keyring.
-          for host in archive.ubuntu.com security.ubuntu.com; do
-            timeout 15 getent ahostsv4 "$host"
-            curl --fail --silent --show-error --proto '=https' --connect-timeout 5 --max-time 15 \
-              --output /dev/null "https://$host/ubuntu/dists/noble/InRelease"
-          done
-          test -f /etc/apt/apt-mirrors.txt
-          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' \
-            | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          # Validate the signed Ubuntu mirror before changing the runner's list.
+          # Existing Ubuntu suites, components and trust keyring stay in place.
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT,http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY /usr/bin/python3 -IB .github/scripts/ci_apt_mirror.py
           # Playwright's own apt calls must inherit these bounds too.
           printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\nAPT::Update::Error-Mode "any";\n' \
             | sudo tee /etc/apt/apt.conf.d/99lead-ci-acquire >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap fonts-noto-cjk
-          .venv/bin/playwright install-deps firefox chromium
+          sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get update
+          sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get install -y bubblewrap fonts-noto-cjk
+          sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY "$PWD/.venv/bin/python" -m playwright install-deps firefox chromium
           .venv/bin/playwright install chromium
           .venv/bin/python scripts/ci_install_camoufox.py
           # This ephemeral runner permits user namespaces for the bwrap boundary.
@@ -130,8 +123,8 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           if ! command -v nginx >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y nginx-light
+            sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get update
+            sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get install -y nginx-light
           fi
           sudo unshare --mount --net --propagation private bash -eu -c '
             ip link set lo up
@@ -143,7 +136,7 @@ jobs:
       - name: Package the tested Linux application
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
-          sudo apt-get install -y squashfs-tools
+          sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get install -y squashfs-tools
           ../../scripts/build_home_image.sh "$GITHUB_SHA" "$RUNNER_TEMP/lead.squashfs"
           for file in ../../infra/home-browser-frames/*; do
             unsquashfs -cat "$RUNNER_TEMP/lead.squashfs" "home-browser-frames/${file##*/}" | cmp "$file" -
@@ -194,7 +187,7 @@ jobs:
         if: needs.scope.outputs.kind == 'application'
       - name: Independent systemd image and recovery drill
         run: |
-          sudo apt-get install -y squashfs-tools
+          sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get install -y squashfs-tools
           sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/home_mount_drill.py
       - name: Independent executor systemd binding preservation drill
         run: sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/home_executor_systemd_drill.py
