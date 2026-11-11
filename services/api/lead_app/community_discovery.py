@@ -1,6 +1,7 @@
 """Checkpointed product research. One page or one short decision per cycle."""
 
 import re
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from pydantic import BaseModel, Field
@@ -646,6 +647,10 @@ async def advance(aid):
         config = discovery_config(c, a)
         if not config.enabled or a["desired_state"] != "running":
             return
+        from .community_opportunities import discovery_pressure
+        pressure = discovery_pressure(c, a, config, datetime.now(timezone.utc))
+        if pressure:
+            return {"delay": pressure["delay"], "reason": "community_participation_ready"}
         request = a["onboarding_state"].get("community_research_request", "")
         task = one(
             c,
@@ -1560,11 +1565,19 @@ async def advance(aid):
                              {k: observed.get(k) for k in ("title", "text", "community_links")}, 0,
                              saved.get("campaign_id") or str(task["id"]))
             if observed.get("error"):
+                from .community_sources import remember_failure
+                with tx(aid) as c:
+                    remember_failure(c, aid, payload["config_revision"], url, ADAPTER_REVISION,
+                                     observed["error"], saved.get("campaign_id") or str(task["id"]))
                 saved["errors"].append(
                     {"url": queue[cursor], "error": observed["error"]}
                 )
         except Exception as error:
             await browser.finish("failed")
+            from .community_sources import remember_failure
+            with tx(aid) as c:
+                remember_failure(c, aid, payload["config_revision"], url, ADAPTER_REVISION,
+                                 type(error).__name__, saved.get("campaign_id") or str(task["id"]))
             saved["errors"].append(
                 {"url": queue[cursor], "error": type(error).__name__}
             )

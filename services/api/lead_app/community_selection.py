@@ -17,12 +17,14 @@ def receipt_share(c):
     return row["receipt"] / row["total"] if row["total"] else 0
 
 
-def choose(c, agent, config, now=None):
+def choose(c, agent, config, now=None, *, supported_operations=None):
     from .community_runtime import membership_review, next_candidate, next_voice_edit
     from .community_schedule import next_join_check, next_pending_inventory
     from .operating_kernel import blocked
 
     now = now or datetime.now(timezone.utc)
+    if supported_operations is not None and "leave_restricted" not in supported_operations:
+        config = config.model_copy(update={"allow_leave_restricted": False})
     if agent["desired_state"] != "running" or not config.enabled or config.mode != "contextual_outreach":
         return None
     aid = str(agent["id"])

@@ -236,7 +236,45 @@ def execution(c, aid, day, now):
           AND completed_at BETWEEN %(day)s AND %(now)s
           AND result#>>'{outcome,state}' IN ('skipped','blocked')
         GROUP BY 1,2 ORDER BY count(*) DESC LIMIT 20""", args)
-    return {"totals":totals, "waiting":waiting, "timings":timings, "gates":gates}
+    from .community_participation import business_outcome
+
+    outcomes = {}
+    for task in all_rows(c, """SELECT state,result FROM lead.tasks WHERE agent_id=%s
+        AND type='community.engage' AND completed_at BETWEEN %s AND %s""", (aid, day, now)):
+        kind = business_outcome(task)
+        outcomes[kind] = outcomes.get(kind, 0) + 1
+    return {"totals":totals, "waiting":waiting, "timings":timings, "gates":gates, "outcomes":outcomes}
+
+
+def participation_status(agent, config):
+    """Distinguish configuration from a device's attested effective policy."""
+    from pydantic import ValidationError
+
+    from .community_participation import ParticipationPolicy
+
+    device = agent["onboarding_state"].get("telegram_executor") or {}
+    policy = device.get("participation_policy")
+    try:
+        if not isinstance(policy, dict) or not set(ParticipationPolicy.model_fields) <= policy.keys():
+            policy = None
+        else:
+            policy = ParticipationPolicy.model_validate(policy).model_dump()
+    except ValidationError:
+        policy = None
+    messages = ["主动发帖已开启" if config.allow_proactive_post else "主动发帖未开启",
+                "产品推广已开启" if config.allow_promotion else "产品推广未开启"]
+    if policy:
+        if policy.get("quota_mode") == "per_action":
+            messages.append(f"滚动 24 小时：入群最多 {policy['joins_per_24h']} 次，回复最多 {policy['replies_per_24h']} 次")
+        else:
+            messages.append(f"入群与回复合计每 24 小时最多 {policy['combined_per_24h']} 次")
+        messages.append({"exact_faq":"答疑仅匹配群内原问题", "grounded_faq":"答疑可匹配近期未回答问题并引用群内原文",
+                         "semantic_faq":"答疑可理解问题后引用群内原文，仍需有效的内容处理授权"}.get(policy.get("answer_mode"), "答疑范围待核实"))
+    elif device.get("mode"):
+        messages.append("执行器尚未回报实际答疑范围和操作额度")
+    return {"scope": messages, "policy_reported": bool(policy),
+            "next_eligible_at": device.get("participation_next_at"),
+            "reason": device.get("participation_wait_reason")}
 
 
 def report(c, agent, day, now):
@@ -316,7 +354,7 @@ def report(c, agent, day, now):
         next_action = resident["next"] or next_action
         if accounts["ready"] and resident["owner"]:
             owner = resident["owner"] if not owner else f"{owner} {resident['owner']}"
-    return {"resident": resident, "autonomy": autonomy, "execution": execution(c, agent["id"], day, now), "progress": progress(c, agent["id"], now), "promotion_visits": visits["visits"], "metrics": metrics, "at": now, "current": current,
+    return {"participation": participation_status(agent, config), "resident": resident, "autonomy": autonomy, "execution": execution(c, agent["id"], day, now), "progress": progress(c, agent["id"], now), "promotion_visits": visits["visits"], "metrics": metrics, "at": now, "current": current,
             "next": ("恢复运营后重新排期" if paused else next_action or "暂无已排定的下一项社群行动"),
             "constraint": f"「{latest['name']}」{latest['reason']}" if latest else None,
             "owner": owner}

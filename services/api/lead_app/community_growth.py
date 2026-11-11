@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .community_participation import ParticipationPolicy
 from .db import all_rows, audit, emit, j, one, record, require_agent, tx
 from .scope import current_tenant
 
@@ -88,6 +89,9 @@ class GrowthConfig(BaseModel):
     review_replies_only: bool = False
     allow_reply: bool = True
     allow_promotion: bool = True
+    # Bounded device executors opt into this policy; defaults retain their
+    # existing scope. It is not a substitute for a live account delegation.
+    participation_policy: ParticipationPolicy = Field(default_factory=ParticipationPolicy)
 
     @model_validator(mode="before")
     @classmethod
