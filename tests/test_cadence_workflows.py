@@ -166,6 +166,37 @@ class LegacyChannelWorkflow:
 
 
 @pytest.mark.asyncio
+async def test_running_legacy_clock_adopts_attested_activity_wait_after_upgrade():
+    c = await client()
+    calls = []
+
+    @activity.defn(name="channel_research_tick")
+    async def tick(args: dict):
+        calls.append(args["tick"])
+        if len(calls)==1:
+            return {"delay":1}
+        return waiting() if len(calls)==2 else {"stop":True}
+
+    queue=uid()
+    async with Worker(c,task_queue=queue,workflows=[LegacyChannelWorkflow],activities=[tick]):
+        h=await c.start_workflow(LegacyChannelWorkflow.run,{"lane":"research"},id=uid(),task_queue=queue)
+        while not calls:
+            await asyncio.sleep(.02)
+        await asyncio.sleep(.1)
+    async with Worker(c,task_queue=queue,workflows=[ChannelDeliveryWorkflow],activities=[tick]):
+        try:
+            while len(calls)<2:
+                await asyncio.sleep(.02)
+            await asyncio.sleep(1.3)
+            assert len(calls)==2
+            await h.signal("wake",1)
+            await asyncio.wait_for(h.result(),8)
+            await Replayer(workflows=[ChannelDeliveryWorkflow]).replay_workflow(await h.fetch_history())
+        finally:
+            await h.cancel()
+
+
+@pytest.mark.asyncio
 async def test_old_history_replays():
     c = await client()
     count = 0

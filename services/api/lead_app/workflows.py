@@ -85,7 +85,10 @@ class ChannelDeliveryWorkflow:
                 if result.get("stop"):
                     return
                 pending_tick = None
-                if cadence_waits:
+                # Old runs replay the old patch branch. A newly completed,
+                # protocol-bearing activity can opt that same run into waits;
+                # historical results without the field retain their commands.
+                if cadence_waits or (result.get("execution_cadence") or {}).get("execution_cadence_protocol") == 1:
                     await self.wait_cadence(result, seen)
                 else:
                     await workflow.sleep(max(1, float(result["delay"])))
