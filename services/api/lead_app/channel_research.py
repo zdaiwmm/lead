@@ -133,7 +133,8 @@ def select(args):
             from .atomic_dispatch import enqueue_connected
             enqueue_connected(c,aid,agent,business)
         if not source_access(platform):
-            return wait_result(c, aid, clock, {"delay": 1800, "reason": "source_permission_required"}), None
+            gaps = [] if business and business["description"].strip() else ["business_required"]
+            return wait_result(c, aid, clock, {"delay": 1800, "reason": "source_permission_required", "blocking_reasons": gaps}), None
         if sample()["defer_optional"]:
             return {"delay": 120, "reason": "host_pressure"}, None
         if not business or not business["description"].strip():

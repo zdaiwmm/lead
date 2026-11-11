@@ -26,17 +26,21 @@ def wake_clocks(c, aid, *, platforms=None, lane=None):
         emit(c, aid, "channel.clock.wake", {"task_id": str(clock["id"]), "generation": clock["version"], "policy_version": version})
 
 
-def wait_result(c, aid, clock, result):
+def wait_result(c, aid, clock, result, *, decision=None):
     """Only known condition gaps park indefinitely; engineering retries keep timers."""
-    event = EVENT_REASONS.get(result.get("reason"))
-    if not event:
+    reasons = list(dict.fromkeys([result.get("reason"), *result.get("blocking_reasons", [])]))
+    reasons = [reason for reason in reasons if reason in EVENT_REASONS]
+    if decision is None and not reasons:
         return result
     agent = one(c, "SELECT onboarding_state FROM lead.agents WHERE id=%s", (aid,))
     version = max(1, agent["onboarding_state"].get("execution_cadence", {}).get("policy_version", 0))
     scope = Scope(agent_id=str(aid), target_id="platform:"+clock["input"]["platform"], operation=clock["input"].get("lane", "delivery"))
-    evidence = WaitEvidence(scope=scope, source="capability", reason_code=result["reason"],
-        evidence_ref="task:"+str(clock["id"]), observed_at=datetime.now(timezone.utc), resume_event=event, policy_version=version)
-    decision = decide([evidence], evidence.observed_at, subject=scope)
+    now = datetime.now(timezone.utc)
+    if decision is None:
+        evidence = [WaitEvidence(scope=scope, source="capability", reason_code=reason,
+            evidence_ref="task:"+str(clock["id"]), observed_at=now, resume_event=EVENT_REASONS[reason], policy_version=version)
+            for reason in reasons]
+        decision = decide(evidence, now, subject=scope)
     result = {**result, "execution_cadence": decision.model_dump(mode="json")}
     c.execute("UPDATE lead.tasks SET result=coalesce(result,'{}') || %s WHERE id=%s AND agent_id=%s",
               (j({"execution_cadence": result["execution_cadence"]}), clock["id"], aid))

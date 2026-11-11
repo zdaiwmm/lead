@@ -351,9 +351,14 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
             )
         assert [r["state"] for r in results] == ["confirmed", "unknown"], results
         assert len(prepared["facebook"][0].posts) == 2
+        def wake_count():
+            with tx(aid) as c:
+                return one(c, "SELECT count(*) AS n FROM lead.outbox_events WHERE event_type='channel.clock.wake' AND payload->>'task_id'=(SELECT id::text FROM lead.tasks WHERE type='channel.clock' AND input->>'platform'='facebook' AND input->>'lane'='delivery')")["n"]
+        before_receipt = wake_count()
         assert (await activities.execute_task(request("facebook")))[
             "state"
         ] == "confirmed"
+        assert wake_count() > before_receipt
         for platform in platforms:
             actor = actors[platform]
             site, task, account_id, target_id = prepared[platform]

@@ -8,6 +8,7 @@ REASONS = {
     "awaiting_validated_opportunity": "等待合格机会",
     "business_required": "需要补齐业务资料",
     "public_web_disabled": "公开来源读取尚未启用",
+    "target_schedule_unverified": "目标的时间依据待核实",
     "cadence_version_mismatch": "执行版本不一致，等待核对",
     "cadence_paused": "新操作已暂停",
     "authentication_required": "账号需要重新登录",
@@ -64,6 +65,8 @@ def project(raw, *, policy=None, device=None):
             scope = "当前项目"
         elif len({item.scope.account_id for item in items}) > 1:
             scope = "相关账号"
+        elif len({item.scope.target_id for item in items}) > 1:
+            scope = "相关目标"
         elif all(item.scope.target_id is not None for item in items):
             scope = "当前目标"
         else:
