@@ -25,12 +25,12 @@ def api(resource, payload=None):
     if payload is not None:
         args.extend(["--method", "POST", "--input", "-"])
     output = subprocess.check_output(
-        args, input=json.dumps(payload) if payload is not None else None, text=True
+        args, input=json.dumps(payload) if payload is not None else None, text=True, timeout=45
     )
     return json.loads(output)
 
 
-def verified_run(sha, *, get=None):
+def verified_run(sha, *, get=None, kind="application"):
     if get is None:
         get = api
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
@@ -53,8 +53,27 @@ def verified_run(sha, *, get=None):
     if not run or (run["status"], run["conclusion"]) != ("completed", "success"):
         raise ValueError("Latest exact main CI has not passed")
     jobs = get(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
-    passed = {j["name"] for j in jobs["jobs"] if j["conclusion"] == "success"}
-    if not {"backend", "frontend", "namespace"} <= passed:
+    if kind not in {"application", "tools"}:
+        raise ValueError("Unknown release kind")
+    if jobs.get("total_count", len(jobs["jobs"])) > 100:
+        raise ValueError("Verification jobs listing incomplete")
+    named = {j["name"]: j for j in jobs["jobs"]}
+    if len(named) != len(jobs["jobs"]):
+        raise ValueError("Ambiguous verification jobs")
+    passed = {name for name, job in named.items() if job["conclusion"] == "success"}
+    if "scope" in named or "verified" in named:
+        proof = named.get("verified", {})
+        steps = {s["name"] for s in proof.get("steps", []) if s.get("conclusion") == "success"}
+        if not {"scope", "checks", "verified"} <= passed:
+            raise ValueError("Required verification proof has not passed")
+        application = "Application verification" in steps and {"backend", "frontend", "namespace"} <= passed
+        tools = "Tool verification" in steps and {"delivery", "namespace"} <= passed
+        if kind == "application" and not application:
+            raise ValueError("Application verification required; tool/docs/PR checks cannot release an application")
+        if kind == "tools" and (not (tools or application) or "tool-bundle" not in passed):
+            raise ValueError("Tool verification and tested bundle required")
+    elif kind != "application" or not {"backend", "frontend", "namespace"} <= passed:
+        # Historical exact application runs remain usable; they never prove a tool bundle.
         raise ValueError("Required verification jobs have not passed")
     return run
 

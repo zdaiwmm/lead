@@ -329,9 +329,17 @@ RUNTIME_COMPATIBILITY_FILES = {
         "69daf9b5065322206da080a4c64b66a27d74d179",  # PR #28
         "aa243338dd22dc3becf10eaf0100ecf7858d00b6",  # PR #29
     },
-    # Operator-side archive preparation; absent from the application image.
-    # This does not install/execute the tool on the node or replace image attestation.
-    "scripts/prepare_home_image.py": {"5fe5d7f7429c322cdce68e616256db87b8d6d255"},
+}
+
+# These exact paths are maintained outside the application image. App upgrades
+# neither install nor execute their repository copies. Tools have a separate CI
+# proof, bundle, explicit install operation, backup and readback.
+OPERATOR_ONLY_FILES = {
+    "scripts/ci_scope.py", "scripts/ci_gate.py", "scripts/build_tool_bundle.py",
+    "scripts/tool_release.py", "scripts/tool_install.py",
+    "scripts/request_home_release.py", "scripts/poll_home_release.py",
+    "scripts/prepare_home_image.py", "scripts/home_release_operator.py",
+    "scripts/home_systemd_release.py",
 }
 
 
@@ -394,6 +402,7 @@ def deploy(sha):
         allowed = ("services/api/lead_app/", "apps/web/app/", "apps/web/public/", "docs/", "tests/", ".github/")
         extra = {name for name in changes.split("\0") if name and not name.startswith(allowed)
                  and name not in ("README.md", "AGENTS.md")}
+        extra -= OPERATOR_ONLY_FILES
         extra -= reviewed_maintenance_files(mirror, sha, extra)
         extra -= reviewed_channel_schema(mirror, sha, extra)
         extra -= reviewed_reddit_site(mirror, sha, extra)

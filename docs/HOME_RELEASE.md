@@ -1,8 +1,8 @@
 # 家庭服务器发布
 
-新任务按[小修复交付](SMALL_FIX_RELEASE.md)提前准备并冻结批次；现有精确 main CI、生产审批、维护锁和独立核验要求保持。可选下载缓存仅在显式传入 `--cache-dir` 时启用；它不改写在途发布，不自动安装到节点。
+新任务按[小修复交付](SMALL_FIX_RELEASE.md)：PR 快速检查，完整验证在 main 按范围一次执行；文档/工具证明不能放行业务应用。用户授权需求和环境，Agent 记录精确 SHA，同范围不因新哈希重复询问。维护锁、备份、平台环境审核与独立核验保留，在途发布沿用原协议。
 
-维护电脑的正式取件入口使用 `prepare_home_image.py --archive-only --cache-dir`，复用同机私有缓存，不再为每轮任务重写取件脚本。它只交付带 GitHub 认证摘要的 ZIP，节点仍核验 REVISION。发布器只接受本次已审阅下载工具的精确 blob；允许其源码进入后续应用提交不等于安装或执行该工具，也不放行其他 scripts 变化。节点发布器升级仍需确认精确提交、等待已有发布退出、保存旧工具并独立回读字节；不为更新维护工具重启业务服务。
+维护电脑的正式取件入口使用 `prepare_home_image.py --archive-only --cache-dir`，复用同机私有缓存，不再为每轮任务重写取件脚本。它只交付带 GitHub 认证摘要的 ZIP，节点仍核验 REVISION。登记工具源码不进入业务镜像，不再要求手改摘要白名单。维护工具由 tool_release.py 取得同轮独立工具包，核验来源后单文件备份、锁、原子更新与回读；不重启业务。未知脚本、运行依赖及主机配置仍走原兼容核验。
 
 ## 隔离 Worker 的模型连接
 
@@ -26,9 +26,9 @@ socket 文件绑定会固定当时的 inode；通道服务重新创建 socket �
 
 发布日志分别保存配置修复、模型服务错误、用户批准的模型切换和原消息最终状态。不能自动更换供应商、重发社媒内容或修改失败账本为成功。
 
-在 GitHub Actions 的 **Approve a home release** 选择 main，输入已确认的完整应用 SHA。审批环境 home-release-approval 应限制仅 main，要求仓库所有者审核。主机只需主动向 GitHub 出站访问。公共仓库的任意 CI 作业都在 GitHub 托管节点运行。
+在 GitHub Actions 的 **Approve a home release** 选择 main，由 Agent 输入本需求授权范围内已固定的完整应用 SHA。审批环境 home-release-approval 限制 main，并沿用仓库所有者审核；Agent 可在本次授权和自身平台权限内办理，不再增加重复聊天确认。主机只需主动向 GitHub 出站访问，公共仓库 CI 在 GitHub 托管节点运行。
 
-工作流检查提交是合入本仓库 main 的 PR 合并结果，同一 SHA 的最新主线 CI 成功且 backend、frontend、namespace 三个任务均通过。在 home-production 创建 task 为 lead-home-release 的 Deployment，记录精确 SHA、CI run/attempt 和审批运行。工作流绿色仅表示请求已登记。线上状态由节点独立上报。
+工作流检查提交是合入本仓库 main 的 PR 合并结果，同一 SHA 的最新主线应用 CI 成功且 backend、frontend、namespace 三个任务均通过，新流水线另要求 Application verification；工具/docs 结果不放行应用。在 home-production 创建 task 为 lead-home-release 的 Deployment，记录精确 SHA、CI run/attempt 和审批运行。工作流绿色仅表示请求已登记。线上状态由节点独立上报。
 
 ## 已运行节点的接入约定
 
@@ -72,7 +72,7 @@ Python 3.11+、GitHub CLI 和可出站访问 GitHub 的 Unix 节点可以运行 
 
 ## 先合并，再部署
 
-每次生产变更先在独立分支实现，推送 PR，在候选提交的 CI 通过后合入 main。应用、主机脚本、systemd 单元和站点路由遵循同一顺序。部署设备从指定 GitHub 仓库刷新 main，核对获批 SHA 已在 main 历史内、该 SHA 的主线 CI 成功，再使用该次构建的发布包。检查现网进程、编码服务和入口规则；遇到线上已有、仓库缺失的必要改动，先补 PR 并重新确定发布基线。再次部署时仍需本次目标环境和精确 SHA 的授权。
+每次生产变更先在独立分支实现，PR 快速检查成功后合入 main，再等待该 SHA 适用的完整验证。应用、主机脚本、systemd 单元和站点路由遵循同一顺序。部署设备从指定 GitHub 仓库刷新 main，核对获批 SHA 已在 main 历史内、该 SHA 的主线 CI 成功，再使用该次构建的发布包。检查现网进程、编码服务和入口规则；遇到线上已有、仓库缺失的必要改动，先补 PR 并重新确定发布基线。授权按本需求和环境继承，Agent 固定记录精确 SHA；超范围变化重新确认。维护工具使用独立工具证明和同轮工具包，不创建应用 Deployment。
 
 ## 家庭入口画面编码
 
@@ -111,6 +111,6 @@ Python 3.11+、GitHub CLI 和可出站访问 GitHub 的 Unix 节点可以运行 
 
 PR #26 新增 `httpx2` 后，家庭节点共享解释器须已经由节点维护者安装 `httpx2==2.16.0`；应用 SquashFS 不携带 Python 环境，不能用 CI 安装成功代替节点检查。正式入口仅接受已审阅的完整依赖清单 blob，并在 API、Worker、browser 各自运行空间使用低权限、隔离模式核验版本和 Unix socket transport，不读凭据、不联网、不安装依赖。进程在检查期间改变、缺包或清单变化均拒绝。
 
-`verify_account_browser.py` 是开发验收工具，不由生产服务调用。发布入口仅识别 PR #28/#29 对应的精确 blob，不开放其他脚本，也不执行该工具。未来修改须重新审阅并更新对应核验。节点发布器本身的升级仍须单独确认完整 SHA；从同一获批提交取出节点工具，保留原工具备份，核对安装字节后再使用正式发布入口。
+`verify_account_browser.py` 是开发验收工具，不由生产服务调用。发布入口仅识别 PR #28/#29 对应的精确 blob，不开放其他脚本，也不执行该工具。未来修改须重新审阅并更新对应核验。登记节点工具按本需求/环境授权，使用 tool_release.py 的已验证工具包、备份和独立回读，不因合并 SHA 变化重复询问。
 
 预先撤除模型临时覆盖且持有维护状态时，如果正式入口在切换前拒绝，不要让维护状态等待下一轮 CI。先只读确认 selector 未变、独立核验旧映像，再恢复备份的原配置和服务，健康检查通过后通过 `home_live_maintenance.py restore <本次SHA>` 解除维护；记录原覆盖仍存在和本次未上线。禁止把旧请求改写成成功，后续使用新的已确认正式请求。

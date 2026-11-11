@@ -7,7 +7,52 @@ on:
 permissions:
   contents: read
 jobs:
+  scope:
+    runs-on: ubuntu-24.04
+    outputs:
+      kind: ${{ steps.scope.outputs.kind }}
+      tools: ${{ steps.scope.outputs.tools }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: scope
+        run: python3 scripts/ci_scope.py
+  checks:
+    needs: scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest==9.2.0 ruff==0.17.3 PyYAML==6.0.3
+      - run: ruff check services scripts tests infra/migrations
+      - run: python scripts/check_repository.py
+      - name: Scope and release contract regression
+        run: python -m pytest --noconftest -q tests/test_ci_delivery.py
+  delivery:
+    needs: scope
+    if: github.event_name != 'pull_request' && needs.scope.outputs.kind == 'tools'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pytest==9.2.0 PyYAML==6.0.3
+      - name: Tool regression
+        run: python -m pytest --noconftest -q tests/test_ci_delivery.py tests/test_tool_release.py tests/test_prepare_home_image.py tests/test_home_release.py tests/test_home_systemd_release.py
   backend:
+    needs: scope
+    if: github.event_name != 'pull_request' && needs.scope.outputs.kind == 'application'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -50,6 +95,8 @@ jobs:
       - if: always() && hashFiles('.state/infra.env') != ''
         run: docker compose --env-file .state/infra.env -f infra/compose.yaml down
   frontend:
+    needs: scope
+    if: needs.scope.outputs.kind == 'application'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -65,7 +112,9 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+        if: github.event_name != 'pull_request'
       - name: Reproduce home browser frames with synthetic images
+        if: github.event_name != 'pull_request'
         run: |
           if ! command -v nginx >/dev/null; then
             sudo apt-get update
@@ -96,19 +145,68 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   namespace:
+    needs: scope
+    if: github.event_name != 'pull_request' && needs.scope.outputs.kind != 'docs'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Enable rootless namespaces on ephemeral runner
+        if: needs.scope.outputs.kind == 'application'
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - run: docker build --secret id=lead_ca,src=/etc/ssl/certs/ca-certificates.crt -f infra/namespace-test.Dockerfile -t lead-namespace-test:ci .
+        if: needs.scope.outputs.kind == 'application'
       - name: Independent systemd image and recovery drill
         run: |
           sudo apt-get install -y squashfs-tools
           sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/home_mount_drill.py
+      - name: Independent tool install and rollback drill
+        run: sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/tool_install_drill.py
       - name: Rootless isolated transport contract
+        if: needs.scope.outputs.kind == 'application'
         run: docker run --rm --network none --cap-drop ALL --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined lead-namespace-test:ci
+  verified:
+    needs: [scope, checks, backend, frontend, namespace, delivery]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check required results
+        env:
+          SCOPE: ${{ needs.scope.outputs.kind }}
+          EVENT: ${{ github.event_name }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_gate.py
+      - name: Application verification
+        if: github.event_name != 'pull_request' && needs.scope.outputs.kind == 'application'
+        run: echo 'Full application verification passed'
+      - name: Tool verification
+        if: github.event_name != 'pull_request' && needs.scope.outputs.kind == 'tools'
+        run: echo 'Full tool verification passed'
+      - name: Documentation verification
+        if: github.event_name != 'pull_request' && needs.scope.outputs.kind == 'docs'
+        run: echo 'Documentation verification passed'
+      - name: PR checks
+        if: github.event_name == 'pull_request'
+        run: echo 'Fast PR checks passed; release verification runs on main'
+  tool-bundle:
+    needs: [scope, verified]
+    if: github.event_name != 'pull_request' && needs.scope.outputs.tools == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build tested tools
+        run: python3 scripts/build_tool_bundle.py "$GITHUB_SHA" "$RUNNER_TEMP/lead-tools.tar"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lead-tools-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lead-tools.tar
+          if-no-files-found: error
+          retention-days: 7
