@@ -331,15 +331,11 @@ def test_runtime_dependency_probe_is_unprivileged_and_fails_closed(hook, monkeyp
         hook.verify_model_runtime()
 
 
-def test_operator_download_tool_requires_exact_reviewed_source(hook, monkeypatch, tmp_path):
+def test_operator_download_tool_is_not_installed_or_executed_by_application_release(hook):
     name = "scripts/prepare_home_image.py"
-    source = Path(__file__).resolve().parents[1] / name
-    blob = subprocess.check_output(["git", "hash-object", "--no-filters", str(source)], text=True).strip()
-    assert hook.RUNTIME_COMPATIBILITY_FILES[name] == {blob}
-    monkeypatch.setattr(hook, "TOOLS", tmp_path)
-    (tmp_path / "home_live_maintenance.py").touch()
-    monkeypatch.setattr(hook, "run", lambda *args: blob)
-    assert hook.reviewed_runtime_files(tmp_path, "a" * 40, {name, "scripts/arbitrary.py"}) == {name}
-    monkeypatch.setattr(hook, "run", lambda *args: "unreviewed revision")
-    with pytest.raises(hook.Refused, match="separate compatibility review"):
-        hook.reviewed_runtime_files(tmp_path, "a" * 40, {name})
+    assert name in hook.OPERATOR_ONLY_FILES
+    assert name not in hook.RUNTIME_COMPATIBILITY_FILES
+    assert "scripts/arbitrary.py" not in hook.OPERATOR_ONLY_FILES
+    assert "scripts/home_live_maintenance.py" not in hook.OPERATOR_ONLY_FILES
+    builder = (Path(__file__).resolve().parents[1] / "scripts/build_home_image.sh").read_text()
+    assert 'git archive "$sha" services apps/web infra/home-browser-frames' in builder
