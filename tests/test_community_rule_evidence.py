@@ -27,3 +27,20 @@ def test_description_does_not_replace_topic_check():
     from lead_app.community_rule_evidence import description_kind
 
     assert description_kind("Adults discussing an unrelated subject together.", topic_matches=False) == "title_only"
+
+
+def test_read_pins_reference_does_not_invalidate_complete_evidence():
+    from lead_app.community_rule_evidence import rules_status
+
+    assert rules_status(description="Please read pinned rules.", pinned_complete=True, external_rules_unresolved=False) == "complete"
+
+
+@pytest.mark.parametrize("description,complete,external", [
+    ("Please read pinned rules.", False, False),
+    ("请查看置顶群规", False, False),
+    ("Rules already read.", True, True),
+])
+def test_external_link_or_missing_pin_stays_unresolved(description, complete, external):
+    from lead_app.community_rule_evidence import rules_status
+
+    assert rules_status(description=description, pinned_complete=complete, external_rules_unresolved=external) == "unresolved"
