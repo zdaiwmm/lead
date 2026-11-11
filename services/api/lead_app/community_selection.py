@@ -35,7 +35,7 @@ def choose(c, agent, config, now=None, *, supported_operations=None):
     fences = blocked(c, community_worker=True)
     if fences["unknown_write_scope"]:
         return None
-    diagnostic = one(c, """SELECT t.* FROM lead.memory_entries h JOIN lead.tasks t ON t.id::text=h.body->>'task_id'
+    diagnostic = one(c, """SELECT t.*,h.body->>'read_after' AS read_after FROM lead.memory_entries h JOIN lead.tasks t ON t.id::text=h.body->>'task_id'
         WHERE h.body->>'type'='community_target_health' AND h.body->>'state'='blocked'
         AND (h.body->>'read_after')::timestamptz<=now()
         AND coalesce((t.result->>'receipt_review_after')::timestamptz,(t.result->>'retry_after')::timestamptz,now())<=now()
@@ -87,7 +87,12 @@ def choose(c, agent, config, now=None, *, supported_operations=None):
     if opportunity:
         return opportunity
     if diagnostic:
-        return {"kind": "diagnose", "task_id": str(diagnostic["id"]), "paid": False}
+        from .cadence_events import probe_rule_gap
+        # The selection SQL has already checked the bound account/read authority;
+        # execution still revalidates it immediately before the one-target read.
+        return probe_rule_gap(diagnostic, now=now, source_allowed=True,
+            read_after=datetime.fromisoformat(diagnostic["read_after"]),
+            reader=lambda task: {"kind": "diagnose", "task_id": str(task["id"]), "paid": False})
     retry = one(c, """SELECT * FROM lead.tasks t WHERE type='community.engage' AND state='failed'
         AND """ + community_health.eligible_sql() + """
         AND NOT (input->>'account_id'=ANY(%s)) AND result->>'reply_state' IS NULL

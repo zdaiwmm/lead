@@ -121,6 +121,8 @@ async def deliver_workspace(client, tenant, configured, key_was_configured):
     with tenant_scope(tenant, None), service_scope():
         if configured and not key_was_configured:
             await run_db(model_became_available)
+        from .cadence_events import reconcile_source_config
+        await run_db(reconcile_source_config)
         events = await run_db(outbox_rows)
         async def deliver_event(e):
             try:
@@ -170,6 +172,15 @@ async def deliver_workspace(client, tenant, configured, key_was_configured):
                         )
                     except WorkflowAlreadyStartedError:
                         pass
+                elif e["event_type"] == "channel.clock.wake":
+                    try:
+                        await client.get_workflow_handle(
+                            f"channel-clock:{payload['task_id']}:{payload['generation']}"
+                        ).signal("wake", payload["policy_version"])
+                    except RPCError as error:
+                        if error.status != RPCStatusCode.NOT_FOUND:
+                            raise
+                    # Never create a replacement clock from a wake event.
                 elif e["event_type"] == "dispatch.channel":
                     await dispatch_channel_event(client, aid, payload)
                 elif e["event_type"] in ("task.enqueue", "task.reconcile"):

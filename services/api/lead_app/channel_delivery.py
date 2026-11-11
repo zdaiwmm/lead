@@ -8,6 +8,7 @@ from temporalio import activity
 from . import growth_experiments
 from .admin_operations import managed_execution
 from .atomic_dispatch import channel_pilot
+from .cadence_events import wait_result
 from .db import emit, j, one, tx
 from .operating_playbooks import channel_for
 from .scope import current_tenant, scoped_activity
@@ -148,12 +149,14 @@ def next_target(args):
             return {"stop": True}
         state = clock["result"] or {}
         if state.get("last_tick") == args["tick"]:
-            return {"delay": max(1, (clock["scheduled_at"] - now).total_seconds())}
+            return {"delay": max(1, (clock["scheduled_at"] - now).total_seconds()),
+                    **({"execution_cadence": state["execution_cadence"]} if state.get("execution_cadence") else {})}
         if state.get("pending_tick") == args["tick"]:
             return {
                 "target_id": state["pending_target"],
                 "opportunity": state.get("opportunity"),
             }
+        state.pop("execution_cadence", None)
         targets = eligible_publish_targets(c, blocked(c))
         deadlines = state.get("target_deadlines", {})
         due = sorted(
@@ -194,7 +197,7 @@ def next_target(args):
                 clock["id"],
             ),
         )
-        return {"delay": delay, "reason": reason}
+        return wait_result(c, aid, clock, {"delay": delay, "reason": reason})
 
 
 def finish(args, target_id, result):

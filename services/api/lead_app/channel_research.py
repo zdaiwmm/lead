@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from temporalio import activity
 
 from .admin_operations import managed_execution
+from .cadence_events import wait_result, wake_clocks
 from .channel_delivery import current
 from .config import env
 from .db import all_rows, j, one, tx
@@ -120,9 +121,10 @@ def select(args):
                 ),
                 "reason": state.get("reason"),
                 "recorded": True,
+                **({"execution_cadence": state["execution_cadence"]} if state.get("execution_cadence") else {}),
             }, None
         if not source_access(platform):
-            return {"delay": 1800, "reason": "source_permission_required"}, None
+            return wait_result(c, aid, clock, {"delay": 1800, "reason": "source_permission_required"}), None
         if sample()["defer_optional"]:
             return {"delay": 120, "reason": "host_pressure"}, None
         agent = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
@@ -130,10 +132,10 @@ def select(args):
             c, "SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1"
         )
         if not business or not business["description"].strip():
-            return {"delay": 300, "reason": "business_required"}, None
+            return wait_result(c, aid, clock, {"delay": 300, "reason": "business_required"}), None
         ctx = context(c, aid, business)
         if not ctx["models"]["tools"]["public_web"]:
-            return {"delay": 900, "reason": "public_web_disabled"}, None
+            return wait_result(c, aid, clock, {"delay": 900, "reason": "public_web_disabled"}), None
         pending = (
             state.get("pending") if state.get("pending_tick") == args["tick"] else None
         )
@@ -235,11 +237,12 @@ async def channel_research_tick(args: dict):
             if not clock:
                 return {"stop": True}
             c.execute(
-                """UPDATE lead.tasks SET scheduled_at=now()+%s,result=(coalesce(result,'{}')-'pending'-'pending_tick')||%s WHERE id=%s""",
+                """UPDATE lead.tasks SET scheduled_at=now()+%s,result=(coalesce(result,'{}')-'pending'-'pending_tick'-'execution_cadence')||%s WHERE id=%s""",
                 (
                     timedelta(seconds=delay),
                     j(
                         {
+                            **({"execution_cadence": result["execution_cadence"]} if result.get("execution_cadence") else {}),
                             "reason": result.get("reason"),
                             "last_tick": args["tick"],
                             "last_work": candidate.task_id if candidate else None,
@@ -248,4 +251,6 @@ async def channel_research_tick(args: dict):
                     clock["id"],
                 ),
             )
+            if candidate or result.get("reason") in {"target_verification_queued", "target_permissions_review"}:
+                wake_clocks(c, args["agent_id"], platforms={clock["input"]["platform"]}, lane="delivery")
     return result
