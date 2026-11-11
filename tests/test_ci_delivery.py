@@ -216,3 +216,13 @@ def test_release_image_nonroot_check_precedes_upload_of_the_same_artifact():
     assert 'sudo umount "$image_root"' in command
     assert steps[upload]['with']['path'] == '${{ runner.temp }}/lead.squashfs'
     subprocess.run(['bash', '-n'], input=command, text=True, check=True)
+
+
+def test_namespace_gate_runs_real_executor_systemd_dropin_drill():
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.load((root / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)
+    steps = workflow['jobs']['namespace']['steps']
+    exercise = [step for step in steps if 'tests/home_executor_systemd_drill.py' in step.get('run', '')]
+    assert len(exercise) == 1
+    assert 'sudo env LEAD_DISPOSABLE_RUNNER=1' in exercise[0]['run']
+    assert 'continue-on-error' not in exercise[0] and 'if' not in exercise[0]
