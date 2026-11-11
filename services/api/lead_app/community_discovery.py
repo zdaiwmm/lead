@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from pydantic import BaseModel, Field
 
+from . import executor_scope
 from .browser_tools import BrowserTools
 from .budget import BudgetExceeded
 from .community_growth import (
@@ -163,22 +164,39 @@ def broaden_empty_searches(terms, saved):
     return list(dict.fromkeys(tried + [s for s in shorter if s.casefold() not in earlier] + terms[cursor:]))
 
 
-def account_discovery_blocked(c, focus):
+def account_discovery_blocked(c, focus, *, aid=None):
+    selected = executor_scope.selected_profile(aid) if aid is not None else None
     if focus:
         # A due receipt is queued work, not ownership of the entire browser.
-        # Native operations serialize on the actor lock; unknown publications
-        # still retain their account-level write barrier below.
+        # Unknown publications keep the selected account's write barrier.
         return one(c, """SELECT 1 FROM lead.actions a JOIN lead.account_targets t ON t.id=a.target_id
             JOIN lead.social_accounts s ON s.id=t.account_id WHERE s.platform='telegram'
-            AND a.state IN ('dispatching','unknown') LIMIT 1""")
-    return one(c, """SELECT 1 FROM lead.tasks WHERE
+            AND a.state IN ('dispatching','unknown')"""
+            + (" AND s.profile_id=%s" if selected else "") + " LIMIT 1",
+            (selected,) if selected else ())
+    scope, scope_args = "TRUE", ()
+    if selected:
+        # Explicit profile work shares this browser. Otherwise resolve Telegram
+        # account/target identity; a different channel's queue is independent.
+        scope = """(work.input->>'channel_profile_id'=%s OR work.input->>'profile_id'=%s
+            OR EXISTS (SELECT 1 FROM lead.social_accounts s
+                WHERE s.platform='telegram' AND s.profile_id=%s AND (
+                    s.id::text=work.input->>'account_id'
+                    OR (work.input->>'account_id' IS NULL
+                        AND s.external_account_id=work.input->>'external_account_id')
+                    OR EXISTS (SELECT 1 FROM lead.account_targets target WHERE target.account_id=s.id
+                        AND (target.id::text=work.input->>'target_id'
+                             OR EXISTS (SELECT 1 FROM lead.actions action
+                                 WHERE action.task_id=work.id AND action.target_id=target.id))))))"""
+        scope_args = (selected, selected, selected)
+    return one(c, """SELECT 1 FROM lead.tasks work WHERE (
         (type<>'community.discover' AND state IN ('queued','running','reconciling')
          AND NOT (type='community.engage' AND state='reconciling')
          AND NOT (type='community.engage' AND state='running'
                   AND coalesce(input#>>'{reply,standalone}','')='true' AND coalesce(result->>'reply_state','')='unknown'
                   AND result ? 'receipt_review_after' AND (result->>'receipt_review_after')::timestamptz>now()))
-        OR (NOT %s AND input->>'fresh_channel'='true' AND result->>'awaiting_first_publish'='true')
-        LIMIT 1""", (focus,))
+        OR (NOT %s AND input->>'fresh_channel'='true' AND result->>'awaiting_first_publish'='true'))
+        AND """ + scope + " LIMIT 1", (focus, *scope_args))
 
 
 def next_phase(payload, saved, native_queries):
@@ -637,10 +655,39 @@ def model_wait(aid, task_id, phase, error):
     return {"delay": 300, "reason": "token_budget_wait"}
 
 
-async def advance(aid):
+def executor_task_filter(aid, table="lead.tasks"):
+    """Select this executor's checkpoints without mutating another binding's work.
+
+    A legacy public checkpoint belongs to the original default profile. Account
+    checkpoints must still name an active, unchanged identity in this profile;
+    a replacement account starts fresh while the old evidence stays intact.
+    """
+    selected = executor_scope.selected_profile(aid)
+    if selected is None:
+        return "TRUE", ()
+    if table not in {"lead.tasks", "t"}:
+        raise ValueError("unsupported discovery task alias")
+    return f"""(
+        ({table}.input->>'channel_profile_id'=%s
+         OR (NOT ({table}.input ? 'channel_profile_id') AND
+             ({table}.input ? 'account_id' OR EXISTS (
+                SELECT 1 FROM lead.browser_profiles p WHERE p.slot='default' AND p.id=%s))))
+        AND (NOT ({table}.input ? 'account_id') OR EXISTS (
+            SELECT 1 FROM lead.social_accounts s WHERE s.id::text={table}.input->>'account_id'
+              AND s.profile_id=%s AND s.platform='telegram'
+              AND s.state='connected' AND s.automation_enabled
+              AND s.external_account_id={table}.input->>'external_account_id'))
+    )""", (selected, selected, selected)
+
+
+async def advance(aid, *, invoke_model=None):
     from .community_growth import campaign_progress, search_interval
     from .community_search import QUERIES
     from .model import run_model
+
+    run_model = invoke_model or run_model
+    channel_profile_id = executor_scope.selected_profile(aid)
+    owned, owned_args = executor_task_filter(aid)
 
     with tx(aid) as c:
         a = require_agent(c, aid, True)
@@ -654,7 +701,8 @@ async def advance(aid):
         request = a["onboarding_state"].get("community_research_request", "")
         task = one(
             c,
-            "SELECT * FROM lead.tasks WHERE type='community.discover' AND state='running' AND input->>'checkpoint_version'='2' ORDER BY created_at LIMIT 1",
+            "SELECT * FROM lead.tasks WHERE type='community.discover' AND state='running' AND input->>'checkpoint_version'='2' AND " + owned + " ORDER BY created_at LIMIT 1",
+            owned_args,
         )
         if task and task["input"].get("research_request", "") != request:
             c.execute(
@@ -673,7 +721,7 @@ async def advance(aid):
         # fence account-bound search/participation, not independent public pages.
         if (
             config.mode != "discovery" or (task and task["input"].get("account_id"))
-        ) and account_discovery_blocked(c, first_users(a)):
+        ) and account_discovery_blocked(c, first_users(a), aid=aid):
             if not chamber_campaign(a):
                 return
             if task and (task["result"] or {}).get("phase") == "native_collect":
@@ -689,8 +737,8 @@ async def advance(aid):
         if not task:
             repaired = one(
                 c,
-                "SELECT * FROM lead.tasks WHERE type='community.discover' AND state='failed' AND input->>'checkpoint_version'='2' AND coalesce(input->>'research_request','')=%s AND result->>'phase'='assess' AND (coalesce(result->>'adapter_revision','0')<>%s OR coalesce(completed_at,created_at)<=now()-interval '10 minutes') ORDER BY created_at DESC LIMIT 1",
-                (request, str(ADAPTER_REVISION)),
+                "SELECT * FROM lead.tasks WHERE type='community.discover' AND state='failed' AND input->>'checkpoint_version'='2' AND coalesce(input->>'research_request','')=%s AND result->>'phase'='assess' AND (coalesce(result->>'adapter_revision','0')<>%s OR coalesce(completed_at,created_at)<=now()-interval '10 minutes') AND " + owned + " ORDER BY created_at DESC LIMIT 1",
+                (request, str(ADAPTER_REVISION), *owned_args),
             )
             if repaired:
                 task = one(
@@ -701,14 +749,15 @@ async def advance(aid):
         if not task:
             finished = one(
                 c,
-                "SELECT * FROM lead.tasks WHERE type='community.discover' AND state='succeeded' AND input->>'checkpoint_version'='2' AND coalesce(input->>'research_request','')=%s ORDER BY created_at DESC LIMIT 1",
-                (request,),
+                "SELECT * FROM lead.tasks WHERE type='community.discover' AND state='succeeded' AND input->>'checkpoint_version'='2' AND coalesce(input->>'research_request','')=%s AND " + owned + " ORDER BY created_at DESC LIMIT 1",
+                (request, *owned_args),
             )
             phase = continuation_phase(finished, a, config) if finished else None
             if phase:
                 saved = {**finished["result"], "phase": phase, "candidates": [], "summary": ""}
                 saved.pop("batch_deadline", None)
-                payload = {**finished["input"], **config.model_dump(), "continued_from": str(finished["id"])}
+                payload = {**finished["input"], **config.model_dump(), "continued_from": str(finished["id"]),
+                           **({"channel_profile_id": channel_profile_id} if channel_profile_id else {})}
                 task = one(
                     c,
                     """INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,result,scheduled_at,started_at)
@@ -801,8 +850,8 @@ async def advance(aid):
         if not task:
             latest = one(
                 c,
-                "SELECT state,result->>'adapter_revision' AS adapter_revision,jsonb_array_length(coalesce(result->'candidates','[]')) AS candidate_count,extract(epoch FROM now()-coalesce(completed_at,created_at)) AS age FROM lead.tasks WHERE type='community.discover' AND coalesce(input->>'research_request','')=%s ORDER BY created_at DESC LIMIT 1",
-                (request,),
+                "SELECT state,result->>'adapter_revision' AS adapter_revision,jsonb_array_length(coalesce(result->'candidates','[]')) AS candidate_count,extract(epoch FROM now()-coalesce(completed_at,created_at)) AS age FROM lead.tasks WHERE type='community.discover' AND coalesce(input->>'research_request','')=%s AND " + owned + " ORDER BY created_at DESC LIMIT 1",
+                (request, *owned_args),
             )
             if latest and latest["state"] == "failed" and latest["age"] < 600:
                 return {
@@ -819,17 +868,19 @@ async def advance(aid):
                 )
             ):
                 return
+            previous_owned, previous_args = executor_task_filter(aid, "t")
             previous_groups = all_rows(
                 c,
                 """SELECT DISTINCT item->>'telegram_url' AS url FROM lead.tasks t
                 CROSS JOIN LATERAL jsonb_array_elements(t.result->'candidates') item
                 WHERE t.type='community.discover' AND t.state='succeeded' AND t.completed_at>now()-interval '7 days'
                 AND t.input->>'config_revision'=%s AND coalesce(t.input->>'research_request','')=%s
-                AND item->>'telegram_url' IS NOT NULL ORDER BY url""",
-                (str(a["config_revision"]), request),
+                AND item->>'telegram_url' IS NOT NULL AND """ + previous_owned + " ORDER BY url",
+                (str(a["config_revision"]), request, *previous_args),
             )
             payload = {
                 **config.model_dump(),
+                **({"channel_profile_id": channel_profile_id} if channel_profile_id else {}),
                 "product_topics": True,
                 **(
                     {"native_queries": list(CHAMBER_TOPICS if chamber_campaign(a) else dict.fromkeys(config.topics))}
@@ -1010,7 +1061,8 @@ async def advance(aid):
         if config.mode == "contextual_outreach" and "native_cursor" not in saved:
             account = one(
                 c,
-                "SELECT s.id,s.external_account_id,card.id AS delegation_id FROM lead.social_accounts s JOIN lead.interaction_cards card ON card.type='manage_community' AND card.state='accepted' AND card.expires_at>now() AND card.payload->>'account_id'=s.id::text AND card.payload->>'external_account_id'=s.external_account_id WHERE s.platform='telegram' AND s.state='connected' AND s.automation_enabled LIMIT 1",
+                "SELECT s.id,s.external_account_id,card.id AS delegation_id FROM lead.social_accounts s JOIN lead.interaction_cards card ON card.type='manage_community' AND card.state='accepted' AND card.expires_at>now() AND card.payload->>'account_id'=s.id::text AND card.payload->>'external_account_id'=s.external_account_id WHERE s.platform='telegram' AND s.state='connected' AND s.automation_enabled AND (%s::uuid IS NULL OR s.profile_id=%s) LIMIT 1",
+                (channel_profile_id, channel_profile_id),
             )
             if account:
                 payload.update(
@@ -1296,7 +1348,7 @@ async def advance(aid):
             return {"delay": 2, "reason": "community_discovery_progress"}
     if saved["phase"] == "native_collect":
         with tx(aid) as c:
-            if account_discovery_blocked(c, first_users(a)):
+            if account_discovery_blocked(c, first_users(a), aid=aid):
                 return {"delay": 30,"reason": "community_account_in_use"}
         from .activities import browser_rpc
         from .community_search import QUERIES
