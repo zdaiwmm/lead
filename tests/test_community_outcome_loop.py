@@ -148,6 +148,10 @@ def test_join_quota_does_not_consume_opt_in_reply_quota():
         ),
         ({"join_state": "confirmed"}, "no_change"),
         ({"join_state": "confirmed", "join_submitted": True}, "membership_confirmed"),
+        (
+            {"join_state": "confirmed", "join_submitted": True, "reply_state": "unknown"},
+            "pending_receipt",
+        ),
     ],
 )
 def test_finished_task_is_not_automatically_a_business_result(result, expected):

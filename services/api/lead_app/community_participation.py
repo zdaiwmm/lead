@@ -184,8 +184,6 @@ def business_outcome(task):
     outcome = result.get("outcome") or {}
     if result.get("reply_state") == "confirmed" and result.get("reply_external_id"):
         return "message_confirmed"
-    if result.get("join_state") == "confirmed" and result.get("join_submitted"):
-        return "membership_confirmed"
     if (
         outcome.get("state") in {"unknown", "pending_verification", "pending_approval"}
         or task.get("state") == "reconciling"
@@ -193,6 +191,8 @@ def business_outcome(task):
         or result.get("join_state") in {"unknown", "dispatching", "pending_approval"}
     ):
         return "pending_receipt"
+    if result.get("join_state") == "confirmed" and result.get("join_submitted"):
+        return "membership_confirmed"
     if task.get("state") == "failed" or outcome.get("state") == "failed":
         return "failed"
     if outcome.get("state") in {"blocked", "deferred", "skipped", "review_only"}:
