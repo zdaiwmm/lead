@@ -86,8 +86,13 @@ def waiting_result(challenge):
     }
 
 
-def block(actor, platform, action_id=None):
+def block(actor, platform, action_id=None, *, challenge_page=None):
     """Caller owns actor.lock. Keep account grants and action IDs unchanged."""
+    if challenge_page is not None and challenge_page is not actor.page:
+        if challenge_page.context is not actor.page.context or challenge_page.is_closed():
+            raise ValueError("验证页面不属于原浏览器会话")
+        actor.challenge_return_page = actor.page
+        actor.page = challenge_page
     with tx(actor.aid) as c:
         agent = require_agent(c, actor.aid, True)
         profile_id = getattr(actor, "profile", {}).get("id")
@@ -159,6 +164,9 @@ def assert_session(challenge, actor):
 
 def finish(actor, challenge_id, observed):
     """Called only after checking the original page and authenticated account."""
+    return_page = getattr(actor, "challenge_return_page", None)
+    if return_page is not None and return_page.is_closed():
+        raise ValueError("原草稿窗口已关闭，任务保持暂停，请先核对原任务")
     with tx(actor.aid) as c:
         agent = require_agent(c, actor.aid, True)
         challenge = pending(c, getattr(actor, "profile", {}).get("id"))
@@ -255,9 +263,13 @@ def finish(actor, challenge_id, observed):
         )
         if resume:
             emit(c, actor.aid, "supervisor.wake")
-        return {
+        response = {
             "ok": True,
             "resumed_tasks": resumed,
             "account_id": challenge["account_id"],
             "finish_login": resolved["finish_login"],
         }
+    if return_page is not None:
+        actor.page = return_page
+        actor.challenge_return_page = None
+    return response

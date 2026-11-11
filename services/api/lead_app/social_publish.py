@@ -310,10 +310,10 @@ async def execute(actor, action_id):
                         "state": "unknown",
                         "reason": "提交后的回执不确定，只核对，不重复上传或点击",
                     }
-        except HumanVerificationRequired:
+        except HumanVerificationRequired as error:
             from .browser_challenges import block
 
-            return block(actor, target["platform"], action_id)
+            return block(actor, target["platform"], action_id, challenge_page=getattr(error, "page", None))
         except (NeedsAuth, ScopeChanged) as error:
             with tx(aid) as c:
                 c.execute(

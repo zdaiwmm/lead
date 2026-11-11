@@ -509,3 +509,78 @@ def test_rebound_account_never_resumes_an_old_challenge(handoff):
         )
     with pytest.raises(ValueError, match="账号绑定已改变"):
         challenges.finish(actor, challenge["id"], {"external_account_id": actor.aid})
+
+
+@pytest.mark.skipif(os.environ.get("LEAD_BROWSER_TESTS") != "1", reason="real browser fixture")
+@pytest.mark.parametrize("close_draft", [False, True])
+async def test_rule_check_tab_is_preserved_and_original_draft_restored(handoff, monkeypatch, close_draft):
+    from lead_app import social_publish
+    from lead_app.adapters.web import WebAdapter
+    from lead_app.reddit_member import rules_digest
+
+    original, task, action, _ = handoff
+    gateway = browser.Gateway()
+    actor = await gateway.get(original.aid)
+    draft = actor.page
+    rule_text = "Respect community rules and disclose your affiliation clearly."
+    require_verification = True
+    preparations, submits = [], []
+    adapter = WebAdapter("reddit")
+    monkeypatch.setattr(adapter, "account", AsyncMock(return_value={"external_account_id": actor.aid}))
+
+    async def rules_route(route):
+        await route.fulfill(content_type="text/html", body=(
+            "<main><h1>Verify you are human</h1></main>" if require_verification
+            else f"<main>{rule_text}</main>"
+        ))
+
+    await actor.context.route("https://www.reddit.com/r/fixture/about/rules/", rules_route)
+
+    class Adapter:
+        async def prepare(self, page, target, *args):
+            preparations.append(1)
+            await page.set_content('<textarea>Original prepared draft</textarea><button>Publish</button>')
+            return {"kind": "text", "fields": [], "prepared_url": page.url,
+                    "target_id": target["external_target_id"], "final_selectors": ["button"]}
+
+        async def before_commit(self, page, target, observation, expected_account):
+            await adapter.before_commit(page, {**target, "canonical_url": "https://www.reddit.com/r/fixture/",
+                "verified_permissions": {"access_mode": "ordinary_member", "rules": {"sha256": rules_digest(rule_text)}}}, observation, expected_account)
+
+        async def submit(self, page, observation):
+            assert page is draft
+            assert await page.locator("textarea").input_value() == "Original prepared draft"
+            submits.append(1)
+
+        async def receipt(self, *args):
+            return {"external_id": "fixture-only-post"}
+
+    monkeypatch.setattr(social_publish, "get_adapter", lambda _: Adapter())
+    try:
+        result = await social_publish.execute(actor, str(action["id"]))
+        assert result["state"] == "needs_verification"
+        challenge_page = actor.page
+        assert challenge_page is not draft and not challenge_page.is_closed()
+        assert await challenge_page.get_by_role("heading").inner_text() == "Verify you are human"
+        assert await draft.locator("textarea").input_value() == "Original prepared draft"
+        assert not submits and len(preparations) == 1
+        with tx(actor.aid) as c:
+            challenge = challenges.pending(c)
+        require_verification = False
+        await challenge_page.set_content(f"<main>{rule_text}</main>")
+        await check_challenge(challenge_page)
+        if close_draft:
+            await draft.close()
+            with pytest.raises(ValueError, match="原草稿窗口已关闭"):
+                challenges.finish(actor, challenge["id"], {"external_account_id": actor.aid})
+            with tx(actor.aid) as c:
+                assert challenges.pending(c)
+                assert one(c, "SELECT state FROM lead.tasks WHERE id=%s", (task["id"],))["state"] == "waiting_user"
+            assert actor.page is challenge_page and not submits
+        else:
+            assert challenges.finish(actor, challenge["id"], {"external_account_id": actor.aid})["resumed_tasks"] == 1
+            assert actor.page is draft
+            assert (await social_publish.execute(actor, str(action["id"])))["state"] == "confirmed"
+            assert len(preparations) == 1 and len(submits) == 1
+    finally:
+        await gateway.close(actor.aid)

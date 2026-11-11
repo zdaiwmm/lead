@@ -39,7 +39,9 @@ async def check_challenge(page):
         or await headings.filter(visible=True).count()
         or re.search(r"^/(?:captcha|challenge|i/flow/challenge|cdn-cgi/challenge-platform)(?:/|$)", path, re.I)
     ):
-        raise HumanVerificationRequired("平台要求真人验证，已保留原页面，请接管浏览器完成验证")
+        error = HumanVerificationRequired("平台要求真人验证，已保留原页面，请接管浏览器完成验证")
+        error.page = page
+        raise error
 
 
 class ScopeChanged(ValueError):

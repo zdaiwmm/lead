@@ -1168,12 +1168,18 @@ class WebAdapter:
             from ..reddit_member import read_rules
 
             check = await page.context.new_page()
+            preserve_challenge = False
             try:
                 rules = await read_rules(check, target["canonical_url"])
                 if rules["sha256"] != target["verified_permissions"]["rules"]["sha256"]:
                     raise ScopeChanged("提交前社区规则已变化，未点击发布")
+            except HumanVerificationRequired:
+                # The actor takes over this exact tab; keep the prepared draft intact.
+                preserve_challenge = True
+                raise
             finally:
-                await check.close()
+                if not preserve_challenge:
+                    await check.close()
         if self.platform == "tiktok" and observation.get("disclosures"):
             await self.tiktok_declarations(
                 page, observation["disclosures"]["ai_generated"], verify=True
