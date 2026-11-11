@@ -3,6 +3,32 @@
 import re
 from typing import Literal
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class PinReadResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["complete", "partial", "failed"]
+    reader: Literal["carousel", "native_list"]
+    reason: Literal["identity_changed", "incomplete_list", "timeout", "unreadable_body", "external_rules_required"] | None = None
+    peer_binding: dict[str, str]
+    message_ids: list[str] = Field(default_factory=list)
+    content_refs: list[str] = Field(default_factory=list)
+    total_count: int | None = Field(default=None, ge=0)
+    next_cursor: str | None = None
+
+    @model_validator(mode="after")
+    def verify_completeness(self):
+        if self.status == "complete":
+            if (self.reason is not None or self.next_cursor is not None
+                    or self.total_count is None or self.total_count != len(self.message_ids)
+                    or len(set(self.message_ids)) != len(self.message_ids)
+                    or len(self.content_refs) != self.total_count):
+                raise ValueError("Complete pins require a unique, fully evidenced list")
+        elif self.reason is None:
+            raise ValueError("An incomplete read must explain its gap")
+        return self
+
 
 def description_kind(text: str, *, topic_matches: bool) -> Literal["substantive", "title_only", "empty"]:
     content = re.sub(r"https?://\S+|(?:www\.|t\.me/)\S+|(?<!\w)@[\w]+", "", text)
