@@ -31,9 +31,12 @@ def unbound_source(c, platform, agent, business):
           AND t.result->>'channel_fit'='viable' AND t.result#>>'{cold_entry,source_url}'=t.input->>'candidate_url' AND t.result->'source_urls' ? (t.input->>'candidate_url')
           AND t.completed_at>now()-interval '14 days' AND t.input->>'business_profile_id'=%s
           AND t.input->>'config_revision'=%s AND s.platform=%s AND s.state='connected' AND s.automation_enabled
-          AND NOT coalesce(t.result->'account_inspections','{}') ? (s.id::text||':'||s.binding_version::text)
+          AND (NOT coalesce(t.result->'account_inspections','{}') ? (s.id::text||':'||s.binding_version::text)
+               OR (t.result#>>ARRAY['account_inspections',s.id::text||':'||s.binding_version::text,'checked_at'])::timestamptz<now()-interval '1 day')
           AND NOT EXISTS (SELECT FROM lead.account_targets target WHERE target.account_id=s.id
-                           AND rtrim(target.canonical_url,'/')=rtrim(t.input->>'candidate_url','/'))
+                           AND rtrim(target.canonical_url,'/')=rtrim(t.input->>'candidate_url','/')
+                           AND (target.verified_permissions->>'access_mode' IS DISTINCT FROM 'ordinary_member'
+                                OR (target.verified_permissions#>>'{rules,checked_at}')::timestamptz>now()-interval '23 hours'))
           AND EXISTS (SELECT FROM lead.platform_capabilities p WHERE p.platform=s.platform AND p.action_type='publish'
                       AND p.permission_state='approved')
         ORDER BY t.completed_at DESC,s.created_at,s.id LIMIT 1""",
@@ -65,19 +68,22 @@ async def inspect_source(args, candidate):
         if target["canonical_url"].rstrip("/") != candidate["url"].rstrip("/"):
             reason = "target_management_unverified"
         else:
-            binding = await asyncio.to_thread(
-                store_target,
-                aid,
-                str(candidate["account_id"]),
-                target,
-                expected_binding=candidate["binding_version"],
-                channel_clock=args,
-            )
-            reason = (
-                "target_permissions_review"
-                if binding["card_id"]
-                else "target_verification_queued"
-            )
+            suitable = True
+            if target.get("access_mode") == "ordinary_member":
+                from .reddit_member import prepare_first
+
+                draft = await prepare_first(aid, candidate, target)
+                suitable = draft["suitable"]
+                target["first_publication"] = draft
+                target["evidence_task_id"] = str(candidate["evidence_id"])
+            if suitable:
+                binding = await asyncio.to_thread(
+                    store_target, aid, str(candidate["account_id"]), target,
+                    expected_binding=candidate["binding_version"], channel_clock=args,
+                )
+                reason = "target_permissions_review" if binding["card_id"] else "target_verification_queued"
+            else:
+                reason = "community_rules_do_not_fit"
     with tx(aid) as c:
         if not current(c, aid, args):
             return {"stop": True}
@@ -85,7 +91,7 @@ async def inspect_source(args, candidate):
         c.execute(
             """UPDATE lead.tasks SET result=jsonb_set(result,'{account_inspections}',
                   coalesce(result->'account_inspections','{}') || %s) WHERE id=%s""",
-            (j({key: reason}), candidate["evidence_id"]),
+            (j({key: {"reason": reason, "checked_at": datetime.now(timezone.utc).isoformat()}}), candidate["evidence_id"]),
         )
     return {"delay": 1, "reason": reason}
 

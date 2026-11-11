@@ -136,7 +136,7 @@ def gate(c, target_id, schedule, now=None, exclude_task_id=None):
            WHERE t.input->>'target_id'=%s AND t.type LIKE '%%.publish'
              AND (%s::uuid IS NULL OR t.id<>%s::uuid)
              AND t.scheduled_at>now()-interval '30 days'
-             AND coalesce(t.input->>'bootstrap_verification','false')<>'true'
+             AND (coalesce(t.input->>'bootstrap_verification','false')<>'true' OR t.input->>'member_contribution'='true')
              AND (t.state IN ('queued','running','reconciling','succeeded') OR a.state IN ('dispatching','unknown','confirmed'))""",
         (str(target_id), exclude_task_id, exclude_task_id),
     )
