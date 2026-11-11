@@ -11,7 +11,12 @@ def model_http_client(agent_id, config, timeout, values):
     if agent_id is None:
         return None
     provider = config["provider"]
-    agent_key = UUID(str(agent_id)).hex.upper()
+    try:
+        agent_key = UUID(str(agent_id)).hex.upper()
+    except ValueError:
+        # Only real Agent UUIDs can select an operator-owned route. Leave
+        # unconfigured callers (including test doubles) on their existing path.
+        return None
     key = f"LEAD_MODEL_SOCKET_{agent_key}_{provider.upper()}"
     if key not in values:
         return None

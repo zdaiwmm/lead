@@ -27,6 +27,11 @@ def test_configuration_is_scoped_to_agent_and_provider():
     assert model_http_client(aid, endpoint(), 1, {}) is None
 
 
+@pytest.mark.parametrize("values", [{}, {"LEAD_MODEL_SOCKET_FIXTURE_OPENAI": "/run/model.sock"}])
+def test_non_uuid_caller_keeps_existing_client_without_selecting_a_route(values):
+    assert model_http_client("fixture", endpoint(), 1, values) is None
+
+
 @pytest.mark.parametrize("path", [None, "", "relative.sock", "/run/../private.sock", "/run/bad\0.sock"])
 def test_invalid_explicit_route_never_uses_default_transport(path):
     aid = uuid4()

@@ -289,8 +289,8 @@ async def run_model(
             base_url=config["base_url"],
             api_key=config["key"],
             max_retries=0,
-            http_client=http_client,
             timeout=timeout,
+            **({"http_client": http_client} if http_client is not None else {}),
         )
         if config["provider"] == "openai"
         or short_request
