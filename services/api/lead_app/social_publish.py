@@ -339,8 +339,6 @@ async def execute(actor, action_id):
                 "UPDATE lead.action_attempts SET outcome='confirmed',evidence_ref=%s,ended_at=now() WHERE action_id=%s AND attempt=(SELECT max(attempt) FROM lead.action_attempts WHERE action_id=%s)",
                 (str(path), action_id, action_id),
             )
-            from .cadence_events import wake_clocks
-            wake_clocks(c, aid, platforms={target["platform"]}, lane="delivery")
             delivery = None
             if target["platform"] == "tiktok":
                 from .publication_delivery import persist

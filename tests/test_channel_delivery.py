@@ -355,9 +355,19 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
             with tx(aid) as c:
                 return one(c, "SELECT count(*) AS n FROM lead.outbox_events WHERE event_type='channel.clock.wake' AND payload->>'task_id'=(SELECT id::text FROM lead.tasks WHERE type='channel.clock' AND input->>'platform'='facebook' AND input->>'lane'='delivery')")["n"]
         before_receipt = wake_count()
-        assert (await activities.execute_task(request("facebook")))[
-            "state"
-        ] == "confirmed"
+        record_result=activities.record_publish_result
+        def consume_before_task_completion(*values):
+            with tx(aid) as c:
+                clock=one(c,"SELECT * FROM lead.tasks WHERE type='channel.clock' AND input->>'platform'='facebook' AND input->>'lane'='delivery'")
+            parked=channel_delivery.next_target(dict(agent_id=aid,task_id=str(clock['id']),generation=clock['version'],tick=uid()))
+            assert parked['execution_cadence']['state']=='waiting_event'
+            before_terminal=wake_count()
+            result=record_result(*values)
+            assert wake_count()>before_terminal
+            return result
+        with monkeypatch.context() as timing:
+            timing.setattr(activities,'record_publish_result',consume_before_task_completion)
+            assert (await activities.execute_task(request("facebook")))["state"] == "confirmed"
         assert wake_count() > before_receipt
         for platform in platforms:
             actor = actors[platform]
