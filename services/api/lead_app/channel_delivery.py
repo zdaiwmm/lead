@@ -14,11 +14,17 @@ from .scope import current_tenant, scoped_activity
 
 
 def owns(agent, platform):
-    # Experiments already own scheduling/admission and their budgets.
+    member = platform == "reddit" and agent["onboarding_state"].get("reddit_member_delivery") is True
+    # Bounded experiments keep their own budget admission. Chamber's existing
+    # campaign has no experiment pool; explicitly delegated Reddit work uses
+    # these clocks, and the shared kernel skips the same channel via owns().
     return bool(
-        (channel_pilot(agent["id"]) or (platform == "reddit" and agent["onboarding_state"].get("reddit_member_delivery") is True))
+        (channel_pilot(agent["id"]) or member)
         and channel_for(platform)
-        and not growth_experiments.enabled(agent)
+        and (
+            not growth_experiments.enabled(agent)
+            or (member and growth_experiments.chamber_campaign(agent))
+        )
     )
 
 
