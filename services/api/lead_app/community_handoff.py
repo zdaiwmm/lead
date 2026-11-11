@@ -3,9 +3,9 @@ import hashlib
 import json
 from uuid import NAMESPACE_URL, uuid5
 
+from .community_health import canonical_url
 from .db import all_rows, emit, j, one, require_agent
 from .scope import current_tenant
-from .community_health import canonical_url
 
 TYPE = "community_candidate_handoff"
 

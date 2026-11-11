@@ -15,13 +15,12 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import BaseModel, Field
 
-from .cadence_state import create_read_task
 from . import community_checkpoints, community_health
+from .cadence_state import create_read_task
 from .community_growth import CHAMBER_BRIEF, GrowthConfig
 from .db import j, one, record, require_agent, tx, uid
 from .growth_experiments import chamber_campaign, first_users
 from .promotion import asked_role, promoter_copy_ok, promoter_voice, tracking_required
-from .scope import current_tenant
 
 HISTORY_ADAPTER_VERSION = "16"
 DECISION_VERSION = "5"
@@ -1863,8 +1862,8 @@ def candidate_already_assessed(c, url, *, focus=False, observation=False, proact
 
 
 def next_candidate(c, revision, focus, *, chamber=False, proactive=False, account=None, aid=None):
-    from .community_opportunities import next_rule_review
     from .community_handoff import next_handoff
+    from .community_opportunities import next_rule_review
 
     handoff = next_handoff(c, aid, account, revision)
     if handoff and not community_health.blocked(c, aid, {"input": {"external_account_id": account["external_account_id"], "candidate": handoff}}, write=False):

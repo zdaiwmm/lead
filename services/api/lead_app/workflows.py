@@ -57,7 +57,8 @@ class ChannelDeliveryWorkflow:
         decision = result.get("execution_cadence") or {}
         state = decision.get("state")
         version = max((item.get("policy_version", 0) for item in decision.get("constraints", [])), default=0)
-        changed = lambda: self.wake_count > seen and self.wake_version >= version
+        def changed():
+            return self.wake_count > seen and self.wake_version >= version
         if state == "waiting_event":
             await workflow.wait_condition(changed)
         elif state == "waiting_time" and decision.get("next_at"):
