@@ -684,10 +684,13 @@ def login_browser_port(c, aid, path, body):
             if account["slot"].split("-", 1)[0] != account["platform"]:
                 raise HTTPException(409, "请重新打开此账号的独立登录窗口")
             return 18091
-    if operation in ("screenshot", "input"):
+    challenge = operation in ("challenge/status", "challenge/verify")
+    if operation in ("screenshot", "input") or challenge:
         takeover = data.get("takeover")
         if operation == "screenshot":
             takeover = parse_qs(url.query).get("takeover", [None])[0]
+        if challenge and not takeover:
+            raise HTTPException(409, "接管已过期")
         if takeover:
             profile = one(
                 c,
@@ -701,7 +704,13 @@ def login_browser_port(c, aid, path, body):
             )
             if not profile:
                 raise HTTPException(409, "接管已过期")
-            if profile["slot"].split("-", 1)[0] in platforms and profile["bound"]:
+            platform = profile["slot"].split("-", 1)[0]
+            # Human-verification checks use the same window as input/frames.
+            # Never send an isolated account's challenge to the Telegram executor.
+            if challenge and (platform in platforms or data.get("platform") in platforms):
+                if data.get("platform") != platform or not profile["bound"]:
+                    raise HTTPException(409, "验证请求与当前账号窗口不一致，请重新打开")
+            if platform in platforms and profile["bound"]:
                 return 18091
     return 8089
 
