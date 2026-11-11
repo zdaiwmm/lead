@@ -76,6 +76,19 @@ jobs:
       - run: .venv/bin/python scripts/check_repository.py
       - name: Native Linux browser and namespace prerequisites
         run: |
+          # Validate the official backups before excluding the runner's failing
+          # Azure mirror. Keep the existing suites and Ubuntu signing keyring.
+          for host in archive.ubuntu.com security.ubuntu.com; do
+            timeout 15 getent ahostsv4 "$host"
+            curl --fail --silent --show-error --proto '=https' --connect-timeout 5 --max-time 15 \
+              --output /dev/null "https://$host/ubuntu/dists/noble/InRelease"
+          done
+          test -f /etc/apt/apt-mirrors.txt
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' \
+            | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          # Playwright's own apt calls must inherit these bounds too.
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\nAPT::Update::Error-Mode "any";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99lead-ci-acquire >/dev/null
           sudo apt-get update
           sudo apt-get install -y bubblewrap fonts-noto-cjk
           .venv/bin/playwright install-deps firefox chromium
