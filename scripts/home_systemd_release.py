@@ -321,6 +321,49 @@ def reviewed_reddit_site(mirror, sha, extra):
     return paths
 
 
+# The model-route dependency was independently provisioned on the home node.
+# These are exact reviewed manifests/tools, never a directory-wide exception.
+RUNTIME_COMPATIBILITY_FILES = {
+    "pyproject.toml": {"46a2c7c01a2866bcebcf9e4b4bb2a6570d80461f"},
+    "scripts/verify_account_browser.py": {
+        "69daf9b5065322206da080a4c64b66a27d74d179",  # PR #28
+        "aa243338dd22dc3becf10eaf0100ecf7858d00b6",  # PR #29
+    },
+}
+
+
+def verify_model_runtime():
+    # Use the existing, root-provisioned interpreter, no candidate program and no
+    # network request or credential environment. Do not install anything here.
+    program = (
+        "import sys;sys.path.insert(0,'/run/lead-home/bin/site');"
+        "import asyncio,importlib.metadata as m,httpx2;"
+        "assert m.version('httpx2')=='2.16.0';"
+        "transport=httpx2.AsyncHTTPTransport(uds='/run/lead-model-runtime-probe.sock',"
+        "verify=True,trust_env=False);"
+        "asyncio.run(transport.aclose());print('model-runtime-ready')"
+    )
+    for role in ("api", "worker", "browser"):
+        proc = process(role)
+        result = run("nsenter", "-t", proc.name, "-m", "-n", "--", "setpriv",
+                     "--reuid=lead-r-app", "--regid=lead-r-app", "--clear-groups",
+                     BIN / "py/bin/python3.12", "-I", "-c", program)
+        require(result == "model-runtime-ready", "model runtime dependency unavailable")
+        require(process(role) == proc, "model runtime changed during compatibility check")
+
+
+def reviewed_runtime_files(mirror, sha, extra):
+    paths = extra.intersection(RUNTIME_COMPATIBILITY_FILES)
+    if not paths or not (TOOLS / "home_live_maintenance.py").is_file():
+        return set()
+    for path in paths:
+        require(run("git", "--git-dir", mirror, "rev-parse", f"{sha}:{path}")
+                in RUNTIME_COMPATIBILITY_FILES[path], "runtime files require separate compatibility review")
+    if "pyproject.toml" in paths:
+        verify_model_runtime()
+    return paths
+
+
 def deploy(sha):
     require(os.geteuid() == 0, "trusted node dispatcher required")
     safe_layout()
@@ -351,6 +394,7 @@ def deploy(sha):
         extra -= reviewed_maintenance_files(mirror, sha, extra)
         extra -= reviewed_channel_schema(mirror, sha, extra)
         extra -= reviewed_reddit_site(mirror, sha, extra)
+        extra -= reviewed_runtime_files(mirror, sha, extra)
         if extra:
             # The frame subsystem was already installed from this reviewed commit.
             # Only accept its EXACT reviewed blobs, and attest the installed components.
