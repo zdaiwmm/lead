@@ -1144,11 +1144,17 @@ def status(aid: UUID, today_only: bool = False):
             c,
             """SELECT input->>'platform' AS platform, coalesce(input->>'lane','delivery') AS lane,
             result->>'reason' AS reason, scheduled_at AS next_at,
-            result->>'last_target' AS last_target
+            result->>'last_target' AS last_target,result->'execution_cadence' AS execution_cadence
             FROM lead.tasks WHERE type='channel.clock' AND state='planned'
             AND input->>'control_version'=%s ORDER BY input->>'platform'""",
             (str(agent["control_version"]),),
         )
+        from .cadence_views import safe_project
+        for clock in plan["channel_clocks"]:
+            clock["execution_cadence"] = safe_project(clock["execution_cadence"],
+                policy=agent["onboarding_state"].get("execution_cadence"), device=agent["onboarding_state"].get("telegram_executor") if clock["platform"]=="telegram" else None)
+            clock["scheduled_check_at"] = clock["next_at"]
+            clock["next_at"] = clock["execution_cadence"]["next_at"]
         for horizon in ("week", "day"):
             stored = one(
                 c,

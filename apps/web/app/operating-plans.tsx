@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { api } from "./api-client";
 import DialogPanel from "./dialog-panel";
+import CadenceStatus from "./execution-cadence";
 import SocialIcon, { socialNames } from "./social-icon";
 import AgentAvatar from "./agent-avatar";
 import { ActivityHistory } from "./activity-panel";
@@ -542,17 +543,7 @@ export default function OperatingPlans({
                 <dl className={styles.facts}>
                   {data.channel_clocks.map((clock: Row) => (
                     <div key={clock.platform + clock.lane}><dt>{socialNames[clock.platform] || clock.platform} · {clock.lane === "research" ? "机会研究" : "投放"}</dt>
-                      <dd>{clock.reason === "awaiting_validated_opportunity" ? "等待新的已核验需求"
-                        : clock.reason === "target_permissions_review" ? "等待目标授权"
-                        : clock.reason === "target_verification_queued" ? "目标验证帖已排期"
-                        : clock.reason === "target_management_unverified" ? "未核实该账号的管理权限"
-                        : clock.reason === "work_hours" ? "等待工作时段"
-                        : clock.reason === "concurrency_limit" ? "等待可用执行位"
-                        : clock.reason === "token_budget_wait" ? "等待可用预算"
-                        : clock.reason === "source_permission_required" ? "等待渠道数据接入权限"
-                        : clock.reason === "no_available_verified_target" ? "等待可用的已验证目标"
-                        : clock.reason === "execution_attempts_exhausted" ? "遇阻，稍后复查"
-                        : "已排期"} · {timestamp(clock.next_at, data.timezone)}</dd></div>
+                      <dd><CadenceStatus value={clock.execution_cadence} zone={data.timezone} /></dd></div>
                   ))}
                 </dl>
               </details>

@@ -172,7 +172,7 @@ def participation_decision(c, aid, operation, attempts, now=None, *, account_id=
             origin = origins.get(parameter, {}).get("origin")
             source = {"owner_explicit":"owner", "platform_observed":"platform", "engineering":"engineering"}.get(origin, "capability")
             deadline = wait.get("next_eligible_at")
-            constraints.append(WaitEvidence(scope=scope, source=source, reason_code=parameter if origin else "legacy_unverified_"+parameter,
+            constraints.append(WaitEvidence(scope=scope, source=source, reason_code=parameter if origin in {"owner_explicit", "platform_observed", "engineering"} else "legacy_system_default_"+parameter if origin=="verified_system_default" else "legacy_unverified_"+parameter,
                 evidence_ref=origins.get(parameter, {}).get("evidence_ref") or ref, observed_at=now,
                 not_before=datetime.fromisoformat(deadline) if deadline else None,
                 resume_event=None if deadline else "cadence_policy_changed", policy_version=version))

@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { ArrowRight, CircleDot, Hand, History } from "lucide-react";
 import DialogPanel from "./dialog-panel";
+import CadenceStatus from "./execution-cadence";
+import type { ExecutionCadence } from "./api-client";
 import SocialIcon from "./social-icon";
 import styles from "./telegram-group-card.module.css";
 
@@ -21,6 +23,8 @@ type Board = {
   execution?: {
     totals: Record<string, number>;
     outcomes?: Record<string, number>;
+    facts?: Record<string, number>;
+    execution_cadence?: ExecutionCadence;
     waiting: { name: string; state: string; checked_at: string | null; next_at: string | null; check_state: string | null; reason: string | null }[];
     gates: { rule: string; reason: string; count: number }[];
     timings: { phase: string; samples: number; average_seconds: number; p95_seconds: number; failures: number }[];
@@ -64,11 +68,12 @@ export default function TelegramGroupCard({ board, zone, history }: { board: Boa
     const date = new Date(value);
     return Number.isFinite(date.getTime()) ? deviceClock.format(date) : null;
   }
+  function fact(key: string) { return board.execution?.facts?.[key] ?? "待核实"; }
   return <div className={styles.deck}><article className={styles.card}>
     <header className={styles.head}><div className={styles.identity}><span className={styles.icon}><SocialIcon platform="telegram" connected size={20}/></span><div><small>Telegram</small><h3>找群获客</h3></div></div>
       <button className="text-button" onClick={history}><History size={14}/>工作记录</button></header>
     <div className={styles.metrics}>{metrics.map(([key,label]) => <button key={key} aria-haspopup="dialog" onClick={()=>setSelected(key)}>
-      <span>{label}</span><strong>{(board.metrics[key]?.count??0).toLocaleString("zh-CN")}<small>{key==="interaction"||key==="inbox_reply"||key==="promotion"?" 条":" 个"}</small></strong>
+      <span>{label}</span><strong>{board.metrics[key]?.count == null ? "待核实" : board.metrics[key].count.toLocaleString("zh-CN")}<small>{key==="interaction"||key==="inbox_reply"||key==="promotion"?" 条":" 个"}</small></strong>
     </button>)}</div>
     {board.progress && <section aria-label="社区进展">
       <div className={styles.flow}>
@@ -94,7 +99,7 @@ export default function TelegramGroupCard({ board, zone, history }: { board: Boa
       </span></p>}
       {board.current !== "运营未启动或已暂停" && <p className={styles.note}><b>执行器心跳</b><span>{localTime(resident.heartbeat_at) || "尚未收到"}
         {localTime(resident.next_check_at) && <> · 调度复查 {localTime(resident.next_check_at)}</>}
-        {localTime(resident.native_search_after) && <> · 最早可搜索 {localTime(resident.native_search_after)}</>}
+        {localTime(resident.native_search_after) && <> · 原搜索排期 {localTime(resident.native_search_after)}（限制来源待核实）</>}
       </span></p>}
       {resident.write_hold && <p className={styles.note}><b>账号写入</b><span>{resident.write_hold}</span></p>}
     </section>}
@@ -102,11 +107,13 @@ export default function TelegramGroupCard({ board, zone, history }: { board: Boa
     {board.participation && <details className={styles.execution}>
       <summary>当前参与范围</summary>
       <ul className={styles.list}>{board.participation.scope.map(item => <li key={item}>{item}</li>)}</ul>
-      {localTime(board.participation.next_eligible_at) && <p className={styles.note}>操作额度最早恢复：{localTime(board.participation.next_eligible_at)}。到期后仍会重新核对群规与账号状态。</p>}
+      {localTime(board.participation.next_eligible_at) && <p className={styles.note}>原限制最早复查：{localTime(board.participation.next_eligible_at)}。到期后仍会重新核对群规与账号状态。</p>}
     </details>}
     <div className={styles.flow}><div><small><CircleDot/>当前行动</small><p>{board.current}</p></div><div><small><ArrowRight/>下一步行动</small><p>{board.next}</p></div><div><small><Hand/>需要你协助</small><p>{board.owner || "暂无待办"}</p></div></div>
     {board.execution && <details className={styles.execution}>
       <summary>执行进度与等待原因</summary>
+      <CadenceStatus value={board.execution.execution_cadence} zone={zone} />
+      {board.execution.facts && <p className={styles.note}>今日已确认入群 {fact("membership_confirmed")} 次，已确认回复 {fact("message_confirmed")} 条，待核对结果 {fact("pending_receipt")} 项。后续跳过发言不会抹去已确认入群。</p>}
       {board.execution.outcomes && <p className={styles.note}>
         今日结束的评估：跳过 {board.execution.outcomes.skipped || 0} 次，受阻 {board.execution.outcomes.blocked || 0} 次，
         暂缓 {board.execution.outcomes.deferred || 0} 次，无变化 {board.execution.outcomes.no_change || 0} 次。以上均不计为确认发言或获客成果。
@@ -115,7 +122,7 @@ export default function TelegramGroupCard({ board, zone, history }: { board: Boa
         ["assessed","已评估群"],["joins_started","入群已发起"],["restricted","已加入但不可发言"],
         ["drafts_accepted","文案通过"],["drafts_repaired","尝试修正文案"],["drafts_rejected","文案校验未通过"],
         ["sends_failed","平台确认发送失败"],["tasks_failed","今日失败任务"],
-      ].map(([key,label])=><div key={key}><dt>{label}</dt><dd>{board.execution!.totals[key]??0}</dd></div>)}</dl>
+      ].map(([key,label])=><div key={key}><dt>{label}</dt><dd>{board.execution!.totals[key]??"待核实"}</dd></div>)}</dl>
       {!!board.execution.waiting.length && <ul className={styles.list}>{board.execution.waiting.map((item,index)=>
         <li key={index}><strong>{item.name}</strong><p>{item.state}</p>
           <p>最近核对 {item.checked_at ? clock.format(new Date(item.checked_at)) : "等待首次核对"} ·
@@ -137,7 +144,7 @@ export default function TelegramGroupCard({ board, zone, history }: { board: Boa
           </tr>)}</tbody></table>
       </div>}
     </details>}
-    {metric && <DialogPanel title={metric[1]} onClose={()=>setSelected(null)}><p>{metric[2]}</p><p className="muted small">截至 {clock.format(new Date(board.at))} · {zone} · 已确认记录 {records?.count??0} 项</p>
+    {metric && <DialogPanel title={metric[1]} onClose={()=>setSelected(null)}><p>{metric[2]}</p><p className="muted small">截至 {clock.format(new Date(board.at))} · {zone} · 已确认记录 {records?.count??"待核实"} 项</p>
       {!!records?.records.length && <ul className={styles.list}>{records.records.map((r,i)=><li key={i}><strong>{r.name}</strong><time>{clock.format(new Date(r.at))}</time>{r.detail&&<p>{r.detail}</p>}</li>)}</ul>}
       {records && records.count>records.records.length && <p>展示最近 {records.records.length} 项。</p>}
     </DialogPanel>}
