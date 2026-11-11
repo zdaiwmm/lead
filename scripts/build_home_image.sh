@@ -20,6 +20,8 @@ test -s apps/web/.next/BUILD_ID
 test -d apps/web/node_modules/next
 stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
+# SquashFS preserves the staging root mode; channel executors traverse it as non-root.
+chmod 0755 "$stage"
 # Runtime helpers remain under ROOT; operator tools and local credentials are excluded.
 git archive "$sha" services apps/web infra/home-browser-frames "${runtime_paths[@]}" | tar -x -C "$stage"
 mv "$stage/apps/web" "$stage/web"

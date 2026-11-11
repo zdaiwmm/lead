@@ -852,7 +852,7 @@ def test_incomplete_provision_resumes_readback_without_replaying(provisioning, m
 
 def test_reviewed_executor_image_builder_is_exact(hook, monkeypatch):
     name = 'scripts/build_home_image.sh'
-    monkeypatch.setattr(hook, 'run', lambda *a: 'ba6cbd7ebe5af144346aacad40056e8a7a330daa')
+    monkeypatch.setattr(hook, 'run', lambda *a: '7079b3b48ec7d727800c5959ba6f321dfb24c07c')
     assert hook.reviewed_executor_image_files('/mirror', 'a' * 40, {name, 'scripts/arbitrary.py'}) == {name}
     monkeypatch.setattr(hook, 'run', lambda *a: 'other')
     with pytest.raises(hook.Refused, match='image builder'):
@@ -1037,3 +1037,14 @@ def test_provision_fixture_keeps_unsafe_internal_config_ancestor(provisioning, f
     with pytest.raises(p.h.Refused, match='unsafe executor config directory'):
         p.h.executor_provision_plan(p.path, p.sha)
     assert not any(command[0] == 'systemctl' for command in p.commands)
+
+
+
+def test_provision_refuses_private_image_root_before_stopping_service(provisioning):
+    p = provisioning
+    (p.h.STORE / p.sha).chmod(0o700)
+    with pytest.raises(p.h.Refused, match='executor image root'):
+        p.h.provision_executor(p.sha, p.path)
+    assert not any(command[:2] == ('systemctl', 'stop') for command in p.commands)
+    assert not p.dropin.exists()
+    assert not p.config.exists()
