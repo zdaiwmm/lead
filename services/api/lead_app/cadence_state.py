@@ -184,6 +184,23 @@ def record_decision(c, aid: str, task_id: str, decision: Decision) -> None:
               (j({"execution_cadence": decision.model_dump(mode="json")}), aid, task_id))
 
 
+def participation_waits(c, agent, now=None):
+    """Price known writes before paid reads; shadow keeps existing scheduling."""
+    if agent["onboarding_state"].get("execution_cadence", {}).get("mode") not in {"active", "paused"}:
+        return {}
+    aid = str(agent["id"])
+    waits = {}
+    for account in all_rows(c, "SELECT id,external_account_id FROM lead.social_accounts WHERE agent_id=%s AND platform='telegram' AND state='connected' AND automation_enabled", (aid,)):
+        key = str(account["id"])
+        task = {"input": {"account_id": key, "external_account_id": account["external_account_id"]}}
+        attempts = participation_attempts(c, aid, task, "join")
+        for operation in ("join", "reply"):
+            decision = participation_decision(c, aid, operation, attempts, now, account_id=key)
+            if decision.state != "ready":
+                waits.setdefault(operation, {})[key] = decision
+    return waits
+
+
 def create_read_task(c, aid, payload, workflow_id):
     """Shared constructor; the caller holds control lock and revalidates scope."""
     row = one(c, """INSERT INTO lead.tasks(tenant_id,agent_id,type,state,input,started_at,scheduled_at,workflow_id)
@@ -202,8 +219,6 @@ def resume_eligible(c, aid: str, *, policy_version: int) -> list[str]:
             or state.get("policy_version") != policy_version
             or state.get("parameter_origins", {}).get("combined_per_24h", {}).get("origin") != "verified_system_default"):
         return []
-    if one(c, "SELECT 1 FROM lead.actions WHERE agent_id=%s AND state IN ('dispatching','unknown') LIMIT 1", (aid,)):
-        return []
     rows = all_rows(c, """SELECT DISTINCT ON (t.input->>'account_id',lower(t.input#>>'{candidate,telegram_url}')) t.*,s.binding_version
         FROM lead.tasks t JOIN lead.social_accounts s ON s.id::text=t.input->>'account_id' AND s.agent_id=t.agent_id
         JOIN lead.interaction_cards card ON card.id::text=t.input->>'delegation_id' AND card.agent_id=t.agent_id
@@ -218,7 +233,8 @@ def resume_eligible(c, aid: str, *, policy_version: int) -> list[str]:
           AND card.payload->>'account_id'=s.id::text AND card.payload->>'external_account_id'=s.external_account_id
           AND card.payload->'allowed_actions' ? 'read_recent_history'
           AND card.payload->>'purpose'='bounded_candidate_participation'
-          AND d.type='community.discover' AND d.state='succeeded' AND d.completed_at>now()-interval '7 days'
+          AND d.type='community.discover' AND (d.state='succeeded' OR (d.state='running' AND t.input#>>'{candidate,handoff_id}' IS NOT NULL))
+          AND coalesce(d.completed_at,d.created_at)>now()-interval '7 days'
           AND d.input->>'account_id'=s.id::text AND d.input->>'external_account_id'=s.external_account_id
           AND d.input->>'config_revision'=%s
           AND (card.payload->>'discovery_task'=d.id::text OR (card.payload->>'continue_discovery'='true'
@@ -226,8 +242,12 @@ def resume_eligible(c, aid: str, *, policy_version: int) -> list[str]:
                    AND anchor.agent_id=t.agent_id AND anchor.type='community.discover' AND anchor.state='succeeded'
                    AND anchor.input->>'account_id'=s.id::text AND anchor.input->>'external_account_id'=s.external_account_id
                    AND anchor.input->>'config_revision'=t.input->>'config_revision' AND d.created_at>=anchor.created_at)))
-          AND EXISTS(SELECT FROM jsonb_array_elements(d.result->'candidates') item
-               WHERE lower(item->>'telegram_url')=lower(t.input#>>'{candidate,telegram_url}'))
+          AND (t.input#>>'{candidate,handoff_id}' IS NOT NULL OR EXISTS(SELECT FROM jsonb_array_elements(d.result->'candidates') item
+               WHERE lower(item->>'telegram_url')=lower(t.input#>>'{candidate,telegram_url}')))
+          AND NOT EXISTS(SELECT FROM lead.actions pending_action LEFT JOIN lead.account_targets destination
+               ON destination.id=pending_action.target_id AND destination.agent_id=pending_action.agent_id
+               WHERE pending_action.agent_id=t.agent_id AND pending_action.state IN ('dispatching','unknown')
+                 AND (destination.id IS NULL OR destination.account_id=s.id))
           AND NOT EXISTS(SELECT FROM lead.tasks pending WHERE pending.agent_id=t.agent_id
                AND (pending.input->>'account_id'=s.id::text OR pending.input->>'account_id' IS NULL) AND (pending.result->>'reply_state' IN ('dispatching','unknown')
                     OR pending.result->>'join_state' IN ('dispatching','unknown','pending_approval')))
@@ -235,6 +255,10 @@ def resume_eligible(c, aid: str, *, policy_version: int) -> list[str]:
                     (aid, str(agent["config_revision"]), str(agent["config_revision"])))
     ids = []
     for row in rows:
+        if row["input"]["candidate"].get("handoff_id"):
+            from .community_handoff import valid_handoff
+            if not valid_handoff(c,aid,{"id":row["input"]["account_id"]},agent["config_revision"],row["input"]["candidate"]):
+                continue
         if participation_due(c, aid, "join", [], account_id=row["input"]["account_id"]) is not None:
             continue
         captured = state.get("account_bindings", {}).get(row["input"]["account_id"], {})

@@ -188,3 +188,22 @@ def test_policy_decision_keeps_quota_and_interval_evidence(cadence_agent):
         assert len(decision.constraints)==2
         assert decision.next_at==now+timedelta(hours=24)-timedelta(minutes=1)
         assert {item.scope.account_id for item in decision.constraints}=={str(account['id'])}
+
+
+@pytest.mark.parametrize('same_account',[True,False])
+def test_known_action_scope_blocks_only_its_account(cadence_agent,same_account):
+    from lead_app.cadence_state import resume_eligible
+    aid,account,_,_=cadence_agent
+    activate_default(aid)
+    with tx(aid) as c:
+        target_account=account['id']
+        if not same_account:
+            target_account=one(c,"INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,external_account_id,state,automation_enabled) VALUES(%s,%s,%s,'lab',%s,'connected',true) RETURNING id",(current_tenant(),aid,account['profile_id'],uid()))['id']
+        target=one(c,"INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,external_target_id,canonical_url,display_name,verified_permissions,state) VALUES(%s,%s,%s,'channel',%s,'https://fixture.invalid/target','Fixture','{}','active') RETURNING id",(current_tenant(),aid,target_account,uid()))
+        grant=one(c,"INSERT INTO lead.authorization_grants(tenant_id,agent_id,target_id,version,allowed_actions,limits,granted_by) VALUES(%s,%s,%s,1,'[\"publish\"]','{}','fixture') RETURNING id",(current_tenant(),aid,target['id']))
+        task=one(c,"INSERT INTO lead.tasks(tenant_id,agent_id,type,state,input,result,scheduled_at,workflow_id) VALUES(%s,%s,'fixture.publish','reconciling',%s,'{}',now(),gen_random_uuid()::text) RETURNING id",(current_tenant(),aid,j({'account_id':str(target_account)})))
+        action=one(c,"INSERT INTO lead.actions(tenant_id,agent_id,task_id,target_id,grant_id,operation_key,type,intent,expected_control_version,expected_config_revision,state) VALUES(%s,%s,%s,%s,%s,%s,'publish','{}',1,1,'prepared') RETURNING id",(current_tenant(),aid,task['id'],target['id'],grant['id'],uid()))
+        c.execute("UPDATE lead.actions SET state='dispatching' WHERE id=%s",(action['id'],))
+        c.execute("UPDATE lead.actions SET state='unknown' WHERE id=%s",(action['id'],))
+        resumed=resume_eligible(c,aid,policy_version=1)
+        assert bool(resumed) is (not same_account)

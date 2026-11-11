@@ -253,3 +253,33 @@ def test_mixed_executor_blocks_new_handoff_write_and_preserves_read(partial):
         assert guard(Actor(), c, task, read_only=True)[0]["id"] == account["id"]
         with pytest.raises(ValueError, match="cadence_version_mismatch"):
             guard(Actor(), c, task)
+
+
+def test_qualified_checkpoint_survives_the_next_collection_page(partial):
+    from lead_app.community_handoff import next_handoff, valid_handoff
+    aid,account,_,batch,_,_=partial
+    hid=publish(partial)
+    with tx(aid) as c:
+        found=next_handoff(c,aid,account,1)
+        c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{candidates}','[]') || %s WHERE id=%s",(j({'phase':'collect'}),batch['id']))
+        assert next_handoff(c,aid,account,1)['handoff_id']==hid
+        assert valid_handoff(c,aid,account,1,found)
+
+
+def test_partial_checkpoint_can_resume_after_verified_default_activation(partial):
+    from lead_app.cadence_state import create_read_task, resume_eligible
+    from lead_app.community_handoff import next_handoff
+    from test_cadence_state import activate_default
+    aid,account,card,batch,_,_=partial
+    publish(partial)
+    with tx(aid) as c:
+        item=next_handoff(c,aid,account,1)
+        old=create_read_task(c,aid,{'candidate':item,'account_id':str(account['id']),'external_account_id':account['external_account_id'],'delegation_id':str(card['id']),'control_version':1,'config_revision':1},'partial-before-activation:'+uid())
+        result={'outcome':{'state':'blocked','reason':'daily_participation_limit'}}
+        c.execute("UPDATE lead.tasks SET state='succeeded',completed_at=now(),result=%s WHERE id=%s",(j(result),old['id']))
+        c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{candidates}','[]') WHERE id=%s",(batch['id'],))
+    activate_default(aid)
+    with tx(aid) as c:
+        ids=resume_eligible(c,aid,policy_version=1)
+        assert one(c,"SELECT 1 FROM lead.tasks WHERE id::text=ANY(%s) AND input->>'cadence_resume_parent'=%s",(ids,str(old['id'])))
+        assert one(c,'SELECT result FROM lead.tasks WHERE id=%s',(old['id'],))['result']==result

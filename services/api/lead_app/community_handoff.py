@@ -16,7 +16,7 @@ def digest(candidate):
 
 def publish_candidate(c, aid: str, discovery_id: str, candidate: dict, snapshot: dict) -> str:
     agent = require_agent(c, aid, True)
-    parent = one(c, "SELECT * FROM lead.tasks WHERE agent_id=%s AND id=%s AND type='community.discover' AND state IN ('running','succeeded')", (aid, discovery_id))
+    parent = one(c, "SELECT * FROM lead.tasks WHERE agent_id=%s AND id=%s AND type='community.discover' AND state IN ('running','succeeded') FOR UPDATE", (aid, discovery_id))
     account = one(c, "SELECT * FROM lead.social_accounts WHERE agent_id=%s AND id=%s AND platform='telegram' AND state='connected' AND automation_enabled", (aid, snapshot["account_id"]))
     if (not parent or not account or agent["desired_state"] != "running"
             or snapshot.get("control_version") != agent["control_version"]
@@ -34,6 +34,9 @@ def publish_candidate(c, aid: str, discovery_id: str, candidate: dict, snapshot:
     inserted = one(c, """INSERT INTO lead.memory_entries(id,tenant_id,agent_id,kind,body,source_refs,confirmation,expires_at)
         VALUES(%s,%s,%s,'observation',%s,%s,'observed',now()+interval '7 days') ON CONFLICT(id) DO NOTHING RETURNING id""",
         (hid, current_tenant(), aid, j(body), j([str(discovery_id), candidate["evidence_id"]])))
+    c.execute("""UPDATE lead.tasks SET result=jsonb_set(result,'{qualified_candidate_checkpoints}',
+        coalesce(result->'qualified_candidate_checkpoints','{}') || %s) WHERE agent_id=%s AND id=%s""",
+        (j({url:body["assessment_digest"]}),aid,discovery_id))
     if inserted:
         emit(c, aid, "supervisor.wake")
     return hid
@@ -62,6 +65,17 @@ def read_authority(c, aid, account, revision, discovery_id, *, card_id=None):
         ORDER BY card.created_at DESC LIMIT 1""", (discovery_id, account["id"], aid, card_id, card_id, revision))
 
 
+def assessment_current(body, saved):
+    saved = saved or {}
+    current = [item for item in saved.get("candidates", []) if canonical_url(item.get("telegram_url"))==body["canonical_url"]]
+    if current and any(digest(item)!=body["assessment_digest"] for item in current):
+        return False
+    checkpoint = saved.get("qualified_candidate_checkpoints", {}).get(body["canonical_url"])
+    # Old unversioned checkpoints can only be checked against a still-present
+    # formal result. New pages never erase a durable qualified assessment.
+    return checkpoint==body["assessment_digest"] or (checkpoint is None and bool(current))
+
+
 def next_handoff(c, aid: str, account: dict, revision: int) -> dict | None:
     if not aid or not account:
         return None
@@ -79,7 +93,7 @@ def next_handoff(c, aid: str, account: dict, revision: int) -> dict | None:
     for row in rows:
         body = row["body"]
         candidate = body["candidate"]
-        if not any(digest(item) == body["assessment_digest"] for item in (row["result"] or {}).get("candidates", [])):
+        if not assessment_current(body,row["result"]):
             continue
         authority = read_authority(c, aid, account, revision, body["discovery_task_id"])
         if authority:
@@ -101,5 +115,5 @@ def valid_handoff(c, aid, account, revision, candidate):
         and body["snapshot"].get("config_revision") == revision
         and body["discovery_task_id"] == candidate.get("discovery_task_id")
         and all(candidate.get(key) == value for key,value in body["candidate"].items())
-        and any(digest(item)==body["assessment_digest"] for item in (row["result"] or {}).get("candidates", []))
+        and assessment_current(body,row["result"])
         and read_authority(c, aid, account, revision, body["discovery_task_id"], card_id=candidate.get("handoff_delegation_id")))
