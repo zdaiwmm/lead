@@ -82,3 +82,5 @@ PR #43 合入 `9c75c926d7238126e9196a0a2e604d8aae9ea970`，完整 CI 43029500795
 PR #44 合入 `99acac464868b44a7c909bd31284217e25780780`；两轮完整 CI 43036250071 均在 Ubuntu 软件源解析失败时停止，业务测试尚未开始，该版本未取件或发布。与上一成功版本对比，工作流、Compose 和 runner 镜像一致，不能据此认定应用代码故障或完整验证通过。
 
 后续仅调整临时 CI runner 的 APT 镜像列表：先有界核验两个现有官方 HTTPS 备用源可达，再排除失败的 Azure 镜像；保留原 suite 和 Ubuntu 签名 keyring。全局 APT 重试/超时及严格更新错误同时覆盖 Playwright 内部安装。该缓解方案依据官方 [runner 配置](https://github.com/actions/runner-images/blob/main/images/ubuntu/scripts/build/configure-apt-sources.sh) 和 [APT 镜像列表协议](https://manpages.ubuntu.com/manpages/noble/man1/apt-transport-mirror.1.html)，不声称已确认测试机 DNS 根因。新的精确 main 仍须通过完整应用验证与同轮产物，不能采用仅工具证明。
+
+PR #45 的主线 `28a0f3e0d461a6c8cac42500eaa482d52e910a93` 完整 CI 43040036877 在首次普通官方域名解析检查即失败，尚未切换镜像源；工具范围 CI 成功不构成应用证明。继续增加有界只读诊断，对比 Compose 启动前后系统解析器、路由和官方 DoH 返回。诊断先在 PR 的独立临时 runner 上执行，不修改 DNS、不固定 IP、不跳过 TLS，也不替代正式应用验证。

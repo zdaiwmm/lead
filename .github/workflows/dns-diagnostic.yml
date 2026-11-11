@@ -1,0 +1,26 @@
+name: Read-only runner DNS diagnosis
+on:
+  pull_request:
+    paths:
+      - .github/workflows/dns-diagnostic.yml
+      - scripts/ci_dns_diagnostics.py
+      - .github/workflows/ci.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: python3 scripts/ci_dns_diagnostics.py before-compose
+      - run: python3 scripts/bootstrap.py
+      - name: Start the existing isolated test services
+        run: docker compose --env-file .state/infra.env -f infra/compose.yaml up -d postgres temporal
+      - if: always()
+        run: python3 scripts/ci_dns_diagnostics.py before-apt
+      - if: always() && hashFiles('.state/infra.env') != ''
+        run: docker compose --env-file .state/infra.env -f infra/compose.yaml down
