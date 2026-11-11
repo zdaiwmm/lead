@@ -1842,10 +1842,10 @@ def next_interrupted_read(c, revision):
         ORDER BY created_at DESC LIMIT 1""", (str(revision),))
 
 
-def membership_review(c, *, focus=False, exit_restricted=False, proactive=False):
+def membership_review(c, *, focus=False, exit_restricted=False, proactive=False, excluded_accounts=()):
     from .community_schedule import next_membership_review
 
-    review = next_membership_review(c, repair_legacy=True, focus=focus, exit_restricted=exit_restricted, proactive=proactive)
+    review = next_membership_review(c, repair_legacy=True, focus=focus, exit_restricted=exit_restricted, proactive=proactive, excluded_accounts=excluded_accounts)
     if review and review["due"] <= datetime.now(timezone.utc):
         return review
     return None

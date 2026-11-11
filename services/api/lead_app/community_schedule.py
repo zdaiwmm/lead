@@ -76,7 +76,7 @@ def next_pending_inventory(c):
         ORDER BY due,coalesce((t.result->>'join_checked_at')::timestamptz,t.created_at),t.id LIMIT 1""")
 
 
-def next_membership_review(c, *, repair_legacy=False, focus=False, exit_restricted=False, proactive=False):
+def next_membership_review(c, *, repair_legacy=False, focus=False, exit_restricted=False, proactive=False, excluded_accounts=()):
     """Schedule a fresh visit only with confirmed membership and no pending write."""
     from .community_health import eligible_sql
 
@@ -132,7 +132,7 @@ def next_membership_review(c, *, repair_legacy=False, focus=False, exit_restrict
             AND (m.result->>'join_submitted'='true' OR m.result->>'membership_origin'='existing') AND m.result->>'join_state'='confirmed'
             ORDER BY m.created_at DESC LIMIT 1
         ) membership ON true
-        WHERE """ + eligible_sql("recent") + """ AND coalesce(recent.result->>'leave_state','')<>'confirmed'
+        WHERE NOT (recent.input->>'account_id'=ANY(%s::text[])) AND """ + eligible_sql("recent") + """ AND coalesce(recent.result->>'leave_state','')<>'confirmed'
           AND NOT EXISTS (SELECT 1 FROM lead.tasks orig WHERE orig.id=membership.id AND orig.result->>'leave_state'='confirmed')
           AND coalesce(recent.result->'decision'->>'automation_forbidden','false')<>'true'
           AND NOT EXISTS (SELECT 1 FROM history h WHERE h.peer=recent.peer
@@ -145,7 +145,7 @@ def next_membership_review(c, *, repair_legacy=False, focus=False, exit_restrict
                 AND NOT (recent.input ? 'reply' OR recent.result ?| ARRAY['reply_state','join_state','join_submitted'])
                 AND coalesce(recent.result#>>'{history_observation,joined}','true')<>'false'
                 AND NOT (recent.result ? 'leave_state')))
-        ORDER BY due,recent.id LIMIT 1""", (focus, proactive, exit_restricted, repair_legacy, focus, focus))
+        ORDER BY due,recent.id LIMIT 1""", (focus, proactive, exit_restricted, repair_legacy, focus, focus, list(excluded_accounts)))
 
 
 def deadlines(c, agent, now=None):
@@ -176,8 +176,11 @@ def deadlines(c, agent, now=None):
     if latest and latest["state"] == "succeeded" and continuation_phase(latest, agent, config):
         discovery = latest["checked_at"]
     review = None
+    from .cadence_state import participation_waits
+    waits = participation_waits(c, agent, now)
     if config.mode == "contextual_outreach":
-        row = next_membership_review(c, focus=first_users(agent), exit_restricted=config.allow_leave_restricted, proactive=config.allow_proactive_post)
+        row = next_membership_review(c, focus=first_users(agent), exit_restricted=config.allow_leave_restricted, proactive=config.allow_proactive_post,
+            excluded_accounts=list(waits.get("reply", {})))
         review = row["due"] if row else None
     retry = one(
         c,
@@ -190,6 +193,7 @@ def deadlines(c, agent, now=None):
         "next_review_at": review,
         "next_retry_at": retry,
         "next_join_approval_check_at": pending_join["due"] if pending_join else None,
+        "next_participation_at": min((item.next_at for group in waits.values() for item in group.values() if item.next_at), default=None),
     }
 
 

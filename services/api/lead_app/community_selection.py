@@ -28,6 +28,8 @@ def choose(c, agent, config, now=None, *, supported_operations=None):
     if agent["desired_state"] != "running" or not config.enabled or config.mode != "contextual_outreach":
         return None
     aid = str(agent["id"])
+    from .cadence_state import participation_waits
+    waits = participation_waits(c, agent, now)
     community_health.bootstrap(c, aid)
     revision = next_voice_edit(c, agent)
     if revision:
@@ -56,6 +58,9 @@ def choose(c, agent, config, now=None, *, supported_operations=None):
         if is_receipt:
             receipts.append({"kind": "receipt", "task_id": str(task["id"]), "paid": False})
         else:
+            operation = "reply" if task["input"].get("reply") or saved.get("join_state") == "confirmed" else "join"
+            if not task["input"].get("observation_only") and str(task["input"].get("account_id")) in waits.get(operation, {}):
+                continue
             return {"kind": "resume", "task_id": str(task["id"]), "paid": not bool(task["input"].get("reply"))}
     pending = next_pending_inventory(c) if chamber_campaign(agent) else next_join_check(c)
     if pending and pending["due"] <= now:
@@ -63,7 +68,8 @@ def choose(c, agent, config, now=None, *, supported_operations=None):
         if pending_task["input"].get("account_id") not in fences["accounts"] and not community_health.blocked(c, aid, pending_task, write=False):
             receipts.append({"kind": "inventory" if chamber_campaign(agent) else "receipt", "task_id": str(pending["id"]), "paid": False})
     opportunity = None
-    review = membership_review(c, focus=first_users(agent), exit_restricted=config.allow_leave_restricted, proactive=config.allow_proactive_post)
+    review = membership_review(c, focus=first_users(agent), exit_restricted=config.allow_leave_restricted, proactive=config.allow_proactive_post,
+        excluded_accounts=list(waits.get("reply", {})))
     if review and review["input"].get("account_id") not in fences["accounts"]:
         health = community_health.blocked(c, aid, review)
         opportunity = {"kind": "diagnose" if health else "review", "task_id": str(review["id"]), "membership_id": str(review["membership_id"]),
@@ -76,6 +82,8 @@ def choose(c, agent, config, now=None, *, supported_operations=None):
             WHERE s.platform='telegram' AND s.state='connected' AND s.automation_enabled
             AND NOT(s.id::text=ANY(%s)) ORDER BY s.id""", (fences["accounts"],))
         for account in accounts:
+            if str(account["id"]) in waits.get("join", {}):
+                continue
             candidate = next_candidate(c, agent["config_revision"], first_users(agent), chamber=chamber_campaign(agent),
                                        proactive=config.allow_proactive_post, account=account, aid=aid)
             if candidate:
@@ -99,4 +107,6 @@ def choose(c, agent, config, now=None, *, supported_operations=None):
         AND coalesce(result->>'join_state','confirmed')='confirmed'
         AND result ? 'retry_after' AND (result->>'retry_after')::timestamptz<=now()
         ORDER BY (result->>'retry_after')::timestamptz,id LIMIT 1""", (fences["accounts"],))
+    if retry and str(retry["input"].get("account_id")) in waits.get("reply" if retry["input"].get("reply") else "join", {}):
+        return None
     return {"kind": "resume", "task_id": str(retry["id"]), "paid": not bool(retry["input"].get("reply"))} if retry else None
