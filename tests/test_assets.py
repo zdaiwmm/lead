@@ -1,6 +1,9 @@
 import io
+import os
+from pathlib import Path
 
 import av
+import PIL
 import pytest
 from fastapi.testclient import TestClient
 from lead_app import assets, domain
@@ -45,6 +48,27 @@ def video(tmp_path):
         for packet in stream.encode():
             container.mux(packet)
     return path.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_media_decoder_uses_runtime_dependencies_outside_interpreter(agent, monkeypatch):
+    # Production mounts dependencies separately from the Python interpreter.
+    # Disable normal site discovery so the real decoder must use that path.
+    dependencies = list(dict.fromkeys(
+        str(Path(module.__file__).resolve().parent.parent) for module in (PIL, av)
+    ))
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(dependencies))
+    spawn = assets.asyncio.create_subprocess_exec
+
+    async def isolated_decoder(executable, *args, **kwargs):
+        return await spawn(executable, "-S", *args, **kwargs)
+
+    monkeypatch.setattr(assets.asyncio, "create_subprocess_exec", isolated_decoder)
+    item = await assets.upload(agent, UploadFile(file=io.BytesIO(picture()), filename="fixture.jpg"))
+    _, path = assets.resolve(agent, str(item["id"]), item["sha256"])
+    with Image.open(path) as decoded:
+        assert decoded.size == (96, 64)
+        assert not decoded.getexif()
 
 
 @pytest.mark.asyncio
