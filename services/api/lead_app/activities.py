@@ -562,6 +562,13 @@ async def execute_task(args: dict):
         task = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (task_id,))
         if not task or task["state"] in ("succeeded", "canceled"):
             return {"state": task["state"] if task else "absent"}
+        from .browser_challenges import for_task, waiting_result
+
+        require_agent(c, aid, True)  # Serialize waiting-task registration with recovery.
+        if challenge := for_task(c, task):
+            result = waiting_result(challenge)
+            c.execute("UPDATE lead.tasks SET state='waiting_user',result=coalesce(result,'{}') || %s WHERE id=%s", (j(result), task_id))
+            return result
     action = await asyncio.to_thread(prepare_action, aid, task_id)
     if not action:
         return {"state": "canceled"}
@@ -588,10 +595,16 @@ async def execute_task(args: dict):
         # RPC timeout can mean the submit succeeded. Never retry an uncertain click.
         retry_prepared = False
         with tx(aid) as c:
+            require_agent(c, aid, True)
             current = one(
                 c, "SELECT state FROM lead.actions WHERE id=%s", (action["id"],)
             )
-            if current["state"] == "dispatching":
+            challenge = for_task(c, task)
+            if challenge and current["state"] not in ("confirmed", "canceled"):
+                result = waiting_result(challenge)
+                c.execute("UPDATE lead.actions SET state='unknown' WHERE id=%s AND state='dispatching'", (action["id"],))
+                c.execute("UPDATE lead.tasks SET state='waiting_user',result=coalesce(result,'{}') || %s WHERE id=%s AND state NOT IN ('succeeded','canceled')", (j(result), task_id))
+            elif current["state"] == "dispatching":
                 c.execute(
                     "UPDATE lead.actions SET state='unknown' WHERE id=%s",
                     (action["id"],),
@@ -636,13 +649,17 @@ async def execute_task(args: dict):
 def record_publish_result(aid, task_id, task, action, result):
     with tx(aid) as c:
         previous = one(c, "SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE", (task_id,))
+        if result.get("error") == "HUMAN_VERIFICATION_REQUIRED":
+            last = next((v for v in require_agent(c, aid)["onboarding_state"].get("browser_challenges", {}).values() if v.get("id") == result.get("challenge_id")), {})
+            if last.get("id") == result.get("challenge_id") and last.get("state") == "resolved":
+                return result  # Recovery already queued the original task.
         if previous["state"] in ("succeeded", "canceled"):
             return result
         state = (
             "succeeded"
             if result["state"] == "confirmed"
             else "waiting_user"
-            if result["state"] in ("needs_auth", "blocked", "prepared")
+            if result["state"] in ("needs_auth", "needs_verification", "blocked", "prepared")
             else "reconciling"
         )
         if previous["state"] == state and previous["result"] == result:
@@ -746,7 +763,7 @@ def record_publish_result(aid, task_id, task, action, result):
                     task_id=parent["id"],
                 )
             emit(c, aid, "supervisor.wake")
-        if state == "waiting_user":
+        if state == "waiting_user" and result.get("error") != "HUMAN_VERIFICATION_REQUIRED":
             append_message(
                 c,
                 aid,

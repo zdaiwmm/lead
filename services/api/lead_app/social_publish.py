@@ -3,7 +3,13 @@
 import asyncio
 
 from .adapters import get_adapter
-from .adapters.core import NeedsAuth, PreparationNotStarted, ScopeChanged
+from .adapters.core import (
+    HumanVerificationRequired,
+    NeedsAuth,
+    PreparationNotStarted,
+    ScopeChanged,
+    check_challenge,
+)
 from .assets import resolve
 from .config import STATE
 from .db import j, one, tx, uid
@@ -16,6 +22,10 @@ async def execute(actor, action_id):
     async with actor.lock:
         actor.touch()
         with tx(aid) as c:
+            from .browser_challenges import pending, waiting_result
+
+            if challenge := pending(c, actor.profile["id"]):
+                return waiting_result(challenge)
             action = one(c, "SELECT * FROM lead.actions WHERE id=%s", (action_id,))
             if not action:
                 raise LookupError("发布动作不存在")
@@ -214,6 +224,13 @@ async def execute(actor, action_id):
                                 },
                             )
                         raise
+                    except HumanVerificationRequired as error:
+                        with tx(aid) as c:
+                            if error.safe_to_restart:
+                                c.execute("UPDATE lead.publish_preparations SET stage='preparing',observation=%s,updated_at=now() WHERE action_id=%s", (j({"navigation_not_started": True}), action_id))
+                            else:
+                                c.execute("UPDATE lead.publish_preparations SET stage='uncertain',updated_at=now() WHERE action_id=%s", (action_id,))
+                        raise
                     except BaseException:
                         with tx(aid) as c:
                             c.execute(
@@ -265,6 +282,7 @@ async def execute(actor, action_id):
                             (action_id,),
                         )
                     for _ in range(40):
+                        await check_challenge(actor.page)
                         observed = await adapter.receipt(
                             actor.page,
                             target,
@@ -287,10 +305,15 @@ async def execute(actor, action_id):
                             "UPDATE lead.action_attempts SET outcome='unknown',error_code='ACK_UNCERTAIN',ended_at=now() WHERE id=%s",
                             (attempt["id"],),
                         )
+                    await check_challenge(actor.page)
                     return {
                         "state": "unknown",
                         "reason": "提交后的回执不确定，只核对，不重复上传或点击",
                     }
+        except HumanVerificationRequired as error:
+            from .browser_challenges import block
+
+            return block(actor, target["platform"], action_id, challenge_page=getattr(error, "page", None))
         except (NeedsAuth, ScopeChanged) as error:
             with tx(aid) as c:
                 c.execute(
