@@ -1,5 +1,27 @@
 # 家庭服务器发布
 
+## 隔离 Worker 的模型连接
+
+模型凭据和网络通道分别核验。API 可读到密钥不表示 Worker 的挂载命名空间也能读取。为 Worker 绑定部署端既有凭据文件到应用 `ROOT/.env`，或使用其受控 EnvironmentFile；仅检查有效值是否存在，不输出密钥。保持文件权限与只读挂载。
+
+隔离网络可使用节点已有的官方模型 TLS 通道。部署方为每个 Agent、供应商设置 `LEAD_MODEL_SOCKET_<AGENT_UUID去横线大写>_OPENAI` 或 `_DEEPSEEK`，值为 Worker 内可见的 Unix socket 绝对路径。Agent ID 和实际节点路径只留在私有配置。未配置的 Agent/供应商保持原连接方式；显式配置空值、相对路径或不支持的端点会失败，不回落直连。仅接受对应供应商的官方 HTTPS 主机，保留证书与主机验证；环境代理和重定向关闭。通道宿主端也应限制对应官方目的地，不能暴露通用转发器。socket 路径由运行用户不可修改的部署配置控制。
+
+systemd 示例（部署时替换占位符，不直接照抄）：
+
+```ini
+[Service]
+BindReadOnlyPaths=/secure/existing-model.env:/run/lead-home/bin/original/.env
+BindReadOnlyPaths=/secure/sockets/openai.sock:/run/lead-model-egress/openai.sock
+BindReadOnlyPaths=/secure/sockets/deepseek.sock:/run/lead-model-egress/deepseek.sock
+EnvironmentFile=/secure/worker-model-routes.env
+```
+
+socket 文件绑定会固定当时的 inode；通道服务重新创建 socket 后需按安全点重启 Worker 重新绑定。需要证书覆盖时使用包含公共根证书的受审阅信任集，不使用关闭验证的选项。
+
+已有临时单文件 `model.py` 挂载时，版本检查应继续拒绝。先完成本修复的 PR/CI/main，再与其他待发布项统一确认精确 SHA。维护窗口内核验并保存旧配置，撤除临时代码覆盖、保留凭据和 socket 挂载、登记上述路由环境变量；重新启动后让 `current` 核对旧正式镜像，再走已批准新版本的正常发布入口。不要删掉版本检查或为未知覆盖添加白名单。不要在旧版本不支持路由时重试业务。新版本独立回读有效密钥布尔值、只读模型查询、持久 Worker 版本回执和原消息结果；HTTP 429、仅查到模型或仅服务 active 均不能视为生成成功。
+
+发布日志分别保存配置修复、模型服务错误、用户批准的模型切换和原消息最终状态。不能自动更换供应商、重发社媒内容或修改失败账本为成功。
+
 在 GitHub Actions 的 **Approve a home release** 选择 main，输入已确认的完整应用 SHA。审批环境 home-release-approval 应限制仅 main，要求仓库所有者审核。主机只需主动向 GitHub 出站访问。公共仓库的任意 CI 作业都在 GitHub 托管节点运行。
 
 工作流检查提交是合入本仓库 main 的 PR 合并结果，同一 SHA 的最新主线 CI 成功且 backend、frontend、namespace 三个任务均通过。在 home-production 创建 task 为 lead-home-release 的 Deployment，记录精确 SHA、CI run/attempt 和审批运行。工作流绿色仅表示请求已登记。线上状态由节点独立上报。

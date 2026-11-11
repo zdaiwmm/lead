@@ -12,10 +12,11 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from .budget import reserve, settle
-from .config import model_config, model_reference, resolve_model
+from .config import env, model_config, model_reference, resolve_model
 from .creative_schema import CreativeBrief
 from .db import uid
 from .model_reasoning import selected_effort
+from .model_transport import model_http_client
 from .operating_contract import OperatingUpdate
 from .telemetry import traced
 
@@ -282,16 +283,19 @@ async def run_model(
     if output.__name__ in stage_caps:
         name, default = stage_caps[output.__name__]
         output_tokens = min(output_tokens, bounded_int(name, default, 800, 8000))
+    http_client = model_http_client(agent_id, config, timeout, env())
     client = (
         AsyncOpenAI(
             base_url=config["base_url"],
             api_key=config["key"],
             max_retries=0,
             timeout=timeout,
+            **({"http_client": http_client} if http_client is not None else {}),
         )
         if config["provider"] == "openai"
         or short_request
         or (settings and settings_version != "models/builtin@0")
+        or http_client is not None
         else None
     )
     started = time.monotonic()
