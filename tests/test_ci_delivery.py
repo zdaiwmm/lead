@@ -64,6 +64,26 @@ def test_manual_dispatch_cannot_choose_a_shortcut(tmp_path, monkeypatch):
     assert output.read_text() == "kind=application\ntools=true\n"
 
 
+def test_pr_scope_excludes_unrelated_main_changes(tmp_path):
+    subprocess.run(["git", "init", "-q", tmp_path], check=True)
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(tmp_path), *args], text=True).strip()
+    def commit():
+        git("add", ".")
+        git("-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "fixture")
+        return git("rev-parse", "HEAD")
+    (tmp_path / "AGENTS.md").write_text("base")
+    base = commit()
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/prepare_home_image.py").write_text("tool")
+    head = commit()
+    git("checkout", "-q", "--detach", base)
+    (tmp_path / "application.py").write_text("other main task")
+    main = commit()
+    assert scope.classify(scope.changed_files(tmp_path, main, head)) == "application"
+    assert scope.classify(scope.changed_files(tmp_path, main, head, merge_base=True)) == "tools"
+
+
 @pytest.mark.parametrize("kind,event,required", [
     ("application", "pull_request", {"scope", "checks", "frontend"}),
     ("tools", "pull_request", {"scope", "checks"}),

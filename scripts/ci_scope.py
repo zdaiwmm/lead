@@ -51,9 +51,11 @@ def classify(changes):
     return "application"
 
 
-def changed_files(root, base, head):
+def changed_files(root, base, head, *, merge_base=False):
     if not all(re.fullmatch(r"[a-f0-9]{40}", x or "") and x != "0" * 40 for x in (base, head)):
         raise ValueError("Exact available history required")
+    if merge_base:
+        base = subprocess.check_output(["git", "merge-base", base, head], cwd=root, text=True).strip()
     raw = subprocess.check_output(
         ["git", "diff", "--raw", "--no-abbrev", "--no-renames", "-z", base, head], cwd=root
     ).decode().split("\0")
@@ -80,7 +82,7 @@ def main():
             base, head = event["before"], os.environ["GITHUB_SHA"]
         else:
             raise ValueError("Manual/unknown event uses full application verification")
-        changes = changed_files(args.root, base, head)
+        changes = changed_files(args.root, base, head, merge_base=name == "pull_request")
         kind = classify(changes)
         tools = any(p in TOOL_FILES | TOOL_CONFIG | TOOL_TESTS for p, _, _ in changes)
     except (KeyError, ValueError, subprocess.SubprocessError, UnicodeError):
