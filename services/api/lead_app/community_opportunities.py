@@ -39,7 +39,7 @@ def next_rule_review(c, aid, account, revision):
           AND card.payload->>'external_account_id'=recent.input->>'external_account_id'
           AND card.payload->'allowed_actions' ?& ARRAY['join_public_group','read_recent_history']
         JOIN lead.tasks d ON d.id::text=recent.input#>>'{candidate,discovery_task_id}' AND d.agent_id=a.id
-          AND d.type='community.discover' AND d.state='succeeded'
+          AND d.type='community.discover' AND (d.state='succeeded' OR (d.state='running' AND recent.input#>>'{candidate,handoff_id}' IS NOT NULL))
           AND d.input->>'account_id'=recent.input->>'account_id'
           AND d.input->>'external_account_id'=recent.input->>'external_account_id'
         JOIN lead.tasks anchor ON anchor.id::text=card.payload->>'discovery_task' AND anchor.agent_id=a.id
@@ -70,6 +70,10 @@ def next_rule_review(c, aid, account, revision):
         (aid, account["external_account_id"], str(account["id"]), str(revision)),
     )
     for row in due:
+        if row["input"].get("candidate", {}).get("handoff_id"):
+            from .community_handoff import valid_handoff
+            if not valid_handoff(c, aid, account, revision, row["input"]["candidate"]):
+                continue
         # The read timer can expire while the stricter write gate remains.
         # A held group must not hide another group's due rule check.
         if not community_health.blocked(c, aid, row, write=False):

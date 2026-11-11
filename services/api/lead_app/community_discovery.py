@@ -1715,16 +1715,22 @@ async def advance(aid):
             saved["assessed_urls"].extend(x["telegram_url"] for x in pending)
             saved["model_attempts"] = 0
             if candidates:
-                saved.update(
-                    phase="completed",
-                    candidates=candidates,
-                    summary=result.summary,
-                    execution_scope="discovery_only",
-                )
+                from .community_handoff import publish_candidate, read_authority
+                account = one(c, "SELECT * FROM lead.social_accounts WHERE id::text=%s", (payload.get("account_id"),))
+                partial_authority = read_authority(c, aid, account, a["config_revision"], task["id"]) if account else None
+                phase = next_phase(payload, saved, native_queries) if partial_authority else "completed"
+                prior = {item["telegram_url"].casefold(): item for item in saved.get("candidates", [])}
+                prior.update({item["telegram_url"].casefold(): item for item in candidates})
+                saved.update(phase=phase, candidates=list(prior.values()), summary=result.summary, execution_scope="discovery_only")
                 c.execute(
-                    "UPDATE lead.tasks SET state='succeeded',result=%s,completed_at=now() WHERE id=%s",
-                    (j(saved), task["id"]),
+                    "UPDATE lead.tasks SET state=%s,result=%s,completed_at=CASE WHEN %s THEN now() ELSE NULL END WHERE id=%s",
+                    ("succeeded" if phase == "completed" else "running", j(saved), phase == "completed", task["id"]),
                 )
+                if account:
+                    snapshot = {"account_id": str(account["id"]), "external_account_id": account["external_account_id"],
+                        "binding_version": account["binding_version"], "config_revision": a["config_revision"], "control_version": a["control_version"]}
+                    for item in candidates:
+                        publish_candidate(c, aid, str(task["id"]), item, snapshot)
                 record(
                     c,
                     aid,

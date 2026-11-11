@@ -2,9 +2,10 @@
 
 import hashlib
 import json
+from datetime import datetime, timezone
 
 from .db import all_rows, audit, emit, j, one, require_agent
-from .execution_cadence import Decision
+from .execution_cadence import Decision, Scope, WaitEvidence, decide
 from .scope import current_tenant, trusted_execution
 
 PARAMETERS = ("combined_per_24h", "joins_per_24h", "replies_per_24h", "reply_interval_minutes")
@@ -67,7 +68,7 @@ def activate(c, aid: str, preview_digest: str, expected_control: int) -> dict:
     prior = agent["onboarding_state"].get("execution_cadence", {})
     if prior.get("mode") == "active" and prior.get("preview_digest") == preview_digest:
         return prior
-    version = int(prior.get("policy_version", 0)) + 1
+    version = int(prior.get("policy_version", 0)) if prior.get("mode") == "shadow" and prior.get("preview_digest") == preview_digest else int(prior.get("policy_version", 0)) + 1
     device = agent["onboarding_state"].get("telegram_executor", {})
     if (not preview["account_bindings"] or device.get("execution_cadence_protocol") != 1
             or device.get("cadence_policy_version") != version):
@@ -80,7 +81,25 @@ def activate(c, aid: str, preview_digest: str, expected_control: int) -> dict:
     return state
 
 
-def participation_due(c, aid, operation, attempts, now=None, *, account_id=None):
+def prepare_shadow(c, aid, preview_digest, expected_control):
+    if not trusted_execution():
+        raise PermissionError("节奏预演仅供已授权维护入口使用")
+    agent = require_agent(c, aid, True)
+    preview = preview_migration(c, aid, expected_control=expected_control)
+    prior = agent["onboarding_state"].get("execution_cadence", {})
+    if preview["preview_digest"] != preview_digest or prior.get("mode") == "active":
+        raise ValueError("节奏依据已变化，或须先暂停当前版本")
+    if prior.get("mode") == "shadow" and prior.get("preview_digest") == preview_digest:
+        return prior
+    state = {**preview, "mode": "shadow", "policy_version": int(prior.get("policy_version", 0)) + 1,
+             "parameter_origins": {item["parameter"]: item for item in preview["items"]}}
+    c.execute("UPDATE lead.agents SET onboarding_state=jsonb_set(onboarding_state,'{execution_cadence}',%s) WHERE id=%s", (j(state), aid))
+    audit(c, aid, "cadence.shadow_prepared", {"preview_digest": preview_digest, "policy_version": state["policy_version"]})
+    emit(c, aid, "supervisor.wake")
+    return state
+
+
+def participation_due(c, aid, operation, attempts, now=None, *, account_id=None, shadow=False):
     from .community_participation import quota_due
 
     agent = require_agent(c, aid)
@@ -91,7 +110,7 @@ def participation_due(c, aid, operation, attempts, now=None, *, account_id=None)
     if state.get("mode") == "paused":
         return {"reason": "cadence_paused", "next_eligible_at": None}
     waived = frozenset()
-    if state.get("mode") == "active":
+    if state.get("mode") == "active" or (shadow and state.get("mode") == "shadow"):
         device = agent["onboarding_state"].get("telegram_executor", {})
         relevant = {key: value for key, value in _bindings(c, aid).items() if account_id is None or key == str(account_id)}
         if (len(relevant) != 1 or device.get("execution_cadence_protocol") != 1
@@ -103,6 +122,61 @@ def participation_due(c, aid, operation, attempts, now=None, *, account_id=None)
         waived = frozenset(key for key, item in state.get("parameter_origins", {}).items()
                            if item.get("origin") == "verified_system_default")
     return quota_due(growth.get("participation_policy", {}), operation, attempts, now, waived_defaults=waived)
+
+
+def participation_attempts(c, aid, task, operation, *, exclude_current=False):
+    rows = all_rows(c, """SELECT id,input,result,created_at FROM lead.tasks WHERE agent_id=%s
+        AND type='community.engage' AND input->>'external_account_id'=%s
+        AND (created_at>now()-interval '24 hours' OR
+             (result->>'join_dispatched_at')::timestamptz>now()-interval '24 hours' OR
+             (result->>'reply_dispatched_at')::timestamptz>now()-interval '24 hours')""", (aid, task["input"]["external_account_id"]))
+    attempts = []
+    for row in rows:
+        saved = row["result"] or {}
+        for kind in ("join", "reply"):
+            if exclude_current and str(row.get("id"))==str(task.get("id")) and kind==operation:
+                continue
+            value = saved.get(kind+"_dispatched_at")
+            legacy = saved.get("join_submitted") is True if kind=="join" else saved.get("reply_state") in {"unknown","dispatching","confirmed","failed"}
+            if value or legacy:
+                attempts.append((kind, datetime.fromisoformat(value) if value else row["created_at"]))
+    return attempts
+
+
+def participation_decision(c, aid, operation, attempts, now=None, *, account_id=None, shadow=False):
+    from .community_participation import ParticipationPolicy, quota_due
+    now = now or datetime.now(timezone.utc)
+    due = participation_due(c, aid, operation, attempts, now, account_id=account_id, shadow=shadow)
+    if due is None:
+        return Decision(state="ready")
+    agent = require_agent(c, aid)
+    state = agent["onboarding_state"].get("execution_cadence", {})
+    config = agent["onboarding_state"].get("community_growth", {})
+    policy = ParticipationPolicy.model_validate(config.get("participation_policy", {}))
+    origins = state.get("parameter_origins", {})
+    waived = frozenset(key for key,item in origins.items() if item.get("origin")=="verified_system_default") if state.get("mode")=="active" or (shadow and state.get("mode")=="shadow") else frozenset()
+    scope = Scope(agent_id=str(aid), account_id=str(account_id) if account_id else None, operation=operation)
+    version = max(1, state.get("policy_version", 0))
+    ref = "strategy:" + state.get("strategy_digest", _digest(config))
+    constraints = []
+    if due["reason"] in {"cadence_paused", "cadence_version_mismatch"}:
+        constraints.append(WaitEvidence(scope=scope, source="capability", reason_code=due["reason"],
+            evidence_ref=ref, observed_at=now, resume_event="execution_capability_changed", policy_version=version))
+    else:
+        key = "combined_per_24h" if policy.quota_mode=="combined" else ("joins_per_24h" if operation=="join" else "replies_per_24h")
+        checks = [(key, quota_due(policy, operation, attempts, now, waived_defaults=waived | {"reply_interval_minutes"})),
+                  ("reply_interval_minutes", quota_due(policy, operation, attempts, now, waived_defaults=waived | set(PARAMETERS[:3])))]
+        for parameter, wait in checks:
+            if not wait:
+                continue
+            origin = origins.get(parameter, {}).get("origin")
+            source = {"owner_explicit":"owner", "platform_observed":"platform", "engineering":"engineering"}.get(origin, "capability")
+            deadline = wait.get("next_eligible_at")
+            constraints.append(WaitEvidence(scope=scope, source=source, reason_code=parameter if origin else "legacy_unverified_"+parameter,
+                evidence_ref=origins.get(parameter, {}).get("evidence_ref") or ref, observed_at=now,
+                not_before=datetime.fromisoformat(deadline) if deadline else None,
+                resume_event=None if deadline else "cadence_policy_changed", policy_version=version))
+    return decide(constraints, now, subject=scope)
 
 
 def record_decision(c, aid: str, task_id: str, decision: Decision) -> None:

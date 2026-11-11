@@ -163,3 +163,28 @@ def test_resume_revalidates_full_scope(cadence_agent, change):
         else:
             c.execute("INSERT INTO lead.tasks(tenant_id,agent_id,type,state,input,result,scheduled_at,workflow_id) VALUES(%s,%s,'community.engage','failed','{}',%s,now(),gen_random_uuid()::text)", (current_tenant(), aid, j({"reply_state": "unknown"})))
         assert resume_eligible(c, aid, policy_version=1) == []
+
+
+def test_shadow_version_is_the_version_activated(cadence_agent):
+    from lead_app.cadence_state import activate, prepare_shadow, preview_migration
+    aid,*_=cadence_agent
+    with service_scope(), tx(aid) as c:
+        attest(c,aid,"verified_system_default")
+        preview=preview_migration(c,aid,expected_control=1)
+        shadow=prepare_shadow(c,aid,preview["preview_digest"],1)
+        assert shadow["mode"]=="shadow" and shadow["policy_version"]==1
+        active=activate(c,aid,preview["preview_digest"],1)
+        assert active["policy_version"]==shadow["policy_version"]
+
+
+def test_policy_decision_keeps_quota_and_interval_evidence(cadence_agent):
+    from lead_app.cadence_state import participation_decision
+    aid,account,*_=cadence_agent
+    now=datetime.now(timezone.utc)
+    with service_scope(),tx(aid) as c:
+        attest(c,aid,"owner_explicit")
+        decision=participation_decision(c,aid,"reply",[("reply",now-timedelta(minutes=1))],now,account_id=str(account['id']))
+        assert decision.state=='waiting_time'
+        assert len(decision.constraints)==2
+        assert decision.next_at==now+timedelta(hours=24)-timedelta(minutes=1)
+        assert {item.scope.account_id for item in decision.constraints}=={str(account['id'])}
