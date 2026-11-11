@@ -329,6 +329,9 @@ RUNTIME_COMPATIBILITY_FILES = {
         "69daf9b5065322206da080a4c64b66a27d74d179",  # PR #28
         "aa243338dd22dc3becf10eaf0100ecf7858d00b6",  # PR #29
     },
+    # Operator-side archive preparation; absent from the application image.
+    # This does not install/execute the tool on the node or replace image attestation.
+    "scripts/prepare_home_image.py": {"5fe5d7f7429c322cdce68e616256db87b8d6d255"},
 }
 
 

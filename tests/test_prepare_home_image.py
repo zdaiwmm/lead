@@ -83,6 +83,46 @@ def test_default_does_not_use_cache_or_trust_preexisting_staging(build):
     assert not build.cache.exists()
 
 
+def test_operator_archive_mode_needs_no_squashfs_and_retains_provenance(build, monkeypatch):
+    def no_extraction(*args, **kwargs):
+        raise AssertionError("Operator archive mode must not run unsquashfs")
+    monkeypatch.setattr(build.module.subprocess, "check_output", no_extraction)
+    first = build.prepare(cache_dir=build.cache, archive_only=True)
+    second = build.prepare(cache_dir=build.cache, archive_only=True)
+    assert first == second
+    assert build.downloads == 1
+    assert first["sha"] == SHA and first["ci_run"] == 7 and first["ci_attempt"] == 1
+    assert first["digest"] == build.artifact["digest"] and first["id"] == 41
+    assert first["revision_verified"] is False
+    assert Path(first["archive"]).read_bytes() == build.raw
+    assert not list(build.stage.glob("*.squashfs"))
+
+
+def test_archive_mode_rechecks_latest_ci_before_returning(build):
+    get = build.get
+    count = 0
+    def changing(path):
+        nonlocal count
+        if "/ci.yml/runs?" in path:
+            count += 1
+            if count == 2:
+                build.run["conclusion"] = "failure"
+        return get(path)
+    with pytest.raises(ValueError, match="Latest exact main CI"):
+        build.module.prepare(SHA, build.stage, get=changing, cache_dir=build.cache,
+                             archive_only=True)
+    assert not list(build.stage.iterdir())
+    assert not list(build.cache.iterdir())
+
+
+def test_archive_cache_does_not_replace_node_revision_check(build):
+    build.prepare(cache_dir=build.cache, archive_only=True)
+    build.revision = "b" * 40 + "\n"
+    with pytest.raises(ValueError, match="different commit"):
+        build.prepare(cache_dir=build.cache)
+    assert build.downloads == 1
+
+
 @pytest.mark.parametrize("fault", ["expired", "digest", "size", "sha", "run"])
 def test_cached_image_cannot_bypass_live_provenance(build, fault):
     build.prepare(cache_dir=build.cache)

@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -84,7 +85,8 @@ def save_cache(archive, cached, artifact):
             check_archive(cached, artifact)
 
 
-def prepare(sha, destination, *, get=api, download_command=("gh",), cache_dir=None):
+def prepare(sha, destination, *, get=api, download_command=("gh",), cache_dir=None,
+            archive_only=False):
     ci = verified_run(sha, get=get)
     artifact = artifact_for(sha, ci, get)
     private_directory(destination)
@@ -92,7 +94,7 @@ def prepare(sha, destination, *, get=api, download_command=("gh",), cache_dir=No
     if cache_dir is not None:
         private_directory(cache_dir)
         cached = cache_dir / f"{artifact['id']}-{artifact['digest'][7:]}.zip"
-    target = destination / (sha + ".squashfs")
+    target = destination / (f"{sha}-{artifact['id']}.zip" if archive_only else sha + ".squashfs")
     with tempfile.TemporaryDirectory(dir=destination) as tmp:
         archive = Path(tmp, "download.zip")
         with archive.open("xb") as f:
@@ -113,13 +115,19 @@ def prepare(sha, destination, *, get=api, download_command=("gh",), cache_dir=No
         with zipfile.ZipFile(archive) as z:
             if z.namelist() != ["lead.squashfs"]:
                 raise ValueError("Unexpected release archive")
-            with z.open("lead.squashfs") as reader, image.open("xb") as writer:
-                shutil.copyfileobj(reader, writer)
-                writer.flush()
-                os.fsync(writer.fileno())
-        revision = subprocess.check_output(["unsquashfs", "-cat", image, "REVISION"], text=True)
-        if revision != sha + "\n":
-            raise ValueError("Image belongs to a different commit")
+            if not archive_only:
+                with z.open("lead.squashfs") as reader, image.open("xb") as writer:
+                    shutil.copyfileobj(reader, writer)
+                    writer.flush()
+                    os.fsync(writer.fileno())
+        if archive_only:
+            # Operator workstations need only the authenticated transport ZIP.
+            # The receiving node must still extract and attest REVISION before mounting.
+            image = archive
+        else:
+            revision = subprocess.check_output(["unsquashfs", "-cat", image, "REVISION"], text=True)
+            if revision != sha + "\n":
+                raise ValueError("Image belongs to a different commit")
         image.chmod(0o400)
         with image.open("rb") as f:
             image_digest = hashlib.file_digest(f, "sha256").hexdigest()
@@ -139,6 +147,11 @@ def prepare(sha, destination, *, get=api, download_command=("gh",), cache_dir=No
             with private_file(target) as f:
                 if hashlib.file_digest(f, "sha256").hexdigest() != image_digest:
                     raise ValueError("A different image is already staged for this commit") from None
+        if archive_only:
+            return {"sha": sha, "ci_run": ci["id"], "ci_attempt": ci["run_attempt"],
+                    "id": artifact["id"], "name": artifact["name"],
+                    "digest": artifact["digest"], "size_in_bytes": artifact["size_in_bytes"],
+                    "archive": str(target.resolve()), "revision_verified": False}
         return image_digest
 
 
@@ -148,5 +161,9 @@ if __name__ == "__main__":
     parser.add_argument("private_staging", type=Path)
     parser.add_argument("--cache-dir", type=Path,
                         help="Opt-in private ZIP cache; still verifies live CI and artifact provenance")
+    parser.add_argument("--archive-only", action="store_true",
+                        help="Fetch a verified transport ZIP on the operator host; node must check REVISION")
     args = parser.parse_args()
-    print(prepare(args.sha, args.private_staging, cache_dir=args.cache_dir))
+    result = prepare(args.sha, args.private_staging, cache_dir=args.cache_dir,
+                     archive_only=args.archive_only)
+    print(json.dumps(result) if args.archive_only else result)
