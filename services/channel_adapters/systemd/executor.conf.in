@@ -1,0 +1,17 @@
+# Render only from the approved image. Values are operator-owned absolute paths.
+# Preserve the original unit's isolation, credentials, writable data and network.
+# PRESERVED_READONLY_BINDINGS excludes every obsolete code/entrypoint overlay.
+[Service]
+ExecStart=
+ExecStart=/run/lead-home/bin/py/bin/python3.12 -I -B /run/lead-executor/release/services/api/lead_app/channel_executor.py @BINDING@
+TemporaryFileSystem=/run/lead-executor:ro /etc/lead-home-release:ro
+BindReadOnlyPaths=
+BindReadOnlyPaths=@PRESERVED_READONLY_BINDINGS@
+BindReadOnlyPaths=@CORE_SOURCE@:/run/lead-executor/release
+BindReadOnlyPaths=@CORE_SOURCE@/services:/run/lead-home/bin/original/services
+BindReadOnlyPaths=@ADAPTER_SOURCE@:/run/lead-executor/adapter
+BindReadOnlyPaths=@BINDING@:@BINDING@
+# An empty BindReadOnlyPaths also resets BindPaths; re-emit existing writable mounts.
+@PRESERVED_WRITABLE_BINDINGS@
+BindPaths=@RECEIPT_SOURCE@:/run/lead-executor/receipt
+EnvironmentFile=@ENV_SOURCE@

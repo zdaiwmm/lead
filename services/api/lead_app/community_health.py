@@ -103,6 +103,10 @@ def recover(previous, observed, now=None):
         return saved
     evidence = permission_evidence(observed)
     previous = saved.get("last_permission_evidence") or saved.get("permission_evidence") or {}
+    if saved.get("error_code") == "send_failed":
+        # Seeing repaired permission before cooldown must not replace the
+        # original failure baseline and require yet another permission change.
+        previous = saved.get("permission_evidence") or previous
     changed = any(previous.get(key) is not None and value is not None and previous[key] != value
                   for key, value in evidence.items())
     due = not saved.get("write_after") or datetime.fromisoformat(saved["write_after"]) <= now
@@ -171,10 +175,19 @@ def failed(c, aid, task, event, *, occurred_at=None):
     attempt = str(task["id"]) + ":" + str(event.get("evidence_ref") or event["error_code"])
     if prior.get("last_attempt") == attempt:
         return prior
-    state = transition(prior, event, occurred_at)
+    send_blocked = prior.get("state") == "blocked" and prior.get("error_code") == "send_failed"
+    transient_read = send_blocked and event["error_code"] in TRANSIENT
+    # A read outage cannot replace an unresolved send-permission barrier. Keep
+    # its failure chain/backoff, while recording the actual latest read fault.
+    state = transition(prior, {**event, "error_code": "send_failed"} if transient_read else event, occurred_at)
+    if transient_read:
+        state.update(fault=event, read_after=max(state["read_after"], prior["read_after"]),
+                     write_after=max(state["write_after"], prior["write_after"]))
     state.update(type=TYPE, account=account, peer=peer or prior.get("peer", ""),
                  urls=sorted({url, *prior.get("urls", [])} - {""}), task_id=str(task["id"]),
                  last_attempt=attempt, permission_evidence=permission_evidence((task.get("result") or {}).get("history_observation") or {}))
+    if send_blocked and state["error_code"] == "send_failed":
+        state["permission_evidence"] = prior.get("permission_evidence", {})
     state["last_permission_evidence"] = state["permission_evidence"]
     key = row["id"] if row else uuid5(NAMESPACE_URL, f"{current_tenant()}:{aid}:{TYPE}:{account}:{peer or url}")
     _save(c, aid, key, state)
@@ -240,12 +253,15 @@ def current_binding_sql(alias="t", *, legacy_receipts=False):
              OR {alias}.result->>'reply_state' IN ('dispatching','unknown'))))))"""
 
 
-def eligible_sql(alias="t", *, legacy_receipts=False):
-    """Read scheduling gate. All dynamic SQL names are internal constants."""
+def eligible_sql(alias="t", *, legacy_receipts=False, write=False):
+    """Account-bound scheduling: a read probe never clears a write hold."""
+    if write and legacy_receipts:
+        raise ValueError("legacy receipt scope cannot authorize writes")
+    cooling = "" if write else "AND (health.body->>'read_after')::timestamptz>now()"
     return current_binding_sql(alias, legacy_receipts=legacy_receipts) + f""" AND NOT EXISTS (SELECT 1 FROM lead.memory_entries health
         WHERE health.agent_id={alias}.agent_id AND health.body->>'type'='{TYPE}'
         AND health.body->>'account'={alias}.input->>'external_account_id'
-        AND health.body->>'state'='blocked' AND (health.body->>'read_after')::timestamptz>now()
+        AND health.body->>'state'='blocked' {cooling}
         AND (health.body->>'peer'='*' OR health.body->>'peer'={alias}.result->>'target_id'
              OR health.body->'urls' ? rtrim(lower({alias}.input#>>'{{candidate,telegram_url}}'),'/')
                 AND (coalesce({alias}.result->>'target_id','')='' OR coalesce(health.body->>'peer','')='')))"""

@@ -26,7 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from . import account_profiles, reddit_login
+from . import account_profiles, executor_scope, reddit_login
 from .adapters.catalog import SPECS
 from .config import BROWSER_BUILD, BROWSER_SDK, STATE, env, proxy_for
 from .db import j, one, record, require_agent, tx, uid
@@ -216,6 +216,8 @@ class Actor:
             accept_downloads=False,
             i_know_what_im_doing=True,
         )
+        if env().get("LEAD_BROWSER_MAIN_WORLD_EVAL") == "1":
+            launch_settings["main_world_eval"] = True
         try:
             from . import network_namespace
 
@@ -386,6 +388,7 @@ class Actor:
         self.used = time.monotonic()
 
     def gate(self, c, action, *, account_setup=False, read_only=False):
+        from .backups import write_backup_ready
         from .managed_network import policy
         from .resources import ensure_capacity
 
@@ -403,9 +406,7 @@ class Actor:
             raise ValueError("环境正在备份，已停止提交")
         if (
             not read_only and env().get("LEAD_DEPLOYMENT_MODE") == "production"
-            and not one(
-                c, "SELECT lead.backup_ready() AND lead.offsite_backup_ready() AS ready"
-            )["ready"]
+            and not write_backup_ready(c)
         ):
             raise ValueError("数据库恢复点已过期，已停止新的发布")
         platform = action["intent"].get("platform")
@@ -1052,6 +1053,7 @@ class Gateway:
     @scoped_agent_method
     async def get(self, aid, profile_id=None, *, allow_challenge=False):
         aid = str(UUID(aid))
+        profile_id = executor_scope.selected_profile(aid, profile_id)
         with tx(aid) as c:
             profile = (
                 one(c, "SELECT * FROM lead.browser_profiles WHERE id=%s", (profile_id,))
@@ -1291,7 +1293,7 @@ async def inspect_account(aid: UUID, body: OpenRequest):
     profile = account_profiles.for_platform(
         str(aid), body.platform, account_id=body.account_id
     )
-    actor = await gateway.get(str(aid)) if profile["slot"]=="default" else await gateway.get(str(aid),profile["id"])
+    actor = await gateway.get(str(aid), profile["id"])
     async with actor.lock:
         if body.takeover:
             require_takeover(str(aid), actor, body.takeover)
@@ -1303,7 +1305,8 @@ async def inspect_account(aid: UUID, body: OpenRequest):
                 # selected login instead of switching back to a released one.
                 known = one(
                     c,
-                    "SELECT external_account_id FROM lead.social_accounts WHERE platform='telegram' AND state IN ('connected','needs_auth','restricted') AND external_account_id IS NOT NULL ORDER BY verified_at DESC LIMIT 1",
+                    "SELECT external_account_id FROM lead.social_accounts WHERE platform='telegram' AND profile_id=%s AND (%s::uuid IS NULL OR id=%s) AND state IN ('connected','needs_auth','restricted') AND external_account_id IS NOT NULL ORDER BY verified_at DESC LIMIT 1",
+                    (actor.profile["id"], body.account_id, body.account_id),
                 )
             if known:
                 await telegram.open_account(actor.page, known["external_account_id"])
@@ -1336,9 +1339,17 @@ class CommunityStepRequest(BaseModel):
 
 @app.post("/agents/{aid}/community/step")
 async def community_step(aid: UUID, body: CommunityStepRequest):
+    return await execute_community_step(str(aid), body)
+
+
+async def execute_community_step(aid, body, *, profile_id=None, step=None, reload=None):
+    """Internal adapter boundary; callbacks are never HTTP request parameters."""
     from playwright.async_api import Error as BrowserError
 
-    from .community_runtime import browser_step
+    from .community_runtime import browser_step, reload_telegram
+
+    browser_step = step or browser_step
+    reload_telegram = reload or reload_telegram
 
     started = time.monotonic()
     budget = 150 if body.operation == "observe" else 105
@@ -1346,8 +1357,8 @@ async def community_step(aid: UUID, body: CommunityStepRequest):
     def remaining(maximum):
         return max(0.1, min(maximum, budget-(time.monotonic()-started)))
 
-    cold = str(aid) not in gateway.actors
-    actor = await asyncio.wait_for(gateway.get(str(aid)), timeout=remaining(90))
+    cold = not any(a.aid == str(aid) and (profile_id is None or str(a.profile["id"]) == str(profile_id)) for a in gateway.actors.values())
+    actor = await asyncio.wait_for(gateway.get(str(aid), profile_id), timeout=remaining(90))
     acquired_ms = round((time.monotonic()-started)*1000)
     try:
         result = await asyncio.wait_for(
@@ -1393,12 +1404,12 @@ async def community_step(aid: UUID, body: CommunityStepRequest):
             # Each recovery action is claimed durably before execution.
             try:
                 if recovery == "refresh":
-                    from .community_runtime import reload_telegram
                     async with actor.lock:
                         await asyncio.wait_for(reload_telegram(actor.page, task["input"]["external_account_id"]), timeout=remaining(15))
                 else:
-                    await gateway.close(str(aid))
-                    actor = await asyncio.wait_for(gateway.get(str(aid)), timeout=remaining(30))
+                    key = str(aid) if actor.profile["slot"] == "default" else str(actor.profile["id"])
+                    await gateway.close_one(str(aid), key)
+                    actor = await asyncio.wait_for(gateway.get(str(aid), profile_id), timeout=remaining(30))
                 result = await asyncio.wait_for(browser_step(actor, str(body.task_id), body.operation), timeout=remaining(30))
                 if body.operation == "observe":
                     with tx(str(aid)) as c:
@@ -1655,6 +1666,7 @@ async def close_research(aid: UUID, rid: UUID):
     actor = next((actor for actor in gateway.actors.values()
                   if actor.aid == str(aid) and str(rid) in actor.research_pages), None)
     if actor:
+        executor_scope.selected_profile(str(aid), actor.profile["id"])
         async with actor.lock:
             controller = actor.research_pages.pop(str(rid), None)
             if controller and hasattr(controller, "close"):

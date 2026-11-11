@@ -2,16 +2,22 @@
 """Trusted, node-local hook for poll_home_release.py. Install outside release images."""
 
 import argparse
+import base64
 import fcntl
+import grp
+import hashlib
 import json
 import os
+import pwd
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from uuid import UUID
 
 VAULT = Path("/srv/lead-prod-vault")
 STORE = VAULT / "lead-git-releases"
@@ -86,8 +92,8 @@ def bound_tree(proc, target):
 
 def application_roles():
     if (TOOLS / "home_live_maintenance.py").is_file():
-        # These processes also bind current/services at process start. The separately
-        # pinned Telegram executor owns another tree and keeps its original scope.
+        # These processes also bind current/services at process start. Independent
+        # channel executors have their own cutover; the registry covers final CLI verify.
         return ROLES | {"browser-status": SERVICES, "lead-chamber-analytics.service": SERVICES}
     return ROLES
 
@@ -106,6 +112,734 @@ def current():
         require(process(role) == proc, f"{role} changed during probe")
     return sha
 
+
+
+# Separate operator registry: application switching never restarts these services.
+EXECUTOR_REGISTRY = Path("/etc/lead-home-release/executors.json")
+PROC = Path("/proc")
+EXECUTOR_PYTHON = Path("/run/lead-home/bin/py/bin/python3.12")
+EXECUTOR_PYTHON_SOURCE = Path("/srv/lead-prod-vault/lead-home-live/bin/py/bin/python3.12")
+
+
+def executor_path(value):
+    require(isinstance(value, str) and re.fullmatch(r"/[a-zA-Z0-9_./-]+", value),
+            "invalid executor path")
+    path = Path(value)
+    require(str(path) == value and ".." not in path.parts, "noncanonical executor path")
+    return path
+
+
+def executor_regular(path, *, private=False, owner=False):
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode), "executor file is redirected or not regular")
+    require(not info.st_mode & (0o077 if private else 0o022), "unsafe executor file permissions")
+    if owner:
+        require(info.st_uid == 0, "executor config is not operator owned")
+    require(info.st_size <= 4 * 1024 * 1024, "executor evidence too large")
+    return path.read_bytes()
+
+
+def executor_config(path):
+    require(path.parent == EXECUTOR_REGISTRY.parent, "binding outside executor config directory")
+    # Check every host ancestor: an attacker must not be able to replace the directory.
+    for directory in (path.parent, *path.parent.parents):
+        info = directory.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+                "unsafe executor config directory")
+    return executor_regular(path, owner=True)
+
+
+def executor_binding(data):
+    # Deliberately duplicate the small public schema instead of importing image code as root.
+    fields = {"version", "channel", "executor_id", "agent_id", "profile_slot", "release",
+              "adapter_root", "entrypoint", "adapter_files", "receipt"}
+    require(isinstance(data, dict) and set(data) == fields, "invalid executor binding fields")
+    require(type(data['version']) is int and data['version'] == 1, "unsupported executor binding version")
+    require(data['channel'] in ('telegram', 'reddit'), "unsupported executor channel")
+    for key in ('executor_id', 'profile_slot'):
+        require(isinstance(data[key], str) and re.fullmatch(r'[a-z0-9][a-z0-9:_-]{0,95}', data[key]),
+                "invalid executor identity")
+    require(isinstance(data['agent_id'], str) and str(UUID(data['agent_id'])) == data['agent_id'],
+            "invalid executor agent")
+    require(isinstance(data['entrypoint'], str) and
+            re.fullmatch(r'[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*:[a-z_][a-z0-9_]*', data['entrypoint']),
+            "invalid executor entrypoint")
+    for key in ('release', 'adapter_root', 'receipt'):
+        executor_path(data[key])
+    release = Path(data['release'])
+    require(release.is_relative_to('/run') and release != Path('/run'), "invalid executor release path")
+    files = data['adapter_files']
+    require(isinstance(files, dict) and files, "missing adapter manifest")
+    for name, digest in files.items():
+        require(isinstance(name, str) and re.fullmatch(r'[a-zA-Z0-9_./-]+\.py', name)
+                and not name.startswith('/') and not any(p in ('.', '..', '') for p in name.split('/'))
+                and isinstance(digest, str) and re.fullmatch(r'[a-f0-9]{64}', digest), "invalid adapter manifest")
+    require(data['entrypoint'].split(':')[0].replace('.', '/') + '.py' in files,
+            "missing adapter entrypoint")
+    paths = [Path(data[key]) for key in ('release', 'adapter_root', 'receipt')]
+    require(all(not a.is_relative_to(b) and not b.is_relative_to(a)
+                for i, a in enumerate(paths) for b in paths[i + 1:]), "overlapping executor paths")
+    return data
+
+
+def executor_view(proc, target):
+    # /proc/PID/root itself is a kernel magic link; every component beneath it must be real.
+    view = proc / 'root'
+    for part in target.parts[1:]:
+        view /= part
+        require(not stat.S_ISLNK(view.lstat().st_mode), "redirected executor process path")
+    return view
+
+
+def executor_mount(proc, target):
+    entries = [line.split() for line in (proc / 'mountinfo').read_text().splitlines()]
+    require(all(len(e) >= 10 and '-' in e for e in entries), "invalid executor mount evidence")
+    require(not any(e[4].startswith(str(target) + '/') for e in entries), "unexpected executor overlay")
+    exact = [e for e in entries if e[4] == str(target)]
+    require(len(exact) == 1 and 'ro' in exact[0][5].split(','), "unbound or writable executor tree")
+    return executor_view(proc, target)
+
+
+def executor_hashes(root, *, adapter=False):
+    require(stat.S_ISDIR(root.lstat().st_mode), "missing executor source directory")
+    result = {}
+    for path in sorted(root.rglob('*')):
+        info = path.lstat()
+        require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode), "redirected executor source")
+        if stat.S_ISDIR(info.st_mode):
+            continue
+        if adapter:
+            require(path.suffix == '.py', "unlisted adapter code or data")
+        else:
+            require(path.suffix not in ('.pyc', '.pyo', '.so'), "unexpected compiled executor code")
+        if path.suffix == '.py':
+            result[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    require(result, "empty executor source")
+    return result
+
+
+
+def executor_interpreter(proc, argv):
+    require(argv and argv[0] == str(EXECUTOR_PYTHON), "unexpected executor interpreter command")
+    expected = EXECUTOR_PYTHON_SOURCE
+    # Resolve only the final executable symlink, checking each link and its parents.
+    # A venv Python symlink is legitimate; a writable source or redirected parent is not.
+    for _ in range(32):
+        for parent in expected.parents:
+            info = parent.lstat()
+            require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+                    "unsafe interpreter directory")
+        info = expected.lstat()
+        require(info.st_uid == 0, "interpreter source is not operator owned")
+        if not stat.S_ISLNK(info.st_mode):
+            require(stat.S_ISREG(info.st_mode) and not info.st_mode & 0o022 and info.st_mode & 0o111,
+                    "unsafe interpreter source")
+            break
+        target = Path(os.readlink(expected))
+        expected = Path(os.path.normpath(target if target.is_absolute() else expected.parent / target))
+    else:
+        raise Refused("interpreter symlink chain is too long")
+    require((proc / 'exe').samefile(expected), "executor actual interpreter mismatch")
+    require((proc / 'root' / EXECUTOR_PYTHON.relative_to('/')).samefile(expected),
+            "executor mounted interpreter mismatch")
+    actual = executor_path(os.readlink(proc / 'exe'))
+    entries = [line.split() for line in (proc / 'mountinfo').read_text().splitlines()]
+    for target in (EXECUTOR_PYTHON, actual):
+        covering = [e for e in entries if len(e) >= 10 and target.is_relative_to(e[4])]
+        require(covering, "missing interpreter mount")
+        depth = max(len(Path(e[4]).parts) for e in covering)
+        closest = [e for e in covering if len(Path(e[4]).parts) == depth]
+        require(len(closest) == 1 and 'ro' in closest[0][5].split(','),
+                "writable or ambiguous interpreter mount")
+
+
+def executor_process(service):
+    pid = property_of(service, 'MainPID')
+    invocation = property_of(service, 'InvocationID')
+    require(pid.isdecimal() and int(pid) > 1 and property_of(service, 'ActiveState') == 'active',
+            "executor process unavailable")
+    require(re.fullmatch(r'[a-f0-9]{32}', invocation), "executor invocation unavailable")
+    return pid, invocation
+
+
+
+def verify_executor_writable_layout(entry, binding, proc):
+    # The stable operator-owned layout outlives shared application revisions.
+    # Only provisioning derives it from the preexisting unit, never from a plan field.
+    path = EXECUTOR_REGISTRY.parent / (entry['channel'] + '-layout.json')
+    raw = executor_config(path)
+    require(not path.lstat().st_mode & 0o077, 'executor writable layout is not private')
+    layout = json.loads(raw)
+    require(isinstance(layout, dict) and set(layout) == {
+        'version', 'channel', 'service', 'binding', 'writable_bindings'}
+        and type(layout['version']) is int and layout['version'] == 1
+        and all(layout[key] == entry[key] for key in entry), 'executor writable layout identity mismatch')
+    rows = layout['writable_bindings']
+    require(isinstance(rows, list), 'invalid executor writable layout')
+    expected = set()
+    for pair in rows:
+        require(isinstance(pair, list) and len(pair) == 2, 'invalid executor writable mapping')
+        expected.add(tuple(str(executor_path(value)) for value in pair))
+    require(len(expected) == len(rows) and len({target for _, target in expected}) == len(expected),
+            'ambiguous executor writable mapping')
+    receipt = (str(STORE / 'executors' / entry['channel'] / 'receipt'), str(Path(binding['receipt']).parent))
+    require(receipt in expected, 'executor writable receipt mapping missing')
+    require(executor_writable_bindings(entry['service'], entry['channel']) == expected,
+            'executor writable bindings differ from original layout')
+    mounts = [line.split() for line in (proc / 'mountinfo').read_text().splitlines()]
+    for source, target in sorted(expected):
+        exact = [row for row in mounts if len(row) >= 10 and row[4] == target]
+        require(len(exact) == 1 and 'rw' in exact[0][5].split(','), 'executor data mount is missing or read-only')
+        view = executor_view(proc, Path(target))
+        require(view.samefile(Path(source)), 'executor writable mount source changed')
+    return raw
+
+
+def verify_executor_entries(sha, entries, *, both_channels=True):
+    """Verify the same live evidence for initial single-service and final fleet acceptance."""
+    release = image(sha)
+    expected_source = release / 'services/api/lead_app'
+    require(expected_source.resolve(strict=True) == expected_source, 'redirected release source')
+    expected_core = executor_hashes(expected_source)
+    require('channel_executor.py' in expected_core, "release lacks executor launcher")
+    services, identities, pids, channels, proofs, observed = set(), set(), set(), set(), [], []
+    for entry in entries:
+        require(isinstance(entry, dict) and set(entry) == {'service', 'channel', 'binding'}, "invalid registry entry")
+        service = entry['service']
+        require(isinstance(service, str) and re.fullmatch(r'lead-[a-z0-9][a-z0-9-]{0,100}\.service', service),
+                "invalid executor service")
+        require(service not in services, "duplicate executor service")
+        services.add(service)
+        config = executor_path(entry['binding'])
+        config_bytes = executor_config(config)
+        binding = executor_binding(json.loads(config_bytes))
+        require(binding['channel'] == entry['channel'], "executor channel mismatch")
+        require(binding['executor_id'] not in identities, "duplicate executor identity")
+        identities.add(binding['executor_id'])
+        channels.add(binding['channel'])
+        pid, invocation = executor_process(service)
+        require(pid not in pids, "shared executor process")
+        pids.add(pid)
+        proc = PROC / pid
+        mounts = (proc / 'mountinfo').read_bytes()
+        root = executor_mount(proc, Path(binding['release']))
+        require(root.samefile(release), "executor runs a different image")
+        require((root / 'REVISION').read_text().strip() == sha, "executor revision mismatch")
+        # A receipt does not attest loaded memory on its own: pair boot evidence with
+        # the immutable exact release mount and the live, unchanged systemd invocation.
+        command = (proc / 'cmdline').read_bytes().rstrip(b'\0').split(b'\0')
+        args = [arg.decode() for arg in command]
+        executor_interpreter(proc, args)
+        require(len(args) in (4, 5) and args[1:-2] in (['-I', '-B'], ['-IB'])
+                and args[-2:] == [binding['release'] + '/services/api/lead_app/channel_executor.py', str(config)],
+                "unexpected executor launcher")
+        process_config = executor_view(proc, config)
+        require(executor_regular(process_config, owner=True) == config_bytes, "executor binding drift")
+        adapter_root = executor_mount(proc, Path(binding['adapter_root']))
+        adapter_files = executor_hashes(adapter_root, adapter=True)
+        require(adapter_files == binding['adapter_files'], "executor adapter drift")
+        core_files = executor_hashes(executor_view(proc, Path(binding['release']) / 'services/api/lead_app'))
+        require(core_files == expected_core, "executor common source drift")
+        receipt = executor_view(proc, Path(binding['receipt']))
+        require(stat.S_ISDIR(receipt.parent.lstat().st_mode) and not receipt.parent.lstat().st_mode & 0o077,
+                "unsafe executor receipt directory")
+        proof = json.loads(executor_regular(receipt, private=True))
+        expected = dict(version=1, channel=binding['channel'], executor_id=binding['executor_id'],
+                        revision=sha, pid=int(pid), invocation=invocation, core_files=core_files,
+                        adapter_files=adapter_files, boot_sha256=expected_core['channel_executor.py'],
+                        binding_sha256=hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
+        require(proof == expected, "executor boot evidence mismatch")
+        layout_bytes = verify_executor_writable_layout(entry, binding, proc)
+        proofs.append(proof)
+        observed.append((service, pid, invocation, config, config_bytes, mounts, args, entry, binding, layout_bytes))
+    if both_channels:
+        require(channels == {'telegram', 'reddit'}, "both executor channels are required")
+    for service, pid, invocation, config, config_bytes, mounts, args, entry, binding, layout_bytes in observed:
+        require(executor_process(service) == (pid, invocation), "executor changed during verification")
+        executor_interpreter(PROC / pid, args)
+        require((PROC / pid / 'cmdline').read_bytes().rstrip(b'\0').split(b'\0') ==
+                [arg.encode() for arg in args], 'executor command changed during verification')
+        require((PROC / pid / 'mountinfo').read_bytes() == mounts, 'executor mounts changed during verification')
+        require(executor_config(config) == config_bytes, "executor config changed during verification")
+        require(verify_executor_writable_layout(entry, binding, PROC / pid) == layout_bytes,
+                'executor writable layout changed during verification')
+    return proofs
+
+
+def verify_executor_entry(sha, entry):
+    return verify_executor_entries(sha, [entry], both_channels=False)[0]
+
+
+def verify_executors(sha):
+    # Provisioning accepts one consumer at a time; final release acceptance needs both.
+    registry_bytes = executor_config(EXECUTOR_REGISTRY)
+    registry = json.loads(registry_bytes)
+    require(isinstance(registry, dict) and set(registry) == {'version', 'executors'}
+            and type(registry['version']) is int and registry['version'] == 1
+            and isinstance(registry['executors'], list) and registry['executors'], "invalid executor registry")
+    proofs = verify_executor_entries(sha, registry['executors'])
+    require(executor_config(EXECUTOR_REGISTRY) == registry_bytes, "executor registry changed during verification")
+    return proofs
+
+
+
+EXECUTOR_SYSTEMD = Path('/etc/systemd/system')
+EXECUTOR_TEMPLATE = 'services/channel_adapters/systemd/executor.conf.in'
+
+
+def executor_json(data):
+    return json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
+
+
+def executor_digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def executor_directory(path, *, create=False, private=False):
+    if create and not path.exists():
+        executor_directory(path.parent, create=True)
+        path.mkdir(mode=0o700)
+    for directory in (path, *path.parents):
+        info = directory.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+                'unsafe executor provisioning directory')
+    if private:
+        require(not path.lstat().st_mode & 0o077, 'executor journal directory is not private')
+
+
+def executor_host_file(path, *, private=False):
+    executor_directory(path.parent)
+    return executor_regular(path, private=private, owner=True)
+
+
+def executor_atomic(path, content, *, mode=0o600, uid=0, gid=0):
+    executor_directory(path.parent)
+    fd, temporary = tempfile.mkstemp(prefix='.executor-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            os.fchmod(stream.fileno(), mode)
+            os.chown(temporary, uid, gid)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        executor_sync(path.parent)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def executor_sync(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def executor_file_backup(path):
+    if not os.path.lexists(path):
+        return None
+    data = executor_host_file(path)
+    info = path.lstat()
+    return dict(bytes=base64.b64encode(data).decode(), mode=stat.S_IMODE(info.st_mode),
+                uid=info.st_uid, gid=info.st_gid)
+
+
+def executor_restore_file(path, saved):
+    if saved is None:
+        path.unlink(missing_ok=True)
+        executor_sync(path.parent)
+    else:
+        executor_atomic(path, base64.b64decode(saved['bytes'], validate=True),
+                        mode=saved['mode'], uid=saved['uid'], gid=saved['gid'])
+
+
+def executor_selector(path):
+    if not os.path.lexists(path):
+        return None
+    executor_directory(path.parent)
+    require(path.is_symlink() and path.lstat().st_uid == 0, 'unsafe executor selector')
+    value = os.readlink(path)
+    target = executor_path(value)
+    require(target.parent == STORE and SHA.fullmatch(target.name), 'invalid executor selector target')
+    return value
+
+
+def executor_select(path, value):
+    if value is None:
+        path.unlink(missing_ok=True)
+    else:
+        with tempfile.TemporaryDirectory(prefix='.selector-', dir=path.parent) as directory:
+            temporary = Path(directory) / 'current'
+            temporary.symlink_to(value)
+            os.replace(temporary, path)
+    executor_sync(path.parent)
+
+
+def executor_maintenance(sha, agent_id):
+    # Only this already-installed trusted host adapter accesses the operator database.
+    # No application/adapter code is imported, no hold/restore/drain action is requested.
+    require(SHA.fullmatch(sha) and str(UUID(agent_id)) == agent_id, 'invalid maintenance identity')
+    site = TOOLS / 'home_live_maintenance.py'
+    executor_host_file(site)
+    program = (
+        'import runpy;m=runpy.run_path(' + repr(str(site)) + ');'
+        'key=m["KEY"];fingerprint=m["FINGERPRINT"];busy=m["BUSY"];'
+        'sha=' + repr(sha) + ';aid=' + repr(agent_id) + ';'
+        'query=f"SELECT NOT ({busy}) AND NOT EXISTS(SELECT FROM lead.agents WHERE desired_state=\'running\') "'
+        '+f"AND EXISTS(SELECT FROM lead.agents a WHERE id=\'{aid}\' AND desired_state=\'paused\' "'
+        '+f"AND onboarding_state#>>\'{{{key},sha}}\'=\'{sha}\' AND onboarding_state#>\'{{{key},before}}\'={fingerprint}) "'
+        '+f"AND NOT EXISTS(SELECT FROM lead.agents a WHERE onboarding_state ? \'{key}\' AND "'
+        '+f"(onboarding_state#>>\'{{{key},sha}}\' IS DISTINCT FROM \'{sha}\' OR desired_state<>\'paused\' "'
+        '+f"OR onboarding_state#>\'{{{key},before}}\' IS DISTINCT FROM {fingerprint}))";'
+        'print(m["site_sql"](query))'
+    )
+    require(run('/usr/bin/python3', '-IB', '-c', program) == 't',
+            'same-revision maintenance hold and idle state required')
+
+
+
+def executor_existing_bindings(service, prop='BindReadOnlyPaths'):
+    require(prop in ('BindReadOnlyPaths', 'BindPaths'), 'unsupported executor binding property')
+    result = set()
+    for value in property_of(service, prop).split():
+        parts = value.split(':')
+        require(len(parts) in (2, 3) and (len(parts) == 2 or parts[2] == 'rbind'),
+                'unsupported existing read-only binding')
+        source, target = str(executor_path(parts[0])), str(executor_path(parts[1]))
+        result.add((source, target))
+    return result
+
+
+
+def executor_writable_bindings(service, channel):
+    bindings = executor_existing_bindings(service, 'BindPaths')
+    receipt = (str(STORE / 'executors' / channel / 'receipt'), '/run/lead-executor/receipt')
+    for source, name in bindings:
+        target = Path(name)
+        protected = (Path('/run/lead-executor'), EXECUTOR_REGISTRY.parent, SERVICES, BIN)
+        require((source, name) == receipt or not any(
+            target.is_relative_to(path) or path.is_relative_to(target) for path in protected),
+            'existing writable binding overlaps executor code or configuration')
+    return bindings
+
+
+def executor_render_template(template, values, writable_bindings):
+    # Generate complete lines so an empty list cannot emit a second BindPaths=
+    # reset and discard the read-only mounts emitted just above it.
+    receipt = (values['@RECEIPT_SOURCE@'], '/run/lead-executor/receipt')
+    values = {**values, '@PRESERVED_WRITABLE_BINDINGS@': '\n'.join(
+        'BindPaths=' + source + ':' + target + ':rbind' for source, target in sorted(writable_bindings)
+        if (source, target) != receipt)}
+    placeholders = set(re.findall(r'@[A-Z_]+@', template))
+    require(placeholders == set(values) == {'@BINDING@', '@PRESERVED_READONLY_BINDINGS@',
+            '@PRESERVED_WRITABLE_BINDINGS@', '@CORE_SOURCE@', '@ADAPTER_SOURCE@',
+            '@RECEIPT_SOURCE@', '@ENV_SOURCE@'}, 'unexpected executor template parameters')
+    for key, value in values.items():
+        template = template.replace(key, value)
+    require('@' not in template, 'unexpanded executor template')
+    return template
+
+
+def executor_command_identity(value):
+    match = re.fullmatch(r'\{ path=(.*?) ; argv\[\]=(.*?) ; ignore_errors=(yes|no) ; .* \}', value)
+    require(match is not None and '} {' not in value, 'unsupported executor command evidence')
+    return list(match.groups())
+
+
+def executor_provision_plan(path, sha):
+    raw = executor_config(path)
+    require(not path.lstat().st_mode & 0o077, 'executor provision plan is not private')
+    plan = json.loads(raw)
+    require(isinstance(plan, dict) and set(plan) == {
+        'version', 'channel', 'service', 'binding', 'core_mode', 'preserved_readonly_bindings', 'expected'},
+        'invalid executor provisioning fields')
+    require(type(plan['version']) is int and plan['version'] == 1, 'unsupported executor provisioning version')
+    binding = executor_binding(plan['binding'])
+    channel, service = plan['channel'], plan['service']
+    require(channel == binding['channel'] and path.name == channel + '-provision.json', 'provision channel mismatch')
+    require(isinstance(service, str) and re.fullmatch(r'lead-[a-z0-9][a-z0-9-]{0,100}\.service', service),
+            'invalid executor provision service')
+    require(plan['core_mode'] in ('main-current', 'independent'), 'invalid executor core selector mode')
+    require(binding['release'] == '/run/lead-executor/release'
+            and binding['adapter_root'] == '/run/lead-executor/adapter'
+            and binding['receipt'] == '/run/lead-executor/receipt/boot.json', 'nonstandard executor binding paths')
+    expected = plan['expected']
+    require(isinstance(expected, dict) and set(expected) == {
+        'fragment_sha256', 'dropins', 'binding_sha256', 'selector'}, 'invalid prior executor evidence')
+    require(isinstance(expected['dropins'], dict), 'invalid prior dropin evidence')
+    for value in [expected['fragment_sha256'], *expected['dropins'].values()]:
+        require(isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value), 'invalid prior file digest')
+    require(expected['binding_sha256'] is None or isinstance(expected['binding_sha256'], str)
+            and re.fullmatch('[a-f0-9]{64}', expected['binding_sha256']), 'invalid prior binding digest')
+    if expected['selector'] is not None:
+        selector = executor_path(expected['selector'])
+        require(selector.parent == STORE and SHA.fullmatch(selector.name), 'invalid prior selector')
+    base = STORE / 'executors' / channel
+    adapter = base / 'adapters' / executor_digest(executor_json(binding['adapter_files']))
+    executor_directory(adapter)
+    for file in adapter.rglob('*'):
+        info = file.lstat()
+        require(info.st_uid == 0 and not info.st_mode & 0o022, 'unsafe adapter source ownership')
+    require(executor_hashes(adapter, adapter=True) == binding['adapter_files'], 'provision adapter source drift')
+    environment = EXECUTOR_REGISTRY.parent / (channel + '.env')
+    executor_config(environment)
+    require(not environment.lstat().st_mode & 0o077, 'executor environment is not private')
+    preserved = plan['preserved_readonly_bindings']
+    require(isinstance(preserved, list) and preserved, 'missing preserved executor bindings')
+    targets = set()
+    inherited = executor_existing_bindings(service)
+    environments = set(re.findall(r'(/[^ ]+) \(ignore_errors=(?:yes|no)\)',
+                                  property_of(service, 'EnvironmentFiles')))
+    for item in preserved:
+        require(isinstance(item, dict) and set(item) == {'source', 'target'}, 'invalid preserved binding')
+        source, target = executor_path(item['source']), executor_path(item['target'])
+        # Existing unit mappings are preserved, never newly granted. Data/socket
+        # ownership belongs to the original service and need not be root-only.
+        pair = (str(source), str(target))
+        require(pair in inherited or (str(source) in environments and target == Path('/run/lead-home/model.env')),
+                'preserved binding is not existing service access')
+        info = source.lstat()
+        require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode) or stat.S_ISSOCK(info.st_mode),
+                'unsupported existing binding source')
+        trusted_bin = target == BIN and source == EXECUTOR_PYTHON_SOURCE.parents[2] and pair in inherited
+        reserved = (Path('/run/lead-executor'), Path('/etc/lead-home-release'), SERVICES)
+        require((trusted_bin or not any(target.is_relative_to(p) or p.is_relative_to(target) for p in reserved))
+                and target.suffix not in ('.py', '.pyc', '.pyo', '.so'), 'preserved binding overlays executor code')
+        if target == BIN or target.is_relative_to(BIN / 'py') or target == BIN / 'site':
+            require(trusted_bin or pair in inherited, 'unreviewed interpreter dependency binding')
+            executor_directory(source.parent)
+            require(info.st_uid == 0 and not info.st_mode & 0o022, 'unsafe interpreter dependency source')
+        require(target not in targets, 'duplicate preserved binding')
+        targets.add(target)
+    return plan, raw
+
+
+def executor_service_snapshot(service, expected, config, selector, dropin):
+    fragment = executor_path(property_of(service, 'FragmentPath'))
+    require(executor_digest(executor_host_file(fragment)) == expected['fragment_sha256'], 'executor unit drift')
+    paths = property_of(service, 'DropInPaths').split()
+    require(set(paths) == set(expected['dropins']) and len(paths) == len(set(paths)), 'executor dropin set drift')
+    unit_files = {str(fragment): executor_file_backup(fragment)}
+    for name in paths:
+        path = executor_path(name)
+        require(path.name <= dropin.name, 'later executor dropin would override provisioning')
+        require(executor_digest(executor_host_file(path)) == expected['dropins'][name], 'executor dropin drift')
+        unit_files[name] = executor_file_backup(path)
+    saved_config = executor_file_backup(config)
+    actual_config = None if saved_config is None else executor_digest(base64.b64decode(saved_config['bytes']))
+    require(actual_config == expected['binding_sha256'], 'prior executor binding drift')
+    require(executor_selector(selector) == expected['selector'], 'prior executor selector drift')
+    require(property_of(service, 'ActiveState') == 'active', 'existing executor service must be active')
+    return dict(config=saved_config, dropin=executor_file_backup(dropin), selector=expected['selector'],
+                layout=executor_file_backup(config.with_name(config.stem + '-layout.json')),
+                exec_start=executor_command_identity(property_of(service, 'ExecStart')), active=True, unit_files=unit_files,
+                readonly_bindings=sorted(executor_existing_bindings(service)),
+                writable_bindings=sorted(executor_writable_bindings(service, config.stem)),
+                environment_files=property_of(service, 'EnvironmentFiles'))
+
+
+def provision_executor(sha, plan_path):
+    require(os.geteuid() == 0 and SHA.fullmatch(sha), 'trusted node dispatcher and exact SHA required')
+    path = executor_path(str(plan_path))
+    executor_directory(STORE)
+    lock_path = STORE / 'deploy.lock'
+    if os.path.lexists(lock_path):
+        executor_host_file(lock_path)
+    with lock_path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        baseline = current()
+        release = image(sha)
+        require(release.stat().st_mode & 0o005 == 0o005,
+                'executor image root must be readable and traversable by the service user')
+        mirror = STORE / 'lead.git'
+        run('git', '-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', '--git-dir', mirror,
+            'fetch', '--no-tags', 'https://github.com/zdaiwmm/lead.git',
+            '+refs/heads/main:refs/heads/main', timeout=120)
+        run('git', '--git-dir', mirror, 'merge-base', '--is-ancestor', sha, 'refs/heads/main')
+        plan, raw = executor_provision_plan(path, sha)
+        channel, service, binding = plan['channel'], plan['service'], plan['binding']
+        if plan['core_mode'] == 'main-current':
+            require(baseline == sha, 'application current must match provisioning revision')
+        config = EXECUTOR_REGISTRY.parent / (channel + '.json')
+        base = STORE / 'executors' / channel
+        selector = base / 'current'
+        dropin = EXECUTOR_SYSTEMD / (service + '.d') / 'zzzz-lead-executor.conf'
+        entry = dict(service=service, channel=channel, binding=str(config))
+        journal_dir = base / 'journal'
+        executor_directory(journal_dir, create=True, private=True)
+        journal_path = journal_dir / (sha + '.json')
+        if os.path.lexists(journal_path):
+            journal = json.loads(executor_host_file(journal_path, private=True))
+            require(journal.get('plan_sha256') == executor_digest(raw), 'different executor plan already journaled')
+            require(journal.get('state') != 'rolled-back', 'previous executor provisioning was restored; review its journal')
+            try:
+                proof = verify_executor_entry(sha, entry)
+            except (Refused, OSError, ValueError, subprocess.SubprocessError):
+                raise Refused('incomplete executor provisioning; inspect journal without replaying') from None
+            journal['state'] = 'verified'
+            executor_atomic(journal_path, executor_json(journal))
+            return proof
+        executor_maintenance(sha, binding['agent_id'])
+        if plan['core_mode'] == 'main-current':
+            require(plan['expected']['selector'] is None and not os.path.lexists(selector),
+                    'main-current executor must not own a separate selector')
+        previous = executor_service_snapshot(service, plan['expected'], config, selector, dropin)
+        template_path = release / EXECUTOR_TEMPLATE
+        require(template_path.resolve(strict=True) == template_path, 'redirected executor template')
+        template = template_path.read_text()
+        values = {
+            '@BINDING@': str(config),
+            '@PRESERVED_READONLY_BINDINGS@': ' '.join(item['source'] + ':' + item['target']
+                                                    for item in plan['preserved_readonly_bindings']),
+            '@CORE_SOURCE@': str(STORE / 'current' if plan['core_mode'] == 'main-current' else selector),
+            '@ADAPTER_SOURCE@': str(base / 'adapters' / executor_digest(executor_json(binding['adapter_files']))),
+            '@RECEIPT_SOURCE@': str(base / 'receipt'),
+            '@ENV_SOURCE@': str(EXECUTOR_REGISTRY.parent / (channel + '.env')),
+        }
+        template = executor_render_template(template, values, previous['writable_bindings'])
+        user = pwd.getpwnam(property_of(service, 'User'))
+        group_name = property_of(service, 'Group')
+        gid = grp.getgrnam(group_name).gr_gid if group_name else user.pw_gid
+        require(user.pw_uid > 0 and gid > 0, 'executor cannot be provisioned as root')
+        receipt = base / 'receipt'
+        if os.path.lexists(receipt):
+            info = receipt.lstat()
+            require(stat.S_ISDIR(info.st_mode) and info.st_uid == user.pw_uid and not info.st_mode & 0o077,
+                    'unsafe existing executor receipt directory')
+        else:
+            receipt.mkdir(mode=0o700)
+            os.chown(receipt, user.pw_uid, gid)
+        executor_directory(dropin.parent, create=True)
+        journal = dict(version=1, sha=sha, channel=channel, service=service, plan_sha256=executor_digest(raw),
+                       state='prepared', previous=previous, entry=entry)
+        executor_atomic(journal_path, executor_json(journal))
+        executor_maintenance(sha, binding['agent_id'])
+        require(current() == baseline, 'application changed before executor stop')
+        require(executor_config(path) == raw, 'executor plan changed before stop')
+        require(executor_service_snapshot(service, plan['expected'], config, selector, dropin) == previous,
+                'executor baseline changed before stop')
+        try:
+            run('systemctl', 'stop', service, timeout=120)
+            require(property_of(service, 'ActiveState') == 'inactive', 'executor failed to stop')
+            journal['state'] = 'stopped'
+            executor_atomic(journal_path, executor_json(journal))
+            executor_atomic(config, executor_json(binding), mode=0o640, gid=gid)
+            writable = set(map(tuple, previous['writable_bindings'])) | {(str(receipt), '/run/lead-executor/receipt')}
+            layout = dict(version=1, **entry, writable_bindings=sorted(writable))
+            executor_atomic(config.with_name(channel + '-layout.json'), executor_json(layout))
+            executor_atomic(dropin, template.encode(), mode=0o644)
+            if plan['core_mode'] == 'independent':
+                executor_select(selector, str(STORE / sha))
+            journal['state'] = 'installed'
+            executor_atomic(journal_path, executor_json(journal))
+            run('systemctl', 'daemon-reload')
+            run('systemctl', 'start', service, timeout=120)
+            proof = wait_executor_entry(sha, entry)
+            executor_maintenance(sha, binding['agent_id'])
+            journal['state'] = 'verified'
+            executor_atomic(journal_path, executor_json(journal))
+            return proof
+        except Exception:
+            # Catch known failures only. A killed process leaves its durable journal for
+            # readback on the next call; it never automatically repeats the stop/install.
+            try:
+                journal['state'] = 'rolling-back'
+                executor_atomic(journal_path, executor_json(journal))
+                run('systemctl', 'stop', service, timeout=120)
+                executor_restore_file(config, previous['config'])
+                executor_restore_file(config.with_name(channel + '-layout.json'), previous['layout'])
+                executor_restore_file(dropin, previous['dropin'])
+                if plan['core_mode'] == 'independent':
+                    executor_select(selector, previous['selector'])
+                run('systemctl', 'daemon-reload')
+                run('systemctl', 'start', service, timeout=120)
+                require(property_of(service, 'ActiveState') == 'active'
+                        and executor_command_identity(property_of(service, 'ExecStart')) == previous['exec_start'], 'old executor did not recover')
+                require(executor_service_snapshot(service, plan['expected'], config, selector, dropin) == previous,
+                        'old executor files did not recover')
+                journal['state'] = 'rolled-back'
+                executor_atomic(journal_path, executor_json(journal))
+            except Exception:
+                raise Refused('executor rollback incomplete; maintenance retained; inspect journal') from None
+            raise Refused('executor candidate failed; previous files and service restored') from None
+
+
+
+def wait_executor_entry(sha, entry):
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            return verify_executor_entry(sha, entry)
+        except (Refused, OSError, ValueError, subprocess.SubprocessError):
+            if time.monotonic() >= deadline:
+                raise Refused('executor startup evidence did not become ready') from None
+            time.sleep(1)
+
+
+def register_executors(sha):
+    require(os.geteuid() == 0 and SHA.fullmatch(sha), 'trusted node dispatcher and exact SHA required')
+    executor_directory(STORE)
+    lock_path = STORE / 'deploy.lock'
+    if os.path.lexists(lock_path):
+        executor_host_file(lock_path)
+    with lock_path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        require(current() == sha, 'application current must match registry revision')
+        entries = []
+        for channel in ('telegram', 'reddit'):
+            path = EXECUTOR_REGISTRY.parent / (channel + '-provision.json')
+            plan, raw = executor_provision_plan(path, sha)
+            journal_path = STORE / 'executors' / channel / 'journal' / (sha + '.json')
+            journal = json.loads(executor_host_file(journal_path, private=True))
+            entry = dict(service=plan['service'], channel=channel,
+                         binding=str(EXECUTOR_REGISTRY.parent / (channel + '.json')))
+            require(journal.get('state') == 'verified' and journal.get('sha') == sha
+                    and journal.get('channel') == channel and journal.get('entry') == entry
+                    and journal.get('plan_sha256') == executor_digest(raw), 'executor provisioning is not verified')
+            entries.append(entry)
+        proofs = verify_executor_entries(sha, entries)
+        content = executor_json(dict(version=1, executors=entries))
+        journal_dir = STORE / 'executors/registry-journal'
+        executor_directory(journal_dir, create=True, private=True)
+        journal_path = journal_dir / (sha + '.json')
+        previous = executor_file_backup(EXECUTOR_REGISTRY)
+        if previous is not None:
+            old = json.loads(base64.b64decode(previous['bytes']))
+            require(old == json.loads(content), 'registry already contains a different executor set')
+            proofs = verify_executors(sha)
+            if os.path.lexists(journal_path):
+                journal = json.loads(executor_host_file(journal_path, private=True))
+                require(journal.get('sha') == sha and journal.get('registry_sha256') == executor_digest(content),
+                        'registry journal identity mismatch')
+                journal['state'] = 'verified'
+                executor_atomic(journal_path, executor_json(journal))
+            return proofs
+        require(not os.path.lexists(journal_path), 'incomplete registry registration; inspect prior journal')
+        journal = dict(version=1, sha=sha, state='prepared', previous=previous,
+                       registry_sha256=executor_digest(content))
+        executor_atomic(journal_path, executor_json(journal))
+        try:
+            executor_atomic(EXECUTOR_REGISTRY, content)
+            proofs = verify_executors(sha)
+            journal['state'] = 'verified'
+            executor_atomic(journal_path, executor_json(journal))
+            return proofs
+        except Exception:
+            executor_restore_file(EXECUTOR_REGISTRY, previous)
+            journal['state'] = 'rolled-back'
+            executor_atomic(journal_path, executor_json(journal))
+            raise Refused('executor registry verification failed; previous registry restored') from None
+
+
+def reviewed_executor_image_files(mirror, sha, extra):
+    name = 'scripts/build_home_image.sh'
+    if name not in extra:
+        return set()
+    require(run('git', '--git-dir', mirror, 'rev-parse', f'{sha}:{name}') ==
+            '7079b3b48ec7d727800c5959ba6f321dfb24c07c', 'executor image builder requires compatibility review')
+    return {name}
 
 def probe(role, url):
     proc = process(role)
@@ -450,14 +1184,19 @@ def deploy(sha):
         # Reject schema, dependency, service configuration and runtime changes without a separate plan.
         changes = run("git", "--git-dir", mirror, "diff", "--no-renames", "--name-only", "-z", old, sha)
         allowed = ("services/api/lead_app/", "apps/web/app/", "apps/web/public/", "docs/", "tests/", ".github/")
+        # This public adapter is application source in the same verified services image.
+        # Adding it never installs node configuration or widens the script/infra exceptions.
+        allowed_files = {"README.md", "AGENTS.md", "services/channel_adapters/reddit/entry.py",
+                         "services/channel_adapters/systemd/executor.conf.in"}
         extra = {name for name in changes.split("\0") if name and not name.startswith(allowed)
-                 and name not in ("README.md", "AGENTS.md")}
+                 and name not in allowed_files}
         extra -= OPERATOR_ONLY_FILES
         extra -= reviewed_maintenance_files(mirror, sha, extra)
         extra -= reviewed_channel_schema(mirror, sha, extra)
         extra -= reviewed_fault_isolation(mirror, sha, extra)
         extra -= reviewed_reddit_site(mirror, sha, extra)
         extra -= reviewed_runtime_files(mirror, sha, extra)
+        extra -= reviewed_executor_image_files(mirror, sha, extra)
         if extra:
             # The frame subsystem was already installed from this reviewed commit.
             # Only accept its EXACT reviewed blobs, and attest the installed components.
@@ -500,18 +1239,31 @@ def deploy(sha):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("current", "deploy", "verify"))
+    parser.add_argument("action", choices=("current", "deploy", "verify", "executors", "provision-executor", "register-executors"))
     parser.add_argument("sha", nargs="?")
+    parser.add_argument("plan", nargs="?")
     args = parser.parse_args()
     if (args.action == "current" and args.sha is not None) or (
         args.action != "current" and not SHA.fullmatch(args.sha or "")
     ):
-        parser.error("current takes no arguments; deploy and verify require a full SHA")
+        parser.error("current takes no arguments; deploy, verify and executors require a full SHA")
+    if (args.action == 'provision-executor') != (args.plan is not None):
+        parser.error('only provision-executor requires a private plan path')
     try:
         if args.action == "current":
             print(current())
         elif args.action == "verify":
             verify(args.sha)
+            # Final release acceptance covers provisioned independent consumers.
+            # A dangling or redirected registry must fail, never disable acceptance.
+            if os.path.lexists(EXECUTOR_REGISTRY):
+                verify_executors(args.sha)
+        elif args.action == 'register-executors':
+            print(json.dumps(register_executors(args.sha), sort_keys=True))
+        elif args.action == 'provision-executor':
+            print(json.dumps(provision_executor(args.sha, args.plan), sort_keys=True))
+        elif args.action == "executors":
+            print(json.dumps(verify_executors(args.sha), sort_keys=True))
         else:
             deploy(args.sha)
     except Refused as error:

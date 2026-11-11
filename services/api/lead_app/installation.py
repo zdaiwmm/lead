@@ -18,6 +18,7 @@ from .config import (
     TENANT,
     database_kwargs,
     env,
+    environment_file,
     model_config,
 )
 
@@ -76,7 +77,7 @@ def checks():
     add("model_key", bool(model_config()["key"]))
     for name, path in (
         ("local_configuration", STATE / "config.json"),
-        ("model_environment", ROOT / ".env"),
+        ("model_environment", environment_file()),
     ):
         add(
             name,

@@ -53,7 +53,9 @@ def test_authenticated_backup_rejects_tampering_truncation_and_wrong_key(tmp_pat
         load_key(key_file)
 
 
-def test_live_database_backup_restores_into_new_fenced_database(tmp_path, monkeypatch):
+@pytest.mark.parametrize("policy", ["offsite", "verified_local"])
+def test_live_database_backup_restores_into_new_fenced_database(tmp_path, monkeypatch, policy):
+    monkeypatch.setenv("LEAD_BACKUP_POLICY", policy)
     monkeypatch.setattr(domain, "emit", lambda *a, **k: None)
     aid = domain.create_agent()
     from lead_app import assets
@@ -87,6 +89,22 @@ def test_live_database_backup_restores_into_new_fenced_database(tmp_path, monkey
         assert (
             result["external_writes"] == "blocked" and result["counts"]["actions"] >= 1
         )
+        if policy == "verified_local":
+            assert set(record["verification_counts"]) == {
+                "agents", "tasks", "actions", "social_accounts"
+            }
+            with psycopg.connect(
+                **{**database_kwargs(True), "dbname": name}, row_factory=dict_row
+            ) as restored:
+                restored_counts = {
+                    table: restored.execute(
+                        sql.SQL("SELECT count(*) FROM lead.{}").format(sql.Identifier(table))
+                    ).fetchone()["count"]
+                    for table in record["verification_counts"]
+                }
+            assert record["verification_counts"] == restored_counts
+        else:
+            assert "verification_counts" not in record
         with psycopg.connect(
             **{**database_kwargs(), "dbname": name}, row_factory=dict_row
         ) as c:

@@ -41,6 +41,31 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def backup_policy():
+    policy = env().get("LEAD_BACKUP_POLICY") or "offsite"
+    if policy not in ("offsite", "verified_local"):
+        raise ValueError("备份策略配置无效")
+    return policy
+
+
+def write_backup_ready(c):
+    if backup_policy() == "verified_local":
+        return one(c, "SELECT lead.local_restore_ready() AS ready")["ready"]
+    return one(
+        c, "SELECT lead.backup_ready() AND lead.offsite_backup_ready() AS ready"
+    )["ready"]
+
+
+def verification_counts(c):
+    # Use the exported pg_dump snapshot, not a later view of the live ledger.
+    return {
+        name: c.execute(
+            sql.SQL("SELECT count(*) FROM lead.{} AS t").format(sql.Identifier(name))
+        ).fetchone()["count"]
+        for name in ("agents", "tasks", "actions", "social_accounts")
+    }
+
+
 def pg_command(tool, database):
     values = env()
     explicit = values.get("LEAD_" + tool.upper() + "_BIN")
@@ -178,6 +203,8 @@ def _backup_database(folder, key, managed):
             "id"
         ]
         command += ["--snapshot", snapshot_id]
+        if backup_policy() == "verified_local":
+            metadata["verification_counts"] = verification_counts(snapshot)
         references = referenced_files(snapshot)
         with tempfile.TemporaryFile() as errors:
             process = subprocess.Popen(

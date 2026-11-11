@@ -196,3 +196,33 @@ def test_workflow_contract_connects_scope_gate_tests_and_builds():
     assert any("LEAD_BROWSER_TESTS=1" in s.get("run", "") and "pytest" in s.get("run", "")
                for s in jobs["backend"]["steps"])
     assert scope.TOOL_FILES == importlib.import_module("home_systemd_release").OPERATOR_ONLY_FILES
+
+
+def test_release_image_nonroot_check_precedes_upload_of_the_same_artifact():
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.load((root / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)
+    steps = workflow['jobs']['frontend']['steps']
+    package = next(i for i, step in enumerate(steps) if step.get('name') == 'Package the tested Linux application')
+    verify = next(i for i, step in enumerate(steps) if step.get('name') == 'Verify non-root access to the exact release image')
+    upload = next(i for i, step in enumerate(steps) if step.get('name') == 'Retain the exact release image')
+    assert package < verify < upload
+    assert steps[verify]['if'] == steps[package]['if'] == steps[upload]['if']
+    assert 'continue-on-error' not in steps[verify]
+    command = steps[verify]['run']
+    assert 'mount -o loop,ro,nodev,nosuid "$RUNNER_TEMP/lead.squashfs"' in command
+    assert 'setpriv --reuid=65534 --regid=65534 --clear-groups' in command
+    assert 'os.getuid() == 65534' in command
+    assert 'REVISION' in command and 'services/api/lead_app/channel_executor.py' in command
+    assert 'sudo umount "$image_root"' in command
+    assert steps[upload]['with']['path'] == '${{ runner.temp }}/lead.squashfs'
+    subprocess.run(['bash', '-n'], input=command, text=True, check=True)
+
+
+def test_namespace_gate_runs_real_executor_systemd_dropin_drill():
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.load((root / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)
+    steps = workflow['jobs']['namespace']['steps']
+    exercise = [step for step in steps if 'tests/home_executor_systemd_drill.py' in step.get('run', '')]
+    assert len(exercise) == 1
+    assert 'sudo env LEAD_DISPOSABLE_RUNNER=1' in exercise[0]['run']
+    assert 'continue-on-error' not in exercise[0] and 'if' not in exercise[0]

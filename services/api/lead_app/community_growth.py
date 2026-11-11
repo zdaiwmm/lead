@@ -415,7 +415,7 @@ def verified_candidates(c, output, sources, *, require_rule_quote=False, chamber
     return found
 
 
-async def discover_communities(aid):
+async def discover_communities(aid, *, invoke_model=None):
     import asyncio
     from datetime import datetime, timezone
 
@@ -435,17 +435,19 @@ async def discover_communities(aid):
     # time and cannot manufacture a successful discovery batch.
     import time
 
-    from .community_discovery import advance
+    from .community_discovery import advance, executor_task_filter
+
+    owned, owned_args = executor_task_filter(aid)
 
     started = time.monotonic()
     with tx(aid) as c:
         checked = one(c, "SELECT now() AS at")["at"]
-        batch = one(c, "SELECT id FROM lead.tasks WHERE type='community.discover' AND state='running' ORDER BY created_at LIMIT 1")
+        batch = one(c, "SELECT id FROM lead.tasks WHERE type='community.discover' AND state='running' AND " + owned + " ORDER BY created_at LIMIT 1", owned_args)
     timed_out = False
     try:
         timer = asyncio.timeout(120)
         async with timer:
-            return await advance(aid)
+            return await advance(aid, invoke_model=invoke_model) if invoke_model is not None else await advance(aid)
     except TimeoutError:
         if not timer.expired():
             raise
@@ -455,8 +457,8 @@ async def discover_communities(aid):
         elapsed = round(time.monotonic()-started, 3)
         with tx(aid) as c:
             current = one(c, """SELECT id,input,result FROM lead.tasks WHERE type='community.discover'
-                AND (id=%s OR (%s::uuid IS NULL AND created_at>=%s)) ORDER BY created_at LIMIT 1 FOR UPDATE""",
-                (batch["id"] if batch else None, batch["id"] if batch else None, checked))
+                AND (id=%s OR (%s::uuid IS NULL AND created_at>=%s)) AND """ + owned + " ORDER BY created_at LIMIT 1 FOR UPDATE",
+                (batch["id"] if batch else None, batch["id"] if batch else None, checked, *owned_args))
             if current:
                 saved = current["result"] or {}
                 campaign_id = saved.get("campaign_id") or current["input"].get("continued_from") or str(current["id"])
