@@ -33,6 +33,7 @@ def test_existing_shared_account_requires_review(monkeypatch):
 @pytest.mark.skipif(
     os.getenv("LEAD_BROWSER_TESTS") != "1", reason="requires native Camoufox"
 )
+@pytest.mark.parametrize("had_challenge", [False, True])
 @pytest.mark.parametrize(
     ("channel", "setting", "login_url", "signed_in_url"),
     [
@@ -57,7 +58,7 @@ def test_existing_shared_account_requires_review(monkeypatch):
     ],
 )
 async def test_isolated_login_retries_and_completes(
-    monkeypatch, channel, setting, login_url, signed_in_url
+    monkeypatch, channel, setting, login_url, signed_in_url, had_challenge
 ):
     aid = domain.create_agent()
     other = domain.create_agent()
@@ -83,6 +84,7 @@ async def test_isolated_login_retries_and_completes(
     async def send(request):
         ports.append((request.url.path, request.url.port))
         if request.url.port == 8089:
+            assert "/challenge/" not in request.url.path, "isolated verification reached Telegram"
             if (
                 request.url.path.endswith("/open")
                 and json.loads(request.content)["platform"] != "telegram"
@@ -174,24 +176,53 @@ async def test_isolated_login_retries_and_completes(
         monkeypatch.setenv(setting, f"{aid},{other}")
         with pytest.raises(HTTPException):
             await api.screenshot(UUID(other), req, "jpeg", takeover)
+        challenge_body = api.BrowserChallengeRequest(platform=channel, takeover=takeover)
+        # The button checks for human verification before inspecting the login.
+        assert await api.browser_challenge_status(UUID(aid), challenge_body) == {"challenge": None}
+        with pytest.raises(HTTPException):
+            await api.browser_challenge_status(UUID(other), challenge_body)
         # The owner has finished the website's login flow and left /login/.
         if channel == "facebook":
             await actor.context.add_cookies(
                 [{"name": "c_user", "value": "10001", "url": signed_in_url}]
             )
         await actor.page.goto(signed_in_url)
-        verified = await api.verify_login(
-            UUID(aid), api.Connection(platform=channel, account_id=pending["id"])
-        )
+        if had_challenge:
+            await actor.page.evaluate("""() => {
+                const frame = document.createElement('iframe');
+                frame.title = 'Security challenge';
+                document.body.append(frame);
+            }""")
+        status = await api.browser_challenge_status(UUID(aid), challenge_body)
+        if had_challenge:
+            challenge = status["challenge"]
+            assert challenge["profile_id"] == str(profile["id"])
+            assert challenge["session_id"] == str(actor.session)
+            await actor.page.locator('iframe[title="Security challenge"]').evaluate("el => el.remove()")
+            verified = await api.browser_challenge_verify(
+                UUID(aid), challenge_body.model_copy(update={"challenge_id": UUID(challenge["id"])})
+            )
+            assert verified["finish_login"]
+        else:
+            assert status == {"challenge": None}
+            verified = await api.verify_login(
+                UUID(aid), api.Connection(platform=channel, account_id=pending["id"])
+            )
         assert verified["ok"]
         assert [path.rsplit("/", 1)[-1] for path, _ in ports] == [
             "open",
             "open",
             "screenshot",
             "input",
+            "status",
+            "status",
+        ] + (["verify"] if had_challenge else []) + [
             "inspect",
         ] + (["inspect"] if channel == "x" else [])
         assert {port for _, port in ports} == {18091}
+        with pytest.raises(HTTPException) as expired_challenge:
+            await api.browser_challenge_status(UUID(aid), challenge_body)
+        assert expired_challenge.value.status_code == 409
         with pytest.raises(HTTPException) as stale:
             await api.screenshot(UUID(aid), req, "jpeg", takeover)
         assert stale.value.status_code == 409
