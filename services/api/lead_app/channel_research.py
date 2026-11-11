@@ -127,14 +127,15 @@ def select(args):
                 "recorded": True,
                 **({"execution_cadence": state["execution_cadence"]} if state.get("execution_cadence") else {}),
             }, None
+        agent = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
+        business = one(c, "SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
+        if business and business["description"].strip():
+            from .atomic_dispatch import enqueue_connected
+            enqueue_connected(c,aid,agent,business)
         if not source_access(platform):
             return wait_result(c, aid, clock, {"delay": 1800, "reason": "source_permission_required"}), None
         if sample()["defer_optional"]:
             return {"delay": 120, "reason": "host_pressure"}, None
-        agent = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
-        business = one(
-            c, "SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1"
-        )
         if not business or not business["description"].strip():
             return wait_result(c, aid, clock, {"delay": 300, "reason": "business_required"}), None
         ctx = context(c, aid, business)

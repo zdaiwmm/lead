@@ -1,8 +1,6 @@
 """Persist and execute account-free channel preparation one platform at a time."""
 
 import asyncio
-import hashlib
-import json
 
 from psycopg.errors import LockNotAvailable
 from temporalio import activity
@@ -14,6 +12,7 @@ from .operating_workspace import (
     channel_config,
     draft_pack,
     persist_workspace,
+    preparation_key,
     save_workspace,
 )
 from .scope import current_tenant, scoped_activity
@@ -81,7 +80,7 @@ def enqueue_connected(c, aid, agent, business):
         if not channel_for(platform) or not owns(agent, platform):
             continue
 
-        from .channel_authority import binding_snapshot, driver_accounts, has_driver
+        from .channel_authority import binding_snapshot, driver_accounts
         bound = binding_snapshot(driver_accounts(c, aid, platform))
         if not bound:
             continue
@@ -93,11 +92,9 @@ def enqueue_connected(c, aid, agent, business):
             config_revision=agent["config_revision"],
             control_version=agent["control_version"],
             channel_version=version,
-            **({"account_bindings":bound} if has_driver(agent,platform) else {}),
+            account_bindings=bound,
         )
-        product_key = f"channel-prepare:{aid}:{business['id']}:{agent['config_revision']}:{platform}:{version}"
-        if has_driver(agent,platform):
-            product_key += ":" + hashlib.sha256(json.dumps(bound,sort_keys=True).encode()).hexdigest()[:20]
+        product_key = preparation_key(aid,business['id'],agent['config_revision'],platform,version,bound)
         job_key = f"connected:{product_key}:{agent['control_version']}"
         job = one(
             c,
@@ -162,7 +159,7 @@ def connected_inputs(c, aid, task_id, generation, pack=None):
     current_accounts = driver_accounts(c,aid,platform)
     allowed = (
         owns(agent,platform)
-        and (not has_driver(agent,platform) or intent.get("account_bindings")==binding_snapshot(current_accounts))
+        and (not current_accounts or intent.get("account_bindings")==binding_snapshot(current_accounts) or ("account_bindings" not in intent and not has_driver(agent,platform)))
         and agent["desired_state"] == "running"
         and business
         and str(business["id"]) == intent["business_id"]
@@ -176,7 +173,21 @@ def connected_inputs(c, aid, task_id, generation, pack=None):
     elif not current_accounts:
         state, reason = "waiting_user", "channel_connection_required"
     else:
-        return (agent, business, channel, version), (task["result"] or {}).get("pack")
+        bindings = binding_snapshot(current_accounts)
+        if "account_bindings" not in intent:
+            c.execute("UPDATE lead.tasks SET input=input || %s WHERE id=%s", (j({"account_bindings":bindings}),task_id))
+        agent = {**agent, "_preparation_account_bindings":bindings}
+        saved = (task["result"] or {}).get("pack")
+        if not saved:
+            # Reauthentication can change a binding while an internal draft was
+            # being saved. Reuse its content only; capture current scope anew.
+            cached = one(c, """SELECT result->'pack' AS pack FROM lead.tasks WHERE agent_id=%s AND type='dispatch.channel'
+                AND id<>%s AND input->>'platform'=%s AND input->>'business_id'=%s
+                AND input->>'config_revision'=%s AND input->>'channel_version'=%s AND result ? 'pack'
+                ORDER BY created_at DESC,id DESC LIMIT 1""", (aid,task_id,platform,str(business["id"]),str(agent["config_revision"]),str(version)))
+            if cached:
+                saved = cached["pack"]
+        return (agent, business, channel, version), saved
     checkpoint = {"reason": reason}
     if state == "waiting_user":
         saved = pack or (task["result"] or {}).get("pack")
@@ -202,6 +213,8 @@ def execute_connected(aid, task_id, generation):
         return
     arguments, saved_pack = inputs
     pack = saved_pack or draft_pack(*arguments)
+    pack = {**pack, "evidence_status":"internal_only", "business_profile_id":str(arguments[1]["id"]),
+            "config_revision":arguments[0]["config_revision"], "account_binding":arguments[0]["_preparation_account_bindings"]}
     with tx(aid) as c:
         current = connected_inputs(c, aid, task_id, generation, pack)
         if not current:
