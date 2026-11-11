@@ -7,6 +7,7 @@ from .adapters.core import NeedsAuth, PreparationNotStarted, ScopeChanged
 from .assets import resolve
 from .config import STATE
 from .db import j, one, tx, uid
+from .reddit_member import ordinary_member
 from .scope import current_tenant
 
 
@@ -381,7 +382,7 @@ def gate(actor, c, action):
     )
     if not grant:
         raise ScopeChanged("目标授权已撤销")
-    if target["verified_permissions"].get("access_mode") == "ordinary_member":
+    if ordinary_member(target):
         from datetime import datetime, timedelta, timezone
 
         from .reddit_member import member_scope

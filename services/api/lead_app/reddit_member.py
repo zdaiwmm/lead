@@ -11,6 +11,11 @@ from .scope import current_tenant
 SOURCE = "reddit_member_targets"
 
 
+def ordinary_member(target):
+    permissions = target.get("verified_permissions")
+    return isinstance(permissions, dict) and permissions.get("access_mode") == "ordinary_member"
+
+
 def member_scope(c, account):
     if not account:
         return None
