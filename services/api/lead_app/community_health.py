@@ -50,7 +50,8 @@ def fault(error, stage, *, uncertain=False, evidence_ref=None):
         header = response.headers.get("retry-after", "")
         if header.isdigit():
             retry_after = int(header)
-    flood = re.search(r"flood_wait[_ :]+(\d+)", text)
+    # A page, model or ordinary error message cannot assert a platform limit.
+    flood = re.search(r"flood_wait[_ :]+(\d+)", text) if response is not None and status == 429 else None
     if flood:
         retry_after = int(flood.group(1))
     code, scope, retryable = "browser_error", "target", False
@@ -64,13 +65,13 @@ def fault(error, stage, *, uncertain=False, evidence_ref=None):
         code, retryable = "navigation_timeout", True
     elif status in {500, 502, 503, 504} or any(word in text for word in ("connecterror", "connectionerror", "readerror", "connection reset")):
         code, scope, retryable = "transport_error", "account", True
-    elif status == 429 or "429" in text or "flood_wait" in text:
+    elif status == 429:
         code, scope, retryable = "rate_limited", "account", True
     elif any(word in text for word in ("unauthorized", "登录失效", "captcha", "验证码")):
         code, scope = "authentication_required", "account"
     return {"error_code": code, "stage": stage, "scope": scope, "retryable": retryable,
             "write_may_have_happened": uncertain, "retry_after": retry_after,
-            "evidence_ref": evidence_ref, "message": message[:1500]}
+            "evidence_ref": evidence_ref, "message": message[:1500], "source": "engineering"}
 
 
 def permission_evidence(observed):
