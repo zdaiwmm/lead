@@ -30,6 +30,12 @@ def test_device_owned_agent_delivers_independent_scoped_reddit_review(monkeypatc
         with tenant_scope(tenant, None):
             reddit_workspace.review_enabled(tenant)
 
+    # A device holds this lock while reviewing Telegram. Reddit's internal
+    # draft must finish before that transaction releases the project row.
+    with tx(aid) as held, ThreadPoolExecutor(1) as pool:
+        held.execute("SELECT id FROM lead.agents WHERE id=%s FOR NO KEY UPDATE", (aid,))
+        pool.submit(collect).result(timeout=8)
+
     with ThreadPoolExecutor(2) as pool:
         list(pool.map(lambda _: collect(), range(2)))
     with tx(aid) as c:

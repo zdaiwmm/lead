@@ -15,9 +15,16 @@ def review_workspace(aid):
         return
     with tx(aid) as c:
         c.execute("SET LOCAL lock_timeout='2s'")
-        agent = one(
-            c, "SELECT * FROM lead.agents WHERE id=%s FOR NO KEY UPDATE", (aid,)
-        )
+        # This job only saves an internal brief. Serialize its own writers without
+        # waiting on a device's long-running project transaction. The source and
+        # account binding remain versioned, and this path cannot publish content.
+        if not one(
+            c,
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0)) AS acquired",
+            (f"reddit-workspace:{current_tenant()}:{aid}",),
+        )["acquired"]:
+            return
+        agent = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
         if not agent or agent["desired_state"] != "running":
             return
         runtime, _ = effective(c, "runtime", aid)
