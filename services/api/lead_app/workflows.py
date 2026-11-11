@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -44,9 +44,38 @@ class ChannelPreparationWorkflow:
 
 @workflow.defn
 class ChannelDeliveryWorkflow:
+    def __init__(self):
+        self.wake_count = 0
+        self.wake_version = -1
+
+    @workflow.signal
+    def wake(self, policy_version: int):
+        self.wake_count += 1
+        self.wake_version = max(self.wake_version, policy_version)
+
+    async def wait_cadence(self, result, seen):
+        decision = result.get("execution_cadence") or {}
+        state = decision.get("state")
+        version = max((item.get("policy_version", 0) for item in decision.get("constraints", [])), default=0)
+        def changed():
+            return self.wake_count > seen and self.wake_version >= version
+        if state == "waiting_event":
+            await workflow.wait_condition(changed)
+        elif state == "waiting_time" and decision.get("next_at"):
+            remaining = max(0, (datetime.fromisoformat(decision["next_at"]) - workflow.now()).total_seconds())
+            if remaining:
+                try:
+                    await workflow.wait_condition(changed, timeout=timedelta(seconds=remaining))
+                except asyncio.TimeoutError:
+                    pass
+        else:
+            await workflow.sleep(max(1, float(result["delay"])))
+
     @workflow.run
     async def run(self, args: dict, pending_tick: str | None = None):
+        cadence_waits = workflow.patched("execution-cadence-waits-v1")
         for _ in range(100):
+            seen = self.wake_count
             pending_tick = pending_tick or str(workflow.uuid4())
             try:
                 result = await workflow.execute_activity(
@@ -56,7 +85,13 @@ class ChannelDeliveryWorkflow:
                 if result.get("stop"):
                     return
                 pending_tick = None
-                await workflow.sleep(max(1, float(result["delay"])))
+                # Old runs replay the old patch branch. A newly completed,
+                # protocol-bearing activity can opt that same run into waits;
+                # historical results without the field retain their commands.
+                if cadence_waits or (result.get("execution_cadence") or {}).get("execution_cadence_protocol") == 1:
+                    await self.wait_cadence(result, seen)
+                else:
+                    await workflow.sleep(max(1, float(result["delay"])))
             except ActivityError:
                 try:
                     result = await workflow.execute_activity(

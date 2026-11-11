@@ -128,6 +128,9 @@ def audit(conn, agent_id, kind, payload=None):
 
 
 def emit(conn, agent_id, kind, payload=None):
+    if kind in {"supervisor.wake", "agent.updated"}:
+        from .cadence_events import wake_clocks
+        wake_clocks(conn, agent_id)
     parent = trace_parent()
     payload = payload or {}
     if parent and kind in ("chat.enqueue", "task.enqueue"):

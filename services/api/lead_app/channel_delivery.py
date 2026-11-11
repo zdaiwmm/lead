@@ -8,21 +8,27 @@ from temporalio import activity
 from . import growth_experiments
 from .admin_operations import managed_execution
 from .atomic_dispatch import channel_pilot
+from .cadence_events import wait_result
 from .db import emit, j, one, tx
 from .operating_playbooks import channel_for
 from .scope import current_tenant, scoped_activity
 
 
-def owns(agent, platform):
+def owns(agent, platform, *, account_id=None, connection=None):
+    from .channel_authority import driver_accounts, has_driver
+    managed = has_driver(agent, platform)
+    if managed and account_id is not None:
+        return bool(connection is not None and any(str(row["id"]) == str(account_id) for row in driver_accounts(connection, str(agent["id"]), platform)))
     member = platform == "reddit" and agent["onboarding_state"].get("reddit_member_delivery") is True
     # Bounded experiments keep their own budget admission. Chamber's existing
     # campaign has no experiment pool; explicitly delegated Reddit work uses
     # these clocks, and the shared kernel skips the same channel via owns().
     return bool(
-        (channel_pilot(agent["id"]) or member)
+        (channel_pilot(agent["id"]) or member or managed)
         and channel_for(platform)
         and (
             not growth_experiments.enabled(agent)
+            or managed
             or (member and growth_experiments.chamber_campaign(agent))
         )
     )
@@ -66,6 +72,7 @@ def enroll_lane(c, aid, agent, platform, lane):
 
 
 def current(c, aid, args):
+    from .channel_authority import driver_accounts
     c.execute("SET LOCAL lock_timeout='500ms'")
     agent = one(c, "SELECT * FROM lead.agents WHERE id=%s FOR SHARE", (aid,))
     clock = one(
@@ -81,12 +88,7 @@ def current(c, aid, args):
         agent["desired_state"] != "running"
         or agent["control_version"] != clock["input"]["control_version"]
         or not owns(agent, platform)
-        or not one(
-            c,
-            """SELECT 1 FROM lead.social_accounts
-            WHERE platform=%s AND automation_enabled AND state='connected'""",
-            (platform,),
-        )
+        or not driver_accounts(c, aid, platform)
     ):
         c.execute(
             "UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE id=%s",
@@ -138,6 +140,7 @@ def opportunity(c, target_id):
 
 
 def next_target(args):
+    from .execution_cadence import Decision, Scope, WaitEvidence, decide
     from .operating_kernel import blocked, eligible_publish_targets
 
     aid = args["agent_id"]
@@ -148,34 +151,52 @@ def next_target(args):
             return {"stop": True}
         state = clock["result"] or {}
         if state.get("last_tick") == args["tick"]:
-            return {"delay": max(1, (clock["scheduled_at"] - now).total_seconds())}
+            return {"delay": max(1, (clock["scheduled_at"] - now).total_seconds()),
+                    **({"execution_cadence": state["execution_cadence"]} if state.get("execution_cadence") else {})}
         if state.get("pending_tick") == args["tick"]:
             return {
                 "target_id": state["pending_target"],
                 "opportunity": state.get("opportunity"),
             }
-        targets = eligible_publish_targets(c, blocked(c))
+        state.pop("execution_cadence", None)
+        from .channel_authority import driver_accounts
+        accounts = {str(row["id"]): row for row in driver_accounts(c, aid, clock["input"]["platform"])}
+        allowed_accounts = set(accounts)
+        targets = [target for target in eligible_publish_targets(c, blocked(c)) if str(target["account_id"]) in allowed_accounts]
         deadlines = state.get("target_deadlines", {})
-        due = sorted(
-            (deadlines.get(str(t["target_id"]), ""), str(t["target_id"]))
-            for t in targets
-            if t["platform"] == clock["input"]["platform"]
-        )
+        version = max(1, one(c, "SELECT onboarding_state FROM lead.agents WHERE id=%s", (aid,))["onboarding_state"].get("execution_cadence", {}).get("policy_version", 0))
+        waiting = {}
         delay = 300
-        reason = "awaiting_target_window" if due else "no_available_verified_target"
-        for deadline, target_id in due:
-            if deadline and datetime.fromisoformat(deadline) > now:
-                delay = max(
-                    1,
-                    min(
-                        delay, (datetime.fromisoformat(deadline) - now).total_seconds()
-                    ),
-                )
-                break
+        reason = "no_available_verified_target"
+        for target in sorted(targets, key=lambda row: str(row["target_id"])):
+            if target["platform"] != clock["input"]["platform"]:
+                continue
+            target_id = str(target["target_id"])
+            scope = Scope(agent_id=str(aid), account_id=str(target["account_id"]),
+                binding_version=accounts[str(target["account_id"])]["binding_version"], target_id=target_id, operation="publish")
+            constraints = []
+            def constraint(reason, **fields):
+                return WaitEvidence(scope=scope, source="capability", reason_code=reason,
+                    evidence_ref="task:"+str(clock["id"]), observed_at=now, policy_version=version, **fields)
+            deadline = deadlines.get(target_id)
+            if deadline:
+                try:
+                    deadline = datetime.fromisoformat(deadline)
+                    if deadline.tzinfo is None or deadline.utcoffset() is None:
+                        raise ValueError("timezone required")
+                except (ValueError, TypeError):
+                    constraints.append(constraint("target_schedule_unverified", resume_event="configuration_changed"))
+                else:
+                    if deadline > now:
+                        constraints.append(constraint("legacy_unverified_target_window", not_before=deadline))
             evidence = opportunity(c, target_id)
             if clock["input"]["platform"] in ("reddit", "facebook") and not evidence:
-                reason = "awaiting_validated_opportunity"
+                constraints.append(constraint("awaiting_validated_opportunity", resume_event="candidate_validated"))
+            decision = decide(constraints, now, subject=scope)
+            if decision.state != "ready":
+                waiting[target_id] = decision
                 continue
+            state["waiting_targets"] = {key: value.model_dump(mode="json") for key, value in waiting.items()}
             state.update(
                 pending_tick=args["tick"],
                 pending_target=target_id,
@@ -185,6 +206,18 @@ def next_target(args):
                 "UPDATE lead.tasks SET result=%s WHERE id=%s", (j(state), clock["id"])
             )
             return {"target_id": target_id, "opportunity": evidence}
+        state["waiting_targets"] = {key: value.model_dump(mode="json") for key, value in waiting.items()}
+        timed = [item for item in waiting.values() if item.state == "waiting_time"]
+        decision = None
+        if timed:
+            decision = min(timed, key=lambda item: item.next_at)
+            delay = max(1, (decision.next_at-now).total_seconds())
+            reason = "awaiting_target_window"
+        elif waiting:
+            constraints = tuple(item for value in waiting.values() for item in value.constraints)
+            decision = Decision(state="waiting_event", constraints=constraints,
+                resume_events=tuple(sorted({event for value in waiting.values() for event in value.resume_events})))
+            reason = constraints[0].reason_code
         c.execute(
             """UPDATE lead.tasks SET scheduled_at=now()+make_interval(secs=>%s),
             result=%s WHERE id=%s""",
@@ -194,7 +227,9 @@ def next_target(args):
                 clock["id"],
             ),
         )
-        return {"delay": delay, "reason": reason}
+        if decision and decision.next_at:
+            c.execute("UPDATE lead.tasks SET scheduled_at=%s WHERE id=%s", (decision.next_at, clock["id"]))
+        return wait_result(c, aid, clock, {"delay": delay, "reason": reason}, decision=decision)
 
 
 def finish(args, target_id, result):

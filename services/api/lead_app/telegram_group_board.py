@@ -9,14 +9,18 @@ from .db import all_rows, one
 # messages are daily flows. Exit reviews also update the original join task.
 # Count the review receipt once, on the day of the review.
 METRICS = """
-WITH candidate AS (
-  SELECT DISTINCT ON (url) url, coalesce(item->>'name', url) AS name, t.completed_at AS at
+WITH admitted AS (
+  SELECT lower(rtrim(item->>'telegram_url','/')) AS url,coalesce(item->>'name',item->>'telegram_url') AS name,t.completed_at AS at
   FROM lead.tasks t CROSS JOIN LATERAL jsonb_array_elements(t.result->'candidates') item
-  CROSS JOIN LATERAL (SELECT lower(rtrim(item->>'telegram_url','/')) AS url) u
-  WHERE t.agent_id=%(aid)s AND t.type='community.discover' AND url IS NOT NULL
+  WHERE t.agent_id=%(aid)s AND t.type='community.discover' AND item->>'telegram_url' IS NOT NULL
     AND t.completed_at<=%(now)s AND (t.input->>'chamber_campaign' IS DISTINCT FROM 'true'
       OR item->>'scenario_priority' IN ('1','2') OR item->>'selection_basis'='observe_recent_chat')
-  ORDER BY url, t.completed_at, t.id
+  UNION ALL
+  SELECT body->>'canonical_url',coalesce(body#>>'{candidate,name}',body->>'canonical_url'),created_at
+  FROM lead.memory_entries WHERE agent_id=%(aid)s AND body->>'type'='community_candidate_handoff'
+    AND deleted_at IS NULL AND created_at<=%(now)s
+), candidate AS (
+  SELECT DISTINCT ON (url) url,name,at FROM admitted ORDER BY url,at
 ), inbox AS (
   SELECT DISTINCT ON (account, receipt) account, receipt, name, at
   FROM (
@@ -120,7 +124,7 @@ def resident_activity(agent, work, now):
     elif state.get("last_result") == "backup_not_ready":
         current, upcoming = "等待备份就绪", "下次调度时复查备份"
     elif sleeping:
-        current, upcoming = "等待 Telegram 原生搜索冷却", "冷却结束后复查原生搜索"
+        current, upcoming = "原生搜索按原排期等待，限制来源待核实", "到期后重新核验搜索条件"
     else:
         current, upcoming = "等待下一次调度检查", None
     write_hold = None
@@ -236,14 +240,34 @@ def execution(c, aid, day, now):
           AND completed_at BETWEEN %(day)s AND %(now)s
           AND result#>>'{outcome,state}' IN ('skipped','blocked')
         GROUP BY 1,2 ORDER BY count(*) DESC LIMIT 20""", args)
-    from .community_participation import business_outcome
+    from .community_participation import business_outcome, outcome_facts
 
     outcomes = {}
-    for task in all_rows(c, """SELECT state,result FROM lead.tasks WHERE agent_id=%s
-        AND type='community.engage' AND completed_at BETWEEN %s AND %s""", (aid, day, now)):
-        kind = business_outcome(task)
-        outcomes[kind] = outcomes.get(kind, 0) + 1
-    return {"totals":totals, "waiting":waiting, "timings":timings, "gates":gates, "outcomes":outcomes}
+    facts = {key:0 for key in outcome_facts({})}
+    for task in all_rows(c, """WITH observed AS (
+        SELECT state,result,completed_at,
+            coalesce((result->>'join_confirmed_at')::timestamptz,(result->>'join_checked_at')::timestamptz,completed_at,(result->>'join_dispatched_at')::timestamptz) AS joined_at,
+            coalesce((result->>'reply_confirmed_at')::timestamptz,(result->>'reply_dispatched_at')::timestamptz,completed_at) AS replied_at
+        FROM lead.tasks WHERE agent_id=%(aid)s AND type='community.engage'
+    ) SELECT * FROM observed WHERE completed_at BETWEEN %(day)s AND %(now)s
+        OR joined_at BETWEEN %(day)s AND %(now)s OR replied_at BETWEEN %(day)s AND %(now)s
+        OR state IN ('running','reconciling')
+        OR result->>'join_state' IN ('dispatching','unknown','pending_approval')
+        OR result->>'reply_state' IN ('dispatching','unknown')
+        OR (result->>'reply_state'='confirmed' AND (jsonb_typeof(result->'reply_external_id') IS DISTINCT FROM 'string' OR trim(result->>'reply_external_id')=''))
+        OR result#>>'{outcome,state}' IN ('unknown','pending_verification','pending_approval')""", args):
+        completed = task["completed_at"] is not None and day <= task["completed_at"] <= now
+        if completed:
+            kind = business_outcome(task)
+            outcomes[kind] = outcomes.get(kind, 0) + 1
+        for key,confirmed in outcome_facts(task).items():
+            at = task["joined_at"] if key=="membership_confirmed" else task["replied_at"] if key=="message_confirmed" else task["completed_at"]
+            in_window = key=="pending_receipt" or (at is not None and day <= at <= now)
+            facts[key] += int(confirmed and in_window)
+    from .cadence_views import for_task
+    latest = one(c, "SELECT state,input,result FROM lead.tasks WHERE agent_id=%s AND type='community.engage' AND result ? 'execution_cadence' ORDER BY coalesce(completed_at,created_at) DESC,id DESC LIMIT 1", (aid,))
+    return {"totals":totals, "waiting":waiting, "timings":timings, "gates":gates, "outcomes":outcomes,
+            "facts":facts, "execution_cadence":for_task(latest or {})}
 
 
 def participation_status(agent, config):
@@ -263,11 +287,29 @@ def participation_status(agent, config):
         policy = None
     messages = ["主动发帖已开启" if config.allow_proactive_post else "主动发帖未开启",
                 "产品推广已开启" if config.allow_promotion else "产品推广未开启"]
+    cadence = agent["onboarding_state"].get("execution_cadence", {})
+    compatible = (device.get("execution_cadence_protocol") == 1 and device.get("cadence_policy_version") == cadence.get("policy_version")
+                  and cadence.get("config_revision") == agent.get("config_revision"))
+    active = cadence.get("mode") == "active" and compatible
+    origins = cadence.get("parameter_origins", {})
+    if cadence.get("mode") == "paused":
+        messages.append("新操作已暂停，原回执继续保留")
+    elif cadence.get("mode") == "active" and not compatible:
+        messages.append("执行版本待核对，不启动不兼容的新操作")
+    elif cadence.get("mode") == "shadow":
+        messages.append("新规则正在试算，当前继续沿用原有约束")
     if policy:
-        if policy.get("quota_mode") == "per_action":
+        key = "combined_per_24h" if policy.get("quota_mode") == "combined" else None
+        waived = active and ((key and origins.get(key, {}).get("origin") == "verified_system_default") or (not key and all(origins.get(k, {}).get("origin") == "verified_system_default" for k in ("joins_per_24h", "replies_per_24h"))))
+        if waived:
+            messages.append("入群与回复按各自条件推进")
+        elif policy.get("quota_mode") == "per_action":
             messages.append(f"滚动 24 小时：入群最多 {policy['joins_per_24h']} 次，回复最多 {policy['replies_per_24h']} 次")
         else:
             messages.append(f"入群与回复合计每 24 小时最多 {policy['combined_per_24h']} 次")
+        relevant = [key] if key else ["joins_per_24h", "replies_per_24h"]
+        if not waived and any(origins.get(k, {}).get("origin") not in {"owner_explicit", "platform_observed", "engineering", "verified_system_default"} for k in relevant):
+            messages.append("原有限制的来源待核实，继续保留")
         messages.append({"exact_faq":"答疑仅匹配群内原问题", "grounded_faq":"答疑可匹配近期未回答问题并引用群内原文",
                          "semantic_faq":"答疑可理解问题后引用群内原文，仍需有效的内容处理授权"}.get(policy.get("answer_mode"), "答疑范围待核实"))
     elif device.get("mode"):

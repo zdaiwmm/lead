@@ -110,7 +110,11 @@ def test_member_scope_is_explicit_and_does_not_enroll_telegram(site_database, ca
     for clock in clocks:
         args = dict(agent_id=aid, task_id=str(clock["id"]), generation=clock["version"], tick="first")
         if clock["input"]["lane"] == "research":
-            assert channel_research.select(args) == ({"delay": 1800, "reason": "source_permission_required"}, None)
+            result, work = channel_research.select(args)
+            assert work is None and result["delay"] == 1800
+            assert result["reason"] == "source_permission_required"
+            assert result["execution_cadence"]["state"] == "waiting_event"
+            assert result["execution_cadence"]["next_at"] is None
         else:
             assert channel_delivery.next_target(args)["reason"] == "no_available_verified_target"
     reddit_member.authorize(aid, account["id"], account["binding_version"])

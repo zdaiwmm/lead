@@ -675,6 +675,10 @@ def record_publish_result(aid, task_id, task, action, result):
             "UPDATE lead.tasks SET state=%s,result=(coalesce(result,'{}'::jsonb)-'error'-'reason'-'retry_safe') || %s,completed_at=CASE WHEN %s='succeeded' THEN now() ELSE NULL END WHERE id=%s",
             (state, j(result), state, task_id),
         )
+        if state == "succeeded":
+            from .cadence_events import wake_clocks
+            # Both the action and its task barrier must be durable before wake.
+            wake_clocks(c, aid, platforms={platform}, lane="delivery")
         c.execute(
             "UPDATE lead.agents SET health_state=CASE WHEN desired_state='paused' THEN 'stopped' ELSE %s END,heartbeat_at=now() WHERE id=%s",
             (

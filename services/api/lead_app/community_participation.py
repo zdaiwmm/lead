@@ -149,7 +149,7 @@ def grounded_answer(community, mode="exact_faq"):
     return None
 
 
-def quota_due(policy, operation, attempts, now=None):
+def quota_due(policy, operation, attempts, now=None, *, waived_defaults=frozenset()):
     """Attempts are pre-filtered to the current account; failed submits also count."""
     policy = ParticipationPolicy.model_validate(policy)
     now = now or datetime.now(timezone.utc)
@@ -160,6 +160,10 @@ def quota_due(policy, operation, attempts, now=None):
         if policy.quota_mode == "combined"
         else (policy.joins_per_24h if operation == "join" else policy.replies_per_24h)
     )
+    key = "combined_per_24h" if policy.quota_mode == "combined" else (
+        "joins_per_24h" if operation == "join" else "replies_per_24h")
+    if key in waived_defaults:
+        limit = None
     if limit == 0:
         return {"reason": "participation_disabled", "next_eligible_at": None}
     relevant = sorted(
@@ -168,15 +172,34 @@ def quota_due(policy, operation, attempts, now=None):
         if now - timedelta(hours=24) < at <= now
         and (policy.quota_mode == "combined" or kind == operation)
     )
-    due = relevant[-limit] + timedelta(hours=24) if len(relevant) >= limit else now
+    due = relevant[-limit] + timedelta(hours=24) if limit is not None and len(relevant) >= limit else now
     replies = [at for kind, at in attempts if kind == "reply" and at <= now]
-    if operation == "reply" and replies:
+    if operation == "reply" and replies and "reply_interval_minutes" not in waived_defaults:
         due = max(due, max(replies) + timedelta(minutes=policy.reply_interval_minutes))
     return (
         {"reason": "daily_participation_limit", "next_eligible_at": due.isoformat()}
         if due > now
         else None
     )
+
+
+def outcome_facts(task: dict) -> dict[str, bool]:
+    result = task.get("result") or {}
+    outcome = result.get("outcome") or {}
+    reply = result.get("reply_state")
+    receipt = result.get("reply_external_id")
+    has_receipt = isinstance(receipt, str) and bool(receipt.strip())
+    return {
+        "membership_confirmed": result.get("join_submitted") is True and result.get("join_state")=="confirmed",
+        "message_confirmed": reply=="confirmed" and has_receipt,
+        "pending_receipt": task.get("state")=="reconciling" or reply in {"dispatching","unknown"}
+            or (reply=="confirmed" and not has_receipt)
+            or outcome.get("state") in {"unknown", "pending_verification", "pending_approval"}
+            or result.get("join_state") in {"dispatching","unknown","pending_approval"},
+        "skipped": outcome.get("state")=="skipped",
+        "blocked": outcome.get("state")=="blocked",
+        "failed": task.get("state")=="failed" or outcome.get("state")=="failed" or reply=="failed",
+    }
 
 
 def business_outcome(task):

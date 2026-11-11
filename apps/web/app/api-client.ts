@@ -68,3 +68,23 @@ export async function api(path: string, body?: Row, signal?: AbortSignal) {
   if (path === "/auth/me") access = data;
   return data;
 }
+
+
+export type ExecutionCadence = {
+  state: "ready" | "waiting_time" | "waiting_event" | "receipt_only" | "terminal" | "unverified";
+  reason_label: string;
+  evidence_source: string;
+  scope_label: string;
+  next_at: string | null;
+  resume_event_label: string | null;
+  needs_user: boolean;
+  policy_version: number | null;
+  compatible: boolean | null;
+};
+
+export function enableManagedScope(aid: string, account: Row, controlVersion: number) {
+  return api(`/agents/${aid}/accounts/${account.id}/managed-scope`, {
+    binding_version: account.binding_version,
+    expected_control_version: controlVersion,
+  });
+}

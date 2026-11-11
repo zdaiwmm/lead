@@ -422,12 +422,16 @@ class Actor:
                 raise ValueError("Agent 不可运行")
         task = None
         if action.get("task_id"):
-            task = one(c, "SELECT input->'channel_clock' AS clock FROM lead.tasks WHERE id=%s", (action["task_id"],))
+            task = one(c, "SELECT input->'channel_clock' AS clock,input FROM lead.tasks WHERE id=%s", (action["task_id"],))
         if task and task["clock"]:
             from .channel_delivery import current
 
             if not current(c, self.aid, task["clock"]):
                 raise ValueError("此渠道已停用或重新启动，旧任务不能提交")
+            if task["input"].get("channel_profile_id"):
+                from .channel_authority import research_binding_valid
+                if not research_binding_valid(c,self.aid,task["input"]) or task["input"]["channel_profile_id"] != str(self.profile["id"]):
+                    raise ValueError("研究账号绑定或托管授权已变化")
         from .browser_challenges import pending
         if pending(c, self.profile["id"]):
             raise ValueError("原浏览器正在等待真人验证，自动操作已暂停")

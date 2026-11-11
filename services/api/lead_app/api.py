@@ -609,10 +609,21 @@ async def verify_login(aid: UUID, body: Connection):
             current = require_agent(c,aid,True)
             if current["control_version"] != control_version or not selected:
                 raise ValueError("项目或绑定账号已变化，请重新核对后启动")
-            authorize_managed_discovery(c, aid, account_id, platform, observed["external_account_id"], selected["binding_version"]+1)
+            authorize_managed_discovery(c, aid, account_id, platform, observed["external_account_id"], selected["binding_version"]+1, explicit=True)
             domain.complete_setup(aid, connection=c)
             domain.channel_control(aid, platform, True, connection=c, start_account=account_id)
     return {"ok": True, "account_id": account_id}
+
+
+class ManagedScopeRequest(BaseModel):
+    binding_version: int = Field(ge=1)
+    expected_control_version: int = Field(ge=1)
+
+
+@app.post("/api/agents/{aid}/accounts/{account_id}/managed-scope")
+def enable_managed_scope(aid: UUID, account_id: UUID, body: ManagedScopeRequest):
+    from .channel_authority import authorize_managed_scope
+    return authorize_managed_scope(str(aid), str(account_id), body.binding_version, body.expected_control_version)
 
 
 @app.post("/api/agents/{aid}/identity/check")

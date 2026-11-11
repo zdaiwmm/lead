@@ -16,11 +16,11 @@ import httpx
 from pydantic import BaseModel, Field
 
 from . import community_checkpoints, community_health
+from .cadence_state import create_read_task
 from .community_growth import CHAMBER_BRIEF, GrowthConfig
 from .db import j, one, record, require_agent, tx, uid
 from .growth_experiments import chamber_campaign, first_users
 from .promotion import asked_role, promoter_copy_ok, promoter_voice, tracking_required
-from .scope import current_tenant
 
 HISTORY_ADAPTER_VERSION = "16"
 DECISION_VERSION = "5"
@@ -225,7 +225,7 @@ def digest(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def guard(actor, c, task, *, editing_confirmed=False, reading_receipt=False, read_only=False):
+def guard(actor, c, task, *, editing_confirmed=False, reading_receipt=False, read_only=False, operation=None):
     from .admin_controls import enforce_channel
 
     enforce_channel(c, actor.aid, "telegram", operation="community")
@@ -243,6 +243,25 @@ def guard(actor, c, task, *, editing_confirmed=False, reading_receipt=False, rea
         "SELECT * FROM lead.interaction_cards WHERE id=%s AND type='manage_community' AND state='accepted' AND expires_at>now()",
         (task["input"]["delegation_id"],),
     )
+    bounded = False
+    reply = task["input"].get("reply") or {}
+    action = operation or ("observe" if read_only else "reply" if reply else "join" if task["input"].get("join_approved") else "observe")
+    if not (read_only or reading_receipt) and action in {"join", "reply"} and a["onboarding_state"].get("execution_cadence", {}).get("mode") in {"active", "paused"}:
+        from .cadence_state import participation_attempts, participation_due
+        attempts = participation_attempts(c, actor.aid, task, action, exclude_current=True)
+        due = participation_due(c, actor.aid, action, attempts, account_id=task["input"]["account_id"])
+        if due:
+            raise ValueError(due["reason"])
+    candidate = task["input"].get("candidate", {})
+    if card and account and candidate.get("handoff_id"):
+        from .community_handoff import valid_handoff
+        reply = task["input"].get("reply") or {}
+        action = operation or ("observe" if read_only else "reply" if reply else "join" if task["input"].get("join_approved") else "observe")
+        required = {"observe": "read_recent_history", "receipt": "read_recent_history", "scan_pending": "read_recent_history",
+                    "join": "join_public_group", "reply": "relevant_promotion" if reply.get("promote") else "contextual_reply"}.get(action)
+        bounded = bool(required and required in card["payload"].get("allowed_actions", [])
+            and str(card["id"]) == candidate.get("handoff_delegation_id")
+            and valid_handoff(c, actor.aid, account, a["config_revision"], candidate))
     if (
         a["desired_state"] != "running"
         or not config.enabled
@@ -254,13 +273,9 @@ def guard(actor, c, task, *, editing_confirmed=False, reading_receipt=False, rea
         or not card
         or card["payload"].get("external_account_id") != account["external_account_id"]
         or card["payload"].get("account_id") != str(account["id"])
-        or card["payload"].get("source") != "owner_strategy"
-        or not {
-            "join_public_group",
-            "read_recent_history",
-            "contextual_reply",
-            "relevant_promotion",
-        }.issubset(card["payload"].get("allowed_actions", []))
+        or not (bounded or (card["payload"].get("source") == "owner_strategy" and {
+            "join_public_group", "read_recent_history", "contextual_reply", "relevant_promotion",
+        }.issubset(card["payload"].get("allowed_actions", []))))
         or task["type"] != "community.engage"
         or (task["state"] != "running" and not (reading_receipt and task["state"] == "reconciling") and not (editing_confirmed and task["state"] == "succeeded" and (task["result"] or {}).get("reply_state") == "confirmed" and promoter_voice(a)))
     ):
@@ -1147,7 +1162,7 @@ async def browser_step(actor, task_id, operation):
                               (j(retry),task["id"]))
                     return {"state":retry["state"]}
             else:
-                account, config = guard(actor,c,task, reading_receipt=operation == "receipt", read_only=(operation in {"receipt", "observe", "scan_pending"} or (operation == "reply" and (task["result"] or {}).get("reply_state") in {"unknown", "dispatching"}) or (operation == "join" and (task["result"] or {}).get("join_state") in {"unknown", "dispatching", "pending_approval"})))
+                account, config = guard(actor,c,task, operation=operation, reading_receipt=operation == "receipt", read_only=(operation in {"receipt", "observe", "scan_pending"} or (operation == "reply" and (task["result"] or {}).get("reply_state") in {"unknown", "dispatching"}) or (operation == "join" and (task["result"] or {}).get("join_state") in {"unknown", "dispatching", "pending_approval"})))
             saved = task["result"] or {}
             if operation in {"reply", "join"} and not (saved.get("reply_state") in {"unknown", "dispatching"} or saved.get("join_state") in {"unknown", "dispatching", "pending_approval"}):
                 if community_health.blocked(c, actor.aid, task):
@@ -1827,10 +1842,10 @@ def next_interrupted_read(c, revision):
         ORDER BY created_at DESC LIMIT 1""", (str(revision),))
 
 
-def membership_review(c, *, focus=False, exit_restricted=False, proactive=False):
+def membership_review(c, *, focus=False, exit_restricted=False, proactive=False, excluded_accounts=()):
     from .community_schedule import next_membership_review
 
-    review = next_membership_review(c, repair_legacy=True, focus=focus, exit_restricted=exit_restricted, proactive=proactive)
+    review = next_membership_review(c, repair_legacy=True, focus=focus, exit_restricted=exit_restricted, proactive=proactive, excluded_accounts=excluded_accounts)
     if review and review["due"] <= datetime.now(timezone.utc):
         return review
     return None
@@ -1847,8 +1862,12 @@ def candidate_already_assessed(c, url, *, focus=False, observation=False, proact
 
 
 def next_candidate(c, revision, focus, *, chamber=False, proactive=False, account=None, aid=None):
+    from .community_handoff import next_handoff
     from .community_opportunities import next_rule_review
 
+    handoff = next_handoff(c, aid, account, revision)
+    if handoff and not community_health.blocked(c, aid, {"input": {"external_account_id": account["external_account_id"], "candidate": handoff}}, write=False):
+        return handoff
     review = next_rule_review(c, aid, account, revision)
     if review:
         return review
@@ -2153,14 +2172,7 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
                 if previous and previous["was_review"] and not (prefer_outreach and (review["result"].get("history_observation") or {}).get("can_reply")):
                     fresh = next_candidate(c, a["config_revision"], focus, chamber=chamber_campaign(a), proactive=config.allow_proactive_post)
             if review and not fresh:
-                task = one(
-                    c,
-                    "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,input,started_at,scheduled_at,workflow_id) VALUES(%s,%s,'community.engage','running',%s,now(),now(),%s) RETURNING *",
-                    (
-                        current_tenant(),
-                        aid,
-                        j(
-                            {
+                task = create_read_task(c, aid, {
                                 **{
                                     key: review["input"][key]
                                     for key in (
@@ -2176,11 +2188,7 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
                                 "decision_version": DECISION_VERSION,
                                 "control_version": a["control_version"],
                                 "config_revision": a["config_revision"],
-                            }
-                        ),
-                        "community.engage:" + uid(),
-                    ),
-                )
+                            }, "community.engage:" + uid())
         if not task:
             candidate = fresh if fresh is not None else next_candidate(c, a["config_revision"], focus, chamber=chamber_campaign(a), proactive=config.allow_proactive_post)
             if not candidate and not chamber_campaign(a):
@@ -2192,8 +2200,8 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
                 candidate = reassess["candidate"] if reassess else None
             account = one(
                 c,
-                "SELECT s.*,card.id AS delegation_id FROM lead.social_accounts s JOIN lead.interaction_cards card ON card.type='manage_community' AND card.state='accepted' AND card.expires_at>now() AND card.payload->>'account_id'=s.id::text AND card.payload->>'external_account_id'=s.external_account_id WHERE s.platform='telegram' AND s.state='connected' AND s.automation_enabled AND NOT(s.id::text=ANY(%s)) AND (%s::text IS NULL OR s.id::text=%s) ORDER BY s.id LIMIT 1",
-                (blocked_accounts, (selection or {}).get("account_id"), (selection or {}).get("account_id")),
+                "SELECT s.*,card.id AS delegation_id FROM lead.social_accounts s JOIN lead.interaction_cards card ON card.type='manage_community' AND card.state='accepted' AND card.expires_at>now() AND card.payload->>'account_id'=s.id::text AND card.payload->>'external_account_id'=s.external_account_id WHERE s.platform='telegram' AND s.state='connected' AND s.automation_enabled AND NOT(s.id::text=ANY(%s)) AND (%s::text IS NULL OR s.id::text=%s) AND (%s::text IS NULL OR card.id::text=%s) ORDER BY s.id LIMIT 1",
+                (blocked_accounts, (selection or {}).get("account_id"), (selection or {}).get("account_id"), (candidate or {}).get("handoff_delegation_id"), (candidate or {}).get("handoff_delegation_id")),
             )
             if not candidate or not account:
                 return
@@ -2202,19 +2210,16 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
                 rechecked = next_rule_review(c, aid, account, a["config_revision"])
                 if not rechecked or rechecked["rule_review_parent"] != candidate["rule_review_parent"]:
                     return {"delay": 1, "reason": "community_selection_changed"}
+            if candidate.get("handoff_id"):
+                from .community_handoff import valid_handoff
+                if not valid_handoff(c, aid, account, a["config_revision"], candidate) or str(account["delegation_id"]) != candidate["handoff_delegation_id"]:
+                    return {"delay": 1, "reason": "community_selection_changed"}
             membership = one(
                 c,
                 "SELECT id FROM lead.tasks WHERE type='community.engage' AND input->'candidate'->>'telegram_url'=%s AND input->>'external_account_id'=%s AND result->>'join_submitted'='true' AND result->>'join_state'='confirmed' ORDER BY created_at DESC LIMIT 1",
                 (candidate["telegram_url"], account["external_account_id"]),
             )
-            task = one(
-                c,
-                "INSERT INTO lead.tasks(tenant_id,agent_id,type,state,input,started_at,scheduled_at,workflow_id) VALUES(%s,%s,'community.engage','running',%s,now(),now(),%s) RETURNING *",
-                (
-                    current_tenant(),
-                    aid,
-                    j(
-                        {
+            task = create_read_task(c, aid, {
                             "candidate": candidate,
                             **({"observation_admission": 2 if config.allow_proactive_post else 1} if chamber_campaign(a) and candidate.get("selection_basis") == "observe_recent_chat" else {}),
                             "decision_version": DECISION_VERSION,
@@ -2231,11 +2236,7 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
                             "delegation_id": str(account["delegation_id"]),
                             "control_version": a["control_version"],
                             "config_revision": a["config_revision"],
-                        }
-                    ),
-                    "community.engage:" + uid(),
-                ),
-            )
+                        }, ("handoff:" + candidate["handoff_id"]) if candidate.get("handoff_id") else "community.engage:" + uid())
         if (
             task["input"]["control_version"] != a["control_version"]
             or task["input"]["config_revision"] != a["config_revision"]

@@ -53,6 +53,7 @@ def active(c, aid):
         "followups": "后续工作安排",
         "notification_collection": "通知检查",
         "workflow_status": "任务汇总",
+        "execution_cadence": "等待依据与恢复条件",
     }
     for row in rows:
         row["label"] = labels.get(

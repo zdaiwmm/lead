@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from temporalio import activity
 
 from .admin_operations import managed_execution
+from .cadence_events import wait_result, wake_clocks
 from .channel_delivery import current
 from .config import env
 from .db import all_rows, j, one, tx
@@ -22,6 +23,10 @@ def source_access(platform):
 def unbound_source(c, platform, agent, business):
     if platform not in ("reddit", "facebook"):
         return None
+    from .channel_authority import driver_accounts
+    allowed_ids = [str(row["id"]) for row in driver_accounts(c,str(agent["id"]),platform)]
+    if not allowed_ids:
+        return None
     return one(
         c,
         """SELECT t.id AS evidence_id,s.id AS account_id,s.binding_version,
@@ -30,7 +35,7 @@ def unbound_source(c, platform, agent, business):
         WHERE t.type='operating.validate' AND t.state='succeeded' AND t.result->>'status'='observed'
           AND t.result->>'channel_fit'='viable' AND t.result#>>'{cold_entry,source_url}'=t.input->>'candidate_url' AND t.result->'source_urls' ? (t.input->>'candidate_url')
           AND t.completed_at>now()-interval '14 days' AND t.input->>'business_profile_id'=%s
-          AND t.input->>'config_revision'=%s AND s.platform=%s AND s.state='connected' AND s.automation_enabled
+          AND t.input->>'config_revision'=%s AND s.platform=%s AND s.id::text=ANY(%s) AND s.state='connected' AND s.automation_enabled
           AND (NOT coalesce(t.result->'account_inspections','{}') ? (s.id::text||':'||s.binding_version::text)
                OR (t.result#>>ARRAY['account_inspections',s.id::text||':'||s.binding_version::text,'checked_at'])::timestamptz<now()-interval '1 day')
           AND NOT EXISTS (SELECT FROM lead.account_targets target WHERE target.account_id=s.id
@@ -40,7 +45,7 @@ def unbound_source(c, platform, agent, business):
           AND EXISTS (SELECT FROM lead.platform_capabilities p WHERE p.platform=s.platform AND p.action_type='publish'
                       AND p.permission_state='approved')
         ORDER BY t.completed_at DESC,s.created_at,s.id LIMIT 1""",
-        (str(business["id"]), str(agent["config_revision"]), platform),
+        (str(business["id"]), str(agent["config_revision"]), platform, allowed_ids),
     )
 
 
@@ -120,20 +125,23 @@ def select(args):
                 ),
                 "reason": state.get("reason"),
                 "recorded": True,
+                **({"execution_cadence": state["execution_cadence"]} if state.get("execution_cadence") else {}),
             }, None
+        agent = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
+        business = one(c, "SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
+        if business and business["description"].strip():
+            from .atomic_dispatch import enqueue_connected
+            enqueue_connected(c,aid,agent,business)
         if not source_access(platform):
-            return {"delay": 1800, "reason": "source_permission_required"}, None
+            gaps = [] if business and business["description"].strip() else ["business_required"]
+            return wait_result(c, aid, clock, {"delay": 1800, "reason": "source_permission_required", "blocking_reasons": gaps}), None
         if sample()["defer_optional"]:
             return {"delay": 120, "reason": "host_pressure"}, None
-        agent = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
-        business = one(
-            c, "SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1"
-        )
         if not business or not business["description"].strip():
-            return {"delay": 300, "reason": "business_required"}, None
+            return wait_result(c, aid, clock, {"delay": 300, "reason": "business_required"}), None
         ctx = context(c, aid, business)
         if not ctx["models"]["tools"]["public_web"]:
-            return {"delay": 900, "reason": "public_web_disabled"}, None
+            return wait_result(c, aid, clock, {"delay": 900, "reason": "public_web_disabled"}), None
         pending = (
             state.get("pending") if state.get("pending_tick") == args["tick"] else None
         )
@@ -235,11 +243,12 @@ async def channel_research_tick(args: dict):
             if not clock:
                 return {"stop": True}
             c.execute(
-                """UPDATE lead.tasks SET scheduled_at=now()+%s,result=(coalesce(result,'{}')-'pending'-'pending_tick')||%s WHERE id=%s""",
+                """UPDATE lead.tasks SET scheduled_at=now()+%s,result=(coalesce(result,'{}')-'pending'-'pending_tick'-'execution_cadence')||%s WHERE id=%s""",
                 (
                     timedelta(seconds=delay),
                     j(
                         {
+                            **({"execution_cadence": result["execution_cadence"]} if result.get("execution_cadence") else {}),
                             "reason": result.get("reason"),
                             "last_tick": args["tick"],
                             "last_work": candidate.task_id if candidate else None,
@@ -248,4 +257,6 @@ async def channel_research_tick(args: dict):
                     clock["id"],
                 ),
             )
+            if candidate or result.get("reason") in {"target_verification_queued", "target_permissions_review"}:
+                wake_clocks(c, args["agent_id"], platforms={clock["input"]["platform"]}, lane="delivery")
     return result

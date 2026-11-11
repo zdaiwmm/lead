@@ -70,6 +70,8 @@ def draft_pack(agent, business, channel, version):
     )
     return {
         "platform": channel["platform"],
+        "evidence_status": "internal_only",
+        "account_binding": agent.get("_preparation_account_bindings"),
         "catalog_version": version,
         "business_profile_id": str(business["id"]),
         "config_revision": agent["config_revision"],
@@ -125,13 +127,24 @@ def save_workspace(c, aid, agent, business, platform):
     return persist_workspace(c, aid, agent, business, channel, version, pack)
 
 
+def preparation_key(aid, business_id, revision, platform, version, bindings=None):
+    key = f"channel-prepare:{aid}:{business_id}:{revision}:{platform}:{version}"
+    if bindings is not None:
+        key += ":" + hashlib.sha256(json.dumps(bindings,sort_keys=True).encode()).hexdigest()[:20]
+    return key
+
+
 def persist_workspace(c, aid, agent, business, channel, version, pack):
     platform = channel["platform"]
     fingerprint = hashlib.sha256(
         json.dumps(pack, sort_keys=True, default=str).encode()
     ).hexdigest()
     # Calendar preview changes with time; identity is the versioned source, not that preview.
-    key = f"channel-prepare:{aid}:{business['id']}:{agent['config_revision']}:{platform}:{version}"
+    if (pack.get("evidence_status") != "internal_only" or pack.get("business_profile_id") != str(business["id"])
+            or pack.get("config_revision") != agent["config_revision"]
+            or pack.get("account_binding") != agent.get("_preparation_account_bindings")):
+        raise ValueError("内部底稿的业务或账号快照已变化")
+    key = preparation_key(aid,business["id"],agent["config_revision"],platform,version,pack.get("account_binding"))
     old = one(c, "SELECT id,result FROM lead.tasks WHERE workflow_id=%s", (key,))
     if old:
         return {"id": str(old["id"]), **old["result"], "duplicate": True}

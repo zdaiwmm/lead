@@ -324,7 +324,19 @@ def agent_detail(aid, *, chat=False, message_seq=None):
             "SELECT s.*, t.id AS target_id,t.canonical_url,t.display_name AS target_name,t.target_type,t.verified_permissions,t.state AS target_state, EXISTS(SELECT 1 FROM lead.authorization_grants g JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.target_type=t.target_type AND pc.action_type='publish' WHERE g.target_id=t.id AND g.revoked_at IS NULL AND g.allowed_actions ? 'publish' AND pc.technical_state='verified' AND (pc.permission_state='approved' OR pc.permission_state='pending' AND lead.owner_browser_pilot_allowed(t.id,g.id)) AND t.state='active' AND s.state='connected' AND (s.platform='lab' OR (jsonb_array_length(coalesce(t.verified_permissions->'publishing_verified_formats','[]'))>0 AND t.verified_permissions->>'adapter_version'=pc.adapter_version))) AS operational_ready FROM lead.social_accounts s LEFT JOIN LATERAL (SELECT t.* FROM lead.account_targets t WHERE t.account_id=s.id ORDER BY (t.state='active') DESC,(jsonb_array_length(coalesce(t.verified_permissions->'publishing_verified_formats','[]'))>0) DESC,(SELECT max(g.granted_at) FROM lead.authorization_grants g WHERE g.target_id=t.id AND g.revoked_at IS NULL) DESC NULLS LAST,t.id DESC LIMIT 1) t ON true ORDER BY s.created_at",
         )
         from .account_profiles import isolated_login_platforms
+        from .cadence_views import for_account
+        from .channels import managed_scope
         from .promotion import promoter_voice
+        from .reddit_member import member_scope
+        clock_waits = all_rows(c, "SELECT input->>'platform' AS platform,input->>'lane' AS lane,result->'execution_cadence' AS cadence,result->'waiting_targets' AS waiting_targets FROM lead.tasks WHERE type='channel.clock' AND state='planned' AND input->>'control_version'=%s",(str(a["control_version"]),))
+        for account in a["accounts"]:
+            if account["platform"] in {"facebook", "reddit"}:
+                profile = one(c,"SELECT slot FROM lead.browser_profiles WHERE id=%s",(account["profile_id"],))
+                account["managed_scope_authorized"] = bool(managed_scope(c, account))
+                account["member_scope_authorized"] = bool(account["platform"]=="reddit" and member_scope(c,account))
+                account["managed_scope_available"] = bool(account["state"]=="connected" and profile and profile["slot"]!="default")
+                if account["automation_enabled"] and (account["managed_scope_authorized"] or account["member_scope_authorized"]):
+                    account["channel_waits"] = [{"lane":row["lane"],"execution_cadence":for_account(row,account)} for row in clock_waits if row["platform"]==account["platform"]]
 
         if "reddit" in isolated_login_platforms(aid):
             for account in a["accounts"]:
@@ -699,7 +711,7 @@ def channel_control(aid, platform, enabled, *, connection=None, start_account=No
                 raise ValueError("运营模型尚未配置凭据，请让所有者在后台检查模型服务")
             c.execute(
                 """UPDATE lead.social_accounts SET automation_enabled=(platform=%s AND (%s::uuid IS NULL OR id=%s))
-                WHERE platform<>'lab'""", (platform,start_account,start_account),
+                WHERE platform<>'lab' AND %s::uuid IS NULL""", (platform,start_account,start_account,start_account),
             )
             c.execute(
                 "UPDATE lead.agents SET desired_state='running',health_state='queued',control_version=control_version+1,version=version+1,updated_at=now() WHERE id=%s",
