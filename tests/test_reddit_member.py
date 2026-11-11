@@ -24,6 +24,19 @@ from test_migrations import isolated_database as isolated_database
 RULES = "Relevant product feedback posts are welcome. Disclose promotional affiliation and automated participation. No unsolicited direct messages."
 
 
+@pytest.mark.parametrize("focus", ["first_users", "bounded_trial", "chamber_first_users"])
+@pytest.mark.parametrize("member", [False, True])
+def test_campaign_clock_handoff_preserves_other_experiment_ownership(focus, member, monkeypatch):
+    monkeypatch.setenv("LEAD_CHANNEL_ATOM_AGENT_IDS", "fixture-agent")
+    agent = dict(id="fixture-agent", onboarding_state={
+        "reddit_member_delivery": member,
+        "growth_trial_policy": {"mode": "active", "focus": focus},
+    })
+    assert channel_delivery.owns(agent, "reddit") == (member and focus == "chamber_first_users")
+    assert not channel_delivery.owns(agent, "telegram")
+    assert not channel_delivery.owns(agent, "facebook")
+
+
 class MemberSite(FixtureSite):
     rules = RULES
     blocked = False
@@ -68,9 +81,15 @@ def setup_account():
     return aid, account, profile
 
 
-def test_member_scope_is_explicit_and_does_not_enroll_telegram(site_database):
+@pytest.mark.parametrize("campaign", [False, True])
+def test_member_scope_is_explicit_and_does_not_enroll_telegram(site_database, campaign, monkeypatch):
     aid, account, _ = setup_account()
+    monkeypatch.setenv("LEAD_APPROVED_DISCOVERY_CHANNELS", "")
     with tx(aid) as c:
+        if campaign:
+            c.execute("""UPDATE lead.agents SET onboarding_state=jsonb_set(onboarding_state,
+                '{growth_trial_policy}',%s) WHERE id=%s""",
+                (j({"mode": "active", "focus": "chamber_first_users", "version": "v1"}), aid))
         c.execute("""INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,external_account_id,state,automation_enabled)
             SELECT tenant_id,agent_id,id,'telegram',gen_random_uuid()::text,'connected',true FROM lead.browser_profiles WHERE slot='default'""")
     reddit_member.authorize(aid, account["id"], account["binding_version"])
@@ -86,6 +105,17 @@ def test_member_scope_is_explicit_and_does_not_enroll_telegram(site_database):
                 "SELECT input FROM lead.tasks WHERE type='channel.clock'"
             )
         } == {"reddit"}
+        clocks = list(c.execute("SELECT * FROM lead.tasks WHERE type='channel.clock'"))
+        assert len(clocks) == 2
+    for clock in clocks:
+        args = dict(agent_id=aid, task_id=str(clock["id"]), generation=clock["version"], tick="first")
+        if clock["input"]["lane"] == "research":
+            assert channel_research.select(args) == ({"delay": 1800, "reason": "source_permission_required"}, None)
+        else:
+            assert channel_delivery.next_target(args)["reason"] == "no_available_verified_target"
+    reddit_member.authorize(aid, account["id"], account["binding_version"])
+    with tx(aid) as c:
+        assert one(c, "SELECT count(*) AS n FROM lead.tasks WHERE type='channel.clock'")["n"] == 2
         c.execute(
             "UPDATE lead.social_accounts SET binding_version=binding_version+1 WHERE id=%s",
             (account["id"],),
