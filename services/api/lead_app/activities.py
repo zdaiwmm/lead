@@ -26,6 +26,7 @@ from .operating_playbooks import (
 )
 from .promotion import PROMOTER_VOICE, new_marker, promoter_voice, promotion_body
 from .promotion import configuration as promotion_configuration
+from .reddit_member import ordinary_member
 from .scope import current_tenant, scoped_activity
 from .security import internal_token
 from .telemetry import trace_headers
@@ -991,7 +992,7 @@ async def _publication_cycle(args: dict):
         prepared_wait = False
         shortlink_wait = False
         for target in rows:
-            if target["verified_permissions"].get("access_mode") == "ordinary_member" and not (args.get("channel_clock") and requested_target):
+            if ordinary_member(target) and not (args.get("channel_clock") and requested_target):
                 continue
             if target_blocked(target, barriers):
                 continue
@@ -1087,7 +1088,7 @@ async def _publication_cycle(args: dict):
                 continue
             from .outbound_links import configured_problem
 
-            if platform != "lab" and target["verified_permissions"].get("access_mode") != "ordinary_member" and configured_problem():
+            if platform != "lab" and not ordinary_member(target) and configured_problem():
                 shortlink_wait = True
                 waits.append(300)
                 continue
@@ -1175,7 +1176,7 @@ async def _publication_cycle(args: dict):
     reusable = None
     if not launch:
         for target_option in targets:
-            if target_option["verified_permissions"].get("access_mode") == "ordinary_member":
+            if ordinary_member(target_option):
                 continue
             plan = (
                 operating_playbooks.get(str(target_option["target_id"]), {}).get(
@@ -1199,7 +1200,7 @@ async def _publication_cycle(args: dict):
                 reusable = (target_option, draft)
                 break
     member_draft = None
-    member_target = targets[0] if len(targets) == 1 and targets[0]["verified_permissions"].get("access_mode") == "ordinary_member" else None
+    member_target = targets[0] if len(targets) == 1 and ordinary_member(targets[0]) else None
     if member_target:
         from .reddit_member import prepare_first
 
@@ -1466,7 +1467,7 @@ async def _publication_cycle(args: dict):
         ),
         "media_job_id": media_job_id,
     }
-    if platform == "reddit" and target["verified_permissions"].get("access_mode") == "ordinary_member":
+    if platform == "reddit" and ordinary_member(target):
         publication["reddit_rules_sha256"] = target["verified_permissions"]["rules"]["sha256"]
     if platform == "reddit" and manifest and marker:
         # Native media posts may expose only a title; keep the receipt marker

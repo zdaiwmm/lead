@@ -8,6 +8,7 @@ import psycopg
 from .account_receipts import archive_account_receipts
 from .adapters.catalog import SPECS, validate
 from .db import append_message, audit, emit, j, one, record, require_agent, tx
+from .reddit_member import ordinary_member
 from .scope import current_tenant
 
 
@@ -235,7 +236,7 @@ def store_target(aid, account_id, observed, *, notify=True, expected_binding=Non
             first = observed.get("first_publication", {})
             if not first.get("suitable") or not first.get("body") or not first.get("title") or not observed.get("rules"):
                 raise ValueError("普通成员首帖必须是已核对规则的真实内容")
-            if previous and previous["verified_permissions"].get("access_mode") != "ordinary_member":
+            if previous and not ordinary_member(previous):
                 c.execute("UPDATE lead.authorization_grants SET revoked_at=now() WHERE target_id=%s AND revoked_at IS NULL", (previous["id"],))
                 c.execute("UPDATE lead.account_targets SET verified_permissions=verified_permissions-'publishing_verified_formats'-'publishing_verified' WHERE id=%s", (previous["id"],))
             if previous and previous["verified_permissions"].get("rules", {}).get("sha256") != observed["rules"]["sha256"]:
@@ -382,7 +383,7 @@ def probe_in_tx(
         "made_for_kids": made_for_kids,
         "commercial_disclosure": "own_brand",
     }
-    member = target["verified_permissions"].get("access_mode") == "ordinary_member"
+    member = ordinary_member(target)
     if member:
         first = target["verified_permissions"]["first_publication"]
         if media or not first.get("suitable"):
@@ -506,7 +507,7 @@ def accept_card(
             )
             if target["platform"] in ("reddit","facebook"):
                 from .reddit_member import member_scope
-                scope = member_scope(c, account) if target["verified_permissions"].get("access_mode") == "ordinary_member" else managed_scope(c,account)
+                scope = member_scope(c, account) if ordinary_member(target) else managed_scope(c,account)
                 if (not scope or str(scope["id"]) != str(delegation_id) or a["desired_state"] != "running"
                     or not account["automation_enabled"] or target["slot"]=="default"
                     or "publish" not in target["verified_permissions"].get("actions",[]) or

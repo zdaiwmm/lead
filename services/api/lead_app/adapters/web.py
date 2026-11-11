@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from playwright.async_api import TimeoutError as BrowserTimeoutError
 
+from ..reddit_member import ordinary_member
 from .catalog import SPECS, target_url, validate
 from .core import (
     HumanVerificationRequired,
@@ -502,7 +503,7 @@ class WebAdapter:
                     timeout=45000,
                 )
             own = await self.account(page)
-            member = target.get("verified_permissions", {}).get("access_mode") == "ordinary_member"
+            member = ordinary_member(target)
             if member and kind != "text":
                 raise ScopeChanged("当前普通成员范围仅包含文字投稿")
             checked = await self.target(page, target["canonical_url"], own["external_account_id"], member=member)
@@ -1163,7 +1164,7 @@ class WebAdapter:
         if not await button.is_enabled():
             raise LayoutChanged("发布按钮不再可用")
         await verify_fields(page, observation["fields"])
-        if self.platform == "reddit" and target.get("verified_permissions", {}).get("access_mode") == "ordinary_member":
+        if self.platform == "reddit" and ordinary_member(target):
             from ..reddit_member import read_rules
 
             check = await page.context.new_page()
