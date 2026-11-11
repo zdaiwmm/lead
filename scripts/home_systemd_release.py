@@ -262,6 +262,39 @@ def executor_process(service):
     return pid, invocation
 
 
+
+def verify_executor_writable_layout(entry, binding, proc):
+    # The stable operator-owned layout outlives shared application revisions.
+    # Only provisioning derives it from the preexisting unit, never from a plan field.
+    path = EXECUTOR_REGISTRY.parent / (entry['channel'] + '-layout.json')
+    raw = executor_config(path)
+    require(not path.lstat().st_mode & 0o077, 'executor writable layout is not private')
+    layout = json.loads(raw)
+    require(isinstance(layout, dict) and set(layout) == {
+        'version', 'channel', 'service', 'binding', 'writable_bindings'}
+        and type(layout['version']) is int and layout['version'] == 1
+        and all(layout[key] == entry[key] for key in entry), 'executor writable layout identity mismatch')
+    rows = layout['writable_bindings']
+    require(isinstance(rows, list), 'invalid executor writable layout')
+    expected = set()
+    for pair in rows:
+        require(isinstance(pair, list) and len(pair) == 2, 'invalid executor writable mapping')
+        expected.add(tuple(str(executor_path(value)) for value in pair))
+    require(len(expected) == len(rows) and len({target for _, target in expected}) == len(expected),
+            'ambiguous executor writable mapping')
+    receipt = (str(STORE / 'executors' / entry['channel'] / 'receipt'), str(Path(binding['receipt']).parent))
+    require(receipt in expected, 'executor writable receipt mapping missing')
+    require(executor_writable_bindings(entry['service'], entry['channel']) == expected,
+            'executor writable bindings differ from original layout')
+    mounts = [line.split() for line in (proc / 'mountinfo').read_text().splitlines()]
+    for source, target in sorted(expected):
+        exact = [row for row in mounts if len(row) >= 10 and row[4] == target]
+        require(len(exact) == 1 and 'rw' in exact[0][5].split(','), 'executor data mount is missing or read-only')
+        view = executor_view(proc, Path(target))
+        require(view.samefile(Path(source)), 'executor writable mount source changed')
+    return raw
+
+
 def verify_executor_entries(sha, entries, *, both_channels=True):
     """Verify the same live evidence for initial single-service and final fleet acceptance."""
     release = image(sha)
@@ -316,17 +349,20 @@ def verify_executor_entries(sha, entries, *, both_channels=True):
                         adapter_files=adapter_files, boot_sha256=expected_core['channel_executor.py'],
                         binding_sha256=hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
         require(proof == expected, "executor boot evidence mismatch")
+        layout_bytes = verify_executor_writable_layout(entry, binding, proc)
         proofs.append(proof)
-        observed.append((service, pid, invocation, config, config_bytes, mounts, args))
+        observed.append((service, pid, invocation, config, config_bytes, mounts, args, entry, binding, layout_bytes))
     if both_channels:
         require(channels == {'telegram', 'reddit'}, "both executor channels are required")
-    for service, pid, invocation, config, config_bytes, mounts, args in observed:
+    for service, pid, invocation, config, config_bytes, mounts, args, entry, binding, layout_bytes in observed:
         require(executor_process(service) == (pid, invocation), "executor changed during verification")
         executor_interpreter(PROC / pid, args)
         require((PROC / pid / 'cmdline').read_bytes().rstrip(b'\0').split(b'\0') ==
                 [arg.encode() for arg in args], 'executor command changed during verification')
         require((PROC / pid / 'mountinfo').read_bytes() == mounts, 'executor mounts changed during verification')
         require(executor_config(config) == config_bytes, "executor config changed during verification")
+        require(verify_executor_writable_layout(entry, binding, PROC / pid) == layout_bytes,
+                'executor writable layout changed during verification')
     return proofs
 
 
@@ -464,15 +500,46 @@ def executor_maintenance(sha, agent_id):
 
 
 
-def executor_existing_bindings(service):
+def executor_existing_bindings(service, prop='BindReadOnlyPaths'):
+    require(prop in ('BindReadOnlyPaths', 'BindPaths'), 'unsupported executor binding property')
     result = set()
-    for value in property_of(service, 'BindReadOnlyPaths').split():
+    for value in property_of(service, prop).split():
         parts = value.split(':')
         require(len(parts) in (2, 3) and (len(parts) == 2 or parts[2] == 'rbind'),
                 'unsupported existing read-only binding')
         source, target = str(executor_path(parts[0])), str(executor_path(parts[1]))
         result.add((source, target))
     return result
+
+
+
+def executor_writable_bindings(service, channel):
+    bindings = executor_existing_bindings(service, 'BindPaths')
+    receipt = (str(STORE / 'executors' / channel / 'receipt'), '/run/lead-executor/receipt')
+    for source, name in bindings:
+        target = Path(name)
+        protected = (Path('/run/lead-executor'), EXECUTOR_REGISTRY.parent, SERVICES, BIN)
+        require((source, name) == receipt or not any(
+            target.is_relative_to(path) or path.is_relative_to(target) for path in protected),
+            'existing writable binding overlaps executor code or configuration')
+    return bindings
+
+
+def executor_render_template(template, values, writable_bindings):
+    # Generate complete lines so an empty list cannot emit a second BindPaths=
+    # reset and discard the read-only mounts emitted just above it.
+    receipt = (values['@RECEIPT_SOURCE@'], '/run/lead-executor/receipt')
+    values = {**values, '@PRESERVED_WRITABLE_BINDINGS@': '\n'.join(
+        'BindPaths=' + source + ':' + target + ':rbind' for source, target in sorted(writable_bindings)
+        if (source, target) != receipt)}
+    placeholders = set(re.findall(r'@[A-Z_]+@', template))
+    require(placeholders == set(values) == {'@BINDING@', '@PRESERVED_READONLY_BINDINGS@',
+            '@PRESERVED_WRITABLE_BINDINGS@', '@CORE_SOURCE@', '@ADAPTER_SOURCE@',
+            '@RECEIPT_SOURCE@', '@ENV_SOURCE@'}, 'unexpected executor template parameters')
+    for key, value in values.items():
+        template = template.replace(key, value)
+    require('@' not in template, 'unexpanded executor template')
+    return template
 
 
 def executor_command_identity(value):
@@ -566,8 +633,10 @@ def executor_service_snapshot(service, expected, config, selector, dropin):
     require(executor_selector(selector) == expected['selector'], 'prior executor selector drift')
     require(property_of(service, 'ActiveState') == 'active', 'existing executor service must be active')
     return dict(config=saved_config, dropin=executor_file_backup(dropin), selector=expected['selector'],
+                layout=executor_file_backup(config.with_name(config.stem + '-layout.json')),
                 exec_start=executor_command_identity(property_of(service, 'ExecStart')), active=True, unit_files=unit_files,
                 readonly_bindings=sorted(executor_existing_bindings(service)),
+                writable_bindings=sorted(executor_writable_bindings(service, config.stem)),
                 environment_files=property_of(service, 'EnvironmentFiles'))
 
 
@@ -620,10 +689,6 @@ def provision_executor(sha, plan_path):
         template_path = release / EXECUTOR_TEMPLATE
         require(template_path.resolve(strict=True) == template_path, 'redirected executor template')
         template = template_path.read_text()
-        placeholders = set(re.findall(r'@[A-Z_]+@', template))
-        require(placeholders == {'@BINDING@', '@PRESERVED_READONLY_BINDINGS@', '@CORE_SOURCE@',
-                                 '@ADAPTER_SOURCE@', '@RECEIPT_SOURCE@', '@ENV_SOURCE@'},
-                'unexpected executor template parameters')
         values = {
             '@BINDING@': str(config),
             '@PRESERVED_READONLY_BINDINGS@': ' '.join(item['source'] + ':' + item['target']
@@ -633,9 +698,7 @@ def provision_executor(sha, plan_path):
             '@RECEIPT_SOURCE@': str(base / 'receipt'),
             '@ENV_SOURCE@': str(EXECUTOR_REGISTRY.parent / (channel + '.env')),
         }
-        for key, value in values.items():
-            template = template.replace(key, value)
-        require('@' not in template, 'unexpanded executor template')
+        template = executor_render_template(template, values, previous['writable_bindings'])
         user = pwd.getpwnam(property_of(service, 'User'))
         group_name = property_of(service, 'Group')
         gid = grp.getgrnam(group_name).gr_gid if group_name else user.pw_gid
@@ -663,6 +726,9 @@ def provision_executor(sha, plan_path):
             journal['state'] = 'stopped'
             executor_atomic(journal_path, executor_json(journal))
             executor_atomic(config, executor_json(binding), mode=0o640, gid=gid)
+            writable = set(map(tuple, previous['writable_bindings'])) | {(str(receipt), '/run/lead-executor/receipt')}
+            layout = dict(version=1, **entry, writable_bindings=sorted(writable))
+            executor_atomic(config.with_name(channel + '-layout.json'), executor_json(layout))
             executor_atomic(dropin, template.encode(), mode=0o644)
             if plan['core_mode'] == 'independent':
                 executor_select(selector, str(STORE / sha))
@@ -683,6 +749,7 @@ def provision_executor(sha, plan_path):
                 executor_atomic(journal_path, executor_json(journal))
                 run('systemctl', 'stop', service, timeout=120)
                 executor_restore_file(config, previous['config'])
+                executor_restore_file(config.with_name(channel + '-layout.json'), previous['layout'])
                 executor_restore_file(dropin, previous['dropin'])
                 if plan['core_mode'] == 'independent':
                     executor_select(selector, previous['selector'])

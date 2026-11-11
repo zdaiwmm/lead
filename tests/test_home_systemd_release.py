@@ -391,6 +391,7 @@ def executors(hook, monkeypatch, tmp_path):
     registry = tmp_path / 'config/executors.json'
     registry.parent.mkdir(mode=0o700)
     entries, bindings, proofs, props = [], {}, {}, {}
+    writable_identity = {}
     interpreter = tmp_path / 'trusted/python3.12'
     interpreter.parent.mkdir()
     interpreter.write_bytes(b'fixture interpreter')
@@ -437,15 +438,32 @@ def executors(hook, monkeypatch, tmp_path):
         process_python = root / 'run/lead-home/bin/py/bin/python3.12'
         process_python.parent.mkdir(parents=True)
         process_python.symlink_to(interpreter)
+        host_receipt = hook.STORE / 'executors' / channel / 'receipt'
+        host_data = host_receipt.with_name('data')
+        host_receipt.mkdir(parents=True, mode=0o700)
+        host_data.mkdir(mode=0o700)
+        process_data = root / 'run/lead-home/actor-home'
+        process_data.mkdir(parents=True)
+        writable = [(str(host_data), '/run/lead-home/actor-home'),
+                    (str(host_receipt), str(Path(binding['receipt']).parent))]
+        writable_identity[(process_data, host_data)] = True
+        writable_identity[(receipt.parent, host_receipt)] = True
         (proc / 'mountinfo').write_text(
+            f'40 10 1:8 /data /run/lead-home/actor-home rw - ext4 disk rw\n'
+            f'41 10 1:9 /receipt {Path(binding["receipt"]).parent} rw - ext4 disk rw\n'
             '10 1 1:3 / / ro - ext4 disk ro\n'
             '20 10 1:4 /py /run/lead-home/bin/py ro - ext4 disk rw\n'
             f'30 20 1:1 / {target} ro - squashfs image ro\n'
             f'31 20 1:2 /adapter {binding["adapter_root"]} ro - ext4 disk rw\n')
         (proc / 'cmdline').write_bytes(b'\0'.join(s.encode() for s in [
             '/run/lead-home/bin/py/bin/python3.12', '-I', '-B', target + '/services/api/lead_app/channel_executor.py', str(binding_file)]) + b'\0')
-        props[service] = dict(MainPID=pid, InvocationID=invocation, ActiveState='active')
-        entries.append(dict(service=service, channel=channel, binding=str(binding_file)))
+        props[service] = dict(MainPID=pid, InvocationID=invocation, ActiveState='active',
+                              BindPaths=' '.join(source + ':' + target + ':rbind' for source, target in writable))
+        entry = dict(service=service, channel=channel, binding=str(binding_file))
+        layout = registry.parent / (channel + '-layout.json')
+        layout.write_text(json.dumps(dict(version=1, **entry, writable_bindings=writable)))
+        layout.chmod(0o600)
+        entries.append(entry)
         bindings[channel], proofs[channel] = binding, proof
     registry.write_text(json.dumps(dict(version=1, executors=entries)))
     registry.chmod(0o600)
@@ -463,6 +481,8 @@ def executors(hook, monkeypatch, tmp_path):
         return SimpleNamespace(st_mode=mode, st_uid=0, st_size=st.st_size)
     monkeypatch.setattr(Path, 'lstat', lstat)
     def samefile(path, other):
+        if (path, other) in writable_identity:
+            return True
         if path in [proc_base / str(i) / 'root' / bindings[c]['release'].lstrip('/')
                     for i, c in enumerate(('telegram', 'reddit'), 10)] and other == release:
             return True
@@ -724,7 +744,7 @@ def provisioning(hook, monkeypatch, tmp_path):
     props = dict(FragmentPath=str(fragment), DropInPaths='', MainPID='10', InvocationID='a' * 32,
                  ActiveState='active', User='fixture', Group='fixture',
                  ExecStart='{ path=/legacy ; argv[]=/legacy ; ignore_errors=no ; pid=10 ; status=0/0 }',
-                 BindReadOnlyPaths=str(preserved) + ':/run/site/.env:rbind', EnvironmentFiles='')
+                 BindReadOnlyPaths=str(preserved) + ':/run/site/.env:rbind', BindPaths='', EnvironmentFiles='')
     commands, holds = [], []
     dropin = systemd / (service + '.d') / 'zzzz-lead-executor.conf'
     def run(*args, **kwargs):
@@ -1048,3 +1068,121 @@ def test_provision_refuses_private_image_root_before_stopping_service(provisioni
     assert not any(command[:2] == ('systemctl', 'stop') for command in p.commands)
     assert not p.dropin.exists()
     assert not p.config.exists()
+
+
+def test_provision_preserves_all_existing_writable_bindings(provisioning):
+    import json
+    p = provisioning
+    source = p.base / 'original-data'
+    source.mkdir()
+    original = str(source) + ':/run/lead-home/actor-home:rbind'
+    p.props['BindPaths'] = original
+    p.h.provision_executor(p.sha, p.path)
+    assert 'BindPaths=' + original + '\n' in p.dropin.read_text()
+    journal = json.loads((p.base / 'journal' / (p.sha + '.json')).read_text())
+    assert journal['previous']['writable_bindings'] == [[str(source), '/run/lead-home/actor-home']]
+    assert '\nBindPaths=\n' not in p.dropin.read_text()
+
+
+def test_provision_cannot_request_new_writable_bindings_in_plan(provisioning):
+    p = provisioning
+    p.plan['preserved_writable_bindings'] = [{'source': '/private-data', 'target': '/run/new-access'}]
+    p.save()
+    with pytest.raises(p.h.Refused, match='fields'):
+        p.h.provision_executor(p.sha, p.path)
+    assert not any(command[:2] == ('systemctl', 'stop') for command in p.commands)
+
+
+def test_provision_rechecks_writable_mapping_before_stop(provisioning, monkeypatch):
+    p = provisioning
+    original = p.h.property_of
+    calls = 0
+    def property_of(service, prop):
+        nonlocal calls
+        if prop == 'BindPaths':
+            calls += 1
+            source = 'old-data' if calls == 1 else 'changed-data'
+            return str(p.base / source) + ':/run/lead-home/actor-home:rbind'
+        return original(service, prop)
+    monkeypatch.setattr(p.h, 'property_of', property_of)
+    with pytest.raises(p.h.Refused, match='baseline changed'):
+        p.h.provision_executor(p.sha, p.path)
+    assert not any(command[:2] == ('systemctl', 'stop') for command in p.commands)
+
+
+def test_empty_inherited_writable_list_never_emits_a_second_reset(provisioning):
+    p = provisioning
+    p.props['BindPaths'] = ''
+    p.h.provision_executor(p.sha, p.path)
+    assert '\nBindPaths=\n' not in p.dropin.read_text()
+    assert sum(line.startswith('BindPaths=') for line in p.dropin.read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize('fault', ['missing-map', 'changed-source', 'readonly-mount', 'wrong-inode', 'missing-layout'])
+def test_executor_writable_mounts_require_original_mapping_and_actual_source(executors, monkeypatch, fault):
+    e = executors
+    service = e.entries[0]['service']
+    if fault == 'missing-map':
+        e.props[service]['BindPaths'] = e.props[service]['BindPaths'].split(' ', 1)[1]
+    elif fault == 'changed-source':
+        e.props[service]['BindPaths'] = e.props[service]['BindPaths'].replace('/data:', '/other-data:', 1)
+    elif fault == 'readonly-mount':
+        mountinfo = e.proc / '10/mountinfo'
+        mountinfo.write_text(mountinfo.read_text().replace('/run/lead-home/actor-home rw', '/run/lead-home/actor-home ro'))
+    elif fault == 'wrong-inode':
+        original = Path.samefile
+        def samefile(path, other):
+            return False if path.name == 'actor-home' else original(path, other)
+        monkeypatch.setattr(Path, 'samefile', samefile)
+    else:
+        (e.registry.parent / 'telegram-layout.json').unlink()
+    with pytest.raises((e.hook.Refused, FileNotFoundError)):
+        e.hook.verify_executors(e.revision)
+
+
+@pytest.mark.parametrize('target', ['/run/lead-home/bin/site', '/run/lead-home/bin/py', '/run/lead-executor/release'])
+def test_provision_rejects_writable_code_dependencies(provisioning, target):
+    p = provisioning
+    p.props['BindPaths'] = str(p.base / 'data') + ':' + target + ':rbind'
+    with pytest.raises(p.h.Refused, match='writable binding overlaps'):
+        p.h.provision_executor(p.sha, p.path)
+    assert not any(command[:2] == ('systemctl', 'stop') for command in p.commands)
+
+
+def test_writable_layout_survives_shared_application_revision_change(executors, monkeypatch):
+    import shutil
+    e = executors
+    before = {path.name: path.read_bytes() for path in e.registry.parent.glob('*-layout.json')}
+    revision = 'b' * 40
+    release = e.hook.STORE / revision
+    shutil.copytree(e.hook.STORE / e.revision, release, dirs_exist_ok=True)
+    (release / 'REVISION').write_text(revision)
+    views = set()
+    for pid, channel in enumerate(('telegram', 'reddit'), 10):
+        view = e.proc / str(pid) / 'root' / e.bindings[channel]['release'].lstrip('/')
+        views.add(view)
+        (view / 'REVISION').write_text(revision)
+        proof = {**e.proofs[channel], 'revision': revision}
+        receipt = e.proc / str(pid) / 'root' / e.bindings[channel]['receipt'].lstrip('/')
+        e.save(receipt, proof)
+    original = Path.samefile
+    def samefile(path, other):
+        return True if path in views and other == release else original(path, other)
+    monkeypatch.setattr(Path, 'samefile', samefile)
+    assert {proof['revision'] for proof in e.hook.verify_executors(revision)} == {revision}
+    assert before == {path.name: path.read_bytes() for path in e.registry.parent.glob('*-layout.json')}
+
+
+def test_failed_provision_restores_previous_writable_layout_bytes(provisioning, monkeypatch):
+    p = provisioning
+    layout = p.config.with_name(p.channel + '-layout.json')
+    prior = b'{"operator":"original exact layout bytes"}\n'
+    layout.write_bytes(prior)
+    layout.chmod(0o600)
+    def failed(*args):
+        raise p.h.Refused('fixture rejected startup')
+    monkeypatch.setattr(p.h, 'verify_executor_entry', failed)
+    with pytest.raises(p.h.Refused, match='restored'):
+        p.h.provision_executor(p.sha, p.path)
+    assert layout.read_bytes() == prior
+    assert layout.stat().st_mode & 0o777 == 0o600

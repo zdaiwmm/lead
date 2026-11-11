@@ -135,6 +135,8 @@ Reddit 现有 Worker 使用同一镜像内 `services/channel_adapters/reddit/ent
 
 操作员先只读盘点现有单元、全部 drop-in、真实进程、挂载、凭据来源和私有策略摘要，生成 root 私有计划。计划明确一个服务、完整 Binding、`main-current` 或 `independent` 来源模式、保留的只读挂载，以及旧主单元/drop-in/绑定/selector 的预期摘要。固定输出在 `/etc/lead-home-release/`、该服务的 `zzzz-lead-executor.conf` 和发布仓库 `executors/<channel>/`；不能指定任意写入目的地或原始 systemd 文本。私有适配器暂存到清单摘要命名的目录，文件集必须与 Binding 完全一致；不把源码或业务资料提交到公开仓库。
 
+systemd 的空 `BindReadOnlyPaths=` 会同时清空两类绑定。工具从原服务实际 `BindPaths` 读取既有可写映射，保存到受保护快照，并在重置后显式重发；私有计划不能新增可写路径，也不能保留覆盖公共代码或解释器的可写绑定。稳定的 `/etc/lead-home-release/<channel>-layout.json` 记录这组来源和回执目录，随配置一起备份、回退。启动验收与后续独立核验均对照该记录检查 systemd 属性、实际进程内的可写挂载及来源 inode；记录不依赖当前应用 SHA，支持主线跟随执行器更新。CI 以真实 systemd 基础单元和 drop-in 验证原目录可写、公共代码只读及恢复行为。
+
 凭据保持原 EnvironmentFile 或现有只读数据绑定；公共代码新位置需要读取外置 dotenv 时，用进程环境 `LEAD_ENV_FILE` 指定绝对普通文件，显式无效路径拒绝、不回落。该设置保留逐次重读与进程环境优先级。新镜像包含浏览器隔离、研究、备份和迁移运行依赖，不依赖旧私有公共代码。
 
 经原维护入口取得本次 SHA 的安全点后，逐次调用一个渠道的纳管命令。工具持共享发布锁，只读核对维护指纹和空闲状态，持久保存旧字节，停止单个服务、安装模板、启动并核对实际进程证明。可知失败恢复原文件和服务；中断留下 journal，下次仅回读，不重放切换。工具不改变业务授权、不自动解除维护、不替换主应用 `current`。`main-current` 须先由正式应用发布切到候选；`independent` 可在主应用切换前单独准备获批版本。

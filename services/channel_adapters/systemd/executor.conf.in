@@ -11,5 +11,7 @@ BindReadOnlyPaths=@CORE_SOURCE@:/run/lead-executor/release
 BindReadOnlyPaths=@CORE_SOURCE@/services:/run/lead-home/bin/original/services
 BindReadOnlyPaths=@ADAPTER_SOURCE@:/run/lead-executor/adapter
 BindReadOnlyPaths=@BINDING@:@BINDING@
+# An empty BindReadOnlyPaths also resets BindPaths; re-emit existing writable mounts.
+@PRESERVED_WRITABLE_BINDINGS@
 BindPaths=@RECEIPT_SOURCE@:/run/lead-executor/receipt
 EnvironmentFile=@ENV_SOURCE@
