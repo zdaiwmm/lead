@@ -30,7 +30,9 @@ def test_today_reports_search_while_account_writes_are_held():
         return operating_plans.status(UUID(aid), today_only=True)["telegram_group_board"]
 
     first = board()
-    assert "冷却" in first["current"] and "复查" in first["next"]
+    assert "限制来源待核实" in first["current"]
+    assert "重新核验搜索条件" in first["next"]
+    assert first["resident"]["native_search_after"] == now + timedelta(minutes=25)
     assert "入群和发言已暂停" in first["resident"]["write_hold"]
     assert first["resident"]["discovery"]["native_cursor"] == 1
     assert "candidate" not in first["metrics"]
