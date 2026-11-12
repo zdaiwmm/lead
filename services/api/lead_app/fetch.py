@@ -6,7 +6,7 @@ import re
 import socket
 import time
 from functools import lru_cache
-from urllib.parse import urldefrag, urljoin, urlsplit
+from urllib.parse import parse_qs, urldefrag, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -120,7 +120,26 @@ async def pinned_get(client, url):
     return await client.send(request, stream=True)
 
 
-async def fetch_product(url, *, discover_links=False):
+def observed_source_links(soup,url):
+    """Search results are candidates. Their original pages must still be read."""
+    found = []
+    anchors = soup.select('a.result__a[href]') or soup.select('a[href]')
+    for anchor in anchors:
+        link = urldefrag(urljoin(url,anchor['href']))[0]
+        parsed = urlsplit(link)
+        if (parsed.hostname or '').endswith('duckduckgo.com'):
+            link = parse_qs(parsed.query).get('uddg',[link])[0]
+            parsed = urlsplit(link)
+        if (parsed.scheme not in ('https','http') or not parsed.hostname or parsed.username or parsed.password
+            or parsed.hostname==urlsplit(url).hostname or (parsed.hostname or '').endswith('duckduckgo.com')
+            or len(link)>2000):
+            continue
+        if link not in found:
+            found.append(link)
+    return found[:10]
+
+
+async def fetch_product(url, *, discover_links=False, external_links=False):
     async with httpx.AsyncClient(
         timeout=15, follow_redirects=False, trust_env=False
     ) as client:
@@ -142,11 +161,13 @@ async def fetch_product(url, *, discover_links=False):
                     if len(data) > 2_000_000:
                         raise ValueError("网页内容过大")
                 soup = BeautifulSoup(bytes(data), "html.parser")
-                links = product_links(soup, url) if discover_links else []
+                links = observed_source_links(soup,url) if external_links else product_links(soup, url) if discover_links else []
+                scripted = bool(soup.find('script'))
                 for tag in soup(["script", "style", "nav", "footer"]):
                     tag.decompose()
                 return {
-                    **({"links": links} if discover_links else {}),
+                    **({"links": links} if discover_links or external_links else {}),
+                    "requires_javascript":scripted and len(soup.get_text(' ',strip=True))<80,
                     "url": url,
                     "title": soup.title.get_text() if soup.title else "",
                     "text": soup.get_text(" ", strip=True)[:18000],

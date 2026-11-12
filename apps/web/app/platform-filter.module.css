@@ -1,0 +1,9 @@
+.filter { display: block; position: relative; flex: none; }
+.filter > button, .filterMenu button { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.filter > button { min-height: 36px; background: var(--surface); padding: 6px 10px; }
+.filter > button[aria-expanded="true"] { background: var(--raised); border-color: var(--text-muted); }
+.filterMenu { position: absolute; z-index: 4; inset: calc(100% + 6px) 0 auto auto; width: 174px; max-height: min(330px, 40dvh); overflow-y: auto; overscroll-behavior: contain; padding: 5px; border-radius: var(--radius-control); background: var(--raised); border: 1px solid var(--line); box-shadow: 0 10px 28px color-mix(in oklch, var(--canvas) 65%, transparent); }
+.filterMenu button { width: 100%; justify-content: flex-start; padding: 6px 10px; min-height: 36px; border: 0; background: transparent; }
+.filterMenu button:hover, .filterMenu button:focus-visible { background: var(--module-primary); outline-offset: -2px; }
+.filterMenu button[aria-selected="true"] { color: var(--focus); background: color-mix(in oklch, var(--data) 10%, transparent); }
+.filterMenu button > svg:last-child:not(:first-child) { margin-left: auto; }

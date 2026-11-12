@@ -198,6 +198,8 @@ def admit_browser(conn, body, network, *, source="browser", legacy=False, inline
         )
         # Do not persist an installation key, raw user ID or test credential.
         wire = redact_payload(wire)
+        if wire.get("conversion_id") and wire.get("properties",{}).get("subject_type") in {"pair","organization","order"}:
+            wire["conversion_id"] = user_key(conn["id"],wire["conversion_id"])
         row = _admit(
             c,
             tenant,
@@ -744,6 +746,8 @@ def process_ingest(args):
                     "UPDATE lead.analytics_ingest_events SET state='processed',processed_at=clock_timestamp(),lease_token=NULL,lease_until=NULL,error_code=NULL,error_detail=NULL WHERE id=%s",
                     (row["id"],),
                 )
+                if row["scope_key"]=="live" and row["source_kind"]=="server" and not result.get("duplicate") and payload.get("event_name") not in ("PageView","Engagement","Identify"):
+                    emit(c,str(row["agent_id"]),"growth.wake",{"reason":"business_receipt","ingest_id":str(row["id"]),"event_name":payload["event_name"]})
                 _settle_outbox(c, row)
             return {"state": "processed"}
         except (HTTPException, ValidationError) as error:

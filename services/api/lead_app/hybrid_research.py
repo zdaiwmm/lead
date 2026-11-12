@@ -13,6 +13,7 @@ import httpx
 from .budget import reserve, settle
 from .config import ROOT, STATE, env
 from .db import uid
+from .execution_routes import research_endpoint
 from .model_reasoning import selected_effort
 from .research import ResearchPage, begin_run, finish_run, public_url
 from .security import internal_token
@@ -100,13 +101,14 @@ async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=N
     url = public_url(url)
     reservation = reserve(aid, uid(), 100000, model_reference(connection), connection["provider"])
     rid = begin_run(aid, goal, message_id=message_id, task_id=task_id, mode=mode)
+    gateway_endpoint = research_endpoint(aid,rid)
     child = None
     result = None
     try:
         async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
             headers = {"Authorization": "Bearer " + internal_token()}
             response = await client.post(
-                f"http://127.0.0.1:8089/agents/{aid}/research/{rid}/hybrid",
+                gateway_endpoint+f"/agents/{aid}/research/{rid}/hybrid",
                 headers=headers,
             )
             response.raise_for_status()
@@ -117,6 +119,7 @@ async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=N
                 "goal": goal[:6000],
                 "cdp_url": response.json()["cdp_url"],
                 "gateway_token": internal_token(),
+                "gateway_endpoint": gateway_endpoint,
                 "model": connection,
                 "reasoning_effort": selected_effort(settings, "research"),
                 "max_steps": min(
@@ -199,7 +202,7 @@ async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=N
         async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
             try:
                 await client.post(
-                    f"http://127.0.0.1:8089/agents/{aid}/research/{rid}/close",
+                    gateway_endpoint+f"/agents/{aid}/research/{rid}/close",
                     headers={"Authorization": "Bearer " + internal_token()},
                 )
             except httpx.HTTPError:

@@ -40,7 +40,7 @@ from .conversions import router as conversion_router
 from .creative_pipeline import router as creative_router
 from .db import all_rows, audit, one, record, require_agent, tx
 from .events import router as event_router
-from .operating_plans import router as plans_router
+from .growth.views import router as growth_router
 from .operating_playbooks import router as playbook_router
 from .operating_workspace import router as operations_router
 from .ops import router as ops_router
@@ -76,7 +76,7 @@ app.include_router(ops_router)
 app.include_router(playbook_router)
 app.include_router(creative_router)
 app.include_router(operations_router)
-app.include_router(plans_router)
+app.include_router(growth_router)
 app.include_router(browser_pilot_router)
 app.include_router(admin_router)
 app.include_router(advanced_admin_router)
@@ -291,7 +291,7 @@ async def analyze_website(body: website_brief.Website, request: Request):
 @app.post("/api/agents/setup/confirm", status_code=201)
 def confirm_website(body: website_brief.ConfirmedBrief):
     brief = body.model_dump(exclude={"client_id"})
-    return {"id": domain.create_agent(str(body.client_id), confirmed_brief=brief)}
+    return {"id": domain.create_agent(str(body.client_id), confirmed_brief=brief,runtime_engine="growth")}
 
 
 @app.post("/api/agents/setup", status_code=201)
@@ -300,6 +300,7 @@ def create_setup(body: AgentSetupCreate):
         str(body.client_id),
         setup=body.profile(),
         setup_template_version=body.template_version,
+        runtime_engine="growth",
     )
     a = domain.agent_detail(aid)
     return {"id": aid, "config_revision": a["config_revision"]}
@@ -511,7 +512,7 @@ class LabPublish(BaseModel):
 
 class BrowserInput(BaseModel):
     takeover: UUID | None = None
-    kind: Literal["click", "text", "key", "scroll", "back", "forward", "reload"]
+    kind: Literal["click", "text", "key", "scroll", "back", "forward", "reload", "composition_start", "composition_end"]
     x: float = 0
     y: float = 0
     text: str = Field(default="", max_length=4000)
@@ -552,6 +553,13 @@ async def verify_login(aid: UUID, body: Connection):
     if platform not in SPECS:
         raise ValueError("频道不存在")
     aid = str(aid)
+    with tx(aid) as c:
+        from .growth.store import enabled
+        if enabled(require_agent(c, aid)):
+            account = one(c, "SELECT id,state FROM lead.social_accounts WHERE id=%s AND platform=%s", (body.account_id, platform))
+            if not account or account["state"] != "connected":
+                raise ValueError("后台正在核对登录，完成后会自动连接")
+            return {"ok": True, "account_id": str(account["id"])}
     with tx(aid) as c:
         control_version = require_agent(c, aid)["control_version"]
         selected = one(c,"SELECT id,binding_version,state,verified_at,external_account_id,automation_enabled FROM lead.social_accounts WHERE platform=%s AND (%s::uuid IS NULL OR id=%s) ORDER BY created_at DESC LIMIT 1",(platform,body.account_id,body.account_id))
@@ -628,7 +636,10 @@ def enable_managed_scope(aid: UUID, account_id: UUID, body: ManagedScopeRequest)
 
 @app.post("/api/agents/{aid}/identity/check")
 async def check_identity(aid: UUID):
-    return (await gateway(f"/agents/{aid}/identity/check")).json()
+    with tx(str(aid)) as c:
+        require_agent(c,str(aid))
+        profile = one(c,"SELECT id FROM lead.browser_profiles WHERE slot='default'")
+    return (await gateway(f"/agents/{aid}/identity/check",body={"profile_id":str(profile["id"])})).json()
 
 
 @app.post("/api/agents/{aid}/accounts/{account_id}/targets")
@@ -730,19 +741,25 @@ def login_browser_port(c, aid, path, body):
 async def gateway(path, method="POST", body=None, timeout=100):
     matched = re.match(r"^/agents/([0-9a-fA-F-]{36})(?:/|$)", path)
     port = 8089
+    base = None
     if matched:
         with tx(matched[1]) as c:
             if path == "/agents/" + matched[1] + "/close":
                 if not one(c, "SELECT id FROM lead.agents WHERE id=%s", (matched[1],)):
                     raise LookupError("Agent 不存在")
             else:
-                require_agent(c, matched[1])
-                port = login_browser_port(c, matched[1], path, body)
+                agent = require_agent(c, matched[1])
+                from .growth.store import enabled
+                if enabled(agent):
+                    from .execution_routes import endpoint, request_route
+                    base = endpoint(request_route(c, matched[1], path, body))
+                else:
+                    port = login_browser_port(c, matched[1], path, body)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         try:
             r = await client.request(
                 method,
-                f"http://127.0.0.1:{port}" + path,
+                (base or f"http://127.0.0.1:{port}") + path,
                 json=body,
                 headers={
                     "Authorization": "Bearer " + internal_token(),
@@ -838,7 +855,7 @@ def agents():
 
 @app.post("/api/agents", status_code=201)
 def create(body: CreateAgent):
-    aid = domain.create_agent(str(body.client_id) if body.client_id else None)
+    aid = domain.create_agent(str(body.client_id) if body.client_id else None,runtime_engine="growth")
     return {"id": aid}
 
 
@@ -1006,6 +1023,12 @@ async def connect(aid: UUID, body: Connection):
     aid = str(aid)
     if body.platform not in [p[0] for p in domain.PLATFORMS] + ["lab"]:
         raise HTTPException(400, "频道不存在")
+    from .growth.store import enabled
+    with tx(aid) as c:
+        growth = enabled(require_agent(c, aid))
+    if growth and body.platform != "lab":
+        from .account_connection import begin
+        return await begin(aid, body.platform, account_id=body.account_id, new_account=body.new_account)
     from .account_profiles import for_platform
 
     profile = for_platform(
@@ -1101,6 +1124,10 @@ async def browser_challenge_status(aid: UUID, body: BrowserChallengeRequest):
 @app.post("/api/agents/{aid}/browser/challenge/verify")
 async def browser_challenge_verify(aid: UUID, body: BrowserChallengeRequest):
     result = (await gateway(f"/agents/{aid}/challenge/verify", body=body.model_dump(mode="json"))).json()
+    from .growth.store import enabled
+    with tx(str(aid)) as c:
+        if enabled(require_agent(c, str(aid))):
+            return result
     if result.get("finish_login"):
         return {**(await verify_login(aid, Connection(platform=body.platform, account_id=result["account_id"], start_managed_targets=body.start_managed_targets))), "finish_login": True}
     return result
@@ -1111,6 +1138,11 @@ def end_takeover(aid: UUID, takeover: UUID | None = None):
     aid = str(aid)
     with tx(aid) as c:
         require_agent(c, aid, True)
+        if takeover:
+            session = one(c, "SELECT * FROM lead.takeover_sessions WHERE id=%s", (takeover,))
+            if session and session["purpose"] == "login" and not session["completed_account_id"]:
+                # Closing the frontend hands control to the durable observer; it does not cancel login.
+                return {"ok": True, "status": "observing"}
         if (
             takeover is None
             and one(
@@ -1125,6 +1157,17 @@ def end_takeover(aid: UUID, takeover: UUID | None = None):
         )
         record(c, aid, "已结束接管", "浏览器控制权已交回。")
     return {"ok": True}
+
+
+@app.get("/api/agents/{aid}/connections/{takeover}")
+def connection_status(aid: UUID, takeover: UUID):
+    with tx(str(aid)) as c:
+        require_agent(c, str(aid))
+        session = one(c, "SELECT state,purpose,completed_account_id FROM lead.takeover_sessions WHERE id=%s", (takeover,))
+        if not session:
+            raise HTTPException(404)
+        return {"status": "connected" if session["completed_account_id"] else session["state"],
+                "account_id": session["completed_account_id"]}
 
 
 @app.get("/api/agents/{aid}/browser/screenshot")

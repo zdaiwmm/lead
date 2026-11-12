@@ -12,6 +12,13 @@ from lead_app.scope import current_tenant
 FACT = "Seka supports long-form translation with glossary and style settings."
 
 
+def legacy_inventory(aid):
+    with tx(aid) as c:
+        agent=one(c,"SELECT * FROM lead.agents WHERE id=%s",(aid,))
+        business=one(c,"SELECT * FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
+        return content_backlog.status(c,agent,business)
+
+
 @pytest.fixture
 def agent(monkeypatch, local_model_settings):
     monkeypatch.setenv("LEAD_COLLECTOR_URL", "https://links.example")
@@ -76,7 +83,7 @@ async def test_prepares_three_distinct_drafts_without_posting_and_stops_at_reser
         assert not all_rows(c, "SELECT id FROM lead.authorization_grants")
         content_backlog.scheduled(c, drafts[0]["id"], uid())
         assert len(content_backlog.ready(c, business["id"], a["config_revision"])) == 2
-    assert len(domain.agent_detail(agent)["operating_workflow"]["ready_content"]) == 2
+    assert len(legacy_inventory(agent)["ready_content"]) == 2
 
 
 @pytest.mark.asyncio
@@ -128,7 +135,7 @@ async def test_pause_during_generation_discards_result(agent, monkeypatch):
     monkeypatch.setattr(content_backlog, "run_model", pause)
     assert (await content_backlog.prepare_one(agent))["state"] == "canceled"
     assert await content_backlog.prepare_one(agent) is None
-    assert not domain.agent_detail(agent)["operating_workflow"]["ready_content"]
+    assert not legacy_inventory(agent)["ready_content"]
 
 
 @pytest.mark.asyncio
@@ -205,8 +212,8 @@ async def test_product_cycle_prepares_content_and_schedules_next_step_without_re
     result = await activities.autonomous_cycle({"agent_id": agent, "cycle_id": uid()})
     assert 5 <= result["delay"] <= 30
     detail = domain.agent_detail(agent)
-    assert len(detail["operating_workflow"]["ready_content"]) == 1, result
-    assert detail["operating_workflow"]["next_check_at"]
+    assert len(legacy_inventory(agent)["ready_content"]) == 1, result
+    assert legacy_inventory(agent)["next_check_at"]
     assert detail["onboarding_state"]["operating_schedule"]["next_content_at"]
 
 
@@ -321,4 +328,4 @@ async def test_product_timer_fills_content_reserve_without_external_wakeup(
         finally:
             if len(calls) < 3:
                 await handle.terminate("isolated test cleanup")
-    assert len(domain.agent_detail(agent)["operating_workflow"]["ready_content"]) == 3
+    assert len(legacy_inventory(agent)["ready_content"]) == 3

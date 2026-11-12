@@ -81,18 +81,23 @@ def source_snapshot(business):
     }
 
 
-def current_guard(c, aid, business_id, revision, control_version):
+def current_guard(c, aid, business_id, revision, control_version, work_ref=None):
     agent = require_agent(c, aid, True)
     business = one(
         c, "SELECT id FROM lead.business_profiles ORDER BY revision DESC LIMIT 1"
     )
     if (
         agent["desired_state"] in {"paused", "archived"}
-        or agent["config_revision"] != revision
+        or (not work_ref and agent["config_revision"] != revision)
+        or agent["control_version"] != control_version
         or not business
         or str(business["id"]) != str(business_id)
     ):
         raise ValueError("素材制作期间运营状态或业务资料已变化")
+    if work_ref:
+        work = one(c,"SELECT state,input FROM lead.tasks WHERE id=%s",(work_ref[0],))
+        if not work or work["state"]!="running" or work["input"].get("task_generation")!=work_ref[1]:
+            raise ValueError("content_work_changed")
     return agent
 
 
@@ -104,6 +109,7 @@ async def produce(
     business_id=None,
     config_revision=None,
     purpose="publication",
+    parent_task_id=None,
 ):
     aid = str(UUID(str(aid)))
     from .admin_settings import brand_context, tool_enabled, validate_brand_content
@@ -157,50 +163,66 @@ async def produce(
             json.dumps(payload, sort_keys=True, default=str).encode()
         ).hexdigest()
         key = f"creative:{aid}:{digest}"
-        old = one(c, "SELECT * FROM lead.tasks WHERE workflow_id=%s", (key,))
-        if old and old["state"] == "succeeded":
-            # Resolve every asset again; a corrupted/deleted asset is not a cache hit.
-            for item in old["result"]["assets"]:
-                assets.resolve(aid, item["id"], item["sha256"])
-            return {**old["result"], "duplicate": True, "job_id": str(old["id"])}
-        if (
-            old
-            and old["state"] == "running"
-            and one(
-                c,
-                "SELECT 1 FROM lead.tasks WHERE id=%s AND started_at>now()-interval '4 minutes'",
-                (old["id"],),
-            )
-        ):
-            raise ValueError("同一份素材正在制作，请稍后继续")
-        if old and old["state"] == "running" and job_is_alive(aid, old["id"]):
-            raise ValueError("同一份素材正在制作，请稍后继续")
-        if (
-            one(
-                c,
-                "SELECT count(*) AS n FROM lead.tasks WHERE type='media.generate' AND created_at>now()-interval '1 day'",
-            )["n"]
-            >= MAX_DAILY_JOBS
-            and not old
-        ):
-            raise ValueError("今天的素材制作量已达到平台上限")
-        job_id = str(old["id"]) if old else uid()
-        if old:
-            c.execute(
-                "UPDATE lead.tasks SET state='running',started_at=now(),completed_at=NULL,result=NULL WHERE id=%s",
-                (job_id,),
-            )
+        work_ref = None
+        if parent_task_id:
+            parent = one(c,"SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE",(parent_task_id,))
+            if not parent or parent["type"]!="growth.content" or parent["state"]!="running":
+                raise ValueError("content_work_changed")
+            work_ref = (parent["id"],parent["input"]["task_generation"])
+            job_id = str(parent["id"])
+            previous = (parent["result"] or {}).get("creative",{})
+            if previous.get("digest")==digest and previous.get("state")=="succeeded":
+                result = previous["result"]
+                for item in result["assets"]:
+                    assets.resolve(aid,item["id"],item["sha256"])
+                return {**result,"job_id":job_id,"duplicate":True}
+            c.execute("UPDATE lead.tasks SET result=coalesce(result,'{}') || %s WHERE id=%s",
+                (j({"creative":{"digest":digest,"state":"running"}}),job_id))
         else:
-            c.execute(
-                "INSERT INTO lead.tasks(id,tenant_id,agent_id,type,state,workflow_id,input,scheduled_at,started_at) VALUES(%s,%s,%s,'media.generate','running',%s,%s,now(),now())",
-                (
-                    job_id,
-                    current_tenant(),
-                    aid,
-                    key,
-                    j({**payload, "control_version": control}),
-                ),
-            )
+            old = one(c, "SELECT * FROM lead.tasks WHERE workflow_id=%s", (key,))
+            if old and old["state"] == "succeeded":
+                # Resolve every asset again; a corrupted/deleted asset is not a cache hit.
+                for item in old["result"]["assets"]:
+                    assets.resolve(aid, item["id"], item["sha256"])
+                return {**old["result"], "duplicate": True, "job_id": str(old["id"])}
+            if (
+                old
+                and old["state"] == "running"
+                and one(
+                    c,
+                    "SELECT 1 FROM lead.tasks WHERE id=%s AND started_at>now()-interval '4 minutes'",
+                    (old["id"],),
+                )
+            ):
+                raise ValueError("同一份素材正在制作，请稍后继续")
+            if old and old["state"] == "running" and job_is_alive(aid, old["id"]):
+                raise ValueError("同一份素材正在制作，请稍后继续")
+            if (
+                one(
+                    c,
+                    "SELECT count(*) AS n FROM lead.tasks WHERE type='media.generate' AND created_at>now()-interval '1 day'",
+                )["n"]
+                >= MAX_DAILY_JOBS
+                and not old
+            ):
+                raise ValueError("今天的素材制作量已达到平台上限")
+            job_id = str(old["id"]) if old else uid()
+            if old:
+                c.execute(
+                    "UPDATE lead.tasks SET state='running',started_at=now(),completed_at=NULL,result=NULL WHERE id=%s",
+                    (job_id,),
+                )
+            else:
+                c.execute(
+                    "INSERT INTO lead.tasks(id,tenant_id,agent_id,type,state,workflow_id,input,scheduled_at,started_at) VALUES(%s,%s,%s,'media.generate','running',%s,%s,now(),now())",
+                    (
+                        job_id,
+                        current_tenant(),
+                        aid,
+                        key,
+                        j({**payload, "control_version": control}),
+                    ),
+                )
     folder = STATE / "creative" / aid / job_id
     base = STATE / "creative"
     process = None
@@ -246,7 +268,7 @@ async def produce(
                 if process.returncode:
                     raise ValueError(rendered.get("error", "CREATIVE_RENDER_FAILED"))
                 with tx(aid) as c:
-                    current_guard(c, aid, business["id"], revision, control)
+                    current_guard(c, aid, business["id"], revision, control, work_ref)
                 media = []
                 filenames = [(rendered["filename"], "publication")]
                 if rendered["preview"] != rendered["filename"]:
@@ -268,7 +290,7 @@ async def produce(
                         },
                     )
                     with tx(aid) as c:
-                        current_guard(c, aid, business["id"], revision, control)
+                        current_guard(c, aid, business["id"], revision, control, work_ref)
                         annotation = {
                             "generated": {
                                 "job_id": job_id,
@@ -307,11 +329,15 @@ async def produce(
                     "render_elapsed_seconds": round(time.monotonic() - began, 3),
                 }
                 with tx(aid) as c:
-                    current_guard(c, aid, business["id"], revision, control)
-                    c.execute(
-                        "UPDATE lead.tasks SET state='succeeded',result=%s,completed_at=now() WHERE id=%s",
-                        (j(result), job_id),
-                    )
+                    current_guard(c, aid, business["id"], revision, control, work_ref)
+                    if work_ref:
+                        c.execute("UPDATE lead.tasks SET result=coalesce(result,'{}') || %s WHERE id=%s",
+                            (j({"creative":{"state":"succeeded","digest":digest,"result":result}}),job_id))
+                    else:
+                        c.execute(
+                            "UPDATE lead.tasks SET state='succeeded',result=%s,completed_at=now() WHERE id=%s",
+                            (j(result), job_id),
+                        )
                     audit(
                         c,
                         aid,
@@ -330,21 +356,22 @@ async def produce(
         if process and process.returncode is None:
             process.kill()
             await process.wait()
-        with tx(aid) as c:
-            c.execute(
-                "UPDATE lead.tasks SET state='failed',result=%s,completed_at=now() WHERE id=%s AND state='running'",
-                (
-                    j(
-                        {
-                            "error": str(error)[:240]
-                            if isinstance(error, ValueError)
-                            else type(error).__name__,
-                            "retry_safe": True,
-                        }
+        if not work_ref:
+            with tx(aid) as c:
+                c.execute(
+                    "UPDATE lead.tasks SET state='failed',result=%s,completed_at=now() WHERE id=%s AND state='running'",
+                    (
+                        j(
+                            {
+                                "error": str(error)[:240]
+                                if isinstance(error, ValueError)
+                                else type(error).__name__,
+                                "retry_safe": True,
+                            }
+                        ),
+                        job_id,
                     ),
-                    job_id,
-                ),
-            )
+                )
         raise
     finally:
         if held:

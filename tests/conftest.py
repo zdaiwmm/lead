@@ -27,6 +27,9 @@ def reclaim_test_profiles(monkeypatch, verification_scope):
     created = set()
 
     def tracked(*args, **kwargs):
+        # Existing regressions exercise the retained legacy contracts explicitly.
+        # New public API calls pass growth; new growth fixtures also choose it explicitly.
+        kwargs.setdefault("runtime_engine","legacy")
         aid = original(*args, **kwargs)
         created.add(str(aid))
         return aid
@@ -83,3 +86,11 @@ def process_pending_clicks():
             assert process_ingest(work_args(item))["state"] == "processed"
 
     return process
+
+
+@pytest.fixture
+def growth_agent():
+    """A disposable project in the explicitly selected verification database."""
+    aid = domain.create_agent(runtime_engine="growth")
+    yield aid
+    domain.set_control(aid, "archive")

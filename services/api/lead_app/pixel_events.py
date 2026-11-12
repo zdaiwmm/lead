@@ -25,6 +25,11 @@ NAME = r"^[A-Za-z][A-Za-z0-9_]{0,63}$"
 EVENT_ID = r"^[A-Za-z0-9:_.-]{1,128}$"
 RESERVED = {"pageview", "engagement", "identify"}
 PROPERTIES = {
+    "first_business_value",
+    "subject_type",
+    "invited",
+    "audience_class",
+    "value_qualified",
     "order_id",
     "content_name",
     "content_category",
@@ -180,6 +185,13 @@ class PixelEvent(BaseModel):
     @field_validator("properties")
     @classmethod
     def properties_only(cls, value):
+        for key in ("first_business_value", "invited", "value_qualified"):
+            if key in value and type(value[key]) is not bool:
+                raise ValueError("业务证明标记必须为布尔值")
+        if "subject_type" in value and value["subject_type"] not in {"user","pair","order","organization"}:
+            raise ValueError("业务主体类型无效")
+        if "audience_class" in value and value["audience_class"] not in {"customer","team","partner_acceptance","diagnostic"}:
+            raise ValueError("业务证明来源类型无效")
         if (
             set(value) - PROPERTIES
             or len(json.dumps(value, ensure_ascii=False, allow_nan=False)) > 4000
@@ -829,11 +841,19 @@ def receive(
         body.event_name in ("CompleteRegistration", "Activation", "Identify")
         and not identity
         and not (body.event_name == "CompleteRegistration" and body.conversion_id)
+        and not (body.properties.get("subject_type") in {"pair","organization","order"} and body.conversion_id)
     ):
         raise HTTPException(422, "此事件需要用户编号")
     properties = body.properties
     business = None
-    if body.event_name == "CompleteRegistration":
+    if properties.get("subject_type") in {"pair","organization","order"} and body.event_name != "Purchase":
+        if not body.conversion_id or trust != "server_verified":
+            raise HTTPException(422,"此业务主体需要服务端回传受限化名编号")
+        prefix = "activation" if body.event_name=="Activation" else body.event_name
+        if properties.get("rule_version") != f"{prefix}-v{definition['revision']}":
+            raise HTTPException(422,"业务规则版本不匹配")
+        business = user_key(conn["id"],properties["subject_type"]+":"+body.conversion_id)
+    elif body.event_name == "CompleteRegistration":
         business = body.conversion_id or identity
     elif body.event_name == "Lead":
         business = body.conversion_id

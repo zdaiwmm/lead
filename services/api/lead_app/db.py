@@ -69,6 +69,7 @@ def tx(agent_id=None, tenant_id=None, *, pooled=True):
             "SELECT set_config('app.tenant_id',%s,true), set_config('app.agent_id',%s,true),set_config('app.analytics_scope','',true)",
             (tenant_id, agent_id or ""),
         )
+        conn.execute("SELECT set_config('app.growth_protocol','1',true)")
         from .scope import principal
 
         who = principal()
@@ -128,6 +129,14 @@ def audit(conn, agent_id, kind, payload=None):
 
 
 def emit(conn, agent_id, kind, payload=None):
+    if kind in {"supervisor.wake","agent.updated"}:
+        from .growth.store import enabled as growth_enabled
+        agent = one(conn,"SELECT * FROM lead.agents WHERE id=%s",(agent_id,))
+        if agent and growth_enabled(agent):
+            if kind=="agent.updated":
+                return
+            kind = "growth.wake"
+            payload = {"reason":"configuration_changed","control_version":agent["control_version"],"config_revision":agent["config_revision"]}
     if kind in {"supervisor.wake", "agent.updated"}:
         from .cadence_events import wake_clocks
         wake_clocks(conn, agent_id)

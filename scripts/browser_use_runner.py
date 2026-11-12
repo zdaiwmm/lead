@@ -112,7 +112,7 @@ async def main(data):
             from uuid import uuid4
 
             response = await client.post(
-                f"http://127.0.0.1:8089/agents/{data['agent_id']}/research/command",
+                data['gateway_endpoint']+f"/agents/{data['agent_id']}/research/command",
                 headers={"Authorization": "Bearer " + data["gateway_token"]},
                 json={
                     "run_id": data["run_id"],

@@ -24,24 +24,38 @@ from .channel_research import channel_research_tick
 from .config import STATE, any_model_configured, env, model_config
 from .db import all_rows, emit, one
 from .db import pooled_tx as tx
+from .growth.runtime import (
+    growth_advance,
+    growth_coordinate,
+    growth_execute,
+    growth_finish,
+)
 from .identity_store import execution_tenants
 from .resident_ownership import resident_cycle_agent_ids
-from .scope import service_scope, tenant_scope
+from .scope import scoped_activity, service_scope, tenant_scope
 from .temporal_client import connect
 from .workflows import (
     AnalyticsIngestWorkflow,
     ChannelDeliveryWorkflow,
     ChannelPreparationWorkflow,
     ChatWorkflow,
+    GrowthDecisionWorkflow,
+    GrowthWorkWorkflow,
     PublishWorkflow,
     SupervisorWorkflow,
 )
 
 
 @activity.defn(name="autonomous_cycle")
+@scoped_activity
 async def autonomous_cycle(args: dict):
     # Route before scoped/managed execution acquires any shared business resources.
     # A resident owns only this supervisor cycle, never channel.clock delivery queues.
+    with tx(args["agent_id"]) as c:
+        from .growth.store import legacy_owns
+        agent = one(c,"SELECT * FROM lead.agents WHERE id=%s",(args["agent_id"],))
+        if agent and not legacy_owns(agent):
+            return {"stop":True,"delay":86400,"reason":"growth_owns_scope"}
     if str(args["agent_id"]) in resident_cycle_agent_ids(env()):
         return {"delay": 300, "cadence_version": 1, "reason": "device_resident_owns_cycle"}
     return await managed_autonomous_cycle(args)
@@ -156,7 +170,25 @@ async def deliver_workspace(client, tenant, configured, key_was_configured):
                                 raise
                     await run_db(ack_outbox, aid, e["id"], e.get("lease_token"))
                     return
-                if e["event_type"] == "chat.enqueue":
+                if e["event_type"] == "growth.work":
+                    identifier = f"growth-work:{payload['task_id']}:{payload['task_generation']}"
+                    try:
+                        await start_workflow(client, GrowthWorkWorkflow.run, payload, id=identifier, task_queue="lead",
+                            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE)
+                    except WorkflowAlreadyStartedError:
+                        try:
+                            await client.get_workflow_handle(identifier).signal("wake")
+                        except RPCError as error:
+                            if error.status != RPCStatusCode.NOT_FOUND:
+                                raise
+                elif e["event_type"] == "growth.account_connected":
+                    from .account_connection import connected
+                    await run_db(connected, aid, payload["account_id"])
+                elif e["event_type"] == "growth.wake":
+                    await start_workflow(client, GrowthDecisionWorkflow.run, aid, id="growth-decision:"+aid,
+                        task_queue="lead", id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+                        start_signal="wake", start_signal_args=[payload])
+                elif e["event_type"] == "chat.enqueue":
                     await start_workflow(client,
                         ChatWorkflow.run,
                         aid,
@@ -278,6 +310,9 @@ async def publish_outbox(client):
                 elif kind == "reddit_review":
                     from .reddit_workspace import review_enabled
                     await asyncio.to_thread(review_enabled, tenant)
+                elif kind == "growth":
+                    from .growth.runtime import recover_workspace
+                    await asyncio.to_thread(recover_workspace)
                 else:
                     from .admin_experiences import collect
                     await asyncio.to_thread(collect)
@@ -305,7 +340,7 @@ async def publish_outbox(client):
                     workspace_retry_at.clear()
                 credential_state = current_credentials
                 for tenant in await asyncio.to_thread(execution_tenants):
-                    for kind, interval in (("analytics", 5), ("notifications", 5), ("external_notifications", 5), ("experiences", 600), ("reddit_review", 60)):
+                    for kind, interval in (("analytics", 5), ("notifications", 5), ("external_notifications", 5), ("experiences", 600), ("reddit_review", 60), ("growth", 60)):
                         if kind == "analytics" and env().get("LEAD_ANALYTICS_DEDICATED") == "1":
                             continue
                         key = (tenant, kind)
@@ -373,6 +408,8 @@ async def main():
             ChatWorkflow,
             PublishWorkflow,
             SupervisorWorkflow,
+            GrowthWorkWorkflow,
+            GrowthDecisionWorkflow,
         ],
         activities=[
             chat_job,
@@ -380,6 +417,9 @@ async def main():
             autonomous_cycle,
             mark_task_failed,
             execution_policy,
+            growth_advance,
+            growth_finish,
+            growth_coordinate,
         ],
         max_concurrent_activities=activity_slots,
         max_concurrent_workflow_tasks=workflow_slots,
@@ -432,6 +472,10 @@ async def main():
         ))
         await stack.enter_async_context(publish_worker)
         await stack.enter_async_context(chat_worker)
+        for lane, capacity in (("growth-model", 1), ("growth-work", 4), ("growth-receipts", 3)):
+            await stack.enter_async_context(Worker(client, task_queue="lead-"+lane,
+                activities=[growth_execute], max_concurrent_activities=capacity,
+                graceful_shutdown_timeout=timedelta(seconds=5)))
         if env().get("LEAD_ANALYTICS_DEDICATED") != "1":
             await stack.enter_async_context(analytics_worker)
         delivery = asyncio.create_task(publish_outbox(client))

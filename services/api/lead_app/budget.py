@@ -1,3 +1,4 @@
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
 from .config import env
@@ -13,6 +14,7 @@ class BudgetExceeded(Exception):
 
 DEFAULT_DAILY_TOKEN_LIMIT = 1_000_000_000
 MAX_DAILY_TOKEN_LIMIT = 9_007_199_254_740_991
+growth_cost_context = ContextVar("growth_cost_context", default=None)
 
 
 def configuration(c, aid):
@@ -26,10 +28,10 @@ def configuration(c, aid):
         else int(env().get("LEAD_DAILY_TOKEN_LIMIT") or DEFAULT_DAILY_TOKEN_LIMIT)
     )
     custom = agent["onboarding_state"].get("daily_token_limit")
-    from .growth_experiments import chamber_campaign
     config = head(c, "budgets/" + str(aid))
     return {
-        "acquisition_uncapped": chamber_campaign(agent),
+        "acquisition_uncapped": agent["onboarding_state"].get("growth_budget_policy", {}).get("mode") == "unlimited"
+            and bool(agent["onboarding_state"].get("growth_budget_policy", {}).get("source_ref")),
         "daily_token_limit": custom if custom is not None else default,
         "default_daily_token_limit": default,
         "custom_daily_token_limit": custom,
@@ -144,8 +146,7 @@ def reserve(aid, operation_key, estimate, model_ref=None, provider=None):
                 (limit, period["id"]),
             )
             period["limit_units"] = limit
-        from .growth_experiments import chamber_campaign
-        if not chamber_campaign(agent) and (
+        if not configuration(c, aid)["acquisition_uncapped"] and (
             period["spent_units"] + period["reserved_units"] + estimate
             > period["limit_units"]
         ):
@@ -160,6 +161,31 @@ def reserve(aid, operation_key, estimate, model_ref=None, provider=None):
         )
         trial = runtime.get()
         pricing = quote(c, model_ref)
+        growth = growth_cost_context.get()
+        if growth:
+            from .growth.store import question_costs
+            snapshot = dict(growth)
+            if growth.get("recovery_root"):
+                spent = one(c,"""SELECT coalesce(sum(CASE WHEN r.state IN ('reserved','unknown') THEN r.units ELSE 0 END),0)
+                  +coalesce(sum(u.units),0) n FROM lead.budget_reservations r LEFT JOIN (
+                    SELECT reservation_id,sum(units) units FROM lead.usage_events GROUP BY reservation_id) u ON u.reservation_id=r.id
+                    WHERE r.pricing_snapshot#>>'{growth,recovery_root}'=%s""",(growth["recovery_root"],))["n"]
+                if spent+estimate > min(70000,growth["recovery_limit"]):
+                    raise BudgetExceeded("recovery_budget_exhausted",required_units=estimate)
+            if growth.get("experiment_id"):
+                experiment = one(c,"SELECT * FROM lead.growth_experiments WHERE id=%s",(growth["experiment_id"],))
+                if not experiment or experiment["state"] not in ("active","observing"):
+                    raise BudgetExceeded("experiment_closed",required_units=estimate)
+                from .growth.store import objective_revision
+                if experiment["objective_revision"]!=objective_revision(agent):
+                    raise BudgetExceeded("experiment_closed",required_units=estimate)
+                if datetime.fromisoformat(experiment["specification"]["review_at"]) <= now:
+                    raise BudgetExceeded("experiment_window_ended",required_units=estimate)
+                cost = question_costs(c,experiment["question_key"])
+                if cost["committed_units"]+estimate > cost["limit_units"]:
+                    raise BudgetExceeded("question_limit",required_units=estimate)
+                snapshot["question_key"] = experiment["question_key"]
+            pricing = {**(pricing or {}), "growth": snapshot}
         if trial and str(trial["aid"]) == str(aid):
             if not enabled(agent) or trial["control"] != agent["control_version"] or trial["revision"] != agent["config_revision"]:
                 raise BudgetExceeded("experiment_configuration_changed", required_units=estimate)
@@ -168,7 +194,7 @@ def reserve(aid, operation_key, estimate, model_ref=None, provider=None):
                 usage = trial_spend(c,trial["id"])
                 if usage["spent"]+usage["held"]+estimate>trial["max_tokens"]:
                     raise BudgetExceeded("experiment_limit",required_units=estimate)
-            if not chamber_campaign(agent) and estimate > headroom(remaining,trial["bucket"],bool(trial.get("max_tokens"))):
+            if estimate > headroom(remaining,trial["bucket"],bool(trial.get("max_tokens"))):
                 raise BudgetExceeded("experiment_working_budget",required_units=estimate)
             if operation_key.startswith("trial-cache:") and one(c,"SELECT 1 FROM lead.budget_reservations WHERE operation_key=%s",(operation_key,)):
                 raise BudgetExceeded("experiment_judgement_already_reserved",required_units=estimate)
@@ -239,8 +265,12 @@ def settle(
             from .metering import priced
 
             measured = priced(details or {}, snapshot=r["pricing_snapshot"])
+            if (details or {}).get("growth_output") is not None:
+                measured["growth_output"] = details["growth_output"]
             if (r["pricing_snapshot"] or {}).get("trial"):
                 measured["trial"] = r["pricing_snapshot"]["trial"]
+            if (r["pricing_snapshot"] or {}).get("growth"):
+                measured["growth"] = r["pricing_snapshot"]["growth"]
             c.execute(
                 "INSERT INTO lead.usage_events(tenant_id,agent_id,reservation_id,event_key,category,units,rate_version,occurred_at,details) VALUES(%s,%s,%s,%s,'model_tokens',%s,%s,now(),%s) ON CONFLICT DO NOTHING",
                 (

@@ -18,6 +18,44 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_lab_transport(monkeypatch):
+    # Never send this task's synthetic IDs/cookies to a separately running user
+    # API at :8088. Firefox still renders and submits the real lab HTML, while
+    # the HTTP boundary goes to this process's scoped application/database.
+    from fastapi.testclient import TestClient
+    from lead_app.api import app
+    original=Gateway.get
+    routed=set()
+    client=TestClient(app,base_url="http://127.0.0.1:8088",follow_redirects=False)
+    calls=[]
+    async def handle(route):
+        from urllib.parse import urljoin
+        request=route.request
+        source_headers=await request.all_headers()
+        response=await asyncio.to_thread(client.request,request.method,request.url,
+            headers=source_headers,content=request.post_data_buffer)
+        # A browser redirect can bypass a route handler. Resolve this lab's
+        # same-origin PRG inside the isolated transport as well.
+        if response.status_code==303:
+            destination=urljoin(request.url,response.headers['location'])
+            assert destination.startswith('http://127.0.0.1:8088/lab/')
+            response=await asyncio.to_thread(client.get,destination,headers=source_headers)
+        assert response.status_code<400,(request.method,request.url,response.status_code,response.text[:120])
+        calls.append((request.method,request.url,response.status_code))
+        headers={key:value for key,value in response.headers.items() if key.lower() not in ('content-length','content-encoding','transfer-encoding')}
+        await route.fulfill(status=response.status_code,headers=headers,body=response.content)
+    async def get(self,*args,**kwargs):
+        actor=await original(self,*args,**kwargs)
+        if id(actor.context) not in routed:
+            await actor.context.route('http://127.0.0.1:8088/**',handle)
+            routed.add(id(actor.context))
+        return actor
+    monkeypatch.setattr(Gateway,'get',get)
+    yield calls
+    client.close()
+
+
 @pytest.mark.asyncio
 async def test_browser_process_crash_reopens_same_profile(monkeypatch):
     import psutil
@@ -75,7 +113,7 @@ async def test_browser_process_crash_reopens_same_profile(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_profiles_restart_and_uncertain_submit(tmp_path, monkeypatch):
+async def test_concurrent_profiles_restart_and_uncertain_submit(tmp_path, monkeypatch,isolated_lab_transport):
     monkeypatch.setattr(domain, "emit", lambda *args, **kwargs: None)
     ids = [domain.create_agent() for _ in range(3)]
     g = Gateway()
@@ -126,7 +164,8 @@ async def test_concurrent_profiles_restart_and_uncertain_submit(tmp_path, monkey
         results = await asyncio.gather(
             *(operate(a, act) for a, act in zip(actors, actions))
         )
-        assert all(r["state"] == "confirmed" for r in results), results
+        assert all(r["state"] == "confirmed" for r in results),(results,isolated_lab_transport,
+            [await actor.page.locator('body').inner_text() for actor in actors])
         assert max(s for s, e in intervals) < min(e for s, e in intervals)
         for aid in ids:
             with tx(aid) as c:

@@ -152,7 +152,7 @@ def test_deploy_path_checks_compatibility_and_skips_repeats(
     monkeypatch.setattr(hook, "current", lambda: (hook.STORE / "current").readlink().name)
     activations = []
 
-    def verify(sha, *, fenced=False):
+    def verify(sha, *, fenced=False, require_idle=True):
         assert hook.current() == sha
 
     def restart(sha):
@@ -372,6 +372,147 @@ def test_fault_isolation_requires_exact_reviewed_files_and_live_schema(hook, mon
     monkeypatch.setattr(hook, 'run', lambda *a: 'unknown')
     with pytest.raises(hook.Refused, match='compatibility review'):
         hook.reviewed_fault_isolation('/mirror', 'b' * 40, paths)
+
+
+def test_growth_schema_files_and_retained_cutover_hold_are_both_required(hook,monkeypatch,tmp_path):
+    paths=set(hook.GROWTH_RUNTIME_FILES)
+    assert len(paths)==3
+    monkeypatch.setattr(hook,'TOOLS',tmp_path/'tools')
+    hook.TOOLS.mkdir()
+    (hook.TOOLS/'home_live_maintenance.py').write_text('# trusted existing verifier')
+    def run(*args):
+        if args[0]=='git':
+            return hook.GROWTH_RUNTIME_FILES[args[-1].split(':',1)[1]]
+        return 't'
+    monkeypatch.setattr(hook,'run',run)
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda sha:False)
+    with pytest.raises(hook.Refused,match='hold is missing'):
+        hook.reviewed_growth_runtime('/mirror','b'*40,paths)
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda sha:True)
+    assert hook.reviewed_growth_runtime('/mirror','b'*40,paths)==paths
+    monkeypatch.setattr(hook,'run',lambda *args:'unreviewed')
+    with pytest.raises(hook.Refused,match='compatibility review'):
+        hook.reviewed_growth_runtime('/mirror','b'*40,paths)
+
+
+def test_growth_hold_marker_fails_closed_on_changed_identity(hook,monkeypatch):
+    sha='b'*40
+    assert not hook.growth_cutover_pending(sha)
+    stage=hook.STORE/('maintenance-'+sha)
+    stage.mkdir(mode=0o700)
+    marker=stage/'growth-cutover.pending'
+    marker.write_text('a'*40)
+    monkeypatch.setattr(hook,'executor_directory',lambda *args,**kwargs:None)
+    monkeypatch.setattr(hook,'executor_host_file',lambda path,**kwargs:path.read_bytes())
+    with pytest.raises(hook.Refused,match='differs'):
+        hook.growth_cutover_pending(sha)
+    marker.write_text(sha+'\n')
+    assert hook.growth_cutover_pending(sha)
+
+
+@pytest.mark.parametrize('failure',[None,'provision','finish'])
+def test_growth_cutover_finishes_only_after_actual_executor_delivery(hook,monkeypatch,failure):
+    import json
+    sha,old='b'*40,'a'*40
+    pending=True
+    calls=[]
+    stage=hook.STORE/('maintenance-'+sha)
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda revision:pending)
+    def host_file(path,**kwargs):
+        if path.name=='growth-migration.json':
+            assert kwargs.get('private')
+            return json.dumps({'sha':sha,'old':old}).encode()
+        assert path==stage/'source/scripts/growth_runtime_upgrade.py'
+        return b'# attested source'
+    monkeypatch.setattr(hook,'executor_host_file',host_file)
+    def provision(revision,path):
+        calls.append('provision')
+        assert revision==sha and path==hook.EXECUTOR_REGISTRY.parent/'telegram-provision.json'
+        if failure=='provision':
+            raise hook.Refused('provision failed')
+    monkeypatch.setattr(hook,'provision_executor',provision)
+    monkeypatch.setattr(hook,'register_executors',lambda revision:calls.append('register'))
+    def run(*args,**kwargs):
+        nonlocal pending
+        if args[0]=='git':
+            return hook.GROWTH_RUNTIME_FILES['scripts/growth_runtime_upgrade.py']
+        assert args==(hook.EXECUTOR_PYTHON_SOURCE,'-I','-B',stage/'source/scripts/growth_runtime_upgrade.py',
+            'finish','--sha',sha,'--old',old)
+        calls.append('finish')
+        if failure=='finish':
+            raise hook.Refused('independent readback failed')
+        pending=False
+        return ''
+    monkeypatch.setattr(hook,'run',run)
+    if failure:
+        with pytest.raises(hook.Refused):
+            hook.complete_growth_cutover(sha)
+        assert pending
+    else:
+        hook.complete_growth_cutover(sha)
+        assert not pending
+    assert calls==(['provision'] if failure=='provision' else ['provision','register','finish'])
+
+
+def test_deploy_cli_does_not_report_completion_before_growth_finalization(hook,monkeypatch):
+    import sys
+    sha='b'*40
+    calls=[]
+    monkeypatch.setattr(sys,'argv',['home_systemd_release.py','deploy',sha])
+    monkeypatch.setattr(hook,'deploy',lambda revision:calls.append(('app',revision)))
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda revision:True)
+    monkeypatch.setattr(hook,'complete_growth_cutover',lambda revision:calls.append(('executors-and-readback',revision)))
+    hook.main()
+    assert calls==[('app',sha),('executors-and-readback',sha)]
+
+
+@pytest.mark.parametrize('pending',[False,True])
+def test_preflight_reads_exact_staged_hold_without_reopening_intake(hook,monkeypatch,pending):
+    import json
+    old,sha='a'*40,'b'*40
+    checks=[]
+    monkeypatch.setattr(hook,'current',lambda:old)
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda revision:pending)
+    monkeypatch.setattr(hook,'executor_host_file',lambda *args,**kwargs:json.dumps({'sha':sha,'old':old}).encode())
+    monkeypatch.setattr(hook,'verify',lambda *args,**kwargs:checks.append((args,kwargs)))
+    assert hook.release_preflight(sha)==old
+    assert checks==[((old,),{'fenced':pending,'require_idle':not pending})]
+
+
+def test_interrupted_cutover_resumes_only_after_same_app_revision_is_observed(hook,monkeypatch):
+    sha='b'*40
+    calls=[]
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda revision:True)
+    monkeypatch.setattr(hook,'current',lambda:'a'*40)
+    monkeypatch.setattr(hook,'complete_growth_cutover',lambda revision:calls.append(revision))
+    with pytest.raises(hook.Refused,match='has not completed'):
+        hook.finalize_cutover(sha)
+    assert not calls
+    monkeypatch.setattr(hook,'current',lambda:sha)
+    hook.finalize_cutover(sha)
+    assert calls==[sha]
+
+
+def test_attended_request_finalizes_before_separate_readback(hook,monkeypatch):
+    import io
+    import json
+    from types import SimpleNamespace
+
+    operator=importlib.import_module('home_release_operator')
+    sha,old='b'*40,'a'*40
+    calls=[]
+    def read(command,**kwargs):
+        calls.append(command[-2:] if command[-1]!= 'current' else ['current'])
+        return old+'\n'
+    def run(command,**kwargs):
+        calls.append(command[-2:])
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(operator.subprocess,'check_output',read)
+    monkeypatch.setattr(operator.subprocess,'run',run)
+    replies=io.StringIO()
+    operator.serve([json.dumps({'operation':operation,'sha':sha}) for operation in ('current','verify')],replies,['ssh','existing-host'],sha)
+    assert calls==[['current'],['preflight',sha],['finalize-cutover',sha],['verify',sha]]
+    assert all(json.loads(line)['ok'] for line in replies.getvalue().splitlines())
 
 
 @pytest.fixture

@@ -10,6 +10,16 @@ OWNER = '00000000-0000-0000-0000-000000000001'
 OTHER = '00000000-0000-0000-0000-000000000002'
 
 
+@pytest.fixture(autouse=True)
+def synthetic_routing_scope(monkeypatch):
+    # These routing unit tests intentionally use two non-existent project IDs.
+    # The production wrapper now establishes scope before consulting ownership.
+    from lead_app import identity_store
+    from lead_app.config import TENANT
+    original=identity_store.agent_tenant
+    monkeypatch.setattr(identity_store,'agent_tenant',lambda aid:TENANT if aid in (OWNER,OTHER) else original(aid))
+
+
 def test_resident_ownership_defaults_to_no_exclusions():
     from lead_app.resident_ownership import resident_cycle_agent_ids
 

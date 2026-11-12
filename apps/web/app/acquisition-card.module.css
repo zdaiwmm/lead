@@ -107,3 +107,7 @@
 .setup>div{display:flex;align-items:baseline;justify-content:space-between;gap:6px;padding-top:7px;font-size:13px}.setup small{color:var(--text-muted);font-size:11px}.setup button{white-space:nowrap}
 @container (max-width:760px){.overview{grid-template-columns:1fr 1fr;gap:15px}.overview>.setup{grid-column:1/-1;border-left:0;border-top:1px solid var(--line);padding:12px 0 0}}
 @container (max-width:480px){.overview{grid-template-columns:1fr}.overview>div{border:0;padding:0}.overview>.setup{grid-column:auto}}
+.goal { display: grid; grid-template-columns: 1fr auto; gap: 8px 20px; align-items: baseline; margin: 24px 0; }
+.goal span { color: var(--text-secondary); font-size: 14px; }
+.goal strong { color: var(--text); font-size: 20px; font-weight: 450; font-variant-numeric: tabular-nums; }
+.goal small { grid-column: 1 / -1; color: var(--text-muted); font-size: 12px; }

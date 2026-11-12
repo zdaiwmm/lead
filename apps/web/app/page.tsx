@@ -24,9 +24,7 @@ import AgentAvatar from "./agent-avatar";
 import AgentIdentity from "./agent-identity";
 import AgentPreferences from "./agent-preferences";
 import SocialAccounts from "./social-accounts";
-import AgentResults from "./agent-results";
-import OperatingPanel from "./operating-panel";
-import OperatingPlans from "./operating-plans";
+import GrowthStatus from "./growth-status";
 import AccountBrowser from "./account-browser";
 import SocialIcon from "./social-icon";
 import NewAgentDialog from "./website-agent-dialog";
@@ -318,7 +316,7 @@ export default function Lead() {
   async function connect(p: Row) {
     if (!current || readOnly) return;
     window.dispatchEvent(new Event("lead:close-dialogs"));
-    setBrowser({ platform: p.id, name: p.name, activate: p.activate, account_id: p.account_id });
+    setBrowser({ platform: p.id, name: p.name, account_id: p.account_id, new_account: p.new_account });
     setChannels(false);
   }
   const running = agents.filter((a) => a.desired_state === "running").length;
@@ -807,19 +805,13 @@ export default function Lead() {
                 />
                 </header>
                 <div className="workspace-overview">
-                <AgentResults
-                  key={"results" + current}
-                  agent={detail}
-                  readOnly={readOnly}
-                />
-                <OperatingPlans
-                  key={"plans" + current}
+                <GrowthStatus
+                  key={"growth" + current}
                   aid={current!}
                   agent={detail}
                   readOnly={readOnly}
                 />
                 </div>
-                <OperatingPanel key={"operations" + current} aid={current!} />
                 {detail.cards?.some(
                   (c: Row) => c.state === "pending" && c.valid,
                 ) && (
@@ -1195,16 +1187,13 @@ export default function Lead() {
           aid={current}
           platform={browser.platform}
           requestedAccountId={browser.account_id}
+          newAccount={browser.new_account}
           name={browser.name}
-          verifyLabel={browser.activate ? "验证并激活" : "验证并完成"}
-          onVerified={browser.activate ? async (started) => {
-            const platform = browser.platform;
+          verifyLabel="核对登录状态"
+          onVerified={async () => {
             setBrowser(null);
-            await run(async () => {
-              if (!started) await api(`/agents/${current}/channels/${platform}/control`, { enabled: true });
-            });
             await refresh();
-          } : undefined}
+          }}
           onClose={() => {
             setBrowser(null);
             refresh().catch((e) => setError(e.message));

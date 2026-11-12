@@ -84,6 +84,9 @@ INTRO = """# Agent 从零运营手册：Telegram 以外的十个渠道
 """
 
 
+CURRENT_USE = '# Agent 从零运营手册：Telegram 以外的十个渠道\n\n## 当前使用边界\n\n新运行时由一个经营 Agent 根据产品目标和实际反馈选择工作，渠道方法仅是可选知识。旧三方案轮换、默认篇数/频率、固定周复盘和统计门槛不再作为生产派活规则。内容和账号无需等这些方案全部就绪。\n\n当前渠道工具按已接受的具体内容、账号和位置执行，不在工具内部重新选题。公开讨论读取、评论、群组投稿、短视频、洞察等必须分别声明真实已安装能力；Page 发布不能冒充外部答疑或受众触达。真实平台许可和当前角色仍须核对。\n\n首次格式验证允许由合格的正常业务帖完成，不伪造 accepted 卡或发测试垃圾。未知提交只核对原动作；有效素材可复用，可选视频失败可保留文字路径。产品/来源事实、格式、必要披露和链接校验继续生效。\n\n完整规则见 [自主运营运行时 V2](requirements/20261112-autonomous-growth-runtime.md)。下方为历史方法与旧实现说明，不能恢复为第二套经营循环。\n\n<details>\n<summary>历史渠道方案与研究依据</summary>\n\n'
+
+
 def render():
     catalog = json.loads((DATA / "channels.json").read_text())
     examples = json.loads((DATA / "seka.json").read_text())
@@ -133,7 +136,7 @@ def render():
 本地素材制作、版本与暂停保护、各渠道独立排期、周复盘已实现，详见 [素材与自主运营闭环](CREATIVE_AUTONOMY.md)。下一步外部验收包括：账号资料写入与置顶、各平台实际可点击入口、原生数据接入、逐平台许可/格式/回执校准，以及业务网站的真实转化部署。排期由结构化 schedule 执行，模型的文字建议不能突破间隔与滚动七天上限。本地检查不替代真实账号和真实转化效果。
 """
     ]
-    return "\n".join(lines).strip() + "\n"
+    return CURRENT_USE + "\n".join(lines).strip().split("\n\n",1)[1] + "\n\n</details>\n"
 
 
 if __name__ == "__main__":

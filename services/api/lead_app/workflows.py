@@ -23,6 +23,68 @@ def activity_queue(kind):
 
 
 @workflow.defn
+class GrowthWorkWorkflow:
+    """One immutable TaskRef. Timers free activity capacity; signals only recheck facts."""
+    def __init__(self):
+        self.wakes = 0
+
+    @workflow.signal
+    def wake(self):
+        self.wakes += 1
+
+    @workflow.run
+    async def run(self, ref: dict):
+        for _ in range(100):
+            seen = self.wakes
+            step = await workflow.execute_activity("growth_advance", ref,
+                start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)
+            if step["state"] == "terminal":
+                return step
+            if step["state"] == "wait":
+                remaining = max(.05, (datetime.fromisoformat(step["wait"]["check_at"])-workflow.now()).total_seconds())
+                try:
+                    await workflow.wait_condition(lambda: self.wakes > seen, timeout=timedelta(seconds=remaining))
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            claim = step["claim"]
+            kind = claim.get("kind")
+            lane = "growth-model" if kind == "decision" else "growth-work" if kind in ("research", "content") else "growth-receipts"
+            try:
+                result = await workflow.execute_activity("growth_execute", {"agent_id": ref["agent_id"], "claim": claim},
+                    task_queue=activity_queue(lane), start_to_close_timeout=timedelta(seconds=500),
+                    retry_policy=RetryPolicy(maximum_attempts=1))
+            except ActivityError:
+                # A lost worker may have crossed an external barrier. Re-read the original ledger.
+                result = {"outcome": "failed", "failure_code": "execution_lost"}
+            await workflow.execute_activity("growth_finish", {"agent_id": ref["agent_id"], "claim": claim, "result": result},
+                start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)
+        workflow.continue_as_new(ref)
+
+
+@workflow.defn
+class GrowthDecisionWorkflow:
+    """Coalesce triggers; only the ordinary decision task invokes the model."""
+    def __init__(self):
+        self.pending = []
+
+    @workflow.signal
+    def wake(self, trigger: dict):
+        self.pending.append(trigger)
+
+    @workflow.run
+    async def run(self, agent_id: str, pending: list | None = None):
+        self.pending = (pending or []) + self.pending
+        for _ in range(100):
+            await workflow.wait_condition(lambda: bool(self.pending))
+            await workflow.sleep(.25)
+            batch, self.pending = self.pending, []
+            await workflow.execute_activity("growth_coordinate", {"agent_id": agent_id, "triggers": batch},
+                start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)
+        workflow.continue_as_new(args=[agent_id, self.pending])
+
+
+@workflow.defn
 class ChannelPreparationWorkflow:
     @workflow.run
     async def run(self, args: dict):
@@ -319,6 +381,8 @@ class SupervisorWorkflow:
                 if not recover:
                     raise
                 result = {"delay": 60}
+            if result.get("stop"):
+                return
             if workflow.patched("stop-archived-supervisor-v1") and result.get(
                 "archived"
             ):

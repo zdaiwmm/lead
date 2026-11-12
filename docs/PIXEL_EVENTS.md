@@ -1,5 +1,17 @@
 # 网站像素与事件接入
 
+## 自主运营核心成果口径
+
+`growth/outcomes` 与访问统计分别呈现。实验创建前固定 connection、事件/规则版本、统计主体、归因窗口与迟到容许。更换当前目标不会修改旧实验；旧口径不能证明新口径。
+
+服务端核心价值事件需明确 `first_business_value`（布尔值）、`subject_type`（user/pair/order/organization）和 `rule_version`（Activation 为 activation-vN，自定义事件为 EventName-vN）。没有可信首次证据时保持新客未知。`invited` 为布尔值，邀请来源单列；`audience_class` 为 customer/team/partner_acceptance/diagnostic，后三种排除；可选 `value_qualified=false` 表示不满足核心价值质量要求。
+
+pair/organization 等受限业务主体通过稳定、不含消息内容或联系人信息的 `conversion_id` 回传；接收时按连接散列。一次双向成功由业务后端证明，不由 Lead 浏览器或点击推断。服务端仍需独立密钥、稳定事件编号、实际发生时间和冻结来源。重复和冲突、测试隔离、隐私清洗等下文契约继续生效。
+
+主来源选择最早合格到站，并要求能串回已确认的业务发布；没有来源保持未归因。主体在项目连接内跨渠道去重，旧主体和旧定义的历史在筛选统计窗口前核对。迟到事实入账并改变报告证据修订，不重发原操作。
+
+
+
 本地产品已接入分步安装、真实事件测试、标准／自定义事件管理和事件明细。公开网站需要部署方配置公开 HTTPS 的 LEAD_PUBLIC_URL；本机地址无法接收外部网站的回传。
 
 ## 用户流程

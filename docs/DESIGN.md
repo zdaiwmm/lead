@@ -1,4 +1,7 @@
 ---
+
+当前流程以 [PRODUCT](PRODUCT.md) 与自主运营 V2 为准：目标、实际工作、真实结果、账号和必要本人事项。移除日周计划及账号连接后的第二次启用/授权步骤；视觉变量和组件规范继续沿用。历史 Supervisor 或方案轮换文案不构成当前用户流程。
+
 name: lead Visual System
 description: 自主运营清楚可见，结果优先，干预轻量
 version: "1.3"

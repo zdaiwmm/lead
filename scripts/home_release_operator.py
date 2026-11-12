@@ -19,9 +19,16 @@ def serve(stream, replies, host, sha):
             live = subprocess.check_output([*command, "current"], text=True).strip()
             if not re.fullmatch("[a-f0-9]{40}", live):
                 raise ValueError("invalid live revision")
-            subprocess.run([*command, "verify", live], check=True)
+            checked = subprocess.check_output([*command, "preflight", sha], text=True).strip()
+            if checked != live:
+                raise ValueError("production revision changed during preflight")
             response = {"ok": True, "current": live}
         else:
+            if op == 'verify':
+                # Resume only the staged executor/finalization journal of this
+                # same request, then launch a separate read-only verification.
+                # An interruption leaves no terminal result to falsely cache.
+                subprocess.run([*command, 'finalize-cutover', sha], check=True)
             result = subprocess.run([*command, op, sha], check=False)
             # A lost SSH session cannot establish a negative deployment verification.
             if result.returncode == 255:

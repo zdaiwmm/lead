@@ -17,7 +17,17 @@ from .reddit_member import ordinary_member
 from .scope import current_tenant
 
 
-async def execute(actor, action_id):
+async def execute(actor, action_id,*,growth_claim=None):
+    from .growth.tools import submission_claim
+    token = submission_claim.set(growth_claim) if growth_claim else None
+    try:
+        return await _execute(actor,action_id)
+    finally:
+        if token:
+            submission_claim.reset(token)
+
+
+async def _execute(actor, action_id):
     aid = actor.aid
     async with actor.lock:
         actor.touch()
@@ -276,7 +286,10 @@ async def execute(actor, action_id):
                 try:
                     with tx(aid) as c:
                         actor.gate(c, action)
-                        await adapter.submit(actor.page, observation)
+                        if publication.get("growth_runtime"):
+                            await asyncio.wait_for(adapter.submit(actor.page, observation),timeout=20)
+                        else:
+                            await adapter.submit(actor.page, observation)
                         c.execute(
                             "UPDATE lead.publish_preparations SET stage='submitted',updated_at=now() WHERE action_id=%s",
                             (action_id,),
