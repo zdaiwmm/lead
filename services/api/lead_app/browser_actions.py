@@ -47,6 +47,33 @@ def execution_action(c, action):
     return value
 
 
+def repair_generation_current(c,actor,action,task):
+    """A canonical recovery may change the claim generation, not the revision."""
+    marker=(task.get('result') or {}).get('runtime',{}).get('browser_method_repair') or {}
+    if (action['state']!='prepared' or marker.get('task_generation')!=task['input']['task_generation']
+            or marker.get('target_id')!=str(action['target_id']) or marker.get('grant_id')!=str(action['grant_id'])
+            or marker.get('operation')!=action['type']):
+        return False
+    attempts=c.execute('SELECT * FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt FOR UPDATE',(action['id'],)).fetchall()
+    if not attempts:
+        return False
+    for attempt in attempts:
+        observation=attempt['observation'] or {}
+        repair=observation.get('method_repair') or {}
+        binding=observation.get('browser_request') or {}
+        if (repair.get('revision')!=1 or str(attempt['browser_session_id'])!=str(actor.session)
+                or attempt['epoch']!=actor.epoch or binding.get('claimed') is not False
+                or binding.get('fingerprint') or binding.get('dispatch_task_attempt_token')
+                or 'browser_transport' in observation or 'browser_receipt' in observation
+                or attempt['outcome'] is not None or attempt['ended_at'] is not None
+                or attempt['error_code'] is not None or attempt['evidence_ref'] is not None
+                or any(marker.get(key)!=repair.get(key) for key in
+                    ('method_hash','proof_ref','browser_session_id','browser_epoch','producer_task_id'))):
+            return False
+        execution_method(c,action)
+    return True
+
+
 def prepare_method_repair(c,actor,action,task):
     """Consume one committed recovery proof under the original submission locks."""
     from .browser_method_recovery import method_repair_candidate

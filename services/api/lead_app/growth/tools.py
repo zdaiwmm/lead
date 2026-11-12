@@ -808,7 +808,11 @@ def submission_gate(c, actor, action,claim=None,*,allow_method_repair=False):
     platform, kind = account["platform"], publication.get("format","text")
     method = publication.get("browser_method")
     if method:
-        from ..browser_actions import execution_method, prepare_method_repair
+        from ..browser_actions import (
+            execution_method,
+            prepare_method_repair,
+            repair_generation_current,
+        )
         from ..browser_execution import validate_method
         permissions = target["verified_permissions"] if isinstance(target["verified_permissions"],dict) else {}
         methods = permissions.get("browser_methods") or {}
@@ -827,7 +831,7 @@ def submission_gate(c, actor, action,claim=None,*,allow_method_repair=False):
                 (action['id'],)) or {}).get('observation',{}).get('method_repair',{})
             if not repair and allow_method_repair:
                 repair=lease.get('browser_method_repair') or {}
-            if repair.get('task_generation')!=task['input']['task_generation']:
+            if repair.get('task_generation')!=task['input']['task_generation'] and not repair_generation_current(c,actor,action,task):
                 raise ValueError('stale_submission_claim')
     elif operation == "reply":
         raise ValueError("reply_browser_method_missing")
