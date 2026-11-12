@@ -94,6 +94,8 @@ def _episode(c, resource, condition,row,code=None):
 def _record_failure(c, row, runtime, code):
     resource, condition = runtime.get("resource_key", row["type"]), runtime.get("condition_revision", "initial")
     prior = _episode(c, resource, condition,row,code)
+    if not prior and row["type"]=="growth.research" and code=="source_unavailable":
+        prior = _episode(c,resource,condition,row,"gaierror")
     root = prior["id"] if prior else row["id"]
     episode = dict(prior["recovery"]) if prior else {
         "fingerprint": digest([resource, condition, code]), "resource": resource,

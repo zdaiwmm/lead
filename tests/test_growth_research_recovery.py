@@ -96,6 +96,25 @@ async def test_source_probe_retains_recovery_cost_cap_and_original_experiment(gr
     assert growth_cost_context.get() is None
 
 
+async def test_resumed_old_dns_failure_keeps_the_episode_and_remains_probeable(growth_agent,monkeypatch):
+    from lead_app.growth.runtime import recover_due
+    ref,root,probe,data=blocked_source(growth_agent,'gaierror')
+    original=root['result']['runtime']['recovery']
+    document,_=tools._remember(growth_agent,{'url':'https://forum.example/topic','title':'Source','text':SOURCE})
+    async def available(*args,**kwargs):
+        return WorkResult(outcome='completed',evidence_refs=[document])
+    monkeypatch.setattr(tools,'research',available)
+    resumed=(await probe_episode(growth_agent,probe,data)).output['resumed']
+    finish(advance(resumed)['claim'],WorkResult(outcome='failed',failure_code='source_unavailable'))
+    with tx(growth_agent) as c:
+        episode=one(c,'SELECT result FROM lead.tasks WHERE id=%s',(ref['task_id'],))['result']['runtime']['recovery']
+        assert episode['fingerprint']==original['fingerprint'] and episode['root_task_id']==ref['task_id']
+        assert episode['attempts']==4 and episode['status']=='blocked'
+    recover_due(growth_agent,now=utcnow()+timedelta(minutes=11))
+    with tx(growth_agent) as c:
+        assert one(c,"SELECT count(*) n FROM lead.tasks WHERE type='growth.recover' AND input#>>'{spec,payload,episode_root}'=%s",(ref['task_id'],))['n']==2
+
+
 async def test_research_assessment_provider_recovers_original_research(growth_agent,monkeypatch):
     new_work(growth_agent)
     monkeypatch.setattr(config,'any_model_configured',lambda:True)
