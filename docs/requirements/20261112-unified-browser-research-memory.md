@@ -828,6 +828,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - C09独立首阶段`17f52a9`（源`e940cf5`）：真实Linux唯一Chrome主PID经本test父链、精确user-data-dir/实际exe/无--type/CDPport双核对后SIGKILL；双原Task页关闭、runtime.closed/actor.disconnected、旧session结束/旧有效租约失效、双scope_view/current_scope拒绝、原forward token撤销，零新增模型。1项15.60秒全绿；当前仅证明共享实例死亡撤销，不能替代恢复换代/当前私有身份再核或独立另一实例正常，后两项继续补。
 - C10 `ca0cdc3`（源`fd20ac4`）补原ActionRef稳定共享锁和原dispatch Task attempt token；同Action/同claim重复RPC不另起SDK，其他Action不锁整个profile。Linux实际并发2次调用只产生一套4次假模型步骤、POST1/attempt1，两返回unknown；下一原claim仍可只读拒旧帖并确认新帖，pause/intent/grants不变，Actor锁字典最终清空。1项28.65秒通过，无真实模型。
 - C17/C23增量`613ef00`（源`920f1aa`）修复真实DB复现的两层去重缺口：旧planned material与已有unknown Action都曾把同ContentRef的publish/replyP1/replyP2合成一项。现按operation/实际reply parent区分，默认publish及publish无效parent仍归同意图，旧hash仅在原语义相同时兼容复用；same primitive/parent改名仍回原Task，reply grant/method校验未变。6项红例→独立42项3.44秒、主集成29项1.83秒通过，没有模型/浏览器或新增权限。
+- C15语义反例修正`88979d6`（源`acbc242`）：采样可见语义文字/字段/视区，排除time/status/aria-live/实际动画与时间格式；loader仍防stale但不计新进展，原Task只留最多32个seen摘要，回访不重置计数。Linux2项53.66秒通过，真实20ms时钟、每SDK步同URL reload（loader确换）、长页bottom/top往返各在3/3/4次假模型调用后no_progress3停止。此覆盖静态/一次修正及上述三种假进展，正向checkpoint/原Wait/due续接仍继续补验。
+- C05/C09扩展`8cdcdc9`（源`c0f7b08`）：同一真实故障case新输入在Linux1项18.18秒通过。共享实例死亡时epoch仍1而lease released、session closed/ended、双旧scope拒绝；独立public_research实际factory创建的Chrome/原Task页继续读取，原进程/epoch/session不变且forwardtoken有效。经原gateway.get一次恢复，共享原storage/registered出口不变，新actor/session及epoch1→2，旧targets双拒；A/B新页面均generation2，实际fresh private self认证成功，零新增模型。首轮死亡证据保留，未将Chrome死亡等同于整个管理器死亡；后者仍属独立必验。
 
 ### 22.2 尚未放行与部署约束
 
