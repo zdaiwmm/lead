@@ -12,7 +12,7 @@ import styles from "./growth-status.module.css";
 
 type Row = Record<string, any>;
 const states: Row = { planned: "待执行", queued: "排队中", running: "执行中", reconciling: "核对原结果", waiting_user: "需要本人处理", succeeded: "已完成", failed: "未完成", canceled: "已结束" };
-const reasons: Row = { resource_blocked: "等待受影响能力恢复；其他工作继续", recovery_exhausted: "此能力仍受阻", recovery_budget_exhausted: "已达到本次检查投入上限", dependency_pending: "等待必要资料", account_paused: "该账号已暂停", resource_wait: "等待此账号环境空闲", work_leased: "原任务仍在执行", unknown_receipt: "正在核对原操作，结果尚未确认", login_in_progress: "等待登录完成", signed_out: "尚未登录", challenge: "需要在原窗口完成验证", ambiguous: "需要确认当前账号身份", temporarily_unavailable: "平台正在恢复账号识别", daily_token_limit: "等待当前用量额度恢复", question_limit: "这条验证路径已达到投入上限", model_call_billing_unknown: "平台正在核对原调用费用" };
+const reasons: Row = { resource_blocked: "等待受影响能力恢复；其他工作继续", recovery_exhausted: "此能力仍受阻", recovery_probe_limit: "本轮能力检查次数已用完", recovery_deadline: "本轮能力检查期限已结束", recovery_budget_exhausted: "已达到本次检查投入上限", dependency_pending: "等待必要资料", account_paused: "该账号已暂停", resource_wait: "等待此账号环境空闲", work_leased: "原任务仍在执行", unknown_receipt: "正在核对原操作，结果尚未确认", login_in_progress: "等待登录完成", signed_out: "尚未登录", challenge: "需要在原窗口完成验证", ambiguous: "需要确认当前账号身份", temporarily_unavailable: "平台正在恢复账号识别", daily_token_limit: "等待当前用量额度恢复", question_limit: "这条验证路径已达到投入上限", model_call_billing_unknown: "平台正在核对原调用费用" };
 
 function probeStatus(probe: Row | undefined) {
   if (!probe?.state) return null;

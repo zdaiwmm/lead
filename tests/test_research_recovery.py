@@ -213,3 +213,42 @@ def test_other_project_cannot_consume_recovery(growth_agent):
         assert runtime._consume_recovery(other, root["task_id"], episode, "foreign-proof", episode["condition_revision"], "foreign-lease") is None
     finally:
         domain.set_control(other, "archive")
+
+
+async def test_free_probe_is_bounded_without_model_cost(growth_agent, monkeypatch):
+    from lead_app.growth import tools
+    from lead_app.growth.tools import RecoverInput
+    root = blocked(growth_agent)
+    calls = []
+    async def denied(*args):
+        calls.append(1)
+        return WorkResult(outcome="completed", output={"state":"still_blocked"})
+    monkeypatch.setattr(tools, "probe_research_resource", denied, raising=False)
+    with tx(growth_agent) as c:
+        row = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (root["task_id"],))
+    data = RecoverInput(episode_root=root["task_id"], condition_revision=row["result"]["runtime"]["condition_revision"])
+    for _ in range(8):
+        assert (await runtime.probe_episode(growth_agent, row, data)).output["state"] == "still_blocked"
+    for _ in range(2):
+        result = await runtime.probe_episode(growth_agent, row, data)
+        assert result.output["state"] == "recovery_budget_exhausted"
+        assert result.output["reason"] == "recovery_probe_limit"
+    assert len(calls) == 8
+    runtime.recover_due(growth_agent, now=utcnow()+timedelta(minutes=40))
+    with tx(growth_agent) as c:
+        assert not one(c, "SELECT id FROM lead.tasks WHERE type='growth.recover'")
+        assert one(c, "SELECT count(*) n FROM lead.outbox_events WHERE event_type='growth.wake' AND payload->>'reason'='resource_probe_stopped'")["n"] == 1
+
+
+async def test_expired_probe_window_never_calls_source(growth_agent, monkeypatch):
+    from lead_app.growth import tools
+    from lead_app.growth.tools import RecoverInput
+    root = blocked(growth_agent)
+    async def forbidden(*args):
+        raise AssertionError("Expired original work must not spend another probe")
+    monkeypatch.setattr(tools, "probe_research_resource", forbidden, raising=False)
+    with tx(growth_agent) as c:
+        c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery,probe_deadline}',%s) WHERE id=%s", (j((utcnow()-timedelta(seconds=1)).isoformat()),root["task_id"]))
+        row = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (root["task_id"],))
+    result = await runtime.probe_episode(growth_agent, row, RecoverInput(episode_root=root["task_id"],condition_revision=row["result"]["runtime"]["condition_revision"]))
+    assert result.output["reason"] == "recovery_deadline"

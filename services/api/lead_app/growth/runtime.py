@@ -140,11 +140,17 @@ def _block_on(c, aid, row, runtime, root, episode, now):
                   "condition_revision": episode["condition_revision"]}
     if dependency not in blocked:
         blocked.append(dependency)
+    task_deadline = TaskSpec.model_validate(row["input"]["spec"]).review_at
+    check_at = min(datetime.fromisoformat(episode["next_check_at"]), task_deadline)
+    if episode.get("probe_deadline") and episode.get("hard_deadline"):
+        episode["probe_deadline"] = min(max(datetime.fromisoformat(episode["probe_deadline"]), task_deadline),
+                                        datetime.fromisoformat(episode["hard_deadline"])).isoformat()
     wait = _wait(row, "resource_blocked", now, producer="growth.runtime.probe_episode", action="probe",
-                 delay=max(1, int((datetime.fromisoformat(episode["next_check_at"])-now).total_seconds())))
+                 delay=max(1, int((check_at-now).total_seconds())))
     wait.update(episode_root=str(root), scope_ref=episode["resource"])
     runtime.update(blocked_resources=blocked, wait=wait)
     _blocked_notice(c, aid, root, episode)
+    c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery}',%s) WHERE id=%s", (j(episode),root))
     return wait
 
 
@@ -174,7 +180,10 @@ def _record_failure(c, row, runtime, code):
     episode = dict(prior["recovery"]) if prior else {
         "fingerprint": digest([resource, condition]), "resource": resource,
         "condition_revision": condition, "root_task_id": str(root), "attempts": 0,
-        "repair_attempts": 0, "probes": 0, "proposal_key": _proposal_key(row)}
+        "repair_attempts": 0, "probes": 0, "proposal_key": _proposal_key(row),
+        "hard_deadline": (utcnow()+timedelta(hours=24)).isoformat(),
+        "probe_deadline": min(TaskSpec.model_validate(row["input"]["spec"]).review_at,
+                              utcnow()+timedelta(hours=24)).isoformat()}
     was_recovered = episode.get("status") == "recovered"
     episode["attempts"] += 1
     if was_recovered:
@@ -453,6 +462,8 @@ def recover_due(aid, now=None, cursor=None):
             AND (result#>>'{runtime,recovery,next_check_at}')::timestamptz<=%s
             ORDER BY scheduled_at,id LIMIT 20 FOR UPDATE SKIP LOCKED""", (now,)):
             episode = root["result"]["runtime"]["recovery"]
+            if episode.get("probes_stopped"):
+                continue
             if episode.get("paid_probes_stopped") or episode.get("error_code")=="invalid_proposal":
                 agent = require_agent(c,aid)
                 _, condition = _resource_condition(c,agent,root,TaskSpec.model_validate(root["input"]["spec"]))
@@ -620,6 +631,16 @@ async def probe_episode(aid, work, data):
         episode = dict(_runtime(root).get("recovery") or {})
         if episode.get("status") != "blocked" or episode.get("condition_revision") != data.condition_revision:
             return WorkResult(outcome="completed",output={"state":"obsolete_probe"})
+        deadline = datetime.fromisoformat(episode.get("probe_deadline") or root["input"]["spec"]["review_at"])
+        if episode.get("probes_stopped") or episode.get("probes", 0) >= 8 or utcnow() >= deadline:
+            if not episode.get("probes_stopped"):
+                episode.update(probes_stopped=True, reason="recovery_probe_limit" if episode.get("probes",0)>=8 else "recovery_deadline",
+                               responsibility="product", recovery_action="configuration")
+                c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery}',%s) WHERE id=%s", (j(episode),root["id"]))
+                emit(c,aid,"growth.wake",{"reason":"resource_probe_stopped", "resource":episode["resource"],
+                     "condition_revision":episode["condition_revision"], "transition":episode["fingerprint"]})
+            return WorkResult(outcome="completed", output={"state":"recovery_budget_exhausted", "reason":episode["reason"],
+                "resource":episode["resource"], "responsibility":"product", "resumed_count":0})
         if episode.get("probe_lease_until") and datetime.fromisoformat(episode["probe_lease_until"])>utcnow():
             return WorkResult(outcome="completed",output={"state":"another_probe_active"})
         spec = TaskSpec.model_validate(root["input"]["spec"])
@@ -761,7 +782,7 @@ def consume_triggers(aid, triggers):
 def trigger_key(item):
     # Coalesce a stream by changed business condition, retaining its latest fact.
     # A newer fact with the same key survives consumption of the old snapshot.
-    if item.get("reason") in ("resource_blocked", "resource_recovered"):
+    if item.get("reason") in ("resource_blocked", "resource_recovered", "resource_probe_stopped"):
         return digest([item.get("reason"), item.get("resource"), item.get("condition_revision"), item.get("transition")])
     task = item.get("task_id") if item.get("reason") in ("evidence_added","work_failed","dependency_failed","dependency_artifact_missing") else None
     return digest([item.get("reason"),item.get("account_id"),item.get("experiment_id"),item.get("event_name"),task])
