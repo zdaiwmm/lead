@@ -19,7 +19,7 @@ from lead_app.connection_control import LoginInput
 from lead_app.db import one, tx
 from lead_app.forward_proxy import BrowserForwardProxy
 from lead_app.growth.contracts import TaskRef
-from lead_app.growth.runtime import advance
+from lead_app.growth.runtime import advance, finish
 from lead_app.growth.tools import AccountInput
 from native_browser_fixture import BoardState, NativeBoard
 
@@ -28,6 +28,7 @@ async def verify_login(monkeypatch, *, mode="login"):
     from lead_app import native_runner
 
     model_calls = []
+    workflow = {"kind": "login", "step": 0}
 
     class FakeModel(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -61,14 +62,36 @@ async def verify_login(monkeypatch, *, mode="login"):
                 index = re.search(r"\[(\d+)\]", line)
                 if index and any(tag in line.lower() for tag in ("<input", "<button")):
                     candidates.append((int(index[1]), line))
-            step = len(model_calls) - 1
+            step = workflow["step"]
+            workflow["step"] += 1
             action = {
                 "done": {
                     "text": "Controlled transport diagnostic only",
                     "success": True,
                 }
             }
-            if step in (0, 1):
+            if workflow["kind"] == "discovery":
+                if step == 0:
+                    action = {"guarded_navigate": {"url": board.origin + "/home"}}
+                elif step == 1:
+                    action = {
+                        "propose_method": {
+                            "target_url": board.origin + "/home",
+                            "operation": "publish",
+                            "selectors": {
+                                "self_subject": "main > p",
+                                "editor_target": "#editor-target",
+                                "editor_body": "textarea[name=body]",
+                                "submit": "form button",
+                            },
+                            "self_subject_prefix": "Signed in as ",
+                            "self_subject_suffix": " · Your account settings",
+                            "permission_selector": "section p",
+                            "permission_quote": "You are an ordinary member. Members may publish text posts and reply to existing posts. "
+                            "Automated browser tools are permitted for these member actions. You have no administrator privileges.",
+                        }
+                    }
+            elif step in (0, 1):
                 field = "username" if step == 0 else "password"
                 matches = [
                     index
@@ -172,11 +195,12 @@ async def verify_login(monkeypatch, *, mode="login"):
         ),
         public_origin="http://93.184.215.14",
     ).start()
+    boards = {"93.184.215.14": board}
 
     async def fixture_connect(self, ip, port):
-        if ip != "93.184.215.14" or port != 80:
+        if ip not in boards or port != 80:
             raise ValueError("Fixture transport forbids other destinations")
-        return await asyncio.open_connection("127.0.0.1", board.server.server_port)
+        return await asyncio.open_connection("127.0.0.1", boards[ip].server.server_port)
 
     monkeypatch.setattr(BrowserForwardProxy, "connect", fixture_connect)
     with socket.socket() as chooser:
@@ -217,7 +241,7 @@ async def verify_login(monkeypatch, *, mode="login"):
             task_id=task["id"],
             task_generation=task["input"]["task_generation"],
         )
-        advance(ref)
+        claim = advance(ref)["claim"]
         with tx(aid) as c:
             task = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (task["id"],))
         assert all(
@@ -227,11 +251,14 @@ async def verify_login(monkeypatch, *, mode="login"):
         result = await execute_account(
             aid, task, AccountInput.model_validate(task["input"]["spec"]["payload"])
         )
+        finish(claim, result)
         probe_checks = None
+        discovery = None
         if mode == "login" and result.outcome == "completed":
             actor = await browser.gateway.get(
                 aid, task["input"]["spec"]["payload"]["profile_id"]
             )
+            await actor.connection_pages[str(pending["takeover_id"])].reconcile()
             probe, target = await actor.native_runtime.acquire_identity_probe(
                 [board.origin + "/account", board.origin + "/login"]
             )
@@ -254,6 +281,119 @@ async def verify_login(monkeypatch, *, mode="login"):
                 }
             finally:
                 await actor.native_runtime.release_page(target)
+            from datetime import timedelta
+
+            from lead_app.account_connection import discover
+            from lead_app.growth.contracts import TaskSpec, utcnow
+            from lead_app.growth.store import submit_work
+            from lead_app.native_task import NativeTask
+
+            first_board = board
+            board = NativeBoard(
+                BoardState(
+                    host="93.184.215.15",
+                    username="member-" + os.urandom(4).hex(),
+                    password="secret-" + os.urandom(6).hex(),
+                ),
+                public_origin="http://93.184.215.15",
+            ).start()
+            boards["93.184.215.15"] = board
+            workflow.update(kind="login", step=0)
+            second = await begin(
+                aid,
+                "web",
+                site_url=board.origin + "/login",
+                login=LoginInput(
+                    username=board.state.username, password=board.state.password
+                ),
+            )
+            with tx(aid) as c:
+                second_task = one(
+                    c,
+                    "SELECT * FROM lead.tasks WHERE input#>>'{spec,payload,takeover_id}'=%s",
+                    (str(second["takeover_id"]),),
+                )
+            second_claim = advance(
+                TaskRef(
+                    agent_id=aid,
+                    task_id=second_task["id"],
+                    task_generation=second_task["input"]["task_generation"],
+                )
+            )["claim"]
+            with tx(aid) as c:
+                second_task = one(
+                    c, "SELECT * FROM lead.tasks WHERE id=%s", (second_task["id"],)
+                )
+            second_result = await execute_account(
+                aid,
+                second_task,
+                AccountInput.model_validate(second_task["input"]["spec"]["payload"]),
+            )
+            assert second_result.outcome == "completed"
+            finish(second_claim, second_result)
+            assert str(second_task["input"]["spec"]["payload"]["profile_id"]) == str(
+                actor.profile["id"]
+            )
+            await actor.connection_pages[str(second["takeover_id"])].reconcile()
+            board = first_board
+            controllers = []
+            works = []
+            work_claims = []
+            try:
+                for number in range(2):
+                    subject = pending if number == 0 else second
+                    site = board if number == 0 else boards["93.184.215.15"]
+                    with tx(aid) as c:
+                        work = submit_work(
+                            c,
+                            aid,
+                            TaskSpec(
+                                kind="account",
+                                purpose="discover",
+                                account_id=subject["account_id"],
+                                payload={"target_urls": [site.origin + "/home"]},
+                                review_at=utcnow() + timedelta(hours=1),
+                                dedupe_key="native-two-workers-" + str(number),
+                            ),
+                        )
+                    admitted = advance(work)
+                    assert admitted["state"] == "ready"
+                    work_claims.append(admitted["claim"])
+                    works.append(work)
+                    controller = NativeTask(actor, work["task_id"])
+                    await controller.start()
+                    controllers.append(controller)
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *(
+                            controller.verify_private_self()
+                            for controller in controllers
+                        )
+                    ),
+                    8,
+                )
+                # The editor still displays A while the private session becomes B.
+                saved = dict(board.state.sessions)
+                board.state.sessions = {
+                    key: "different-cookie-subject" for key in saved
+                }
+                try:
+                    import pytest
+
+                    with pytest.raises(ValueError, match="native_self_subject_changed"):
+                        await controllers[0].verify_private_self()
+                finally:
+                    board.state.sessions = saved
+            finally:
+                for controller in controllers:
+                    await controller.close()
+            workflow.update(kind="discovery", step=0)
+            with tx(aid) as c:
+                discovery_task = one(
+                    c, "SELECT * FROM lead.tasks WHERE id=%s", (works[0]["task_id"],)
+                )
+            discovery = await discover(aid, discovery_task)
+            finish(work_claims[0], discovery)
         with tx(aid) as c:
             final = one(
                 c,
@@ -270,6 +410,26 @@ async def verify_login(monkeypatch, *, mode="login"):
             )
         from lead_app.config import STATE
 
+        with tx(aid) as c:
+            task_state = one(
+                c, "SELECT state FROM lead.tasks WHERE id=%s", (task["id"],)
+            )["state"]
+            learned = one(
+                c,
+                "SELECT verified_permissions FROM lead.account_targets WHERE account_id=%s AND target_type='web'",
+                (pending["account_id"],),
+            )
+            if learned:
+                assert (
+                    learned["verified_permissions"]["browser_methods"]["publish"][
+                        "receipt_state"
+                    ]
+                    == "unobserved"
+                )
+                assert not learned["verified_permissions"].get(
+                    "browser_verified_operations"
+                )
+
         result_path = (
             STATE
             / "browser-use-runs"
@@ -280,6 +440,8 @@ async def verify_login(monkeypatch, *, mode="login"):
         return {
             "privacy": worker["credential_scan"],
             "identity_probe": probe_checks,
+            "task_state": task_state,
+            "discovery": discovery.model_dump(mode="json") if discovery else None,
             "usage": worker["usage"],
             "agent_id": aid,
             "result": result.model_dump(mode="json"),
@@ -298,7 +460,7 @@ async def verify_login(monkeypatch, *, mode="login"):
                 "real_connection": final["state"] == "connected",
                 "synthetic_model_requests": len(model_calls),
                 "mechanical_roundtrip": final["state"] == "connected"
-                and len(model_calls) <= 10,
+                and worker["usage"]["request_count"] <= 8,
             },
         }
     finally:
@@ -306,7 +468,8 @@ async def verify_login(monkeypatch, *, mode="login"):
             await browser.gateway.close(aid)
         server.should_exit = True
         await serving
-        board.close()
+        for site in boards.values():
+            site.close()
         model_server.shutdown()
         model_server.server_close()
         if aid:

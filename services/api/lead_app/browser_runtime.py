@@ -354,14 +354,19 @@ class NativeNetworkGate:
 class PersistentRuntime:
     """The existing Actor's Chromium/context/proxy/control lifecycle owner."""
     def __init__(self, actor):
-        from .execution_routes import resolve
+        from .db import tx
+        from .execution_routes import endpoint, resolve
         from .managed_network import policy
 
         self.actor = actor
         # The instance keeps its original execution location and managed exit.
         # A later route edit cannot lend this already-running process a new role.
-        self.execution_ref = resolve(actor.aid,profile_id=actor.profile['id']).model_dump(mode='json')
+        reference=resolve(actor.aid,profile_id=actor.profile['id'])
+        self.execution_ref = reference.model_dump(mode='json')
+        self.transport_endpoint=endpoint(reference)
         self.network_stamp = managed_exit_stamp(policy(actor.aid))
+        with tx(actor.aid) as c:
+            self.profile_exit=profile_exit_stamp(c,actor.aid,actor.profile['id'])
         self.context = None
         self.playwright = None
         self.gate = None
@@ -370,6 +375,7 @@ class PersistentRuntime:
         self.closed = False
         self.closing = False
         self.slots = asyncio.Semaphore(2)
+        self.internal_slots = asyncio.Semaphore(2)
         self.pages = {}
         self.probes={}
         self.identity_options={}
@@ -553,18 +559,27 @@ class PersistentRuntime:
         return None
 
     def current_scope(self, scope):
+        from .channel_contracts import ExecutionRef
         from .db import one, tx
+        from .execution_routes import endpoint
         from .growth.contracts import utcnow
         from .managed_network import policy
+
+        if scope.get('fragment_deadline'):
+            from datetime import datetime
+            if datetime.fromisoformat(scope['fragment_deadline'])<=utcnow():
+                raise ValueError('native_fragment_deadline')
 
         network=policy(self.actor.aid)
         if ((network is not None and not network['usable'])
                 or managed_exit_stamp(network)!=self.network_stamp):
             raise ValueError('browser_exit_changed')
         with tx(self.actor.aid) as c:
+            if profile_exit_stamp(c,self.actor.aid,self.actor.profile['id'])!=self.profile_exit:
+                raise ValueError('browser_profile_exit_changed')
             route=one(c,'SELECT * FROM lead.profile_execution_routes WHERE profile_id=%s',(self.actor.profile['id'],))
             if not route or any(str(route[key])!=str(self.execution_ref[ref]) for key,ref in
-                    (('profile_id','profile_id'),('executor_ref','executor_ref'),('transport_ref','transport_ref'),('generation','route_generation'))):
+                    (('profile_id','profile_id'),('executor_ref','executor_ref'),('transport_ref','transport_ref'),('generation','route_generation'))) or endpoint(ExecutionRef.model_validate(self.execution_ref))!=self.transport_endpoint:
                 raise ValueError('browser_execution_route_changed')
             if scope.get('kind')=='identity_probe':
                 valid=self.probes.get(scope.get('probe_ref'))
@@ -625,6 +640,11 @@ class PersistentRuntime:
                         AND w.input#>>'{spec,payload,connection_account_id}'=%s))''',
                     (self.actor.profile['id'],str(scope.get('account_id')))):
                 raise ValueError('browser_owner_control_active')
+            if scope.get('internal_parent'):
+                parent=self.pages.get(scope['internal_parent'])
+                if not parent or any(parent['scope'].get(key)!=scope.get(key) for key in
+                        ('task_id','account_id','binding_version','control_version','intent_revision')):
+                    raise ValueError('browser_internal_parent_changed')
             return row
 
     async def claim_request(self, scope, target, request, decision):
@@ -683,16 +703,20 @@ class PersistentRuntime:
             self.slots.release()
             raise
 
-    async def acquire_page(self, scope, url):
+    async def acquire_page(self, scope, url, *, internal_parent=None):
         from .browser_execution import origin
         if self.closed or not self.forward_token():
             raise ValueError('browser_control_unavailable')
+        scope=dict(scope)
+        if internal_parent:
+            scope['internal_parent']=internal_parent
         await asyncio.to_thread(self.current_scope,scope)
         if origin(url) not in {origin(value) for value in scope['origins']}:
             raise ValueError('page_url_outside_task')
         # asyncio's semaphore wakes queued waiters in order; waiting doesn't
         # consume a model call or retry. The original task supplies its deadline.
-        await asyncio.wait_for(self.slots.acquire(),timeout=30)
+        slots=self.internal_slots if internal_parent else self.slots
+        await asyncio.wait_for(slots.acquire(),timeout=30)
         page = None
         try:
             page = await self.context.new_page()
@@ -700,7 +724,7 @@ class PersistentRuntime:
             info = (await cdp.send('Target.getTargetInfo'))['targetInfo']
             await cdp.detach()
             scope = {**scope,'target_id':info['targetId'],'generation':self.actor.epoch}
-            self.pages[scope['target_id']] = {'scope':scope,'page':page,'slot_held':True}
+            self.pages[scope['target_id']] = {'scope':scope,'page':page,'slot_held':True,'internal':bool(internal_parent)}
             await self.gate.register(scope['target_id'],scope)
             await page.goto(url,wait_until='domcontentloaded',timeout=45000)
             return scope
@@ -711,7 +735,7 @@ class PersistentRuntime:
                         self.pages.pop(target,None)
                         self.gate.roots.pop(target,None)
                 await page.close()
-            self.slots.release()
+            slots.release()
             raise
 
     async def scope_view(self, target):
@@ -730,9 +754,12 @@ class PersistentRuntime:
         entry=self.pages.get(target)
         if entry and entry.get('slot_held',True):
             entry['slot_held']=False
-            self.slots.release()
+            (self.internal_slots if entry.get('internal') else self.slots).release()
 
     async def release_page(self, target):
+        for child,entry in list(self.pages.items()):
+            if entry['scope'].get('internal_parent')==target:
+                await self.release_page(child)
         entry = self.pages.pop(target,None)
         self.gate.roots.pop(target,None)
         if entry:
@@ -742,7 +769,7 @@ class PersistentRuntime:
             else:
                 await entry['page'].close()
             if entry.get('slot_held',True):
-                self.slots.release()
+                (self.internal_slots if entry.get('internal') else self.slots).release()
 
     async def close(self):
         import shutil
@@ -839,3 +866,25 @@ def managed_exit_stamp(row):
     import hashlib
     return (hashlib.sha256(bytes(row['cipher'])).hexdigest(),str(row['expected_ip']),
             row['region'],row['timezone'],row['locale'])
+
+
+def profile_exit_stamp(c,aid,profile_id):
+    from .account_profiles import isolated_login_platforms
+    from .config import env
+    from .db import one
+    from .reddit_login import PROVIDER
+    row=one(c,'''SELECT p.network_identity_id,n.provider_ref,n.endpoint_ref,n.secret_ref,n.mode,n.expected_ip,
+        n.expected_region,n.policy_version,n.state FROM lead.browser_profiles p
+        JOIN lead.network_identities n ON n.id=p.network_identity_id WHERE p.id=%s''',(profile_id,))
+    if not row or row['state']=='retired':
+        raise ValueError('browser_profile_exit_changed')
+    fields=tuple(str(row[key]) for key in ('network_identity_id','provider_ref','endpoint_ref','secret_ref',
+        'mode','expected_ip','expected_region','policy_version'))
+    if row['provider_ref']==PROVIDER:
+        configured=env().get('LEAD_REDDIT_IPV4_'+str(aid).replace('-','').upper())
+        members={value['platform'] for value in c.execute('SELECT platform FROM lead.social_accounts WHERE profile_id=%s',(profile_id,))}
+        permitted={'reddit'} | (isolated_login_platforms(aid) & {'facebook','x'})
+        if configured!=str(row['expected_ip']) or members-permitted:
+            raise ValueError('browser_profile_exit_changed')
+        fields+=(configured,)
+    return fields

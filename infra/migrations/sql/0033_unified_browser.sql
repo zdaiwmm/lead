@@ -80,7 +80,9 @@ BEGIN
   WHERE id=connected;
  UPDATE lead.takeover_sessions SET completed_account_id=connected WHERE id=p_takeover;
  intent_revision:=lead.growth_set_intent(p_agent,connected,'running','connection','login-complete:'||p_takeover::text,NULL,
-  '{"target_scope":"verified_owned_targets","excluded_targets":[]}'::jsonb);
+  CASE WHEN EXISTS(SELECT FROM lead.browser_profiles p WHERE p.id=takeover.profile_id AND p.provider='chromium')
+   THEN '{"target_scope":"authenticated_permitted_targets","excluded_targets":[]}'::jsonb
+   ELSE '{"target_scope":"verified_owned_targets","excluded_targets":[]}'::jsonb END);
  UPDATE lead.social_accounts s SET automation_enabled=(i.desired='running') FROM lead.account_operating_intents i
   WHERE s.id=connected AND i.account_id=s.id;
  UPDATE lead.takeover_sessions SET state='ended',ended_at=now(),completed_account_id=connected WHERE id=p_takeover;
@@ -129,12 +131,21 @@ BEGIN
     JOIN lead.authorization_grants g ON g.id=native_action.grant_id AND g.target_id=t.id
     WHERE t.id=native_action.target_id AND s.state='connected' AND t.state='active'
      AND s.binding_version=(native_action.intent->>'binding_version')::bigint
-     AND t.verified_permissions->'browser_method'=native_action.intent->'browser_method'
+     AND coalesce(t.verified_permissions->'browser_methods'->native_action.type,t.verified_permissions->'browser_method')=native_action.intent->'browser_method'
      AND g.revoked_at IS NULL AND g.allowed_actions ? native_action.type)
   THEN RETURN false; END IF;
-  UPDATE lead.account_targets SET verified_permissions=verified_permissions ||
-   jsonb_build_object('browser_verified_action',p_action::text,'browser_verified_operation',native_action.type)
-   WHERE id=native_action.target_id;
+  IF EXISTS(SELECT FROM lead.account_targets t WHERE t.id=native_action.target_id
+    AND t.verified_permissions->'browser_verified_operations'->native_action.type->>'binding_version'=native_action.intent->>'binding_version'
+    AND t.verified_permissions->'browser_verified_operations'->native_action.type->>'method_hash'=(SELECT ap.observation#>>'{browser_request,method_hash}'
+      FROM lead.action_attempts ap WHERE ap.action_id=p_action AND ap.outcome='confirmed' ORDER BY ap.attempt DESC LIMIT 1))
+  THEN RETURN false; END IF;
+  UPDATE lead.account_targets SET verified_permissions=verified_permissions || jsonb_build_object(
+    'browser_verified_operations',coalesce(verified_permissions->'browser_verified_operations','{}'::jsonb) ||
+      jsonb_build_object(native_action.type,jsonb_build_object('action_id',p_action::text,
+        'binding_version',native_action.intent->'binding_version','method_version',native_action.intent#>>'{browser_method,version}',
+        'method_hash',(SELECT ap.observation#>>'{browser_request,method_hash}' FROM lead.action_attempts ap
+          WHERE ap.action_id=p_action AND ap.outcome='confirmed' ORDER BY ap.attempt DESC LIMIT 1))))
+    WHERE id=native_action.target_id;
   RETURN true;
  END IF;
  SELECT a.target_id,s.platform,coalesce(a.intent->>'format','text'),a.intent->>'adapter_version'

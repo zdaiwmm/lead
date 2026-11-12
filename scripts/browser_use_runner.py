@@ -200,6 +200,15 @@ async def main(data):
                     if observed.get('status')=='authenticated':
                         return ActionResult(is_done=True,success=True,extracted_content='The current self account was independently verified.')
                     return ActionResult(error='The current self account is not verified.')
+            elif data.get('native_kind')=='discovery':
+                @tools.action('Propose the observed ordinary-member text editor and explicit automation permission. Selectors and quoted rules are independently checked against the current DOM; this never submits a post.')
+                async def propose_method(target_url: str,operation: str,selectors: dict[str,str],self_subject_prefix: str,
+                                         self_subject_suffix: str,permission_selector: str,permission_quote: str):
+                    await browser.assert_fresh_observation()
+                    observed=await manager('record_method',{'target_url':target_url,'operation':operation,
+                        'selectors':selectors,'self_subject_prefix':self_subject_prefix,'self_subject_suffix':self_subject_suffix,
+                        'permission_selector':permission_selector,'permission_quote':permission_quote})
+                    return ActionResult(is_done=True,success=True,extracted_content=json.dumps(observed))
             else:
                 await command('read')
         else:
@@ -207,7 +216,7 @@ async def main(data):
             browser = Browser(cdp_url=data["cdp_url"], keep_alive=True, enable_default_extensions=False)
         llm = research_llm(data, model_timeout, provider_http)
         agent = Agent(
-            task=(data['native_goal'] if data.get('native_kind')=='connection' else
+            task=(data['native_goal'] if data.get('native_goal') else
                 "Read the public website to address this goal: " + data["goal"]
                 + "\nCurrent URL: " + data["url"]
                 + ("\nUse native observations and the guarded tools on your assigned page only. " if native_scope
@@ -234,8 +243,8 @@ async def main(data):
             calculate_cost=False,
         )
         try:
-            history = await agent.run(max_steps=max(1, min(20 if data.get("native_kind")=="connection" else 6, int(data.get("max_steps", 6)))))
-            if native_scope and data.get('native_kind')!='connection':
+            history = await agent.run(max_steps=max(1, min(20 if data.get("native_kind") in ('connection','discovery','action') else 6, int(data.get("max_steps", 6)))))
+            if native_scope and data.get('native_kind') not in ('connection','discovery','action'):
                 await command('read')
         finally:
             if native_scope:

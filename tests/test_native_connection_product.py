@@ -43,8 +43,14 @@ async def test_native_original_connection_with_real_input_and_private_self(
     )
     assert any(row["path"] == "/account" for row in result["oracle"]["requests"])
     assert result["oracle"]["posts"] == []
-    assert result["usage"]["request_count"] <= 10
+    assert result["usage"]["request_count"] <= 8
     if mode == "login":
+        assert result["task_state"] == "succeeded"
+        assert (
+            result["discovery"]["outcome"] == "completed"
+            and result["discovery"]["output"]["knowledge_progress"]
+        )
+        assert len(result["discovery"]["output"]["targets"]) == 1
         assert result["identity_probe"] == {
             "cookie_empty": True,
             "account_redirected_to_login": True,
@@ -57,6 +63,7 @@ async def test_native_original_connection_with_real_input_and_private_self(
         assert result["account"]["external_account_id"].startswith("member-")
         assert result["temporary_login_cleared"]
     else:
+        assert result["task_state"] == "waiting_user"
         assert (
             result["account"]["state"] == "pending"
             and result["account"]["external_account_id"] is None

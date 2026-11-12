@@ -269,16 +269,19 @@ async def discover(aid, row):
     with tx(aid) as c:
         account = one(c, "SELECT * FROM lead.social_accounts WHERE id=%s", (account_id,))
     observed = await rpc(aid, account["profile_id"], "account/discover", {"platform": account["platform"], "account_id": str(account_id),
+        'task_id':str(row['id']),
         "target_urls":row["input"]["spec"]["payload"].get("target_urls",[])})
     targets = []
     for target in observed.get("targets", [])[:20]:
         # Each target must contain role evidence from the current acting subject.
         targets.append(await asyncio.to_thread(derive_target, aid, account, target))
     return WorkResult(outcome="completed", output={"targets": targets, "missing_conditions": observed.get("missing_conditions", []),
-                                                  "knowledge_progress": bool(targets)})
+                                                  "knowledge_progress": any(value.get('knowledge_progress',True) for value in targets)})
 
 
 def derive_target(aid, account, observed):
+    if observed.get('browser_method'):
+        return derive_browser_target(aid,account,observed)
     from .adapters.catalog import SPECS
     spec = SPECS[account["platform"]]
     if not observed.get("evidence_refs") or observed.get("acting_subject") != account["external_account_id"]:
@@ -309,3 +312,58 @@ def derive_target(aid, account, observed):
               (aid, target["id"], j(allowed), j({"intent_revision": intent["revision"], "account_id": str(account["id"]),
                "binding_version": account["binding_version"], "formats": list(spec.formats), "publish_per_day": intent["scope"].get("publish_per_day")}), target["id"]))
         return {"target_id": str(target["id"]), "grant_id": str(grant["id"])}
+
+
+def derive_browser_target(aid,account,observed):
+    from .browser_execution import validate_method
+    method=observed['browser_method']
+    operations=method.get('operations',[]) if isinstance(method,dict) else []
+    if (not observed.get('evidence_refs') or observed.get('acting_subject')!=account['external_account_id']
+            or len(operations)!=1 or observed.get('access_mode')!='ordinary_member'):
+        raise ValueError('target_not_permitted')
+    operation=operations[0]
+    method=validate_method(method,account_id=account['id'],binding_version=account['binding_version'],
+        target_url=observed['canonical_url'],operation=operation)
+    with tx(aid) as c:
+        require_agent(c,aid,True)
+        current=one(c,'SELECT * FROM lead.social_accounts WHERE id=%s FOR SHARE',(account['id'],))
+        intent=one(c,'SELECT * FROM lead.growth_read_intent(%s)',(account['id'],))
+        if (not current or current['state']!='connected' or current['binding_version']!=account['binding_version']
+                or not intent or intent['desired']!='running' or intent['scope'].get('target_scope') not in
+                    ('authenticated_permitted_targets','existing_grants')
+                or observed['external_target_id'] in intent['scope'].get('excluded_targets',[])
+                or intent['scope'].get('target_scope')=='existing_grants' and observed['external_target_id'] not in intent['scope'].get('target_ids',[])):
+            raise ValueError('target_not_permitted')
+        old=one(c,'SELECT * FROM lead.account_targets WHERE account_id=%s AND target_type=%s AND external_target_id=%s FOR UPDATE',
+            (account['id'],'web',observed['external_target_id']))
+        permissions=old['verified_permissions'] if old else {}
+        if not isinstance(permissions,dict) or not isinstance(permissions.get('browser_methods',{}),dict):
+            raise ValueError('browser_method_scope_changed')
+        previous=permissions.get('browser_methods',{}).get(operation)
+        def facts(value):
+            if not isinstance(value,dict):
+                return value
+            return {key:facts(item) if isinstance(item,dict) else item for key,item in value.items()
+                if key not in ('evidence_refs','checked_at')}
+        learned=previous is None or facts(previous)!=facts(method)
+        if not learned:
+            method=previous
+        methods={**permissions.get('browser_methods',{}),operation:method}
+        allowed=sorted(methods)
+        permissions.update(browser_methods=methods,actions=allowed,access_mode='ordinary_member',binding_version=account['binding_version'])
+        target=one(c,"""INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,external_target_id,
+            canonical_url,display_name,verified_permissions,state) VALUES(lead.ctx_tenant(),%s,%s,'web',%s,%s,%s,%s,'active')
+            ON CONFLICT(account_id,target_type,external_target_id) DO UPDATE SET verified_permissions=EXCLUDED.verified_permissions,
+            canonical_url=EXCLUDED.canonical_url,display_name=EXCLUDED.display_name,state='active' RETURNING *""",
+            (aid,account['id'],observed['external_target_id'],observed['canonical_url'],observed['display_name'],j(permissions)))
+        grant=one(c,'SELECT * FROM lead.authorization_grants WHERE target_id=%s AND revoked_at IS NULL FOR UPDATE',(target['id'],))
+        limits={'intent_revision':intent['revision'],'account_id':str(account['id']),'binding_version':account['binding_version'],
+            'formats':['text'],'publish_per_day':intent['scope'].get('publish_per_day')}
+        if grant and (grant['allowed_actions']!=allowed or grant['limits']!=limits):
+            c.execute('UPDATE lead.authorization_grants SET revoked_at=now() WHERE id=%s',(grant['id'],))
+            grant=None
+        if not grant:
+            grant=one(c,"""INSERT INTO lead.authorization_grants(tenant_id,agent_id,target_id,version,allowed_actions,limits,granted_by)
+                SELECT lead.ctx_tenant(),%s,%s,coalesce(max(version),0)+1,%s,%s,'account_intent'
+                FROM lead.authorization_grants WHERE target_id=%s RETURNING *""",(aid,target['id'],j(allowed),j(limits),target['id']))
+        return {'target_id':str(target['id']),'grant_id':str(grant['id']),'operation':operation,'knowledge_progress':learned}

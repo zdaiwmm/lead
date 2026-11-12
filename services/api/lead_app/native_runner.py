@@ -103,3 +103,60 @@ async def connect(controller,gateway_endpoint):
         if child and child.returncode is None:
             child.kill()
             await asyncio.wait_for(child.communicate(),5)
+
+
+async def run_task(controller,gateway_endpoint,*,kind,goal):
+    """One bounded SDK fragment on the current original task and budget ledger."""
+    from .admin_settings import for_agent
+    aid=controller.actor.aid
+    task,account,_=await asyncio.to_thread(controller.snapshot)
+    scope=await controller.start()
+    settings,version=for_agent(aid,'models')
+    model=resolve_model(settings['default_model'])
+    if not model['key']:
+        raise ValueError('native_task_model_unavailable')
+    await asyncio.to_thread(controller.start_fragment)
+    context=growth_cost_context.set({'task_id':controller.task_id,'experiment_id':str(task['experiment_id']) if task['experiment_id'] else None})
+    try:
+        reservation=reserve(aid,uid(),40000,model_reference(model),model['provider'])
+    finally:
+        growth_cost_context.reset(context)
+    packaged=ROOT/'services/browser-runtime'
+    script=packaged/'browser_use_runner.py'
+    if env().get('LEAD_DEPLOYMENT_MODE')!='production':
+        packaged=Path(env().get('LEAD_BROWSER_RUNTIME_DIR') or packaged)
+        if not script.is_file():
+            script=ROOT/'scripts/browser_use_runner.py'
+    folder=STATE/'browser-use-runs'/('task-'+controller.task_id+'-'+uid())
+    payload={'native_scope':scope,'native_kind':kind,'native_goal':goal,'agent_id':aid,'run_id':controller.task_id,
+        'sensitive_data':{'bound_account_subject':account['external_account_id']},
+        'url':controller.page.url,'goal':goal,'command_path':'native/task-command','gateway_endpoint':gateway_endpoint,
+        'gateway_token':internal_token(),'model':model,'max_steps':20,'max_requests':min(8,settings['max_model_requests']),
+        'max_total_tokens':40000,'max_output_tokens':min(1800,settings['max_output_tokens']),'workdir':str(folder)}
+    child=None
+    settled=False
+    try:
+        child=await asyncio.create_subprocess_exec(env().get('LEAD_BROWSER_RUNTIME_PYTHON') or sys.executable,'-B','-S',str(script),
+            stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,
+            env={key:value for key,value in {**os.environ,'PYTHONPATH':str(packaged/'site-packages')+os.pathsep+str(ROOT/'services/api'),
+                'ANONYMIZED_TELEMETRY':'false','BROWSER_USE_CLOUD_SYNC':'false','BROWSER_USE_VERSION_CHECK':'false',
+                'BROWSER_USE_SETUP_LOGGING':'false'}.items() if key in ('PATH','HOME','LANG','LC_ALL','TZ','PYTHONPATH') or key.startswith(('ANONYMIZED_','BROWSER_USE_'))})
+        stdout,_=await asyncio.wait_for(child.communicate(json.dumps(payload).encode()),min(165,controller.remaining_seconds()))
+        if child.returncode:
+            raise ValueError('native_task_worker_failed')
+        result=json.loads(stdout)
+        folder.mkdir(parents=True,exist_ok=True,mode=0o700)
+        (folder/'result.json').write_text(json.dumps(result,ensure_ascii=False))
+        usage=result.get('usage') or {}
+        known=bool(usage.get('entry_count')) and not usage.get('unmeasured_requests')
+        settle(aid,reservation,actual=usage.get('total_tokens') if known else None,
+            details={'provider':model['provider'],'model':model_reference(model),'configuration_version':version,
+                'requests':usage.get('entry_count',0),'purpose':'native_'+kind},incomplete=not known)
+        settled=True
+        return result
+    finally:
+        if not settled:
+            settle(aid,reservation,actual=None,details={'purpose':'native_'+kind,'failure':'native_worker_unavailable'},incomplete=True)
+        if child and child.returncode is None:
+            child.kill()
+            await asyncio.wait_for(child.communicate(),5)
