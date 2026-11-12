@@ -369,10 +369,15 @@ def derive_browser_target(aid,account,observed,*,connection=None):
         except (ValueError,TypeError):
             raise ValueError('native_method_observation_expired') from None
         browser_epoch=producer.get('browser_epoch')
-        if type(browser_epoch) is not int or browser_epoch<1 or not one(c,"""SELECT b.id FROM lead.browser_sessions b
-            JOIN lead.profile_leases l ON l.profile_id=b.profile_id AND l.epoch=b.epoch
-            WHERE b.id=%s AND b.profile_id=%s AND b.epoch=%s AND b.state='ready' AND b.ended_at IS NULL
-                AND l.state='held' AND l.expires_at>now() FOR SHARE OF b,l""",(browser_session,current['profile_id'],browser_epoch)):
+        if type(browser_epoch) is not int or browser_epoch<1:
+            raise ValueError('native_method_observation_expired')
+        # Match the manager heartbeat/close order: profile lease before session.
+        # A joined locking SELECT leaves planner order unspecified.
+        lease=one(c,"""SELECT profile_id FROM lead.profile_leases WHERE profile_id=%s AND epoch=%s
+            AND state='held' AND expires_at>now() FOR SHARE""",(current['profile_id'],browser_epoch))
+        session=one(c,"""SELECT id FROM lead.browser_sessions WHERE id=%s AND profile_id=%s AND epoch=%s
+            AND state='ready' AND ended_at IS NULL FOR SHARE""",(browser_session,current['profile_id'],browser_epoch)) if lease else None
+        if not lease or not session:
             raise ValueError('native_method_observation_expired')
         old=one(c,'SELECT * FROM lead.account_targets WHERE account_id=%s AND target_type=%s AND external_target_id=%s FOR UPDATE',
             (account['id'],'web',observed['external_target_id']))
