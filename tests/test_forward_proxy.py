@@ -10,6 +10,103 @@ from lead_app.forward_proxy import BrowserForwardProxy
 
 
 @pytest.mark.asyncio
+async def test_old_tunnel_cannot_send_after_control_generation_changes(monkeypatch):
+    received = bytearray()
+
+    async def echo(reader, writer):
+        try:
+            while data := await reader.read(1024):
+                received.extend(data)
+                writer.write(data)
+                await writer.drain()
+        finally:
+            writer.close()
+
+    upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+    generation = ["first"]
+    proxy = BrowserForwardProxy(uid(), forward_guard=lambda: generation[0])
+    await proxy.start()
+
+    async def connect(ip, port):
+        return await asyncio.open_connection("127.0.0.1", upstream.sockets[0].getsockname()[1])
+
+    monkeypatch.setattr(proxy, "connect", connect)
+    reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+    try:
+        writer.write(("CONNECT 1.1.1.1:443 HTTP/1.1\r\n"
+                      f"Proxy-Authorization: {proxy.auth}\r\n\r\n").encode())
+        await writer.drain()
+        assert b"200" in await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"first")
+        await writer.drain()
+        assert await reader.readexactly(5) == b"first"
+        generation[0] = "second"
+        writer.write(b"stale")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(), 1) == b""
+        assert received == b"first"
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await proxy.close()
+        upstream.close()
+        await upstream.wait_closed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connected", [False, True])
+async def test_close_with_active_connect_and_partial_header(monkeypatch, connected):
+    """Shutdown must close accepted sockets before waiting for the listener."""
+    upstream_writers = []
+
+    async def upstream(reader, writer):
+        upstream_writers.append(writer)
+        writer.write(b"BEFORE")
+        await writer.drain()
+        await reader.read()
+        writer.close()
+
+    server = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    proxy = await BrowserForwardProxy(uid()).start()
+    reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+    try:
+        if connected:
+            async def connect(ip, requested_port):
+                return await asyncio.open_connection("127.0.0.1", port)
+
+            monkeypatch.setattr(proxy, "connect", connect)
+            writer.write(("CONNECT 1.1.1.1:443 HTTP/1.1\r\n"
+                          f"Proxy-Authorization: {proxy.auth}\r\n\r\n").encode())
+            await writer.drain()
+            assert b"200" in await reader.readuntil(b"\r\n\r\n")
+            assert await reader.readexactly(6) == b"BEFORE"
+        else:
+            writer.write(b"CONNECT ")
+            await writer.drain()
+        for _ in range(100):
+            if proxy.tasks:
+                break
+            await asyncio.sleep(.01)
+        assert proxy.tasks
+        await asyncio.wait_for(proxy.close(), 1)
+        assert not proxy.tasks
+        await asyncio.wait_for(reader.read(), 1)
+        assert reader.at_eof()
+    finally:
+        for task in list(proxy.tasks):
+            task.cancel()
+        await asyncio.gather(*list(proxy.tasks), return_exceptions=True)
+        writer.close()
+        await writer.wait_closed()
+        for remote in upstream_writers:
+            remote.close()
+        await proxy.close()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_proxy_denies_missing_credentials_private_targets_and_wrong_profile():
     aid = uid()
     proxy = await BrowserForwardProxy(aid).start()

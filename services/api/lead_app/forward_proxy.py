@@ -22,9 +22,12 @@ from .config import CONFIG, STATE, env
 
 
 class BrowserForwardProxy:
-    def __init__(self, aid, upstream=None, slot_id=None):
+    def __init__(self, aid, upstream=None, slot_id=None, *, forward_guard=None):
         self.aid = aid
         self.upstream = upstream
+        # A managed Chromium owner supplies its live, non-reusable control
+        # generation. None retains the existing Camoufox network contract.
+        self.forward_guard = forward_guard
         self.bound_ipv6 = (upstream or {}).get("server") == "bound-ipv6"
         tunnel_key = "LEAD_IPV6_TUNNEL_" + aid.replace("-", "").upper()
         self.ipv6_tunnel = env().get(tunnel_key)
@@ -90,16 +93,21 @@ class BrowserForwardProxy:
         return self
 
     async def close(self):
+        # Python 3.12 waits for accepted connections in wait_closed(). Stop
+        # accepting first, then collect every handler (including partial headers).
         if self.unix_server:
             self.unix_server.close()
+        if self.server:
+            self.server.close()
+        tasks = list(self.tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self.unix_server:
             await self.unix_server.wait_closed()
             self.socket_path.unlink(missing_ok=True)
         if self.server:
-            self.server.close()
             await self.server.wait_closed()
-        for task in list(self.tasks):
-            task.cancel()
-        await asyncio.gather(*list(self.tasks), return_exceptions=True)
 
     def public_ip(self, value):
         ip = ipaddress.ip_address(value)
@@ -283,9 +291,22 @@ class BrowserForwardProxy:
                 writer.close()
             raise
 
-    async def pipe(self, reader, writer):
+    def control_token(self):
+        if self.forward_guard is None:
+            return None
+        token = self.forward_guard()
+        if token is None or token is False:
+            raise ConnectionResetError("Browser control is not ready")
+        return token
+
+    def check_control(self, expected):
+        if self.control_token() != expected:
+            raise ConnectionResetError("Browser control generation changed")
+
+    async def pipe(self, reader, writer, control_token=None):
         try:
             while data := await reader.read(65536):
+                self.check_control(control_token)
                 self.bytes_forwarded += len(data)
                 writer.write(data)
                 await writer.drain()
@@ -296,6 +317,7 @@ class BrowserForwardProxy:
         task = asyncio.current_task()
         self.tasks.add(task)
         remote = None
+        pipes = []
         try:
             header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 15)
             lines = header.decode("iso-8859-1").split("\r\n")
@@ -343,6 +365,7 @@ class BrowserForwardProxy:
                 )
                 await writer.drain()
                 return
+            control_token = self.control_token()
             if method == "CONNECT":
                 # HTTP clients may serialize numeric IPv6 CONNECT without brackets.
                 if target.count(":") > 1 and not target.startswith("["):
@@ -354,6 +377,7 @@ class BrowserForwardProxy:
                     raise ValueError("Unsupported CONNECT target")
                 ip = await self.resolve(host)
                 up_reader, remote = await self.connect(ip, port)
+                self.check_control(control_token)
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 await writer.drain()
             else:
@@ -384,14 +408,15 @@ class BrowserForwardProxy:
                         ("proxy-authorization:", "proxy-connection:", "connection:")
                     )
                 )
+                self.check_control(control_token)
                 remote.write(
                     (outgoing + "Connection: close\r\n\r\n").encode("iso-8859-1")
                 )
                 await remote.drain()
             self.connections += 1
             pipes = [
-                asyncio.create_task(self.pipe(reader, remote)),
-                asyncio.create_task(self.pipe(up_reader, writer)),
+                asyncio.create_task(self.pipe(reader, remote, control_token)),
+                asyncio.create_task(self.pipe(up_reader, writer, control_token)),
             ]
             await asyncio.wait(pipes, return_when=asyncio.FIRST_COMPLETED)
             for p in pipes:
@@ -409,6 +434,9 @@ class BrowserForwardProxy:
             except (ConnectionError, asyncio.CancelledError):
                 pass
         finally:
+            for pipe in pipes:
+                pipe.cancel()
+            await asyncio.gather(*pipes, return_exceptions=True)
             if remote:
                 remote.close()
             writer.close()
