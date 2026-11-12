@@ -135,19 +135,27 @@ async def test_unknown_native_action_reads_original_receipt_without_resubmission
             data=ChannelInput(content_id=content['id'],content_hash=content['content_hash'])
             ref=submit_work(c,aid,TaskSpec(kind='channel',purpose='publish',account_id=context['pending']['account_id'],target_id=target_id,
                 payload=data.model_dump(mode='json'),review_at=utcnow()+timedelta(hours=1)))
-        async def execute():
+        async def execute(*,duplicate=False):
             admitted=advance(ref,now=utcnow()+timedelta(minutes=6))
             assert admitted['state']=='ready',admitted
             with tx(aid) as c:
                 task=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(ref['task_id'],))
-            result=await execute_channel(aid,task,data,admitted['claim'])
+            if duplicate:
+                import asyncio
+                results=await asyncio.gather(*(execute_channel(aid,task,data,admitted['claim']) for _ in range(2)))
+                assert all(item.outcome=='unknown' for item in results)
+                result=results[0]
+            else:
+                result=await execute_channel(aid,task,data,admitted['claim'])
             finish(admitted['claim'],result)
             with tx(aid) as c:
                 action=one(c,'SELECT * FROM lead.actions WHERE task_id=%s',(ref['task_id'],))
                 attempts=c.execute('SELECT * FROM lead.action_attempts WHERE action_id=%s',(action['id'],)).fetchall()
             return result,action,attempts
         context['workflow'].update(kind='action',step=0,body=body['body'],operation='publish')
-        first,original,attempts=await execute()
+        start=len(context['model_calls'])
+        first,original,attempts=await execute(duplicate=True)
+        assert len(context['model_calls'])-start==4 and not context['actor'].action_operations
         assert first.outcome=='unknown' and original['state']=='unknown' and len(attempts)==1
         assert attempts[0]['observation']['browser_request']['claimed']
         assert board.origin+'/posts/1' in attempts[0]['observation']['browser_baseline']['urls']

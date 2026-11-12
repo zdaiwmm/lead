@@ -79,7 +79,7 @@ def claim_request(actor, action_id, claim, generation, request, observed):
         updated = c.execute("UPDATE lead.actions SET state='dispatching' WHERE id=%s AND state='prepared'", (action_id,)).rowcount
         if updated != 1:
             return False
-        binding.update(claimed=True, fingerprint=fingerprint)
+        binding.update(claimed=True, fingerprint=fingerprint, dispatch_task_attempt_token=claim["attempt_token"])
         c.execute('UPDATE lead.action_attempts SET observation=observation || %s WHERE id=%s',
                   (j({'browser_request':binding}),attempt['id']))
         return True

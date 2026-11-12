@@ -89,6 +89,7 @@ class Actor:
         self.research_pages = {}
         self.connection_pages = {}
         self.task_pages = {}
+        self.action_operations = {}
         self.forward_proxy = None
         self.disconnected = False
         self.native_runtime = None

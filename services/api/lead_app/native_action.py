@@ -348,6 +348,20 @@ class NativeAction(NativeTask):
 
 
 async def execute_native(actor,action_id,claim):
+    """Duplicate RPCs share only their original ActionRef's operation lock."""
+    key=str(action_id)
+    entry=actor.action_operations.setdefault(key,{'lock':asyncio.Lock(),'users':0})
+    entry['users']+=1
+    try:
+        async with entry['lock']:
+            return await _execute_native_locked(actor,action_id,claim)
+    finally:
+        entry['users']-=1
+        if not entry['users'] and actor.action_operations.get(key) is entry:
+            actor.action_operations.pop(key,None)
+
+
+async def _execute_native_locked(actor,action_id,claim):
     from .channel_contracts import ExecutionRef
     from .execution_routes import endpoint
     from .native_runner import run_task
@@ -361,6 +375,11 @@ async def execute_native(actor,action_id,claim):
         return {'state':action['state']}
     if not claim:
         raise ValueError('native_action_current_claim_required')
+    if action['state'] in ('unknown','dispatching'):
+        with tx(actor.aid) as c:
+            attempt=one(c,'SELECT observation FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1',(action_id,))
+        if attempt and attempt['observation'].get('browser_request',{}).get('dispatch_task_attempt_token')==claim['attempt_token']:
+            return {'state':'unknown','reason':'The original dispatch claim is complete; only a later original task claim may reconcile.'}
     if action['state']=='dispatching':
         with tx(actor.aid) as c:
             c.execute("UPDATE lead.actions SET state='unknown' WHERE id=%s AND state='dispatching'",(action_id,))
