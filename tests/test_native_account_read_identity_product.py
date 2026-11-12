@@ -44,6 +44,8 @@ async def test_account_read_rejects_current_private_subject_that_differs_from_bi
         with tx(aid) as connection:
             original = one(connection, 'SELECT * FROM lead.takeover_sessions WHERE id=%s', (pending['takeover_id'],))
             account = one(connection, 'SELECT * FROM lead.social_accounts WHERE id=%s', (account_id,))
+            initial_intent = one(connection, 'SELECT * FROM lead.account_operating_intents WHERE account_id=%s', (account_id,))
+            initial_grants = all_rows(connection, 'SELECT g.* FROM lead.authorization_grants g JOIN lead.account_targets t ON t.id=g.target_id WHERE t.account_id=%s ORDER BY g.id', (account_id,))
             assert original['state'] == 'ended' and original['completed_account_id'] == account['id']
             assert not all_rows(connection, "SELECT id FROM lead.takeover_sessions WHERE state IN ('active','requested','ending')")
         assert account['state'] == 'connected' and account['external_account_id'] == board.state.username
@@ -75,19 +77,30 @@ async def test_account_read_rejects_current_private_subject_that_differs_from_bi
                 task = one(connection, 'SELECT * FROM lead.tasks WHERE id=%s', (ref['task_id'],))
                 run = one(connection, 'SELECT * FROM lead.browser_runs WHERE task_id=%s', (ref['task_id'],))
                 documents = all_rows(connection, "SELECT d.source_type,k.body FROM lead.knowledge_documents d JOIN lead.knowledge_chunks k ON k.document_id=d.id WHERE d.source_ref=%s", (board.origin + '/account',))
-                bound = one(connection, 'SELECT state,external_account_id FROM lead.social_accounts WHERE id=%s', (account_id,))
+                bound = one(connection, 'SELECT * FROM lead.social_accounts WHERE id=%s', (account_id,))
+                final_intent = one(connection, 'SELECT * FROM lead.account_operating_intents WHERE account_id=%s', (account_id,))
+                final_grants = all_rows(connection, 'SELECT g.* FROM lead.authorization_grants g JOIN lead.account_targets t ON t.id=g.target_id WHERE t.account_id=%s ORDER BY g.id', (account_id,))
             assert run and str(run['profile_id']) == str(actor.profile['id'])
             assert str(task['input']['spec']['account_id']) == account_id
-            assert bound == {'state': 'connected', 'external_account_id': board.state.username}
+            binding_fields = ('external_account_id', 'subject_ref', 'binding_version', 'profile_id')
             dto = observed[0][1] if observed else {}
             diagnostics = {'dto_fields': sorted(dto), 'dto_error': dto.get('error'),
                 'dto_contains_other_private_subject': changed_subject in json.dumps(dto),
                 'persisted_other_private_source': any(changed_subject in document['body'] for document in documents),
-                'research_outcome': result['outcome'], 'task_state': task['state'],
+                'research_outcome': result['outcome'], 'task_state': task['state'], 'health_state': bound['state'],
+                'binding_unchanged': all(bound[key] == account[key] for key in binding_fields),
+                'intent_unchanged': final_intent == initial_intent, 'grants_unchanged': final_grants == initial_grants,
+                'research_condition': (result.get('output', {}).get('failure_scope') or {}).get('condition'),
                 'same_bound_account_and_profile': True, 'login_takeover_ended': True,
                 'new_model_requests': len(context['model_calls'])-before_model,
                 'wrong_subject_reason': 'wrong_subject' in json.dumps(dto)}
             print('ACCOUNT_READ_IDENTITY_DIAGNOSTICS ' + json.dumps(diagnostics, sort_keys=True))
+            assert bound['state'] == 'needs_auth', diagnostics
+            assert diagnostics['binding_unchanged'] and diagnostics['intent_unchanged'] and diagnostics['grants_unchanged'], diagnostics
+            assert bound['external_account_id'] == board.state.username
+            assert diagnostics['new_model_requests'] == 0 and task['state'] != 'succeeded', diagnostics
+            assert dto.get('error') == 'ACCOUNT_SUBJECT_CHANGED' and dto.get('condition') == 'account_subject_changed', diagnostics
+            assert dto.get('reason') == 'wrong_subject' and diagnostics['research_condition'] == 'account_subject_changed', diagnostics
             assert not diagnostics['dto_contains_other_private_subject'], diagnostics
             assert not diagnostics['persisted_other_private_source'], diagnostics
             assert diagnostics['dto_error'] and diagnostics['wrong_subject_reason'], diagnostics
