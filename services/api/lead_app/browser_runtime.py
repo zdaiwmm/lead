@@ -320,6 +320,7 @@ class NativeNetworkGate:
     async def resolve_owner(self, event):
         request = event['request']
         identity = event.get('networkId')
+        body_checked=set()
         deadline = asyncio.get_running_loop().time()+self.owner_timeout
         while identity:
             current=[(session,recorded) for (request_id,session),recorded in self.network.items()
@@ -335,8 +336,29 @@ class NativeNetworkGate:
                 target=self.targets[session]
                 if (target.get('type')=='service_worker' and self.context_id
                         and target.get('browserContextId')==self.context_id and not recorded.get('frameId')
-                        and all(recorded['request'].get(k)==request.get(k) for k in ('url','method','postData'))):
-                    matches=current
+                        and all(recorded['request'].get(k)==request.get(k) for k in ('url','method'))):
+                    same_body=recorded['request'].get('postData')==request.get('postData')
+                    # A streamed fetch(event.request) can omit Network.postData.
+                    # Fetch's body alone must not fill that evidence gap: ask
+                    # the exact current Network session/request and compare it.
+                    if (request.get('method')=='POST' and request.get('hasPostData')
+                            and 'postData' not in recorded['request'] and 'postData' in request
+                            and (identity,session) not in body_checked):
+                        body_checked.add((identity,session))
+                        try:
+                            data=await self.send('Network.getRequestPostData',{'requestId':identity},session)
+                            value=data['postData']
+                            if data.get('base64Encoded'):
+                                import base64
+                                value=base64.b64decode(value,validate=True).decode()
+                            same_body=isinstance(value,str) and value==request['postData']
+                        except (ValueError,KeyError,UnicodeError,ConnectionError,TimeoutError):
+                            same_body=False
+                    if (same_body and self.targets.get(session)==target
+                            and self.network.get((identity,session)) is recorded):
+                        matches=current
+                        if 'postData' in request:
+                            event['_lead_worker_body_verified']=True
             if len(matches) == 1:
                 session, recorded = matches[0]
                 return session, self.targets[session]
@@ -368,7 +390,8 @@ class NativeNetworkGate:
             expected_context=scope.get('probe_context_id') if scope and scope.get('kind')=='identity_probe' else self.context_id
             if not expected_context or target.get('browserContextId') != expected_context:
                 raise ValueError('request_context_unmanaged')
-            request = {**event['request'],'_native_network':{'session':session,'network_id':event.get('networkId')}}
+            request = {**event['request'],'_native_network':{'session':session,'network_id':event.get('networkId'),
+                       'worker_body_verified':bool(event.get('_lead_worker_body_verified'))}}
             if request.get('hasPostData') and 'postData' not in request:
                 raise ValueError('request_body_unavailable')
             root = self.owners.get(session)
