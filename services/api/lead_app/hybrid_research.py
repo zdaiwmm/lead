@@ -7,6 +7,8 @@ social accounts. Neither browser-use nor its model receives publishing tools.
 import asyncio
 import json
 import os
+import sys
+from pathlib import Path
 
 import httpx
 
@@ -22,7 +24,8 @@ RUNTIME = STATE / "browser-use-venv" / "bin" / "python"
 
 
 def available():
-    return env().get("LEAD_BROWSER_USE_ENABLED") == "1" and RUNTIME.is_file()
+    return env().get("LEAD_BROWSER_USE_ENABLED") == "1" and (RUNTIME.is_file() or
+        (ROOT/'services/browser-runtime/manifest.json').is_file())
 
 
 class HybridResearchPage(ResearchPage):
@@ -109,7 +112,7 @@ async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=N
             headers = {"Authorization": "Bearer " + internal_token()}
             response = await client.post(
                 gateway_endpoint+f"/agents/{aid}/research/{rid}/hybrid",
-                headers=headers,
+                headers=headers, json={"url":url},
             )
             response.raise_for_status()
             payload = {
@@ -117,7 +120,8 @@ async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=N
                 "run_id": rid,
                 "url": url,
                 "goal": goal[:6000],
-                "cdp_url": response.json()["cdp_url"],
+                "cdp_url": response.json().get("cdp_url"),
+                "native_scope": response.json().get("native_scope"),
                 "gateway_token": internal_token(),
                 "gateway_endpoint": gateway_endpoint,
                 "model": connection,
@@ -130,14 +134,18 @@ async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=N
                 "timeout_seconds": min(45, settings["timeout_seconds"]),
                 "workdir": str(STATE / "browser-use-runs" / rid),
             }
+            packaged = ROOT / 'services/browser-runtime'
+            native = bool(payload['native_scope'])
+            interpreter = env().get('LEAD_BROWSER_RUNTIME_PYTHON') or sys.executable
             child = await asyncio.create_subprocess_exec(
-                str(RUNTIME),
-                str(ROOT / "scripts/browser_use_runner.py"),
+                *([interpreter, '-S', str(packaged/'browser_use_runner.py')] if native else
+                  [str(RUNTIME), str(ROOT/'scripts/browser_use_runner.py')]),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
                 env={
                     **os.environ,
+                    **({'PYTHONPATH':str(packaged/'site-packages')+os.pathsep+str(ROOT/'services/api')} if native else {}),
                     "ANONYMIZED_TELEMETRY": "false",
                     "BROWSER_USE_CLOUD_SYNC": "false",
                     "BROWSER_USE_VERSION_CHECK": "false",

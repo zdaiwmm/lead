@@ -37,3 +37,22 @@ class ControlBridgeTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RequestOwnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_same_request_id_never_borrows_other_frame_and_ambiguity_fails(self):
+        from lead_app.browser_runtime import NativeNetworkGate
+        gate = NativeNetworkGate(None,None,authorize=None,claim=None,lost=None,owner_timeout=.001)
+        request = {'url':'https://fixture.test/same','method':'GET'}
+        gate.targets = {'one':{'targetId':'page-1'},'two':{'targetId':'page-2'}}
+        gate.network = {('shared','one'):{'request':request,'frameId':'frame-1'},
+                        ('shared','two'):{'request':request,'frameId':'frame-2'}}
+        event = {'networkId':'shared','request':request,'frameId':'frame-1'}
+        session, target = await gate.resolve_owner(event)
+        self.assertEqual((session,target['targetId']),('one','page-1'))
+        gate.network[('shared','two')]['frameId']='frame-1'
+        with self.assertRaisesRegex(ValueError,'request_owner_ambiguous'):
+            await gate.resolve_owner(event)
+        gate.network.clear()
+        with self.assertRaisesRegex(ValueError,'request_owner_unresolved'):
+            await gate.resolve_owner(event)

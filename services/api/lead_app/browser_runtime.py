@@ -169,7 +169,7 @@ class NativeNetworkGate:
                     self.initialized.discard(event['sessionId'])
                     self.changed.set()
                 elif method == 'Network.requestWillBeSent' and session in self.targets:
-                    self.network[event['requestId']] = (session, event)
+                    self.network[(event['requestId'], session)] = event
                     # Request correlation is bounded and never persists permission.
                     if len(self.network) > 4096:
                         self.network.pop(next(iter(self.network)))
@@ -245,13 +245,15 @@ class NativeNetworkGate:
         identity = event.get('networkId')
         deadline = asyncio.get_running_loop().time()+self.owner_timeout
         while identity:
-            if match := self.network.get(identity):
-                session, recorded = match
-                if session in self.targets and all(recorded['request'].get(k) == request.get(k) for k in ('url', 'method')):
-                    return session, self.targets[session]
-            for session, info in self.targets.items():
-                if info['targetId'] == identity and request['method'] == 'GET' and request['url'] == info.get('url'):
-                    return session, info
+            matches = [(session, recorded) for (request_id, session), recorded in self.network.items()
+                       if request_id == identity and session in self.targets
+                       and recorded.get('frameId') == event.get('frameId')
+                       and all(recorded['request'].get(k) == request.get(k) for k in ('url','method','postData'))]
+            if len(matches) == 1:
+                session, recorded = matches[0]
+                return session, self.targets[session]
+            if len(matches) > 1:
+                raise ValueError('request_owner_ambiguous')
             left = deadline-asyncio.get_running_loop().time()
             if left <= 0:
                 break
@@ -482,6 +484,13 @@ class PersistentRuntime:
             if (not row or row['state'] != 'running' or row['control_version'] != scope['control_version']
                     or row['input'].get('task_generation') != scope['task_generation']):
                 raise ValueError('browser_task_scope_changed')
+            if not one(c,'''SELECT 1 FROM lead.profile_leases WHERE profile_id=%s AND state='held'
+                    AND epoch=%s AND expires_at>now()''',(self.actor.profile['id'],self.actor.epoch)):
+                raise ValueError('browser_profile_lease_expired')
+            if not one(c,'''SELECT id FROM lead.browser_sessions WHERE id=%s AND profile_id=%s
+                    AND epoch=%s AND state='ready' AND ended_at IS NULL''',
+                    (self.actor.session,self.actor.profile['id'],self.actor.epoch)):
+                raise ValueError('browser_instance_changed')
             runtime = (row['result'] or {}).get('runtime',{})
             from datetime import datetime
             if (runtime.get('attempt_token') != scope['claim']['attempt_token'] or not runtime.get('lease_until')
@@ -490,7 +499,11 @@ class PersistentRuntime:
             if scope.get('connection_ref'):
                 connection = one(c,"SELECT * FROM lead.takeover_sessions WHERE id=%s AND purpose='login'",(scope['connection_ref'],))
                 if (not connection or connection['expires_at'] <= utcnow() or connection['state'] != 'active'
-                        or connection.get('control_mode') != 'automatic' or str(connection['browser_session_id']) != str(self.actor.session)):
+                        or connection.get('control_mode') != 'automatic' or str(connection['browser_session_id']) != str(self.actor.session)
+                        or str(connection['profile_id']) != str(self.actor.profile['id'])
+                        or connection['control_version'] != scope['control_version']
+                        or connection['challenge_version'] != scope.get('challenge_version')
+                        or connection['input_seq'] != scope.get('input_seq')):
                     raise ValueError('connection_control_changed')
             elif row['desired_state'] != 'running':
                 raise ValueError('browser_project_paused')
@@ -500,6 +513,14 @@ class PersistentRuntime:
                         or account['binding_version'] != scope['binding_version']
                         or not scope.get('connection_ref') and account['state'] != 'connected'):
                     raise ValueError('browser_account_changed')
+                if not scope.get('connection_ref'):
+                    intent = one(c,'SELECT desired,revision FROM lead.account_operating_intents WHERE account_id=%s',(scope['account_id'],))
+                    if not intent or intent['desired'] != 'running' or intent['revision'] != scope.get('intent_revision'):
+                        raise ValueError('browser_account_intent_changed')
+            if not scope.get('connection_ref') and one(c,'''SELECT id FROM lead.takeover_sessions
+                    WHERE profile_id=%s AND state IN ('requested','active','ending') AND expires_at>now()''',
+                    (self.actor.profile['id'],)):
+                raise ValueError('browser_owner_control_active')
             return row
 
     async def claim_request(self, scope, target, request, decision):

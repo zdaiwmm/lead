@@ -1753,7 +1753,9 @@ async def research_command(aid: UUID, body: ResearchCommand):
     aid = str(aid)
     run_id = str(body.run_id)
     actor = await gateway.get(aid, research_profile(aid, run_id))
-    controller = actor.research_pages.setdefault(run_id, ResearchPage(actor, run_id))
+    from .native_research import NativeResearchPage
+    page_type = NativeResearchPage if actor.native_runtime else ResearchPage
+    controller = actor.research_pages.setdefault(run_id, page_type(actor, run_id))
     return await controller.command(body.operation, body.args, str(body.command_id))
 
 
@@ -1773,10 +1775,17 @@ async def close_research(aid: UUID, rid: UUID):
 
 
 @app.post("/agents/{aid}/research/{rid}/hybrid")
-async def start_hybrid_research(aid: UUID, rid: UUID):
+async def start_hybrid_research(aid: UUID, rid: UUID, body: dict | None = None):
     from .hybrid_research import HybridResearchPage
 
     actor = await gateway.get(str(aid), research_profile(str(aid), rid))
+    if actor.native_runtime:
+        from .native_research import NativeResearchPage
+        controller = actor.research_pages.setdefault(str(rid), NativeResearchPage(actor,str(rid)))
+        if not isinstance(controller,NativeResearchPage):
+            raise ValueError("browser_run_engine_changed")
+        # The per-instance two-slot queue owns waiting; do not hold actor.lock.
+        return {"native_scope":await controller.start((body or {}).get("url",""))}
     async with actor.lock:
         controller = actor.research_pages.setdefault(
             str(rid), HybridResearchPage(actor, str(rid))

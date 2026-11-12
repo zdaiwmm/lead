@@ -121,8 +121,10 @@ async def main(wrapper, binary):
                 from lead_app.browser_runtime import NativeNetworkGate
                 context_id = next(item['browserContextId'] for item in (await rpc(first, 'Target.getTargets'))['targetInfos'] if item['type']=='page')
                 control_lost = asyncio.Event()
+                ownership = []
                 async def authorize(scope, target, request):
                     if scope and request['method']=='GET' and request['url'].startswith('http://fixture.test/'):
+                        ownership.append((scope['task_id'],target['targetId']))
                         return {'kind':'read'}
                     return None
                 async def claim(*args):
@@ -135,7 +137,7 @@ async def main(wrapper, binary):
                     target = (await rpc(ws, 'Target.createTarget', {'url': 'about:blank'}))['targetId']
                     await gate.register(target, {'task_id':name,'origins':['http://fixture.test']})
                     session = (await rpc(ws, 'Target.attachToTarget', {'targetId': target, 'flatten': True}))['sessionId']
-                    await rpc(ws, 'Page.navigate', {'url':'http://fixture.test/'+name}, session)
+                    await rpc(ws, 'Page.navigate', {'url':'http://fixture.test/same-page'}, session)
                     for _ in range(50):
                         result = await rpc(ws, 'Runtime.evaluate', {'expression': 'document.body && document.body.innerText', 'returnByValue': True}, session)
                         if result['result'].get('value') == 'isolated fixture':
@@ -144,12 +146,14 @@ async def main(wrapper, binary):
                     raise AssertionError(result)
                 targets = await asyncio.gather(page(first, 'one'), page(second, 'two'))
                 assert len(set(targets)) == 2 and len(requests) >= 2
+                assert all(target == targets[['one','two'].index(task)] for task,target in ownership)
+                assert {task for task,target in ownership} == {'one','two'}
                 # Separate SDK workers avoid the pinned SDK's process-global event lock.
                 from lead_app.browser_runtime import ControlBridge
                 bridge = await ControlBridge(control, __import__('urllib.parse', fromlist=['urlsplit']).urlsplit(uri).path).start()
                 async def worker(index):
                     child_env = {**os.environ, 'ANONYMIZED_TELEMETRY': 'false', 'BROWSER_USE_CLOUD_SYNC': 'false'}
-                    child = await asyncio.create_subprocess_exec(sys.executable, str(Path(__file__).with_name('browser_native_scope_probe.py')),
+                    child = await asyncio.create_subprocess_exec(sys.executable, "-B", "-S", str(Path(__file__).with_name('browser_native_scope_probe.py')),
                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=child_env)
                     payload = {'url': bridge.url, 'headers': bridge.headers, 'task_id': 'task-'+str(index),
                                'target_id': targets[index], 'foreign_target': targets[1-index]}

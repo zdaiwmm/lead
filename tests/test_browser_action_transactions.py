@@ -94,3 +94,29 @@ def test_another_stable_subject_cannot_replace_bound_account(growth_agent):
     with tx(growth_agent) as c:
         assert one(c,'SELECT count(*) n FROM lead.social_accounts')['n']==1
         assert one(c,'SELECT external_account_id FROM lead.social_accounts WHERE id=%s',(sid,))['external_account_id']==social['external_account_id']
+
+
+def test_live_scope_rechecks_profile_lease_and_account_intent(growth_agent):
+    from lead_app.browser_runtime import PersistentRuntime
+    actor,action,claim,_,_,social = native_work(growth_agent)
+    with tx(growth_agent) as c:
+        task=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(action['task_id'],))
+        agent=one(c,'SELECT control_version FROM lead.agents WHERE id=%s',(growth_agent,))
+        intent=one(c,'SELECT revision FROM lead.account_operating_intents WHERE account_id=%s',(social['id'],))
+    scope={'task_id':str(task['id']),'control_version':agent['control_version'],
+           'task_generation':task['input'].get('task_generation'),'claim':claim,
+           'account_id':str(social['id']),'binding_version':social['binding_version'],
+           'intent_revision':intent['revision']}
+    runtime=PersistentRuntime(actor)
+    assert runtime.current_scope(scope)['id']==task['id']
+    with tx(growth_agent) as c:
+        c.execute("UPDATE lead.profile_leases SET expires_at=now()-interval '1 second' WHERE profile_id=%s",(social['profile_id'],))
+    with pytest.raises(ValueError,match='browser_profile_lease_expired'):
+        runtime.current_scope(scope)
+    with tx(growth_agent) as c:
+        c.execute("UPDATE lead.profile_leases SET expires_at=now()+interval '10 minutes' WHERE profile_id=%s",(social['profile_id'],))
+    with pytest.raises(ValueError,match='browser_account_intent_changed'):
+        runtime.current_scope({**scope,'intent_revision':intent['revision']-1})
+    set_intent(growth_agent,social['id'],'paused',source='owner_command',source_ref='revoke-observation')
+    with pytest.raises(ValueError):
+        runtime.current_scope(scope)

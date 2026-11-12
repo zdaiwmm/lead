@@ -586,7 +586,23 @@ class ResearchPage:
 def begin_run(aid, goal, message_id=None, task_id=None, mode="research"):
     # Public reading never borrows a social login or its manually controlled page.
     from .account_profiles import public_research
-    profile = public_research(aid)
+    profile = None
+    with tx(aid) as c:
+        if task_id:
+            task = one(c,'SELECT input FROM lead.tasks WHERE id=%s',(task_id,))
+            spec = (task or {}).get('input',{}).get('spec',{})
+            payload = spec.get('payload',{})
+            if payload.get('access_mode') == 'account':
+                account_id = payload.get('account_id')
+                if not account_id or str(spec.get('account_id')) != str(account_id):
+                    raise ValueError('research_account_scope_missing')
+                profile = one(c,"""SELECT p.* FROM lead.browser_profiles p JOIN lead.social_accounts s ON s.profile_id=p.id
+                    WHERE s.id=%s AND s.state='connected' AND s.binding_version=%s""",
+                    (account_id,task['input'].get('binding_version')))
+                if not profile or profile['provider'] != 'chromium':
+                    raise ValueError('account_browser_capability_gap')
+    if profile is None:
+        profile = public_research(aid)
     with tx(aid) as c:
         a = require_agent(c, aid, True)
         if one(
