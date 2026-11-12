@@ -81,11 +81,14 @@ def method_repair_candidate(c, action):
             or work['input'].get('binding_version') != account['binding_version']
             or work['input'].get('task_generation') != producer.get('task_generation')):
         return None
-    if not one(c, """SELECT b.id FROM lead.browser_sessions b
-        JOIN lead.profile_leases l ON l.profile_id=b.profile_id AND l.epoch=b.epoch
-        WHERE b.id=%s AND b.profile_id=%s AND b.epoch=%s AND b.control_version=%s
-            AND b.state='ready' AND b.ended_at IS NULL AND l.state='held' AND l.expires_at>now()
-        FOR SHARE OF b,l""", (session, account['profile_id'], epoch, agent['control_version'])):
+    # Gateway heartbeat writes lease before session. Explicit statements keep
+    # that order; a join's row-lock order depends on the query plan.
+    if not one(c, """SELECT profile_id FROM lead.profile_leases WHERE profile_id=%s AND epoch=%s
+        AND state='held' AND expires_at>now() FOR SHARE""", (account['profile_id'], epoch)):
+        return None
+    if not one(c, """SELECT id FROM lead.browser_sessions WHERE id=%s AND profile_id=%s AND epoch=%s
+        AND control_version=%s AND state='ready' AND ended_at IS NULL FOR SHARE""",
+        (session, account['profile_id'], epoch, agent['control_version'])):
         return None
     attempts = all_rows(c, 'SELECT * FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt', (action['id'],))
     # Without an original session binding, continuity with the frozen method
@@ -102,6 +105,7 @@ def method_repair_candidate(c, action):
                 or binding.get('profile_id') != str(account['profile_id']) or binding.get('generation') != epoch
                 or binding.get('method_hash') != original_hash or binding.get('claimed') is not False
                 or binding.get('fingerprint') or binding.get('dispatch_task_attempt_token')
+                or 'browser_transport' in observation or 'browser_receipt' in observation
                 or observation.get('method_repair') or observation.get('effective_method')
                 or attempt['outcome'] is not None or attempt['ended_at'] is not None
                 or attempt['error_code'] is not None or attempt['evidence_ref'] is not None):
