@@ -75,6 +75,7 @@ def public_url(value, base=None):
 class ResearchPage:
     def __init__(self, actor, run_id):
         self.actor = actor
+        self.command_lock = actor.lock
         self.run_id = run_id
         self.page = None
         self.context = None
@@ -373,8 +374,12 @@ class ResearchPage:
             "snapshot": self.snapshot,
         }
 
+    async def observation_scope(self):
+        # Legacy isolated research pages retain their existing route gate.
+        return None
+
     async def command(self, operation, args, command_id):
-        async with self.actor.lock:
+        async with self.command_lock:
             self.actor.touch()
             await self.ensure()
             self.gate()
@@ -523,6 +528,7 @@ class ResearchPage:
                 else:
                     raise ValueError("未知浏览操作")
                 self.gate()
+                observation_scope = await self.observation_scope()
                 result = metadata if metadata is not None else await self.observe()
                 result["evidence_id"] = step
                 result["run_id"] = self.run_id
@@ -531,6 +537,9 @@ class ResearchPage:
                 screenshot = folder / (step + ".png")
                 if metadata is None:
                     await self.page.screenshot(path=str(screenshot))
+                if observation_scope != await self.observation_scope():
+                    screenshot.unlink(missing_ok=True)
+                    raise ValueError("browser_document_changed_during_observation")
                 bodyfile = folder / (step + ".json")
                 bodyfile.write_text(json.dumps(result, ensure_ascii=False))
                 with tx(self.actor.aid) as c:

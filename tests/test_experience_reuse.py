@@ -158,3 +158,20 @@ def test_projection_cannot_smuggle_private_fields_in_sql(growth_agent):
             c.execute("""INSERT INTO lead.experiences(tenant_id,agent_id,extraction_key,kind,problem,conclusion,source_document_id,public_projection)
               VALUES(lead.ctx_tenant(),%s,'sql:extra','research','community','private',%s,%s)""",
               (growth_agent,source,j({'problem':'community','conclusion':'Public text','conditions':{},'sources':['https://example.com/guide'],'private_data':'never shared'})))
+
+
+def test_account_source_cannot_reuse_public_provenance(growth_agent):
+    import pytest
+    from lead_app.experiences import record_experience
+    from lead_app.growth.tools import _remember
+    page={"url":"https://example.com/research","title":"Source","text":"The same visible words can have different access provenance."}
+    private,added=_remember(growth_agent,page,source_type="account_read")
+    assert added
+    public,added=_remember(growth_agent,page,source_type="public_read")
+    assert added and public.id != private.id
+    repeated,added=_remember(growth_agent,page,source_type="account_read")
+    assert not added and repeated.id == private.id
+    with pytest.raises(ValueError,match="actual public source"):
+        record_experience(growth_agent,"private-account-projection",kind="research",problem="Source",
+            conclusion="Account observation",source_document_id=private.id,
+            public_projection={"problem":"Source","conclusion":page["text"],"conditions":{},"sources":[page["url"]]})

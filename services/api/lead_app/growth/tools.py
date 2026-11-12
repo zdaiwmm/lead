@@ -141,9 +141,9 @@ def _remember(aid, page, *, source_type="public_read"):
     source = page["url"]
     with tx(aid) as c:
         # Different tasks can read independently. Only duplicate artifact insertion is serialized.
-        c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (str(aid)+source+sha,))
-        old = one(c, "SELECT id FROM lead.knowledge_documents WHERE source_ref=%s AND sha256=%s AND deleted_at IS NULL",
-                  (source, sha))
+        c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (str(aid)+source+sha+source_type,))
+        old = one(c, "SELECT id FROM lead.knowledge_documents WHERE source_ref=%s AND sha256=%s AND source_type=%s AND deleted_at IS NULL",
+                  (source, sha, source_type))
         if old:
             return EvidenceRef(kind="document", id=old["id"]), False
         identifier = uid()
@@ -215,30 +215,28 @@ def research_unavailable(errors, missing=False):
 async def _read_source(aid,row,data,url,*,external_links=False,check_resources=False):
     from ..operating_work import unavailable_source
     scope = source_scope(url, data, operation="search" if external_links else "read")
-    if data.access_mode == "account":
-        # The retained anonymous engine cannot fulfill an authenticated read.
-        # Do not call it and later label its response as the bound account.
-        raise SourceReadError({**scope, "provider": "account_browser"}, "capability_gap")
-    if check_resources:
-        from .runtime import check_research_resource
-        wait = await asyncio.to_thread(check_research_resource, aid, row["id"], scope)
-        if wait:
-            raise SourceReadError(scope, "resource_blocked", wait)
-    try:
-        page = await asyncio.wait_for(fetch_product(url,**({"external_links":True} if external_links else {"discover_links":True})),30)
-    except PermissionError:
-        raise
-    except (OSError,httpx.TransportError):
-        page = None
-    if page is not None and (not page.get("requires_javascript") or unavailable_source(page)):
-        if condition := source_failure(page):
-            raise SourceReadError(scope, condition)
-        return {**page, "access_mode": data.access_mode, "attempt_scope": scope}
+    if data.access_mode == "public":
+        if check_resources:
+            from .runtime import check_research_resource
+            wait = await asyncio.to_thread(check_research_resource, aid, row["id"], scope)
+            if wait:
+                raise SourceReadError(scope, "resource_blocked", wait)
+        try:
+            page = await asyncio.wait_for(fetch_product(url,**({"external_links":True} if external_links else {"discover_links":True})),30)
+        except PermissionError:
+            raise
+        except (OSError,httpx.TransportError):
+            page = None
+        if page is not None and (not page.get("requires_javascript") or unavailable_source(page)):
+            if condition := source_failure(page):
+                raise SourceReadError(scope, condition)
+            return {**page, "access_mode": data.access_mode, "attempt_scope": scope}
     from ..browser_tools import BrowserTools
     browser = BrowserTools(aid,data.question,task_id=str(row["id"]),mode="autonomous")
     state = "failed"
-    scope = {**scope, "provider": "browser"}
+    scope = {**scope, "provider": "account_browser" if data.access_mode == "account" else "browser"}
     if check_resources:
+        from .runtime import check_research_resource
         wait = await asyncio.to_thread(check_research_resource, aid, row["id"], scope)
         if wait:
             raise SourceReadError(scope, "resource_blocked", wait)
@@ -379,7 +377,8 @@ async def research(aid, row, spec, claim=None):
     for url in list(dict.fromkeys(urls))[:4]:
         try:
             page = await _read_source(aid,row,data,url,check_resources=True)
-            ref, added = await asyncio.to_thread(_remember, aid, page)
+            ref, added = await asyncio.to_thread(_remember, aid, page,
+                source_type="account_read" if data.access_mode == "account" else "public_read")
             if ref:
                 evidence.append(ref)
                 progress = progress or added

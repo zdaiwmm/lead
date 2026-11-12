@@ -157,8 +157,19 @@ async def test_account_read_never_silently_uses_public_fetch(monkeypatch):
     async def unexpected(*args, **kwargs):
         pytest.fail("Account request must not read an anonymous HTTP session")
 
+    from lead_app import browser_tools
+    calls=[]
+    class AccountBrowser:
+        def __init__(self, aid, question, **kwargs):
+            calls.append(kwargs)
+        async def command(self, operation, args):
+            return {"url":args["url"],"text":"Bound account source content","title":"Account page"}
+        async def finish(self, state):
+            calls.append(state)
+    monkeypatch.setattr(browser_tools,"BrowserTools",AccountBrowser)
     monkeypatch.setattr(tools, "fetch_product", unexpected)
     data = tools.ResearchInput(access_mode="account", account_id="00000000-0000-0000-0000-000000000001")
-    with pytest.raises(ValueError) as caught:
-        await tools._read_source("fixture", {"id": "task"}, data, "https://forum.example/topic")
-    assert caught.value.failure_scope["access_mode"] == "account"
+    page=await tools._read_source("fixture", {"id": "task"}, data, "https://forum.example/topic")
+    assert page["attempt_scope"]["provider"] == "account_browser"
+    assert page["access_mode"] == "account"
+    assert calls == [{"task_id":"task","mode":"autonomous"},"succeeded"]

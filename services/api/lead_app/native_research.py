@@ -11,6 +11,7 @@ class NativeResearchPage(ResearchPage):
     def __init__(self, actor, run_id):
         super().__init__(actor, run_id)
         self.lease = None
+        self.command_lock = asyncio.Lock()
 
     async def start(self, url):
         run = await asyncio.to_thread(self.gate)
@@ -53,6 +54,30 @@ class NativeResearchPage(ResearchPage):
         scope = await self.actor.native_runtime.scope_view(self.lease['target_id'])
         bridge = self.actor.native_runtime.bridge
         return {**scope,'cdp_url':bridge.url,'headers':bridge.headers}
+
+    async def observation_scope(self):
+        scope = await self.actor.native_runtime.scope_view(self.lease['target_id'])
+        allowed = {origin(url) for url in scope['origins']}
+        session = await self.context.new_cdp_session(self.page)
+        try:
+            tree = await session.send('Page.getFrameTree')
+            def inspect(node):
+                frame = node['frame']
+                if origin(frame['url']) not in allowed:
+                    raise ValueError('observation_frame_out_of_scope')
+                facts = [(frame['id'], frame.get('loaderId'), frame['url'])]
+                for child in node.get('childFrames', []):
+                    facts.extend(inspect(child))
+                return facts
+            facts = inspect(tree['frameTree'])
+            # Include OOPIFs omitted by this renderer's Page frame tree. A frame
+            # detached or navigated during capture changes the final facts.
+            for frame in self.page.frames:
+                if origin(frame.url) not in allowed:
+                    raise ValueError('observation_frame_out_of_scope')
+            return scope, facts, [(frame, frame.url) for frame in self.page.frames]
+        finally:
+            await session.detach()
 
     async def command(self, operation, args, command_id):
         # Scope metadata is consumed by the pinned worker, never by the model.

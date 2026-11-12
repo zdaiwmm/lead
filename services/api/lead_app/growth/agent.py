@@ -21,6 +21,9 @@ Find the most important unresolved acquisition question; propose a small bounded
 existing valid work. Consider audiences, demand, distribution, value, conversion and retention.
 Do not invent users, permission, evidence IDs, URLs observed, activation or existing media.
 Never request extra activation/authorization buttons after account connection.
+A target with native-browser-v1 can support its listed publish/reply operations without a catalog adapter.
+These are observed capabilities, not a bypass of current runtime permissions. A reply must carry its
+actual parent_url and operation=reply; never infer administrator authority from ordinary membership.
 Missing measurement is unknown; do not replace product activation with clicks.
 Keep the current goal's complete core-value evidence contract when diagnosing measurement.
 A page view, success page, download or other proxy is only a diagnostic observation unless verified
@@ -113,7 +116,13 @@ def build_context(aid, trigger_refs=None):
             i.revision intent_revision FROM lead.social_accounts s LEFT JOIN lead.account_operating_intents i
             ON i.account_id=s.id WHERE s.state<>'disconnected' ORDER BY s.created_at""")
         targets = all_rows(c, """SELECT t.id,t.account_id,t.target_type,t.canonical_url,t.display_name,
-            t.state,t.verified_permissions->'publishing_verified_formats' formats
+            t.state,t.verified_permissions->'publishing_verified_formats' formats,
+            t.verified_permissions#>>'{browser_method,version}' method_version,
+            t.verified_permissions#>>'{browser_method,role}' role,
+            t.verified_permissions#>'{browser_method,operations}' observed_operations,
+            (SELECT jsonb_agg(DISTINCT operation) FROM lead.authorization_grants g,
+                LATERAL jsonb_array_elements_text(g.allowed_actions) AS actions(operation)
+                WHERE g.target_id=t.id AND g.revoked_at IS NULL) granted_operations
             FROM lead.account_targets t WHERE t.state='active'""")
         events = all_rows(c, """SELECT d.connection_id,d.name,d.revision,d.method,d.definition
             FROM lead.pixel_definitions d JOIN lead.analytics_connections c ON c.id=d.connection_id
@@ -130,6 +139,14 @@ def build_context(aid, trigger_refs=None):
         capabilities = [{"platform": a["platform"], "installed_target_type": SPECS[a["platform"]].target_type,
                          "formats": list(SPECS[a["platform"]].formats)}
                         for a in accounts if a["platform"] in SPECS]
+    for target in targets:
+        observed = target.pop("observed_operations") or []
+        granted = target.pop("granted_operations") or []
+        target["operations"] = [op for op in ("publish", "reply") if op in observed and op in granted]
+        if target["method_version"] == "native-browser-v1" and target["operations"]:
+            capabilities.append({"target_id": str(target["id"]), "account_id": str(target["account_id"]),
+                "installed_target_type": target["target_type"], "formats": ["text"],
+                "operations": target["operations"], "role": target["role"], "method": target["method_version"]})
     from .outcomes import summarize
     context_outcomes = summarize(aid)
     goal = {"revision": objective_revision(agent),
