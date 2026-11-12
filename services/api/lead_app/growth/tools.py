@@ -800,7 +800,18 @@ def submission_gate(c, actor, action,claim=None):
         raise ValueError("reply_browser_method_missing")
     if kind not in grant["limits"].get("formats",[kind]):
         raise ValueError("target_not_permitted")
-    if one(c,"SELECT 1 FROM lead.takeover_sessions WHERE profile_id=%s AND state IN ('active','requested','ending') AND expires_at>now()",(actor.profile["id"],)):
+    if method:
+        controlled = one(c,"""SELECT 1 FROM lead.takeover_sessions ts
+            WHERE ts.profile_id=%s AND ts.state IN ('active','requested','ending') AND ts.expires_at>now()
+            AND (ts.purpose<>'login' OR NOT EXISTS(SELECT FROM lead.tasks w WHERE w.type='growth.account'
+                AND w.input#>>'{spec,payload,takeover_id}'=ts.id::text)
+                OR EXISTS(SELECT FROM lead.tasks w WHERE w.type='growth.account'
+                    AND w.input#>>'{spec,payload,takeover_id}'=ts.id::text
+                    AND w.input#>>'{spec,payload,connection_account_id}'=%s))""",
+            (actor.profile["id"],str(account["id"])))
+    else:
+        controlled = one(c,"SELECT 1 FROM lead.takeover_sessions WHERE profile_id=%s AND state IN ('active','requested','ending') AND expires_at>now()",(actor.profile["id"],))
+    if controlled:
         raise ValueError("owner_controls_profile")
     if platform != "lab":
         from ..admin_settings import validate_brand_content
