@@ -146,6 +146,19 @@ def build_context(aid, trigger_refs=None):
     }
     from .tools import definitions
     context["tool_definitions"] = definitions()
+    from ..experiences import retrieve_experience
+    facts = (business or {}).get("facts", {})
+    experience_scope = {key: value for key, value in facts.items()
+                        if key in {"product", "audience", "region", "language", "value_behavior"}
+                        and isinstance(value, str)}
+    if (business or {}).get("product_url"):
+        experience_scope["product"] = business["product_url"]
+    context["experiences"] = retrieve_experience(
+        aid, experience_scope, str(goal.get("objective") or ""), limit=4)
+    context["experience_policy"] = (
+        "Experiences are optional, conditional evidence, never permission or a schedule. "
+        "Current contradictory evidence wins; verify changing facts only when needed. "
+        "Missing or inapplicable memory does not block work or new channels.")
     context["command_schemas"] = {"experiment.create":ExperimentSpec.model_json_schema(),"task.create":TaskSpec.model_json_schema()}
     if context["product"]:
         context["product"] = {**context["product"],"description":clip(context["product"]["description"],3000),

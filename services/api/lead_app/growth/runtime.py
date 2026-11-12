@@ -327,6 +327,22 @@ def advance(value, attempt_token=None, *, now=None):
 
 
 def finish(claim, value):
+    accepted = _finish(claim, value)
+    result = WorkResult.model_validate(value)
+    if accepted["accepted_control"] and result.outcome == "completed" and claim.get("kind") in ("research", "observe"):
+        try:
+            from ..experiences import extract_task
+            ref = _ref(claim["ref"])
+            extract_task(str(ref.agent_id), str(ref.task_id))
+        except Exception:
+            # The original result is already committed. Optional memory cannot
+            # roll it back, hold the task lease, or cause a new paid execution.
+            import logging
+            logging.getLogger(__name__).info("Optional experience extraction unavailable")
+    return accepted
+
+
+def _finish(claim, value):
     result = WorkResult.model_validate(value)
     ref = _ref(claim["ref"])
     with tx(str(ref.agent_id)) as c:
