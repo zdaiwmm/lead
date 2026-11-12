@@ -176,6 +176,65 @@ def wake_connection(aid, connection_id, challenge_version):
         return refs
 
 
+def wake_browser_method(aid, target_id, operation):
+    """Consume a committed, current producer fact for its untouched original work."""
+    from ..browser_method_recovery import method_repair_candidate
+    if operation not in ('publish', 'reply'):
+        return []
+    with tx(aid) as c:
+        _recovery_lock(c, aid)
+        agent = require_agent(c, aid, True)
+        all_rows(c, 'SELECT id FROM lead.social_accounts ORDER BY id FOR SHARE')
+        all_rows(c, 'SELECT id FROM lead.authorization_grants ORDER BY id FOR SHARE')
+        rows = all_rows(c, """SELECT t.* FROM lead.tasks t JOIN lead.actions a ON a.task_id=t.id
+            WHERE a.target_id=%s AND a.type=%s AND a.state='prepared' AND t.type='growth.channel'
+              AND t.state IN ('failed','planned','queued','waiting_user') ORDER BY t.id FOR UPDATE OF t""",
+            (target_id, operation))
+        refs = []
+        for row in rows:
+            runtime = _runtime(row)
+            wait = runtime.get('wait') or {}
+            if (runtime.get('reason') in PERMANENT or _resume_allowed(c, agent, row)
+                    or wait.get('recovery_action') == 'owner'
+                    or wait.get('producer') in ('budget', 'home_release_maintenance')):
+                continue
+            action = one(c, 'SELECT * FROM lead.actions WHERE task_id=%s FOR UPDATE', (row['id'],))
+            candidate = method_repair_candidate(c, action)
+            if not candidate:
+                continue
+            resource, condition = _resource_condition(c, agent, row, TaskSpec.model_validate(row['input']['spec']))
+            if resource != runtime.get('resource_key') or condition == runtime.get('condition_revision'):
+                continue
+            episode = dict(runtime.get('recovery') or {'resource': resource,
+                'condition_revision': runtime['condition_revision']})
+            if episode.get('resource') != resource or episode.get('condition_revision') != runtime.get('condition_revision'):
+                continue
+            proof = candidate['proof_ref']
+            if row['state'] == 'failed':
+                episode.update(status='recovered', proof_ref=proof, observed_condition=condition)
+                ref = _resume_proven(c, aid, agent, row, episode, proof)
+                if ref:
+                    refs.append(ref)
+                continue
+            proof_key = digest([resource, episode['condition_revision'], proof])
+            consumed = list(runtime.get('recovery_proofs') or [])
+            if proof_key in consumed:
+                continue
+            remaining = [dep for dep in runtime.get('blocked_resources') or []
+                if dep.get('resource') != resource or dep.get('condition_revision') != episode['condition_revision']]
+            runtime.update(recovery_proofs=[*consumed, proof_key], blocked_resources=remaining)
+            if remaining:
+                _save(c, row, row['state'], runtime)
+                continue
+            runtime.update(wait=None, lease_until=None, attempt_token=None)
+            _save(c, row, 'planned', runtime, when=utcnow())
+            ref = {'agent_id': str(aid), 'task_id': str(row['id']),
+                   'task_generation': row['input']['task_generation']}
+            emit(c, aid, 'growth.work', ref)
+            refs.append(ref)
+        return refs
+
+
 def _episode(c, resource, condition, row, code=None):
     return one(c, """SELECT id,result#>'{runtime,recovery}' recovery FROM lead.tasks
         WHERE result#>>'{runtime,recovery,resource}'=%s
