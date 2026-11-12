@@ -694,8 +694,11 @@ def prepare_channel(aid, task_id, data):
         content = _bind_publication(c,aid,row,content,target)
         platform = target["platform"]
         release = SPECS[platform].version if platform in SPECS else "local-v1"
-        method = (target["verified_permissions"].get("browser_method")
-                  if isinstance(target["verified_permissions"], dict) else None)
+        permissions = target["verified_permissions"] if isinstance(target["verified_permissions"],dict) else {}
+        methods = permissions.get("browser_methods") or {}
+        if not isinstance(methods,dict):
+            raise ValueError("browser_method_scope_changed")
+        method = methods.get(data.operation) or permissions.get("browser_method")
         if method:
             from ..browser_execution import validate_method
             method = validate_method(method, account_id=str(spec.account_id),
@@ -791,7 +794,11 @@ def submission_gate(c, actor, action,claim=None):
     method = publication.get("browser_method")
     if method:
         from ..browser_execution import validate_method
-        current_method = validate_method(target["verified_permissions"].get("browser_method"),
+        permissions = target["verified_permissions"] if isinstance(target["verified_permissions"],dict) else {}
+        methods = permissions.get("browser_methods") or {}
+        if not isinstance(methods,dict):
+            raise ValueError("browser_method_scope_changed")
+        current_method = validate_method(methods.get(operation) or permissions.get("browser_method"),
             account_id=str(account["id"]), binding_version=account["binding_version"],
             target_url=target["canonical_url"], operation=operation)
         if current_method != method:

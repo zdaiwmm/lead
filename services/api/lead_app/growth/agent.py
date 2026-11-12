@@ -120,6 +120,7 @@ def build_context(aid, trigger_refs=None):
             t.verified_permissions#>>'{browser_method,version}' method_version,
             t.verified_permissions#>>'{browser_method,role}' role,
             t.verified_permissions#>'{browser_method,operations}' observed_operations,
+            t.verified_permissions->'browser_methods' browser_methods,
             (SELECT jsonb_agg(DISTINCT operation) FROM lead.authorization_grants g,
                 LATERAL jsonb_array_elements_text(g.allowed_actions) AS actions(operation)
                 WHERE g.target_id=t.id AND g.revoked_at IS NULL) granted_operations
@@ -142,6 +143,16 @@ def build_context(aid, trigger_refs=None):
     for target in targets:
         observed = target.pop("observed_operations") or []
         granted = target.pop("granted_operations") or []
+        methods = target.pop("browser_methods") or {}
+        if not isinstance(methods,dict):
+            methods = {}
+        for op in ("publish", "reply"):
+            method = methods.get(op)
+            if (isinstance(method,dict) and method.get("version")=="native-browser-v1"
+                    and method.get("operations")==[op]):
+                observed.append(op)
+                target["method_version"] = method["version"]
+                target["role"] = method.get("role")
         target["operations"] = [op for op in ("publish", "reply") if op in observed and op in granted]
         if target["method_version"] == "native-browser-v1" and target["operations"]:
             capabilities.append({"target_id": str(target["id"]), "account_id": str(target["account_id"]),
