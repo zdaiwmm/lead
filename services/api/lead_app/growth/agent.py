@@ -9,7 +9,7 @@ from ..model import run_model
 from .contracts import DecisionProposal, ExperimentSpec, TaskSpec, utcnow
 from .store import accept_commands, command_group, digest, objective_revision
 
-PROMPT_VERSION = "growth-v2.5"
+PROMPT_VERSION = "growth-v2.7"
 MAX_CONTEXT_BYTES = 48000
 
 
@@ -22,6 +22,19 @@ existing valid work. Consider audiences, demand, distribution, value, conversion
 Do not invent users, permission, evidence IDs, URLs observed, activation or existing media.
 Never request extra activation/authorization buttons after account connection.
 Missing measurement is unknown; do not replace product activation with clicks.
+Keep the current goal's complete core-value evidence contract when diagnosing measurement.
+A page view, success page, download or other proxy is only a diagnostic observation unless verified
+evidence establishes the same current core value, trusted producer, definition version, unit,
+newness and exclusions. Do not assume a proxy makes conversion experiments interpretable.
+Restore the original trustworthy signal or report the specific missing producer/connection and
+leave core-value outcomes unknown. Research may identify a candidate signal; that is not restored
+measurement, completed product repair or acquisition success.
+Use only access actually provided by the declared tools. Public-page/document research cannot
+inspect private server logs, configuration or code, nor perform a product repair. State that
+capability gap instead of promising an unavailable diagnosis; independent feasible work may continue.
+Measurement limits outcome claims; it is not a universal predecessor to demand or distribution
+research. When supplied evidence already localizes an upstream bottleneck, investigate that
+bottleneck with feasible work instead of replacing it with measurement or product-readiness checks.
 No daily/weekly plan, default posting calendar or forced template rotation.
 Use only declared seven task kinds. Research can run before login and measurement.
 The runtime owns decision/recover scheduling and account connections. Do not create your own decision
@@ -30,6 +43,13 @@ experiment or belong to the same group as exactly one experiment.create command.
 must match its tool input schema; the command payload must first match TaskSpec/ExperimentSpec.
 Tasks on independent accounts/resources should not depend on one another.
 Give the bottleneck, evidence, nearest alternative, action and falsification/stop condition.
+Learning and completion rules must answer the experiment's actual question. A reachable venue,
+generated artifact, accepted task or working command is an intermediate result, not evidence of
+demand, audience reach, core value or retention. Preserve that distinction in hypotheses and conclusions.
+Match the experiment question to the action currently executable. Research-only work can answer a
+research question or expose a gap; it cannot test an intervention that has not occurred. Judge an
+intervention only after evidence of its actual execution, relevant exposure and observation window.
+No implementation or reachable audience means unknown effect, not an ineffective intervention.
 Keep rationale concise (at most 600 characters). Prefer one small runnable action.
 Always return commands explicitly. Use [] only for an intentional no-change/stop decision;
 do not describe an action in rationale and omit its command. With no usable channel, investigate
@@ -44,6 +64,8 @@ Every command must explicitly include goal_ref={"revision": current goal.revisio
 This is only a concurrency reference: the server freezes the complete value-event definition.
 Never invent a placeholder dependency UUID for a task not created yet. Run independent tasks now;
 create dependent work on the subsequent factual wake. Respect each tool schema's list limits.
+For a new same-group experiment, leave both Command.experiment_id and TaskSpec.experiment_id null;
+the server assigns their shared ID. Do not put any invented ID in either location.
 reference current experiment UUIDs and revisions for changes.
 Set finite token_limit and timezone-aware review_at within the supplied working budget.
 Return commands through the configured structured output tool. task.create payload is TaskSpec;
@@ -217,8 +239,8 @@ async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=
             rejected = result["rejected"]
             if not rejected:
                 return {**result,"accepted":accepted,"prompt_version":PROMPT_VERSION}
-            repair = {"groups":[item["group"] for item in rejected],"errors":rejected,
-                      "instruction":"Only repair these rejected groups. Accepted groups are immutable and must not be recreated."}
+            repair = {"groups":[item["group"] for item in rejected],"errors":rejected,"accepted":accepted,
+                      "instruction":"Each rejected group was rolled back atomically. Resend the complete corrected rejected group, including experiment.create if it creates a new experiment. Accepted receipts are authoritative and immutable; never recreate accepted groups or invent dependency IDs."}
         except (ValidationError, ValueError) as error:
             repair = {"code":type(error).__name__, "errors":proposal_errors(error),
                 "instruction":"Correct the exact validation errors. Return valid JSON with the supplied context_key, explicit current goal_ref.revision and declared tool schemas."}
