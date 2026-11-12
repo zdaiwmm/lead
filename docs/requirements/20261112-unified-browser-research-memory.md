@@ -855,6 +855,9 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - 模型费用边界`82d8d9c`新增ModelCallMeter：已发请求缺usage、超时、非2xx、无效/负数/布尔/不一致usage后，下一次HTTP传输前停止；已知用量、请求数、保守token envelope及凭据字面量检查继续执行。11项真实HTTPX传输边界通过。`4693d7f`在真实SDK登录首响应仅删除usage，实际只发1次模型HTTP，40000原预留保持unknown、账号pending/本人Wait、认证POST0；同轮正常首次发布仍唯一确认，2项33.005秒。该轮模型为受控假服务，不是C22；此前80000真实调用未知预留继续保留，不能据此解除或称零费用。
 - C17 `3647181`（源`b9777a4`）新增同账号产品反例：旧runtime真实1红41.98秒，原unknown只读claim占住写互斥，新独立写入resource_wait。`e9abe6c`（源`d5b3dfa`）只从canonical Action dispatching/unknown/confirmed判断只读，不信runtime flag；只读也计入Profile的两个执行槽，同号两写、legacy/current-tab及同号认证/本人占用仍排他。7项新真实DB测试含正反向认证排他，独立相关34项6.33秒、主集成20项4.96秒。原产品case完全不变后1绿50.67秒：原A慢GET与新A2源POST重叠0.500203秒，两个Action各attempt1且confirmed，源POST2/帖2，原intent及account intent/grants全行不变，同意图仍复用原Task。无真实模型；私有red/green证据在`lead-native-same-account-parallel/lead agent/.state/`，自有进程/数据库清理完成。
 
+- 费用最终结算独立复核又复现6红11绿：先收到已知usage，再在第二次200响应头后的正文读取失败，原runner曾把responses计数误作完整usage，调用方会只结算已知部分并释放未知预留。`59b6d01`保留真实HTTPX流式红例及实际runner/调用方表达式检查；`f7e21f2`在正文异常计unknown，最终按request_count与entry_count对账并导出billing_unknown，两处结算均独立拒不完整记录。17项0.09秒通过，独立只读复核接受。`fbad9a7`再走真实Linux SDK进程，首响应缺usage、第二响应正文断开及正常首次发布共3项36.364秒：两故障均保持原40000 reservation unknown，无认证POST，正常发布仍唯一确认。响应头不再被当成已知账单（`mrw28/reports/model-body-{meter-before,meter-after,sdk-final}.xml`）；此前80000未知预留不变。
+- 当前实际schema/升级/恢复合同在目标Linux再次以当前源码核对，18项4.140秒通过（`mrw28/reports/schema-linux-final.xml`及source-generation），覆盖原列/控制/未知动作数据保留、幂等加法迁移、实际函数/权限/约束拒漂移及恢复时先独立回读后放调度。首轮私有取件漏带升级helper导致18项fixture导入错误，未执行迁移验证；补齐原源码后通过，两轮隔离父数据库及自有进程均已清理。此仍不代替正式生产备份克隆演练或精确main CI。当前全仓静态/843文件凭据扫描、32项CI交付合同及前端类型检查通过；应用与两执行器只读回读仍为`7940fbefc93dff2c3ac8c4b43d20e07aefa88253`，没有新发布请求。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2/通用发布回复仍在接线和验证，不能因为基础桥、探针或部分模块通过就开启共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
