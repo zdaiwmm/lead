@@ -1,5 +1,6 @@
 """Real PostgreSQL preservation of the old schema's controls and task facts."""
 import importlib
+import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -83,3 +84,18 @@ def test_release_schema_readback_checks_actual_unified_permissions_and_guards(up
             c.execute('ROLLBACK TO SAVEPOINT changed_guard')
             c.execute('RELEASE SAVEPOINT changed_guard')
             assert c.execute(query).fetchone()[0] is True
+
+
+@pytest.mark.parametrize('name', ['growth_complete_connection','growth_receipt_valid','growth_confirm_publication'])
+def test_unified_release_refuses_legacy_functions_even_with_additive_tables(upgrade_database, name):
+    _, target = upgrade_database
+    release = importlib.import_module('home_systemd_release')
+    upgrade(target)
+    legacy = (Path(__file__).resolve().parents[1]/'infra/migrations/sql/0031_growth_runtime.sql').read_text()
+    with psycopg.connect(**target) as c:
+        statement = re.search(r'CREATE FUNCTION lead\.'+name+r'\(.*?\$\$;', legacy, re.S)[0]
+        c.execute(statement.replace('CREATE FUNCTION','CREATE OR REPLACE FUNCTION',1))
+        # The old app still recognizes its own schema after an additive
+        # migration. A native-browser cutover needs the newer receipt contract.
+        assert c.execute(release.growth_schema_query()).fetchone()[0] is True
+        assert c.execute(release.unified_schema_query()).fetchone()[0] is False
