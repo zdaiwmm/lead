@@ -10,6 +10,7 @@ import ipaddress
 import json
 import math
 import re
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
@@ -39,7 +40,7 @@ def _failure(provider, operation, reason, **extra):
         'access_mode':'provider_public'}, **extra}
 
 
-def configuration(provider, operation, aid=None):
+def configuration(provider, operation, aid=None, *, connection=None):
     values = env()
     if (provider,operation) not in ENDPOINTS:
         return None, 'unsupported_operation'
@@ -64,7 +65,7 @@ def configuration(provider, operation, aid=None):
 
     try:
         from .admin_settings import effective
-        with tx(aid) as c:
+        with (nullcontext(connection) if connection is not None else tx(aid)) as c:
             # Only the workspace default owns a shared connection allowance.
             shared,_=effective(c,'models')
             conf=shared.get('research_providers',{}).get(provider)
@@ -258,6 +259,14 @@ def _reserve(aid, task_id, provider, operation, payload, call_key, conf, executi
         agent=require_agent(c,aid,True)
         task=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE',(task_id,))
         _validate_claim(c,aid,task_id,agent,task,execution_claim)
+        # Publishing models config takes the same project lock. Resolve again
+        # after acquiring it: DNS/argument preparation must not carry an old
+        # allowance or revoked credential into a new paid request.
+        current, reason = configuration(provider,operation,aid,connection=c)
+        if reason:
+            raise ValueError(reason)
+        if current != conf:
+            raise ValueError('provider_configuration_changed')
         old=one(c,'SELECT * FROM lead.budget_reservations WHERE operation_key=%s',(opkey,))
         if old:
             snapshot=old['pricing_snapshot']['research']

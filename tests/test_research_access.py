@@ -173,3 +173,41 @@ async def test_account_read_never_silently_uses_public_fetch(monkeypatch):
     assert page["attempt_scope"]["provider"] == "account_browser"
     assert page["access_mode"] == "account"
     assert calls == [{"task_id":"task","mode":"autonomous"},"succeeded"]
+
+
+@pytest.mark.parametrize('mode,provider', [('public','browser'),('account','account_browser')])
+async def test_browser_recovery_uses_current_probe_task_and_original_transport(monkeypatch,mode,provider):
+    from uuid import uuid4
+
+    from lead_app import browser_tools
+    from datetime import timedelta
+
+    from lead_app.growth.contracts import EvidenceRef, TaskSpec, utcnow
+    calls=[]
+    class Browser:
+        def __init__(self, aid, question, **kwargs):
+            calls.append(kwargs['task_id'])
+        async def command(self, operation, args):
+            return {'url':args['url'],'title':'Observed source','text':'Source is readable again.'}
+        async def finish(self, state):
+            pass
+    async def anonymous(*args,**kwargs):
+        pytest.fail('A different transport cannot prove browser recovery')
+    account_id=uuid4() if mode=='account' else None
+    spec=TaskSpec(kind='research',purpose='product',account_id=account_id,review_at=utcnow()+timedelta(hours=1),
+        payload={'access_mode':mode,'account_id':str(account_id) if account_id else None})
+    root={'id':'original-task','input':{'spec':spec.model_dump(mode='json')}}
+    monkeypatch.setattr(browser_tools,'BrowserTools',Browser)
+    monkeypatch.setattr(tools,'fetch_product',anonymous)
+    remembered=[]
+    def remember(aid,page,**kwargs):
+        remembered.append(kwargs['source_type'])
+        return EvidenceRef(kind='document',id=uuid4()),True
+    monkeypatch.setattr(tools,'_remember',remember)
+    scope={'url':'https://forum.example/topic','provider':provider,'access_mode':mode,
+        'resource':'original-resource','condition_revision':'original-condition'}
+    result=await tools.probe_research_resource('fixture',root,scope,{'id':'current-probe','type':'growth.recover'})
+    assert result.outcome=='completed' and calls==['current-probe']
+    assert remembered==['account_read' if mode=='account' else 'public_read']
+    assert result.output['recovery_checks'][0]['resource']=='original-resource'
+    assert result.output['recovery_checks'][0]['condition_revision']=='original-condition'

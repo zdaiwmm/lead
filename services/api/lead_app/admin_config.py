@@ -356,11 +356,12 @@ def write(
     from .admin_permissions import require_config
 
     require_config(key)
-    kind, aid, platform, target = check_scope(c, key, lock=True)
+    kind, _, _, _ = parse_key(key)
     if kind in {"models", "model_catalog"}:
         c.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(lead.ctx_tenant()::text || ':model-catalog',0))"
         )
+    kind, aid, platform, target = check_scope(c, key, lock=True)
     c.execute(
         "INSERT INTO lead.admin_configs(tenant_id,agent_id,config_key,kind) VALUES(lead.ctx_tenant(),%s,%s,%s) ON CONFLICT DO NOTHING",
         (aid, key, kind),

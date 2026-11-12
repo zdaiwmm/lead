@@ -65,7 +65,7 @@ def configuration_published(c, kind, aid):
             "SELECT body FROM lead.admin_configs WHERE config_key=%s",
             (f"{kind}/{agent_id}",),
         )
-        if not aid and override and override["body"] is not None:
+        if kind != "models" and not aid and override and override["body"] is not None:
             continue
         if kind == "brand":
             c.execute("SELECT set_config('app.agent_id',%s,true)", (agent_id,))

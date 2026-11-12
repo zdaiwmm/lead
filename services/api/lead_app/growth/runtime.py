@@ -682,7 +682,7 @@ async def probe_episode(aid, work, data):
                     from .tools import probe_research_resource
                     observation = await probe_research_resource(aid, root, {
                         **episode["failure_scope"], "resource": episode["resource"],
-                        "condition_revision": episode["condition_revision"], "observed_condition": actual_condition})
+                        "condition_revision": episode["condition_revision"], "observed_condition": actual_condition}, work)
                 else:
                     observation = await research(aid,root,spec)
             finally:

@@ -212,10 +212,10 @@ def research_unavailable(errors, missing=False):
     return WorkResult(outcome="failed", failure_code="research_input_missing" if missing else "source_unavailable", output=output)
 
 
-async def _read_source(aid,row,data,url,*,external_links=False,check_resources=False):
+async def _read_source(aid,row,data,url,*,external_links=False,check_resources=False,required_provider=None):
     from ..operating_work import unavailable_source
     scope = source_scope(url, data, operation="search" if external_links else "read")
-    if data.access_mode == "public":
+    if data.access_mode == "public" and required_provider != "browser":
         if check_resources:
             from .runtime import check_research_resource
             wait = await asyncio.to_thread(check_research_resource, aid, row["id"], scope)
@@ -263,24 +263,37 @@ async def _read_source(aid,row,data,url,*,external_links=False,check_resources=F
             pass
 
 
-async def probe_research_resource(aid, root, scope):
+async def probe_research_resource(aid, root, scope, probe_row=None):
     """Check exactly the failed read; no new question, search or model call."""
     original = TaskSpec.model_validate(root["input"]["spec"])
     data = ResearchInput.model_validate(original.payload)
     url = scope.get("url")
     if not url or scope.get("access_mode") != data.access_mode:
         return WorkResult(outcome="failed", failure_code="recovery_scope_missing")
-    # The same provider must produce the proof. A different transport cannot
-    # establish that the original browser or provider failure has cleared.
-    if scope.get("provider") != "direct_http":
+    provider = scope.get("provider")
+    if provider not in ("direct_http", "browser", "account_browser"):
+        # Paid tools need their own claim/charge proof. A public read cannot
+        # establish their recovery or authorize a repeat of an unknown bill.
         return WorkResult(outcome="failed", failure_code="recovery_capability_gap",
                           output={"failure_scope": scope})
     try:
-        page = await asyncio.wait_for(fetch_product(url, discover_links=False), 30)
-        condition = source_failure(page)
-        if condition or page.get("requires_javascript"):
-            raise SourceReadError(scope, condition or "capability_gap")
-        ref, _ = await asyncio.to_thread(_remember, aid, page)
+        if provider == "direct_http":
+            if data.access_mode != "public":
+                raise SourceReadError(scope, "recovery_scope_missing")
+            page = await asyncio.wait_for(fetch_product(url, discover_links=False), 30)
+            condition = source_failure(page)
+            if condition or page.get("requires_javascript"):
+                raise SourceReadError(scope, condition or "capability_gap")
+        else:
+            if (not probe_row or probe_row.get("type") != "growth.recover"
+                    or (provider == "account_browser") != (data.access_mode == "account")):
+                raise SourceReadError(scope, "recovery_scope_missing")
+            page = await _read_source(aid, probe_row, data, url,
+                external_links=scope.get("operation") == "search", required_provider="browser")
+            if page["attempt_scope"]["provider"] != provider:
+                raise SourceReadError(scope, "recovery_scope_changed")
+        ref, _ = await asyncio.to_thread(_remember, aid, page,
+            source_type="account_read" if data.access_mode == "account" else "public_read")
         if not ref:
             raise SourceReadError(scope, "empty")
         return WorkResult(outcome="completed", evidence_refs=[ref], output={
