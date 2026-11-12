@@ -226,3 +226,29 @@ def test_namespace_gate_runs_real_executor_systemd_dropin_drill():
     assert len(exercise) == 1
     assert 'sudo env LEAD_DISPOSABLE_RUNNER=1' in exercise[0]['run']
     assert 'continue-on-error' not in exercise[0] and 'if' not in exercise[0]
+
+
+def test_sdk_is_built_once_and_same_attempt_artifact_reaches_tests_and_image():
+    root = Path(__file__).resolve().parents[1]
+    jobs = yaml.load((root / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)['jobs']
+    assert jobs['backend']['needs'] == ['scope', 'frontend']
+    frontend, backend = jobs['frontend']['steps'], jobs['backend']['steps']
+    builds = [s for s in frontend if 'build_browser_runtime.py' in s.get('run','') and '--with-system-deps' in s['run']]
+    assert len(builds) == 1
+    assert builds[0]['if'] == "github.event_name != 'pull_request'"
+    assert not any('--with-system-deps' in s.get('run','') for s in backend)
+    upload = next(s for s in frontend if s.get('name') == 'Retain the tested browser runtime for the same-run backend')
+    download = next(s for s in backend if s.get('name') == 'Download the same-run tested browser runtime')
+    assert upload['with']['name'] == download['with']['name'] == 'lead-browser-runtime-${{ github.sha }}-${{ github.run_attempt }}'
+    verify = next(s for s in backend if s.get('name') == 'Verify the original browser runtime before SDK tests')
+    assert '--verify' in verify['run'] and 'LEAD_BROWSER_RUNTIME_PYTHON' in verify['run']
+    native = next(s for s in backend if s.get('name') == 'Native fixed-page SDK and namespace contract')
+    assert 'browser_namespace_cdp_probe.py' in native['run'] and '-B -S' in native['run']
+    assert 'continue-on-error' not in native and 'if' not in native
+    package = next(s for s in frontend if s.get('name') == 'Package the tested Linux application')
+    assert '"$RUNNER_TEMP/lead-browser-runtime"' in package['run']
+    assert any(s.get('with',{}).get('python-version') == '3.12' for s in frontend)
+    assert any(s.get('with',{}).get('python-version') == '3.14' for s in backend)
+    for step in frontend+backend:
+        if 'run' in step:
+            subprocess.run(['bash', '-n'], input=step['run'], text=True, check=True)
