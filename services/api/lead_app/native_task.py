@@ -176,25 +176,25 @@ class NativeTask:
         reader.context=self.actor.context
         return await reader.observation_scope()
 
-    async def temporary_page(self,url):
+    async def temporary_page(self,url,*,private_identity=False):
         scope=copy.deepcopy(self.lease)
         for key in ('target_id','action'):
             scope.pop(key,None)
-        scope=await self.actor.native_runtime.acquire_page(scope,url,internal_parent=self.lease['target_id'])
+        scope=await self.actor.native_runtime.acquire_page(scope,url,internal_parent=self.lease['target_id'],private_identity=private_identity)
         return self.actor.native_runtime.pages[scope['target_id']]['page'],scope
 
     async def verify_private_self(self):
         _,account,_=await asyncio.to_thread(self.snapshot)
         facts=account['private_self']
-        page,scope=await self.temporary_page(facts['self_url'])
+        page,scope=await self.temporary_page(facts['self_url'],private_identity=True)
         try:
             before=await self.document(page,scope)
             if page.url!=facts['self_url']:
                 raise ValueError('native_self_endpoint_redirected')
-            field=page.locator(facts['self_selector'])
-            if await field.count()!=1 or not await field.is_visible():
-                raise ValueError('native_self_subject_missing')
-            actual=await field.evaluate("node=>('value' in node ? node.value : node.innerText||'').trim()")
+            from .native_identity_facts import inspect_private_subject
+            observed=await inspect_private_subject(page,subject_selector=facts['self_selector'],
+                value_prefix=facts.get('self_value_prefix',''),value_suffix=facts.get('self_value_suffix',''))
+            actual=observed['subject']
             if actual!=account['external_account_id']:
                 with tx(self.actor.aid) as c:
                     c.execute("UPDATE lead.social_accounts SET state='needs_auth' WHERE id=%s AND binding_version=%s AND external_account_id=%s AND state='connected'",

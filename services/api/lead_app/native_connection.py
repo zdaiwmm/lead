@@ -6,7 +6,6 @@ publication ActionRef. Identity evidence is read from the current self surface.
 """
 import asyncio
 import re
-from urllib.parse import urljoin
 
 from .browser_execution import origin
 from .connection_control import transition, unseal
@@ -224,37 +223,13 @@ class NativeConnection:
 
     async def inspect_self(self,args):
         await self.descriptor()
-        selector=args.get('self_link_selector','')
-        if not isinstance(selector,str) or not 1<=len(selector)<=300:
-            raise ValueError('self_surface_missing')
-        link=self.page.locator(selector)
-        if await link.count()!=1 or not await link.is_visible() or 'me' not in (await link.get_attribute('rel') or '').split():
-            raise ValueError('not_current_self_surface')
-        href=urljoin(self.page.url,await link.get_attribute('href') or '')
-        if origin(href) not in {origin(url) for url in self.lease['origins']}:
-            raise ValueError('self_surface_outside_connection')
-        acting_selector=args.get('acting_subject_selector','')
-        prefix=args.get('self_subject_prefix','')
-        suffix=args.get('self_subject_suffix','')
-        if (not isinstance(acting_selector,str) or not 1<=len(acting_selector)<=300
-                or not isinstance(prefix,str) or not isinstance(suffix,str) or len(prefix)>150 or len(suffix)>150
-                or not re.fullmatch(r'(?:(?:signed|logged)\s+in\s+as|posting\s+as|replying\s+as|current\s+account|当前(?:登录)?(?:账号|账户|身份))\s*[:：]?\s*',prefix,re.I)):
-            raise ValueError('current_acting_subject_semantics_missing')
-        acting=self.page.locator(acting_selector)
-        if await acting.count()!=1 or not await acting.is_visible():
-            raise ValueError('current_acting_subject_missing')
-        link_handle=await link.element_handle()
-        try:
-            related=await acting.evaluate("(node,link)=>node.contains(link)&&!node.closest('article,[role=article],blockquote')",link_handle)
-        finally:
-            await link_handle.dispose()
-        text=(await acting.inner_text()).strip()
-        if not related or not text.startswith(prefix) or suffix and not text.endswith(suffix):
-            raise ValueError('current_acting_subject_unestablished')
-        acting_subject=text[len(prefix):len(text)-len(suffix) if suffix else len(text)].strip()
-        if not acting_subject or len(acting_subject)>200:
-            raise ValueError('current_acting_subject_invalid')
-        self.self_entry={'url':href,'selector':selector,'acting_subject':acting_subject}
+        from .native_identity_facts import inspect_self_entry
+        _,_,account=await asyncio.to_thread(self.snapshot)
+        facts=await inspect_self_entry(self.page,link_selector=args.get('self_link_selector'),
+            subject_selector=args.get('acting_subject_selector'),subject_prefix=args.get('self_subject_prefix',''),
+            subject_suffix=args.get('self_subject_suffix',''),connection_origin=account['connection_origin'])
+        href=facts['self_url']
+        self.self_entry={'url':href,'selector':facts['self_link_selector'],'acting_subject':facts['acting_subject']}
         await self.page.goto(href,wait_until='domcontentloaded',timeout=30000)
         await self.descriptor()
         return {'state':'self_surface_opened','url':self.page.url}
@@ -272,21 +247,31 @@ class NativeConnection:
             raise ValueError('self_subject_missing')
         if not self.self_entry or self.page.url!=self.self_entry['url']:
             raise ValueError('self_surface_not_opened')
-        field=self.page.locator(selector)
-        if await field.count()!=1 or not await field.is_visible():
-            raise ValueError('self_subject_ambiguous')
-        observed=await field.evaluate("""node=>{const block=node.closest('p,dd,label,td,li');
-          const value=('value' in node ? node.value : node.innerText||'').trim();
-          const preceding=node.tagName==='DD' ? node.previousElementSibling?.innerText : '';
-          const label=node.getAttribute('aria-label')||preceding||(block ? block.innerText.replace(value,'') : '');
-          return {value,label};}""")
-        subject=observed['value']
-        if not re.search(r'account\s*(?:id|identifier)|user\s*(?:id|name)|username|handle|账号|帐号|用户标识',observed['label'],re.I):
-            raise ValueError('self_subject_not_account_field')
+        from .native_identity_facts import inspect_private_subject
+        observed=await inspect_private_subject(self.page,subject_selector=selector,
+            value_prefix=args.get('value_prefix',''),value_suffix=args.get('value_suffix',''))
+        # Cached/SW content may retain the previous subject. The private probe
+        # keeps this cookie jar, exit and original ConnectionRef, but obtains a
+        # fresh network response before accepting a new binding.
+        import copy
+        scope=copy.deepcopy(self.lease)
+        scope.pop('target_id',None)
+        fresh_scope=await self.actor.native_runtime.acquire_page(scope,self.self_entry['url'],
+            internal_parent=self.lease['target_id'],private_identity=True)
+        try:
+            fresh=self.actor.native_runtime.pages[fresh_scope['target_id']]['page']
+            if fresh.url!=self.self_entry['url']:
+                raise ValueError('self_surface_not_authenticated')
+            current=await inspect_private_subject(fresh,subject_selector=selector,
+                value_prefix=observed['value_prefix'],value_suffix=observed['value_suffix'])
+            if current!=observed:
+                raise ValueError('private_self_subject_changed')
+        finally:
+            await self.actor.native_runtime.release_page(fresh_scope['target_id'])
+        await self.descriptor()
+        subject=observed['subject']
         if self.self_entry.get('acting_subject') and subject!=self.self_entry['acting_subject']:
             raise ValueError('private_self_and_acting_subject_disagree')
-        if not subject or len(subject)>200 or subject==observed['label'].strip():
-            raise ValueError('self_subject_invalid')
         if not self.lease.get('authentication_dispatched') and subject!=account.get('external_account_id'):
             raise ValueError('self_surface_not_authenticated')
         href=self.self_entry['url']
@@ -294,7 +279,8 @@ class NativeConnection:
             'evidence_refs':['native-self:'+self.connection_id+':'+str(self.lease['challenge_version'])]}
         with tx(self.actor.aid) as c:
             c.execute('UPDATE lead.takeover_sessions SET connection_data=connection_data || %s WHERE id=%s',
-                (j({'self_url':href,'self_link_selector':self.self_entry['selector'],'self_selector':selector,'self_subject':subject}),self.connection_id))
+                (j({'self_url':href,'self_link_selector':self.self_entry['selector'],'self_selector':selector,'self_subject':subject,
+                    'self_value_prefix':observed['value_prefix'],'self_value_suffix':observed['value_suffix']}),self.connection_id))
         return self.remember_observation(self.observation,expected)
 
     async def command(self,operation,args):

@@ -766,7 +766,7 @@ class PersistentRuntime:
             self.slots.release()
             raise
 
-    async def acquire_page(self, scope, url, *, internal_parent=None):
+    async def acquire_page(self, scope, url, *, internal_parent=None,private_identity=False):
         from .browser_execution import origin
         if self.closed or not self.forward_token():
             raise ValueError('browser_control_unavailable')
@@ -785,9 +785,16 @@ class PersistentRuntime:
             page = await self.context.new_page()
             cdp = await self.context.new_cdp_session(page)
             info = (await cdp.send('Target.getTargetInfo'))['targetInfo']
-            await cdp.detach()
+            if private_identity:
+                await cdp.send('Network.enable')
+                await cdp.send('Network.setBypassServiceWorker',{'bypass':True})
+                await cdp.send('Network.setCacheDisabled',{'cacheDisabled':True})
+            else:
+                await cdp.detach()
             scope = {**scope,'target_id':info['targetId'],'generation':self.actor.epoch}
             self.pages[scope['target_id']] = {'scope':scope,'page':page,'slot_held':True,'internal':bool(internal_parent)}
+            if private_identity:
+                self.pages[scope['target_id']]['identity_session']=cdp
             await self.gate.register(scope['target_id'],scope)
             await page.goto(url,wait_until='domcontentloaded',timeout=45000)
             return scope
@@ -800,6 +807,14 @@ class PersistentRuntime:
                 await page.close()
             slots.release()
             raise
+
+    async def clear_identity_mode(self,target):
+        entry=self.pages.get(target)
+        session=entry.pop('identity_session',None) if entry else None
+        if session:
+            await session.send('Network.setBypassServiceWorker',{'bypass':False})
+            await session.send('Network.setCacheDisabled',{'cacheDisabled':False})
+            await session.detach()
 
     async def scope_view(self, target):
         entry = self.pages.get(target)
@@ -827,6 +842,9 @@ class PersistentRuntime:
         self.gate.roots.pop(target,None)
         if entry:
             self.probes.pop(entry['scope'].get('probe_ref'),None)
+            if entry.get('identity_session'):
+                with contextlib.suppress(Exception):
+                    await entry['identity_session'].detach()
             if entry.get('probe_context'):
                 await entry['probe_context'].close()
             else:

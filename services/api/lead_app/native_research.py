@@ -69,11 +69,12 @@ class NativeResearchPage(ResearchPage):
             if not private or origin(private['connection_data']['self_url']) not in {origin(value) for value in scope['origins']}:
                 raise NativeAccountIdentityError('account_identity_unverified')
         initial=private['connection_data']['self_url'] if private else url
-        self.lease = await self.actor.native_runtime.acquire_page(scope,initial)
+        self.lease = await self.actor.native_runtime.acquire_page(scope,initial,private_identity=bool(private))
         self.page = self.actor.native_runtime.pages[self.lease['target_id']]['page']
         self.context = self.actor.context
         if private:
             await self.verify_account_identity(fresh_page=self.page)
+            await self.actor.native_runtime.clear_identity_mode(self.lease['target_id'])
             if url!=initial:
                 await self.page.goto(url,wait_until='domcontentloaded',timeout=45000)
         return await self.descriptor()
@@ -99,15 +100,18 @@ class NativeResearchPage(ResearchPage):
             if page is None:
                 copied=copy.deepcopy(self.lease)
                 copied.pop('target_id',None)
-                scope=await self.actor.native_runtime.acquire_page(copied,facts['self_url'],internal_parent=self.lease['target_id'])
+                scope=await self.actor.native_runtime.acquire_page(copied,facts['self_url'],internal_parent=self.lease['target_id'],private_identity=True)
                 page=self.actor.native_runtime.pages[scope['target_id']]['page']
             try:
                 if page.url!=facts['self_url']:
                     raise NativeAccountIdentityError('account_identity_unverified')
-                field=page.locator(facts['self_selector'])
-                if await field.count()!=1 or not await field.is_visible():
-                    raise NativeAccountIdentityError('account_identity_unverified')
-                actual=await field.evaluate("node=>('value' in node ? node.value : node.innerText||'').trim()")
+                from .native_identity_facts import inspect_private_subject
+                try:
+                    observed=await inspect_private_subject(page,subject_selector=facts['self_selector'],
+                        value_prefix=facts.get('self_value_prefix',''),value_suffix=facts.get('self_value_suffix',''))
+                except ValueError as error:
+                    raise NativeAccountIdentityError('account_identity_unverified') from error
+                actual=observed['subject']
                 if actual!=account['external_account_id']:
                     with tx(self.actor.aid) as c:
                         c.execute("UPDATE lead.social_accounts SET state='needs_auth' WHERE id=%s AND binding_version=%s AND state='connected'",
