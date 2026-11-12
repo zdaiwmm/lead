@@ -6,7 +6,7 @@ URL heuristic. Unknown code leaves a local session-maintenance capability gap.
 import ast
 import re
 from typing import NamedTuple
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin, urlsplit
 
 from .browser_execution import origin
 
@@ -184,6 +184,13 @@ def worker_envelope(source,*,script_url,line,column,message):
     if not expected:
         raise ValueError('session_current_nonce_unproved')
     url=urljoin(script_url,path)
+    reject_dangerous_endpoint(url)
     if origin(url)!=origin(script_url):
         raise ValueError('session_endpoint_outside_origin')
     return {'method':'POST','url':url,'fields':expected}
+
+
+def reject_dangerous_endpoint(url):
+    parsed=urlsplit(url)
+    if re.search(r'(?:^|[/_.?&=-])(?:billing|checkout|pay(?:ment)?|charge|purchase|subscribe|subscriptions?|invoice|admin|delete|destroy|unfollow|upgrade|amount|currency)(?:$|[/_.?&=-])',unquote(parsed.path)+'?'+unquote(parsed.query),re.I):
+        raise ValueError('session_endpoint_dangerous_operation')

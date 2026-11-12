@@ -6,7 +6,11 @@ from urllib.parse import parse_qs
 
 from .browser_execution import origin
 from .native_read_facts import inspect_search_form
-from .native_session_facts import message_bridges, worker_envelope
+from .native_session_facts import (
+    message_bridges,
+    reject_dangerous_endpoint,
+    worker_envelope,
+)
 
 
 def form_body(request):
@@ -35,6 +39,7 @@ async def private_identity(runtime,scope,page):
 async def authorize_search(runtime,scope,target,request):
     try:
         async with asyncio.timeout(12):
+            reject_dangerous_endpoint(request['url'])
             body=form_body(request)
             root=scope['target_id']
             current=runtime.pages[root]['page']
@@ -84,6 +89,10 @@ async def controls(page,bridge):
     return await page.evaluate(r'''bridge=>Array.from(document.querySelectorAll(bridge.selector)).filter(node=>{
         const bounds=node.getBoundingClientRect(),style=getComputedStyle(node);
         const text=(node.getAttribute('aria-label')||node.innerText||node.value||'').trim();
+        const context=node.closest('section,form,fieldset,[role=group]')||node.parentElement;
+        const costText=context?.innerText||text;
+        if (/\brenew\b.{0,50}\bmembership\b/i.test(text)&&!/\bsession\b|sign[ -]?in|log[ -]?in|会话|登录/i.test(text)) return false;
+        if (/\b(?:pay(?:ment|ing)?|charg(?:e|ed|es)|billing|checkout|purchase|subscrib(?:e|ed)|subscription|invoice|cost|price|fee|amount|currency)\b|[$€£¥￥]\s*\d|付费|付款|支付|续费|充值|扣款|订阅|购买|结算|会员费|金额/i.test(costText)) return false;
         return !node.closest('article,blockquote,nav,header,footer')&&bounds.width>0&&bounds.height>0&&style.visibility!=='hidden'&&style.display!=='none'
             && (/\b(?:refresh|renew)\b.{0,50}\b(?:session|membership|sign.in)\b|刷新.{0,20}(?:会话|会员|登录状态)|续期.{0,20}(?:会话|登录)/i.test(text))
             && !/publish|reply|delete|admin|password|log.?out|sign.?out|complete|发布|回复|删除|管理|密码|退出/i.test(text);
@@ -93,6 +102,7 @@ async def controls(page,bridge):
 async def authorize_maintenance(runtime,target,request):
     try:
         async with asyncio.timeout(12):
+            reject_dangerous_endpoint(request['url'])
             body=form_body(request)
             meta=request['_native_network']
             session=meta['session']

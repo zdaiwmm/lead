@@ -44,3 +44,9 @@ def test_current_page_compiled_bridge_fixes_selector_and_message_data_mapping():
     with pytest.raises(ValueError):
         message_bridges(source.replace('current.dataset.proof','arbitraryExpression()'))
     assert message_bridges('// '+source.replace('\n',' '))==[]
+
+
+@pytest.mark.parametrize('path',['/billing/renew','/checkout','/charge','/subscriptions/renew','/admin/change','/continue?amount=50','/%62illing/renew','/continue?%61mount=50'])
+def test_maintenance_evidence_never_authorizes_a_billing_or_administrative_endpoint(path):
+    with pytest.raises(ValueError,match='dangerous_operation'):
+        inspect(SOURCE.replace('/private/continue',path))
