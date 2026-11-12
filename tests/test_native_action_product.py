@@ -109,3 +109,71 @@ async def test_native_reply_uses_independent_method_and_original_parent_receipt(
         return {'state':'confirmed','requests':context['workflow']['step']}
     result=await verify_login(monkeypatch,after_discovery=reply)
     assert result['action_check']=={'state':'confirmed','requests':3}
+
+
+@pytest.mark.asyncio
+async def test_unknown_native_action_reads_original_receipt_without_resubmission_after_pause(monkeypatch):
+    from lead_app import account_profiles, domain
+    from lead_app.account_intents import set_intent
+    from lead_app.db import j, one, tx
+    from lead_app.growth.contracts import TaskSpec, utcnow
+    from lead_app.growth.runtime import advance, finish
+    from lead_app.growth.store import digest, submit_work
+    from lead_app.growth.tools import ChannelInput, execute_channel
+    from native_connection_product import verify_login
+    monkeypatch.setattr(account_profiles,'native_available',lambda:True)
+    async def reconcile(context):
+        aid=context['aid']
+        board=context['board']
+        body={'body':'Controlled identical old and new publication','title':'','format':'text','media':[]}
+        board.state.posts.append({'id':1,'author':board.state.username,'body':body['body'],'parent_url':None})
+        board.state.drop_next_post_response=True
+        with tx(aid) as c:
+            target_id=context['discovery'].output['targets'][0]['target_id']
+            content=one(c,"""INSERT INTO lead.content_items(tenant_id,agent_id,revision,body,source_refs,validation_result,content_hash)
+                VALUES(lead.ctx_tenant(),%s,1,%s,'[]','{}',%s) RETURNING *""",(aid,j(body),digest(body)))
+            data=ChannelInput(content_id=content['id'],content_hash=content['content_hash'])
+            ref=submit_work(c,aid,TaskSpec(kind='channel',purpose='publish',account_id=context['pending']['account_id'],target_id=target_id,
+                payload=data.model_dump(mode='json'),review_at=utcnow()+timedelta(hours=1)))
+        async def execute():
+            admitted=advance(ref,now=utcnow()+timedelta(minutes=6))
+            assert admitted['state']=='ready',admitted
+            with tx(aid) as c:
+                task=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(ref['task_id'],))
+            result=await execute_channel(aid,task,data,admitted['claim'])
+            finish(admitted['claim'],result)
+            with tx(aid) as c:
+                action=one(c,'SELECT * FROM lead.actions WHERE task_id=%s',(ref['task_id'],))
+                attempts=c.execute('SELECT * FROM lead.action_attempts WHERE action_id=%s',(action['id'],)).fetchall()
+            return result,action,attempts
+        context['workflow'].update(kind='action',step=0,body=body['body'],operation='publish')
+        first,original,attempts=await execute()
+        assert first.outcome=='unknown' and original['state']=='unknown' and len(attempts)==1
+        assert attempts[0]['observation']['browser_request']['claimed']
+        assert board.origin+'/posts/1' in attempts[0]['observation']['browser_baseline']['urls']
+        assert len(board.oracle()['posts'])==2
+        set_intent(aid,context['pending']['account_id'],'paused',source='owner_command',source_ref='synthetic-pause')
+        domain.set_control(aid,'pause')
+        with tx(aid) as c:
+            frozen_intent=one(c,'SELECT * FROM lead.account_operating_intents WHERE account_id=%s',(context['pending']['account_id'],))
+            frozen_grants=c.execute('SELECT * FROM lead.authorization_grants ORDER BY id').fetchall()
+        context['workflow'].update(kind='reconcile',step=0,choose_old=True)
+        old,action,attempts=await execute()
+        assert old.outcome=='unknown' and action['id']==original['id'] and len(attempts)==1
+        assert action['state']=='unknown' and not attempts[0]['observation'].get('browser_receipt')
+        context['workflow'].update(kind='reconcile',step=0,choose_old=False)
+        current,action,attempts=await execute()
+        assert current.outcome=='completed' and action['state']=='confirmed'
+        assert action['id']==original['id'] and len(attempts)==1 and attempts[0]['attempt']==1
+        assert action['intent']==original['intent'] and attempts[0]['outcome']=='confirmed'
+        assert attempts[0]['observation']['browser_receipt']['url']==board.origin+'/posts/2'
+        assert len(board.oracle()['posts'])==2
+        assert len([row for row in board.oracle()['requests'] if row['method']=='POST' and row['path']=='/posts'])==1
+        with tx(aid) as c:
+            assert one(c,'SELECT state FROM lead.tasks WHERE id=%s',(ref['task_id'],))['state']=='succeeded'
+            assert one(c,'SELECT desired_state FROM lead.agents WHERE id=%s',(aid,))['desired_state']=='paused'
+            assert one(c,'SELECT * FROM lead.account_operating_intents WHERE account_id=%s',(context['pending']['account_id'],))==frozen_intent
+            assert c.execute('SELECT * FROM lead.authorization_grants ORDER BY id').fetchall()==frozen_grants
+        return {'state':'confirmed','reconcile_requests':context['workflow']['step']}
+    result=await verify_login(monkeypatch,after_discovery=reconcile)
+    assert result['action_check']=={'state':'confirmed','reconcile_requests':2}

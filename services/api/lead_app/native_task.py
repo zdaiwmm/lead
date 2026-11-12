@@ -22,6 +22,7 @@ class NativeTask:
         self.steps=0
         self.corrections=0
         self.total_corrections=0
+        self.fragment_failures=0
         self.deadline=time.monotonic()+180
 
     def remaining_seconds(self):
@@ -37,21 +38,51 @@ class NativeTask:
             progress=(task['result'] or {}).get('runtime',{}).get('native_progress',{})
             if progress.get('fragments',0)>=3 or progress.get('no_progress',0)>=3 or progress.get('corrections',0)>=8:
                 raise ValueError('native_task_progress_limit')
+            self.fragment_failures=0
             self.corrections=progress.get('no_progress',0)
             self.total_corrections=progress.get('corrections',0)
             progress['fragments']=progress.get('fragments',0)+1
             c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,native_progress}',%s) WHERE id=%s",(j(progress),self.task_id))
 
-    def note_progress(self,success):
+    def note_correction(self):
         from .db import j
+        self.fragment_failures+=1
         with tx(self.actor.aid) as c:
             task=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE',(self.task_id,))
             progress=(task['result'] or {}).get('runtime',{}).get('native_progress',{})
-            progress['no_progress']=0 if success else progress.get('no_progress',0)+1
-            progress['corrections']=progress.get('corrections',0)+(not success)
+            progress['corrections']=progress.get('corrections',0)+1
             c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,native_progress}',%s) WHERE id=%s",(j(progress),self.task_id))
-            self.corrections=progress['no_progress']
             self.total_corrections=progress['corrections']
+
+    async def observe_progress(self):
+        """One real state sample per official SDK step; only a digest is persisted."""
+        import hashlib
+        import json
+
+        from .db import j
+        self.remaining_seconds()
+        await self.descriptor()
+        if not getattr(self,'reconcile',False):
+            await self.verify_private_self()
+        before=await self.document()
+        facts=await self.page.evaluate("""()=>({url:location.href,scroll:[scrollX,scrollY],
+            text:document.body?.innerText||'', fields:Array.from(document.querySelectorAll('input,textarea,select'))
+            .filter(node=>!['password','hidden'].includes(node.type)&&node.autocomplete!=='one-time-code')
+            .map(node=>[node.tagName,node.name,node.value])})""")
+        if before!=await self.document():
+            raise ValueError('native_progress_document_changed')
+        signature=hashlib.sha256(json.dumps([facts,before[1]],sort_keys=True).encode()).hexdigest()
+        with tx(self.actor.aid) as c:
+            task=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE',(self.task_id,))
+            progress=(task['result'] or {}).get('runtime',{}).get('native_progress',{})
+            progress['no_progress']=progress.get('no_progress',0)+1 if progress.get('state_hash')==signature else 0
+            progress['state_hash']=signature
+            self.corrections=progress['no_progress']
+            stopped=self.fragment_failures>=2 or self.corrections>=3 or self.total_corrections>=8 or self.steps>=20
+            if stopped:
+                progress['stopped_reason']='one_correction_exhausted' if self.fragment_failures>=2 else 'no_progress' if self.corrections>=3 else 'active_step_limit'
+            c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,native_progress}',%s) WHERE id=%s",(j(progress),self.task_id))
+        return {'stop':stopped,'reason':progress.get('stopped_reason') if stopped else None}
 
     def snapshot(self):
         with tx(self.actor.aid) as c:
@@ -197,7 +228,19 @@ class NativeTask:
                 await self.actor.native_runtime.release_page(permission_scope['target_id'])
 
     async def command(self,operation,args):
-        return await asyncio.wait_for(self._command(operation,args),self.remaining_seconds())
+        if operation=='progress':
+            return await asyncio.wait_for(self.observe_progress(),self.remaining_seconds())
+        if operation in ('record_method','report_receipt','tool_authorize') and self.fragment_failures>=2:
+            raise ValueError('native_one_correction_exhausted')
+        try:
+            value=await asyncio.wait_for(self._command(operation,args),self.remaining_seconds())
+            if operation=='tool_authorize' and not value.get('allowed'):
+                await asyncio.to_thread(self.note_correction)
+            return value
+        except ValueError:
+            if operation in ('record_method','report_receipt','tool_authorize'):
+                await asyncio.to_thread(self.note_correction)
+            raise
 
     async def _command(self,operation,args):
         if operation=='scope':
@@ -208,13 +251,7 @@ class NativeTask:
             self.steps+=1
             if self.steps>20 or self.corrections>=3 or self.total_corrections>=8:
                 raise ValueError('native_task_progress_limit')
-            try:
-                value=await self.record_method(args)
-            except ValueError:
-                await asyncio.to_thread(self.note_progress,False)
-                raise
-            await asyncio.to_thread(self.note_progress,True)
-            return value
+            return await self.record_method(args)
         raise ValueError('native_task_operation_unsupported')
 
     async def close(self):

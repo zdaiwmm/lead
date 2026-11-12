@@ -61,12 +61,13 @@ async def verify_login(
             import re
 
             candidates = []
-            for line in text.splitlines():
+            lines=text.splitlines()
+            for line_number,line in enumerate(lines):
                 index = re.search(r"\[(\d+)\]", line)
                 if index and any(
-                    tag in line.lower() for tag in ("<input", "<button", "<textarea")
+                    tag in line.lower() for tag in ("<input", "<button", "<textarea", "<a ")
                 ):
-                    candidates.append((int(index[1]), line))
+                    candidates.append((int(index[1]), "\n".join(lines[line_number:line_number+3])))
             step = workflow["step"]
             workflow["step"] += 1
             action = {
@@ -75,7 +76,24 @@ async def verify_login(
                     "success": True,
                 }
             }
-            if workflow["kind"] == "action":
+            if workflow["kind"] == "no_progress":
+                action={"guarded_scroll":{"down":True,"pages":1}}
+            elif workflow["kind"] == "correction":
+                action={"propose_method":{"target_url":board.origin+"/home","operation":"publish",
+                    "selectors":{"self_subject":"#missing-current-subject","editor_target":"#editor-target","editor_body":"textarea","submit":"button"},
+                    "self_subject_prefix":"Signed in as ","self_subject_suffix":" · Your account settings",
+                    "permission_selector":"section p","permission_quote":"Unproved model assertion"}}
+            elif workflow["kind"] == "reconcile":
+                if step == 0:
+                    matches=[index for index,line in candidates if "<a " in line.lower() and workflow["body"] in line]
+                    if matches:
+                        action={"guarded_click":{"index":matches[0] if workflow.get("choose_old") else matches[-1]}}
+                elif step == 1:
+                    receipt={"author":"#author","body":"#post-body","url":"a[rel~=canonical]"}
+                    if workflow.get("operation")=="reply":
+                        receipt["parent"]="#receipt-parent"
+                    action={"report_receipt":{"selectors":receipt}}
+            elif workflow["kind"] == "action":
                 if step == 0:
                     matches = [
                         index

@@ -14,7 +14,7 @@ pytestmark=[pytest.mark.asyncio,pytest.mark.skipif(os.environ.get('LEAD_BROWSER_
 @pytest_asyncio.fixture
 async def receipt_page():
     async with async_playwright() as playwright:
-        browser=await playwright.chromium.launch(headless=True)
+        browser=await playwright.chromium.launch(headless=True,executable_path=playwright.chromium.executable_path)
         page=await browser.new_page()
         await page.route('**/*',lambda route:route.fulfill(body='<main></main>',content_type='text/html'))
         await page.goto('https://board.example.test/posts/7')
