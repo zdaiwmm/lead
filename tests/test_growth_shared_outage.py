@@ -48,7 +48,7 @@ async def test_real_queue_server_restart_resumes_both_original_projects(tmp_path
     if binary:
         kwargs["dev_server_existing_path"]=binary
     seen,executed,completed=set(),[],set()
-    deadline=utcnow()+timedelta(seconds=3)
+    deadline=None
     @activity.defn(name="growth_advance")
     async def advance(ref:dict):
         seen.add(ref["task_id"])
@@ -69,6 +69,9 @@ async def test_real_queue_server_restart_resumes_both_original_projects(tmp_path
     refs=[{"agent_id":uid(),"task_id":uid(),"task_generation":1} for _ in range(2)]
     names=[]
     async with await WorkflowEnvironment.start_local(**kwargs) as env:
+        # Download/startup time is outside the simulated outage window. Both
+        # original workflows must still be waiting when this queue is stopped.
+        deadline=utcnow()+timedelta(seconds=3)
         async with Worker(env.client,task_queue=queue,workflows=[GrowthWorkWorkflow],activities=[advance,execute,finish]):
             for ref in refs:
                 name=uid()
@@ -77,6 +80,7 @@ async def test_real_queue_server_restart_resumes_both_original_projects(tmp_path
             async with asyncio.timeout(8):
                 while len(seen)<2:
                     await asyncio.sleep(.02)
+        assert not executed
         # Exiting really stops this test's queue process, leaving its SQLite.
     async with await WorkflowEnvironment.start_local(**kwargs) as env:
         async with Worker(env.client,task_queue=queue,workflows=[GrowthWorkWorkflow],activities=[advance,execute,finish]):
