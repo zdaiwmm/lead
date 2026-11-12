@@ -14,8 +14,11 @@ from test_growth_account_connection import account, login_work
 from test_growth_channel_operation import channel_work
 
 
-def native_work(aid):
+def native_work(aid,*,provider=None):
     ref,data,social = channel_work(aid)
+    if provider:
+        with tx(aid) as c:
+            c.execute('UPDATE lead.browser_profiles SET provider=%s WHERE id=%s',(provider,social['profile_id']))
     claim = advance(ref)['claim']
     with tx(aid) as c:
         target = one(c,'SELECT * FROM lead.account_targets WHERE account_id=%s',(social['id'],))

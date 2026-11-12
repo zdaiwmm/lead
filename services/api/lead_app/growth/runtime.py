@@ -479,13 +479,13 @@ def advance(value, attempt_token=None, *, now=None):
                 item.get("kind")==dependency.artifact for item in produced.get("artifacts",[])+produced.get("evidence_refs",[])):
                 _save(c,row,"failed",{**runtime,"reason":"dependency_artifact_missing"})
                 return {"state":"terminal","reason":"dependency_artifact_missing"}
-        if (spec.account_id or spec.payload.get("profile_id")) and not reconcile:
+        if spec.account_id or spec.payload.get("profile_id"):
             account = one(c, """SELECT s.*,i.desired FROM lead.social_accounts s
                 LEFT JOIN lead.account_operating_intents i ON i.account_id=s.id WHERE s.id=%s""", (spec.account_id,))
-            if spec.account_id and (not account or account["binding_version"] != row["input"].get("binding_version")):
+            if not reconcile and spec.account_id and (not account or account["binding_version"] != row["input"].get("binding_version")):
                 _save(c, row, "canceled", {**runtime, "reason": "account_changed"})
                 return {"state": "terminal", "reason": "account_changed"}
-            if account and account["desired"] != "running":
+            if not reconcile and account and account["desired"] != "running":
                 wait = _wait(row, "account_paused", now, producer="account_intents", action="configuration", owner="owner")
                 _save(c, row, "planned", {**runtime, "wait": wait}, when=wait["check_at"])
                 return {"state": "wait", "wait": wait}
@@ -495,14 +495,23 @@ def advance(value, attempt_token=None, *, now=None):
             # Short admission serialization; never hold this lock across browser IO.
             if not one(c, "SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0)) ok", (group,))["ok"]:
                 return {"state": "wait", "wait": _wait(row, "resource_wait", now, delay=1, owner="resource")}
-            running = all_rows(c, """SELECT id,result#>>'{runtime,resource}' resource,
-                    coalesce(input#>>'{spec,account_id}',input#>>'{spec,payload,connection_account_id}') account_id
-                FROM lead.tasks WHERE id<>%s AND state='running'
-                AND coalesce(result#>>'{runtime,browser_profile_id}',input->>'profile_id',input#>>'{spec,payload,profile_id}')=%s
-                AND (result#>>'{runtime,lease_until}')::timestamptz>%s""", (row['id'],str(profile),now))
+            running = all_rows(c, """SELECT t.id,t.result#>>'{runtime,resource}' resource,
+                    coalesce(t.input#>>'{spec,account_id}',t.input#>>'{spec,payload,connection_account_id}') account_id,
+                    (t.type='growth.account' AND t.input#>>'{spec,purpose}'='connect') authenticating,
+                    EXISTS(SELECT FROM lead.actions a WHERE a.task_id=t.id AND a.state IN ('dispatching','unknown','confirmed')) readonly
+                FROM lead.tasks t WHERE t.id<>%s AND t.state='running'
+                AND coalesce(t.result#>>'{runtime,browser_profile_id}',t.input->>'profile_id',t.input#>>'{spec,payload,profile_id}')=%s
+                AND (t.result#>>'{runtime,lease_until}')::timestamptz>%s""", (row['id'],str(profile),now))
             busy = bool(running)
             if native and scoped_account:
-                busy = len(running) >= 2 or any(item['account_id'] == str(scoped_account) or item['resource'] == group for item in running)
+                # Only the current canonical Action state grants a read slot;
+                # neither a runtime flag nor a caller's claim changes write
+                # exclusivity. Reads still count toward the two native slots.
+                readonly=bool(original and original['state'] in ('dispatching','unknown','confirmed'))
+                authenticating=spec.kind=='account' and spec.purpose=='connect'
+                busy = len(running) >= 2 or any(item['resource'] == group or
+                    item['account_id'] == str(scoped_account) and (authenticating or item['authenticating']
+                        or not readonly and not item['readonly']) for item in running)
                 control = one(c, """SELECT id FROM lead.takeover_sessions t WHERE profile_id=%s
                     AND state IN ('requested','active','ending') AND expires_at>%s
                     AND (%s::uuid IS NULL OR id<>%s)
