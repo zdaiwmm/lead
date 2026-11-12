@@ -78,6 +78,7 @@ def operating_signals(c,as_of,connection_id=None,experiment_id=None):
         WHERE r.created_at<=%s AND r.pricing_snapshot ? 'research'
         AND (%s::uuid IS NULL OR r.pricing_snapshot#>>'{research,experiment_id}'=%s)
         GROUP BY b.unit""",(as_of,experiment_id,str(experiment_id) if experiment_id else None))
+    provider_costs=[{**item,**{key:int(item[key]) for key in ('held_units','spent_units','unknown_calls')}} for item in provider_costs]
     result={'exposure':{'value':None,'coverage':'platform_insights_not_connected'},
         'visits':{'visitors':None,'page_views':None,'qualified_visits':None,'coverage':'missing','connection_id':None},
         'event_funnel':[],'costs':{'model_tokens':int(costs['tokens']),'held_tokens':int(held['tokens']),

@@ -120,3 +120,15 @@ def test_database_rejects_unproven_public_projection(growth_agent):
             c.execute("""INSERT INTO lead.experiences(tenant_id,agent_id,extraction_key,kind,problem,conclusion,public_projection)
               VALUES(lead.ctx_tenant(),%s,'sql:unproven','research','community','private',%s)""",
               (growth_agent,j({'problem':'community','conclusion':'private','conditions':{},'sources':['https://example.com/guide']})))
+
+
+def test_projection_cannot_smuggle_private_fields_in_sql(growth_agent):
+    import psycopg
+    import pytest
+    from lead_app.db import j
+    source=public_source(growth_agent,'community','Public text')
+    with pytest.raises(psycopg.errors.RaiseException,match='public_experience_source_required'):
+        with tx(growth_agent) as c:
+            c.execute("""INSERT INTO lead.experiences(tenant_id,agent_id,extraction_key,kind,problem,conclusion,source_document_id,public_projection)
+              VALUES(lead.ctx_tenant(),%s,'sql:extra','research','community','private',%s,%s)""",
+              (growth_agent,source,j({'problem':'community','conclusion':'Public text','conditions':{},'sources':['https://example.com/guide'],'private_data':'never shared'})))

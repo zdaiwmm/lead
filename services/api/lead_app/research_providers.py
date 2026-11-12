@@ -204,7 +204,7 @@ def normalize(provider, operation, data, request_id=None):
             'provider':provider,'request_id':request_id,'independently_verified':False,
             'metrics':{key:value.get(key) for key in ('score','num_comments')},
             'metrics_basis':'provider_reported', 'access_mode':'provider_public'})
-    failures=[{'url':r.get('url'),'reason':'extract_failed','details':str(r.get('error',''))[:300]}
+    failures=[{'url':r.get('url'),'reason':{401:'login_required',403:'permission_denied',404:'missing',410:'deleted'}.get(r.get('status_code'),'unknown'),'details':str(r.get('error',''))[:300]}
         for r in data.get('failed_results',[])[:20] if isinstance(r,dict)]
     page=data.get('data',{}).get('pageInfo',{}) if isinstance(data.get('data'),dict) else {}
     return {'state':'partial' if failures else 'complete' if sources else 'empty', 'sources':sources,

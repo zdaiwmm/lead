@@ -52,7 +52,12 @@ BEGIN
    AND tenant_id=NEW.tenant_id AND agent_id=NEW.agent_id AND deleted_at IS NULL;
  SELECT string_agg(k.body,' ' ORDER BY ordinal) INTO body FROM lead.knowledge_chunks k
    WHERE k.document_id=d.id AND k.tenant_id=NEW.tenant_id AND k.agent_id=NEW.agent_id;
- IF d.id IS NULL OR d.source_type<>'public_read' OR projection->>'problem' IS DISTINCT FROM d.title
+ IF jsonb_typeof(projection)<>'object' OR projection - ARRAY['problem','conclusion','conditions','sources'] <> '{}'::jsonb
+   OR jsonb_typeof(projection->'conditions') IS DISTINCT FROM 'object'
+   OR EXISTS(SELECT 1 FROM jsonb_each_text(projection->'conditions') item
+     WHERE item.key NOT IN ('product','audience','region','language','value_behavior','location','operation')
+       OR position(lower(item.value) IN lower(coalesce(body,'')))=0)
+   OR d.id IS NULL OR d.source_type<>'public_read' OR projection->>'problem' IS DISTINCT FROM d.title
    OR projection->'sources' IS DISTINCT FROM jsonb_build_array(d.source_ref)
    OR length(coalesce(projection->>'conclusion','')) NOT BETWEEN 1 AND 500
    OR position(regexp_replace(projection->>'conclusion','\s+',' ','g') IN regexp_replace(coalesce(body,''),'\s+',' ','g'))=0
