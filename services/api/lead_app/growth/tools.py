@@ -286,7 +286,17 @@ async def probe_research_resource(aid, root, scope, probe_row=None):
                     WHERE connection_ref=%s AND period_key=%s
                     AND spent_units+reserved_units+%s<=least(limit_units,%s)""",
                     (conf["connection"],conf["period_key"],conf["max_units"],conf["limit_units"]))
-                if allowance:
+                period = one(c, """SELECT id,spent_units,reserved_units,limit_units FROM lead.budget_periods
+                    WHERE starts_at=%s AND unit=%s""",(conf["start"],provider+":"+conf["unit"]))
+                question = (one(c,"SELECT question_key FROM lead.growth_experiments WHERE id=%s",(root["experiment_id"],))
+                    if root.get("experiment_id") else None)
+                question = question["question_key"] if question else root["input"].get("purpose") or root.get("type", "growth.research")
+                spent = (one(c,"""SELECT coalesce(sum(units),0) n FROM lead.budget_reservations
+                    WHERE period_id=%s AND state<>'released' AND pricing_snapshot#>>'{research,question}'=%s""",
+                    (period["id"],question))["n"] if period else 0)
+                if (allowance and period
+                        and period["spent_units"]+period["reserved_units"]+conf["max_units"]<=min(period["limit_units"],conf["project_limit_units"])
+                        and spent+conf["max_units"]<=conf["question_limit_units"]):
                     ready = one(c, """SELECT id FROM lead.budget_reservations
                         WHERE state IN ('settled','unknown') AND created_at>%s
                         AND pricing_snapshot#>>'{research,provider}'=%s
