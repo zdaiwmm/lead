@@ -801,6 +801,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - `e3e7a5f`接入实际原生自动认证：Linux真实浏览器/原Task/ConnectionRef用本地假模型5次原生调用填两字段、只发一次`POST /session`、读私有`/account`后DB绑定真实Account ID，原任务completed；错误私有主体拒绝。固定Linux2项12.65秒通过，实际模型请求及SDK工作目录的用户名/密码双literal扫描均false，假HTTP接收端独立扫描同样无明文。此为执行器机械证据、真实模型API0，不是陌生页语义验收。独立cookie空identity probe仅允许既定GET，不能借社媒Cookie或POST；生产出口双公网来源仍待实测。
 - 同段补原ExecutionRef generation、出口usable及配置指纹逐次核对；owner重开仍保留有版本的原生协议；8模型调用/20主动步骤上限。主集成45项连接/动作/读取/当前回执投影与旧出口消费者通过。两个独立真实DB反例曾确认不同transport误共享并改A路由、原生Reddit遗漏已配置固定出口；修为兼容transport/出口cohort分组及保留原公共/社媒出口消费者后，两例转绿，旧Profile不迁移。
 
+- C28/C30另有独立三站夹具冻结于`622e49c`，源文件SHA256为`2c2b0e74eb3a6cda8366bbfe473889c35756e1b053879700ea779da97cdd9976`。真实完整Chromium151/Playwright1.62独立3项4.74秒、主集成3项4.49秒证明SW cache/合成/HttpOnly续期POST、POST读取、嵌套独立OOPIF、SSO正/错opener、旧认证端点SW借用及非幂等重放都可实际触发；仅Python oracle、无HTTP oracle且不记密码。夹具故意允许负例，产品门禁尚须在同实例组合证明0源站；不能把夹具自验计作C28/C30产品通过。standalone便利参数含无代理配置，严禁带入产品运行。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2/通用发布回复仍在接线和验证，不能因为基础桥、探针或部分模块通过就开启共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。

@@ -1,6 +1,7 @@
 """Fixture characterization only: these are not product authorization tests."""
 import http.client
 import importlib.util
+import os
 from urllib.parse import urlencode, urlsplit
 
 import pytest
@@ -67,6 +68,8 @@ def test_http_cookie_post_read_and_every_publish_reply_is_non_idempotent():
 
 @pytest.fixture
 def chromium_site():
+    if os.getenv('LEAD_BROWSER_TESTS') != '1':
+        pytest.skip('requires the installed native Chromium test runtime')
     playwright = pytest.importorskip('playwright.sync_api')
     with fixture_class()() as site, playwright.sync_playwright() as manager:
         # Full Chromium honors the explicit HTTP trust list; headless shell 151 does not.
