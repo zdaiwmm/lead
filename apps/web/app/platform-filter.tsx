@@ -3,7 +3,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Bot, Check, ChevronDown, Layers } from "lucide-react";
 import SocialIcon, { socialNames } from "./social-icon";
-import styles from "./operating-plans.module.css";
+import styles from "./platform-filter.module.css";
 
 const channels = [
   ["", "全部平台"],

@@ -38,11 +38,14 @@ def for_platform(
 ):
     with tx(aid) as c:
         agent = require_agent(c, aid, create)
+        from .adapters.catalog import SPECS
+        from .growth.store import enabled
+        growth = enabled(agent)
         if new_binding and (
             account_id
             or not create
-            or not channel_pilot(aid)
-            or not channel_for(platform)
+            or not (growth or channel_pilot(aid))
+            or not (platform in SPECS if growth else channel_for(platform))
         ):
             raise ValueError("此渠道不能创建额外账号环境")
         if not new_binding:
@@ -61,7 +64,7 @@ def for_platform(
                 raise ValueError("此账号不属于当前项目与渠道")
         base = one(c, "SELECT * FROM lead.browser_profiles WHERE slot='default'")
         if not create or not (
-            isolated_login or (channel_pilot(aid) and channel_for(platform))
+            growth or isolated_login or (channel_pilot(aid) and channel_for(platform))
         ):
             return base
         slot = platform if not new_binding else platform + "-" + uid()
@@ -95,7 +98,7 @@ def for_platform(
                 VALUES(%s,%s,%s,%s)""",
                 (pid, agent["tenant_id"], aid, agent["control_version"]),
             )
-        if isolated_login or new_binding:
+        if growth or isolated_login or new_binding:
             profile["account_id"] = one(
                 c,
                 """INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,state,automation_enabled)
@@ -116,3 +119,29 @@ def takeover_profile(aid, takeover):
         if not row:
             raise ValueError("接管已过期")
         return row["profile_id"]
+
+
+def public_research(aid):
+    """A dedicated cookie-empty Profile, independent of every social account."""
+    with tx(aid) as c:
+        agent = require_agent(c,aid,True)
+        profile = one(c,"SELECT * FROM lead.browser_profiles WHERE slot='public-research'")
+        if not profile:
+            base = one(c,"SELECT * FROM lead.browser_profiles WHERE slot='default'")
+            pid = uid()
+            root = directory(aid,{"slot":"public-research","id":pid})
+            profile = one(c,"""INSERT INTO lead.browser_profiles(id,tenant_id,agent_id,provider,engine_version,
+                sdk_version,config_ref,config_hash,storage_ref,key_material_ref,network_identity_id,slot)
+                VALUES(%s,lead.ctx_tenant(),%s,%s,%s,%s,%s,%s,%s,%s,%s,'public-research') RETURNING *""",
+                (pid,aid,base["provider"],base["engine_version"],base["sdk_version"],str(root/"identity.json"),pid,
+                 str(root/"storage"),base["key_material_ref"],base["network_identity_id"]))
+            c.execute("""INSERT INTO lead.profile_leases(profile_id,tenant_id,agent_id,control_version)
+                VALUES(%s,lead.ctx_tenant(),%s,%s)""",(pid,aid,agent["control_version"]))
+    from .execution_routes import default_transport, register, resolve
+    try:
+        resolve(aid,profile_id=profile["id"])
+    except ValueError as error:
+        if str(error)!="execution_route_missing":
+            raise
+        register(aid,profile["id"],default_transport("public-research"))
+    return profile

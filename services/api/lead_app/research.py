@@ -584,6 +584,9 @@ class ResearchPage:
 
 
 def begin_run(aid, goal, message_id=None, task_id=None, mode="research"):
+    # Public reading never borrows a social login or its manually controlled page.
+    from .account_profiles import public_research
+    profile = public_research(aid)
     with tx(aid) as c:
         a = require_agent(c, aid, True)
         if one(
@@ -593,7 +596,7 @@ def begin_run(aid, goal, message_id=None, task_id=None, mode="research"):
             raise ResearchStopped("环境正在备份，浏览任务稍后重试")
         rid = uid()
         c.execute(
-            "INSERT INTO lead.browser_runs(id,tenant_id,agent_id,message_id,task_id,goal,mode,control_version,config_revision) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "INSERT INTO lead.browser_runs(id,tenant_id,agent_id,message_id,task_id,goal,mode,control_version,config_revision,profile_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (
                 rid,
                 current_tenant(),
@@ -604,6 +607,7 @@ def begin_run(aid, goal, message_id=None, task_id=None, mode="research"):
                 mode,
                 a["control_version"],
                 a["config_revision"],
+                profile["id"],
             ),
         )
         return rid

@@ -414,12 +414,18 @@ class Actor:
 
         if platform not in ("lab", "telegram") and platform not in SPECS:
             raise ValueError("该频道的自动发布适配尚未开放")
+        if action["intent"].get("growth_runtime"):
+            from .growth.tools import submission_gate
+            return submission_gate(c,self,action)
         if self.profile["slot"] == "default":
             a = require_agent(c, self.aid, True)
         else:
             a = one(c, "SELECT * FROM lead.agents WHERE id=%s FOR SHARE", (self.aid,))
             if not a or a["desired_state"] == "archived":
                 raise ValueError("Agent 不可运行")
+        from .growth.store import enabled as growth_enabled
+        if growth_enabled(a):
+            raise ValueError("legacy_business_owner_retired")
         task = None
         if action.get("task_id"):
             task = one(c, "SELECT input->'channel_clock' AS clock,input FROM lead.tasks WHERE id=%s", (action["task_id"],))
@@ -580,7 +586,7 @@ class Actor:
                     raise ValueError("频道不存在")
                 if one(
                     c,
-                    "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('active','requested','ending') AND expires_at>now()",
+                    "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('active','requested','ending') AND expires_at>now() AND profile_id=%s",(self.profile["id"],),
                 ):
                     return (
                         {"state": "unknown", "reason": "等待用户结束接管后核对"}
@@ -1202,6 +1208,7 @@ class OpenRequest(BaseModel):
 
 class PublishRequest(BaseModel):
     action_id: str
+    growth_claim: dict | None = None
 
 
 class InputRequest(BaseModel):
@@ -1210,6 +1217,76 @@ class InputRequest(BaseModel):
     x: float = 0
     y: float = 0
     text: str = Field(default="", max_length=4000)
+
+
+@app.post("/agents/{aid}/account/observe")
+async def observe_account(aid: UUID, body: OpenRequest):
+    from .account_connection import observe_identity
+    from .channel_contracts import SessionObservation
+    aid = str(aid)
+    profile = account_profiles.for_platform(aid, body.platform, account_id=body.account_id)
+    actor = await gateway.get(aid, profile["id"], allow_challenge=True)
+    if not hasattr(actor,"connection_observer_lock"):
+        actor.connection_observer_lock = asyncio.Lock()
+    async with actor.connection_observer_lock:
+        async with manual_control(actor):
+            require_takeover(aid,actor,body.takeover)
+            with tx(aid) as c:
+                snapshot = one(c,"SELECT * FROM lead.takeover_sessions WHERE id=%s",(body.takeover,))
+            if snapshot["composing"] or snapshot["input_inflight"]:
+                return SessionObservation(status="temporarily_unavailable").model_dump(mode="json")
+            original = actor.page
+            root = next(url for name,_,url in PLATFORMS if name==body.platform)
+            if body.platform=="telegram" and urlsplit(original.url).hostname=="web.telegram.org":
+                root = original.url
+        # This network read owns a separate page; it must not hold the human's input lock.
+        proof = await original.context.new_page()
+        preserve = False
+        try:
+            await proof.goto(root,wait_until="domcontentloaded",timeout=45000)
+            observed = await observe_identity(proof,body.platform,actor.session)
+            if observed.status=="challenge":
+                async with manual_control(actor):
+                    require_takeover(aid,actor,body.takeover)
+                    with tx(aid) as c:
+                        latest = one(c,"SELECT input_seq,input_inflight,composing FROM lead.takeover_sessions WHERE id=%s",(body.takeover,))
+                    if latest["input_seq"]!=snapshot["input_seq"] or latest["input_inflight"] or latest["composing"]:
+                        return SessionObservation(status="temporarily_unavailable").model_dump(mode="json")
+                    # Keep the actual challenged page visible for the owner, with
+                    # their former page still open in the same private context.
+                    actor.connection_original_page = original
+                    actor.page = proof
+                    preserve = True
+            return observed.model_dump(mode="json")
+        finally:
+            if not preserve:
+                await proof.close()
+
+
+class DiscoverRequest(OpenRequest):
+    target_urls: list[str] = Field(default_factory=list,max_length=10)
+
+
+@app.post("/agents/{aid}/account/discover")
+async def discover_account_targets(aid: UUID, body: DiscoverRequest):
+    from .account_connection import discover_in_browser
+    aid = str(aid)
+    with tx(aid) as c:
+        account = one(c, "SELECT * FROM lead.social_accounts WHERE id=%s AND platform=%s AND state='connected'", (body.account_id, body.platform))
+    if not account:
+        raise ValueError("account_changed")
+    actor = await gateway.get(aid, account["profile_id"])
+    from .config import env
+    from .identity import check, verified_profile
+    with tx(aid) as c:
+        verified = bool(verified_profile(c,account["profile_id"]))
+    if env().get("LEAD_DEPLOYMENT_MODE")=="production" and not verified:
+        measured = await check(actor)
+        if not measured["verified"]:
+            return {"targets":[],"missing_conditions":[{"code":"execution_identity_unverified",
+                "responsibility":"product","platform":account["platform"]}]}
+    async with actor.lock:
+        return await discover_in_browser(actor, account,body.target_urls)
 
 
 def challenge_profile(aid, takeover):
@@ -1544,10 +1621,10 @@ async def inspect_telegram_target(aid: UUID, body: TelegramTargetRequest):
             raise HTTPException(404, "已连接账号不存在")
         if one(
             c,
-            "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('active','requested','ending') AND expires_at>now()",
+            "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('active','requested','ending') AND expires_at>now() AND profile_id=%s",(account["profile_id"],),
         ):
             raise HTTPException(409, "请先结束浏览器接管")
-    actor = await gateway.get(aid)
+    actor = await gateway.get(aid,account["profile_id"])
     async with actor.lock:
         return await inspect_target(
             actor.page, body.url, account["external_account_id"]
@@ -1567,6 +1644,15 @@ async def check_published_link(aid: UUID, body: PublishRequest):
 
 @app.post("/agents/{aid}/publish")
 async def publish_action(aid: UUID, body: PublishRequest):
+    from .growth.tools import submission_claim
+    token = submission_claim.set(body.growth_claim)
+    try:
+        return await _publish_action(aid,body)
+    finally:
+        submission_claim.reset(token)
+
+
+async def _publish_action(aid: UUID, body: PublishRequest):
     aid = str(aid)
     with tx(aid) as c:
         action = one(
@@ -1643,10 +1729,13 @@ async def reload_publishing_adapter(aid: UUID, body: PublishRequest):
 
 def research_profile(aid, run_id):
     with tx(aid) as c:
-        row = one(c, """SELECT t.input->>'channel_profile_id' AS profile_id
+        row = one(c, """SELECT coalesce(r.profile_id::text,t.input->>'channel_profile_id') AS profile_id
             FROM lead.browser_runs r LEFT JOIN lead.tasks t ON t.id=r.task_id WHERE r.id=%s""", (run_id,))
         if not row:
             raise HTTPException(404, "浏览任务不存在")
+        from .growth.store import enabled
+        if not row["profile_id"] and enabled(require_agent(c,aid)):
+            raise HTTPException(409,"公开研究执行环境缺失")
         return row["profile_id"]
 
 
@@ -1701,11 +1790,15 @@ async def health():
     }
 
 
+class IdentityCheckRequest(BaseModel):
+    profile_id: UUID | None = None
+
+
 @app.post("/agents/{aid}/identity/check")
-async def check_identity(aid: UUID):
+async def check_identity(aid: UUID,body:IdentityCheckRequest | None = None):
     from .identity import check
 
-    return await check(await gateway.get(str(aid)))
+    return await check(await gateway.get(str(aid),body.profile_id if body else None))
 
 
 @app.post("/agents/{aid}/open")
@@ -1791,11 +1884,30 @@ async def page_status(aid: UUID):
         })"""), timeout=5)
 
 
+@asynccontextmanager
+async def input_guard(aid, actor, body):
+    require_takeover(aid,actor,body.takeover)
+    with tx(aid) as c:
+        changed = one(c,"""UPDATE lead.takeover_sessions SET input_seq=input_seq+1,last_input_at=now(),input_inflight=true,
+            composing=CASE WHEN %s='composition_start' THEN true WHEN %s='composition_end' THEN false ELSE composing END
+            WHERE (%s::uuid IS NULL OR id=%s) AND profile_id=%s AND state='active' RETURNING id,input_seq""",
+            (body.kind,body.kind,body.takeover,body.takeover,actor.profile["id"]))
+        if not changed:
+            raise HTTPException(409,"接管已过期")
+    try:
+        yield
+    finally:
+        with tx(aid) as c:
+            c.execute("UPDATE lead.takeover_sessions SET input_inflight=false,last_input_at=now() WHERE id=%s AND input_seq=%s",
+                      (changed["id"],changed["input_seq"]))
+
+
 @app.post("/agents/{aid}/input")
 async def user_input(aid: str, body: InputRequest):
     actor = await gateway.get(aid,account_profiles.takeover_profile(aid,body.takeover) if body.takeover else None, allow_challenge=True)
-    async with manual_control(actor):
-        require_takeover(aid, actor, body.takeover)
+    async with manual_control(actor), input_guard(aid,actor,body):
+        if body.kind in ("composition_start", "composition_end"):
+            return {"ok": True}
         if body.kind == "click":
             await actor.page.mouse.click(
                 max(0, min(body.x, 1280)), max(0, min(body.y, 900))

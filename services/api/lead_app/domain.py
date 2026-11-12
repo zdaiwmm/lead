@@ -34,8 +34,10 @@ PLATFORMS = [
 
 
 def create_agent(
-    request_key=None, setup=None, setup_template_version=None, *, confirmed_brief=None
+    request_key=None, setup=None, setup_template_version=None, *, confirmed_brief=None, runtime_engine="growth"
 ):
+    if runtime_engine not in ("growth","legacy"):
+        raise ValueError("invalid_runtime_engine")
     aid, nid, pid = uid(), uid(), uid()
     model = model_config()
     payload = confirmed_brief or setup
@@ -69,6 +71,9 @@ def create_agent(
                 "ready",
             ),
         )
+        if runtime_engine=="growth":
+            c.execute("UPDATE lead.agents SET onboarding_state=onboarding_state || %s WHERE id=%s",(j({"growth_runtime":{
+                "decision":{"engine":"growth","generation":1},"global_control":{"source":"initialization","desired":"running"}}}),aid))
         c.execute(
             "INSERT INTO lead.agent_revisions(tenant_id,agent_id,revision,provider,model_ref,prompt_version,toolset_version,output_schema_version) VALUES(%s,%s,1,%s,%s,'lead-1','browser-1','1')",
             (current_tenant(), aid, model.get("provider", "deepseek"), model["model"]),
@@ -103,7 +108,9 @@ def create_agent(
             c,
             aid,
             "assistant",
-            "已保存你确认的业务资料。你可以在工作台连接运营渠道。"
+            "资料已保存，我会开始了解产品；账号连接可以同时进行。"
+            if runtime_engine=="growth" and payload
+            else "已保存你确认的业务资料。你可以在工作台连接运营渠道。"
             if confirmed_brief
             else "业务与运营方向已保存，连接一个社媒账号后即可创建 Agent。"
             if setup
@@ -123,6 +130,10 @@ def create_agent(
             from .admin_config import onboarding_snapshot
 
             _write_setup(c, aid, setup, onboarding_snapshot(c, setup_template_version))
+        if runtime_engine=="growth":
+            from .growth.migration import bootstrap
+            c.execute("UPDATE lead.agents SET onboarding_state=onboarding_state || '{\"setup_pending\":false}'::jsonb WHERE id=%s",(aid,))
+            bootstrap(c,aid)
     return aid
 
 
@@ -330,6 +341,14 @@ def agent_detail(aid, *, chat=False, message_seq=None):
         from .reddit_member import member_scope
         clock_waits = all_rows(c, "SELECT input->>'platform' AS platform,input->>'lane' AS lane,result->'execution_cadence' AS cadence,result->'waiting_targets' AS waiting_targets FROM lead.tasks WHERE type='channel.clock' AND state='planned' AND input->>'control_version'=%s",(str(a["control_version"]),))
         for account in a["accounts"]:
+            account["operating_intent"] = one(c,"SELECT desired,revision FROM lead.account_operating_intents WHERE account_id=%s",(account["id"],))
+            from .growth.store import enabled as growth_enabled
+            if growth_enabled(a):
+                discovery = one(c,"""SELECT state,result->'output'->'output' output FROM lead.tasks WHERE type='growth.account'
+                    AND input#>>'{spec,purpose}'='discover' AND input#>>'{spec,account_id}'=%s
+                    ORDER BY created_at DESC,id DESC LIMIT 1""",(str(account["id"]),))
+                account["discovery"] = discovery
+                continue
             if account["platform"] in {"facebook", "reddit"}:
                 profile = one(c,"SELECT slot FROM lead.browser_profiles WHERE id=%s",(account["profile_id"],))
                 account["managed_scope_authorized"] = bool(managed_scope(c, account))
@@ -357,10 +376,6 @@ def agent_detail(aid, *, chat=False, message_seq=None):
         a["tasks"] = all_rows(
             c, "SELECT * FROM lead.tasks ORDER BY created_at DESC LIMIT 30"
         )
-        a["plans"] = all_rows(
-            c,
-            "SELECT revision,body,created_at,state FROM lead.plans ORDER BY created_at DESC LIMIT 3",
-        )
         a["memory"] = all_rows(
             c,
             "SELECT * FROM lead.memory_entries WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 100",
@@ -382,9 +397,6 @@ def agent_detail(aid, *, chat=False, message_seq=None):
             c,
             "SELECT id,media_type,size_bytes,sha256,metadata,rights FROM lead.assets WHERE state='ready' ORDER BY created_at DESC LIMIT 100",
         )
-        from .content_backlog import status as workflow_status
-
-        a["operating_workflow"] = optional(c, aid, "workflow_status", lambda: workflow_status(c, a, a["business"]), {}) if not chat else {}
         a["runtime_issues"] = active_issues(c, aid)
         return a
 
@@ -603,6 +615,10 @@ def control_in_tx(c, aid, action, platform=None, only_setup=False):
     )
     if not current:
         raise LookupError("Agent 不存在")
+    from .growth.store import enabled as growth_enabled
+    from .growth.store import project_control
+    if growth_enabled(current):
+        return project_control(c,aid,action,current)
     if only_setup and not current["onboarding_state"].get("setup_pending"):
         return False
     if state == "running" and current["onboarding_state"].get("setup_pending"):
@@ -690,6 +706,18 @@ def channel_control(aid, platform, enabled, *, connection=None, start_account=No
         raise ValueError("社媒不存在")
     with (nullcontext(connection) if connection is not None else tx(aid)) as c:
         agent = require_agent(c, aid, True)
+        from .growth.store import enabled as growth_enabled
+        if growth_enabled(agent):
+            from .account_intents import set_intent
+            accounts = all_rows(c,"""SELECT id FROM lead.social_accounts WHERE platform=%s
+                AND (%s::uuid IS NULL OR id=%s) AND state IN ('connected','needs_auth','restricted')""",
+                (platform,start_account,start_account))
+            if not accounts:
+                raise ValueError("请先连接此渠道账号")
+            for item in accounts:
+                set_intent(aid,item["id"],"running" if enabled else "paused",source="owner_command",
+                    source_ref="channel-control:"+uid())
+            return {"ok":True}
         if enabled and agent["onboarding_state"].get("setup_pending"):
             raise ValueError("请先完成渠道连接和 Agent 创建流程")
         account = one(
@@ -812,6 +840,11 @@ def update_business(aid, expected_revision, product_url, description, audience):
         rev = snapshot_preferences(c, aid)
         record(c, aid, "已更新业务偏好")
         audit(c, aid, "business.updated", {"revision": rev})
+        from .growth.store import enabled as growth_enabled
+        if growth_enabled(a):
+            from .growth.migration import bootstrap
+            bootstrap(c,aid)
+            emit(c,aid,"growth.wake",{"reason":"product_changed","revision":rev})
     return {"ok": True, "revision": rev}
 
 
@@ -932,10 +965,12 @@ def snapshot_preferences(c, aid):
         "UPDATE lead.agents SET config_revision=%s,version=version+1 WHERE id=%s",
         (rev, aid),
     )
-    c.execute(
-        "UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE state IN ('planned','queued')"
-    )
-    emit(c, aid, "supervisor.wake")
+    from .growth.store import enabled as growth_enabled
+    if growth_enabled(one(c,"SELECT * FROM lead.agents WHERE id=%s",(aid,))):
+        emit(c,aid,"growth.wake",{"reason":"preferences_changed","revision":rev})
+    else:
+        c.execute("UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE state IN ('planned','queued')")
+        emit(c, aid, "supervisor.wake")
     return rev
 
 

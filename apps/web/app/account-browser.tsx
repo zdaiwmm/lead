@@ -16,6 +16,7 @@ export default function AccountBrowser({
   aid,
   platform,
   requestedAccountId,
+  newAccount = false,
   name,
   onClose,
   onVerified,
@@ -24,6 +25,7 @@ export default function AccountBrowser({
   aid: string;
   platform: string;
   requestedAccountId?: string;
+  newAccount?: boolean;
   name: string;
   onClose: () => void;
   onVerified?: (started?: boolean) => Promise<void>;
@@ -38,6 +40,8 @@ export default function AccountBrowser({
   const [error, setError] = useState("");
   const [frameError, setFrameError] = useState("");
   const [managedStart, setManagedStart] = useState(false);
+  const [automatic, setAutomatic] = useState(false);
+  const automaticConnection = useRef(false);
   const [verifying, setVerifying] = useState(false);
   const [closing, setClosing] = useState(false);
   const [retry, setRetry] = useState(0);
@@ -237,6 +241,13 @@ export default function AccountBrowser({
   }
   async function close(verify = false) {
     if (stopping.current) return;
+    if (composing.current && keyboard.current) {
+      const text = keyboard.current.value;
+      keyboard.current.value = "";
+      composing.current = false;
+      if (text) input({ kind: "text", text });
+      input({ kind: "composition_end" });
+    }
     // Flush the last debounced scroll before freezing new input.
     if (scrollTimer.current) {
       clearTimeout(scrollTimer.current);
@@ -259,7 +270,7 @@ export default function AccountBrowser({
       }
       if (!mounted.current) return;
       let recovered = false;
-      if (verify) {
+      if (verify && (!automaticConnection.current || challenge)) {
         const currentChallenge = challenge || (await api(`/agents/${aid}/browser/challenge/status`, {
           platform, takeover: takeover.current,
         })).challenge;
@@ -306,11 +317,11 @@ export default function AccountBrowser({
     setState("opening");
     setError("");
     setChallenge(null);
-    const key = `${aid}:${platform}:${requestedAccountId || ""}:${retry}`;
+    const key = `${aid}:${platform}:${requestedAccountId || ""}:${newAccount}:${retry}`;
     if (connection.current?.key !== key)
       connection.current = {
         key,
-        promise: api(`/agents/${aid}/connect`, { platform, account_id: requestedAccountId }),
+        promise: api(`/agents/${aid}/connect`, { platform, account_id: requestedAccountId, new_account: newAccount }),
       };
     connection.current.promise
       .then(async (session) => {
@@ -318,6 +329,8 @@ export default function AccountBrowser({
         takeover.current = session.takeover_id;
         setChallenge(session.challenge || null);
         accountId.current = session.account_id;
+        automaticConnection.current = Boolean(session.automatic_connection);
+        setAutomatic(Boolean(session.automatic_connection));
         setManagedStart(Boolean(session.managed_target_start));
         lastInput.current = performance.now();
         active.current = true;
@@ -351,6 +364,15 @@ export default function AccountBrowser({
         return;
       checkingChallenge = true;
       try {
+        if (automaticConnection.current) {
+          const connection = await api(`/agents/${aid}/connections/${takeover.current}`);
+          if (!canceled && connection.status === "connected") {
+            active.current = false;
+            if (onVerified) await onVerified(false);
+            else onClose();
+            return;
+          }
+        }
         const result = await api(`/agents/${aid}/browser/challenge/status`, {
           platform,
           takeover: takeover.current,
@@ -381,7 +403,7 @@ export default function AccountBrowser({
       document.body.style.overflow = previousOverflow;
       previousFocus?.focus();
     };
-  }, [aid, platform, requestedAccountId, retry, shot]);
+  }, [aid, platform, requestedAccountId, newAccount, retry, shot]);
   useEffect(() => {
     const target = viewport.current;
     if (!target) return;
@@ -440,12 +462,12 @@ export default function AccountBrowser({
             <div>
               <h2 id="account-browser-title">{challenge ? "完成验证" : "连接"} {name}</h2>
               <span className="muted small" role="status">
-                {challenge ? "任务已暂停，请在原窗口完成真人验证；关闭窗口不会恢复任务" : "在专属浏览器中登录账号"}
+                {challenge ? "请在原窗口完成真人验证，其他账号继续运行" : automatic ? "登录后自动连接并运营，可随时暂停；关闭窗口后后台仍会核对" : "在专属浏览器中登录账号"}
               </span>
             </div>
           </div>
           <div className="browser-header-actions">
-            {platform !== "lab" && (
+            {platform !== "lab" && (!automatic || challenge) && (
               <button
                 className="primary"
                 disabled={state !== "ready" || verifying || closing}
@@ -579,12 +601,14 @@ export default function AccountBrowser({
             spellCheck={false}
             onCompositionStart={() => {
               composing.current = true;
+              if (automaticConnection.current) input({ kind: "composition_start" });
             }}
             onCompositionEnd={(e) => {
               composing.current = false;
               const text = e.currentTarget.value;
               e.currentTarget.value = "";
               if (text) input({ kind: "text", text });
+              if (automaticConnection.current) input({ kind: "composition_end" });
             }}
             onChange={(e) => {
               if (!composing.current) {

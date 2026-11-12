@@ -5,7 +5,7 @@ from uuid import UUID
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, field_validator
-from pydantic_ai import Agent, NativeOutput, PromptedOutput
+from pydantic_ai import Agent, NativeOutput, PromptedOutput, ToolOutput
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.providers.deepseek import DeepSeekProvider
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -182,7 +182,7 @@ Telegram 已连接但尚无运营目标时，用户启动或恢复后由后台 A
 用户上传视频时，如果拟用平台需要 AI 生成声明且仍未知，每次只问一个必要问题。用户明确说素材是实拍或 AI 生成时，在 asset_annotations 中引用已有素材 ID 记录声明，不能从画面、网址或猜测推断。对于首次启用尚未验证的图片/视频格式，可返回 media_verification_target_id 与 media_verification_format；此举只创建验证卡，不发布。已验证的格式不应要求用户逐条审批。
 已经接入十一个平台的浏览器适配代码及图片/视频素材服务；这不等于当前账号已验证可发布。只有 server_context 的目标、权限与发布格式真实验证通过后，才能说该目标可自主执行。其余可讨论、起草并引导连接验证。正常运营无需逐条确认；登录、身份验证和扩大授权仍需用户处理。素材元数据的 owner_context 是用户原话及其消息来源，只能作为用户描述，不能称为识别结果。没有图像语义识别，不能声称看过画面；需要画面细节时只问一个必要问题。
 所有运行状态和指标仅使用 server_context 提供的事实；没有数据就说明尚未接入。
-operating_workflow 是产品持久工作流的实际状态。用户问现在做什么或是否停工时，区分正在执行、内容已备好等待渠道、按排期等待、等待必要授权和真实故障，说明已有产出、具体等待原因及下一次检查时间。不要把 running 或定时检查本身说成正在持续产出，不把草稿或连接验证计为推广成果。后台自行准备内容、安排下一项和退避恢复，不要求用户每天布置任务，也不把运营交给 Codex 定时监督。全天候运行仍遵守预算、工作时段、账号授权和发布节奏；电脑关机或服务离线时不能声称仍在执行。
+server_context.growth 是当前经营目标、并行工作、局部等待与真实结果。用户问现在做什么或是否停工时，只按这些实际记录说明已有产物、具体阻断及下一次检查；无法确认就说明未知。不要把 running、定时检查、草稿或连接验证当作推广成果，不要求用户维护日计划、周计划或额外启动授权。后台按事实推进有界任务和恢复，不把运营交给 Codex 定时监督；电脑关机或服务离线时不能声称仍在执行。
 不要索取 API 密钥、账号密码、验证码到聊天中。账号授权只能通过浏览器连接入口完成。
 business intent 只写用户提供或明确从产品网页提取的事实。禁止编造客户、价格、效果和已完成任务。
 回复用普通文本，不需要 Markdown 标题。"""
@@ -216,7 +216,10 @@ async def run_model(
     short_request=False,
     purpose=None,
     workspace_models=None,
+    call_key="primary",
 ):
+    from .budget import growth_cost_context
+    growth = growth_cost_context.get()
     config = {"provider": "deepseek", **model_config()}
     settings = None
     settings_version = "models/builtin@0"
@@ -328,27 +331,45 @@ async def run_model(
     )
     agent = Agent(
         model,
-        output_type=NativeOutput(output) if is_openai else PromptedOutput(output),
+        output_type=NativeOutput(output) if is_openai else ToolOutput(output) if growth else PromptedOutput(output),
         system_prompt=system,
         model_settings={
             "max_tokens": output_tokens,
             "timeout": timeout,
             **provider_settings,
         },
-        retries=1,
+        retries=0 if growth else 1,
         tools=tools,
     )
     from .growth_experiments import cache_answer, cache_identity, cached
-    cache_key = cache_identity(output, prompt, system, model_reference(config), settings_version, tools) if agent_id else None
+    cache_key = cache_identity(output, prompt, system, model_reference(config), settings_version, tools) if agent_id and not growth else None
     if cache_key:
         prior = cached(agent_id, cache_key, output)
         if prior is not None:
             return prior
-    encoded = json.dumps(prompt, ensure_ascii=False, default=str)
+    encoded = json.dumps(prompt, ensure_ascii=False, default=str, sort_keys=bool(growth))
+    growth_operation = None
+    if growth:
+        from .budget import BudgetExceeded
+        from .db import all_rows, tx
+        from .growth.store import digest
+        if len(encoded.encode()) > 60000:
+            raise ValueError("growth_model_context_too_large")
+        identity = "growth-model:"+digest([growth["task_id"], output.__name__, call_key, settings_version,
+            model_reference(config),digest(encoded),digest(system)])
+        with tx(agent_id) as c:
+            prior = all_rows(c, """SELECT r.state,u.details FROM lead.budget_reservations r
+                LEFT JOIN lead.usage_events u ON u.reservation_id=r.id WHERE r.operation_key LIKE %s ORDER BY r.created_at""", (identity+":%",))
+        for item in prior:
+            if (item["details"] or {}).get("growth_output") is not None:
+                return output.model_validate(item["details"]["growth_output"])
+            if item["state"] in ("reserved", "unknown", "settled"):
+                raise BudgetExceeded("model_call_billing_unknown")
+        growth_operation = identity+":"+str(len(prior))
     reservation = (
         reserve(
             agent_id,
-            "trial-cache:"+cache_key if cache_key else uid(),
+            growth_operation or ("trial-cache:"+cache_key if cache_key else uid()),
             reservation_units(encoded, output_tokens),
             model_reference(config),
             config["provider"],
@@ -362,7 +383,7 @@ async def run_model(
             encoded,
             usage=accumulated_usage,
             usage_limits=UsageLimits(
-                request_limit=min(2, settings["max_model_requests"])
+                request_limit=1 if growth else min(2, settings["max_model_requests"])
                 if short_request and settings
                 else settings["max_model_requests"]
                 if settings
@@ -383,6 +404,7 @@ async def run_model(
                 reservation,
                 actual=result.usage.total_tokens,
                 details={
+                    **({"growth_output": result.output.model_dump(mode="json")} if growth else {}),
                     "model": model_reference(config),
                     "provider": config["provider"],
                     "api": "responses" if is_openai else "chat_completions",

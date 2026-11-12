@@ -28,6 +28,7 @@ async def test_cutover_requires_fenced_source_reviews_and_installs_new_profile(
     node = STATE / "recovered-nodes" / suffix
     quarantine = STATE / "restore-quarantine" / str(uuid4())
     owner = database_kwargs(True)
+    previous_database=os.environ.get("LEAD_DB_NAME")
     aid = None
     try:
         with psycopg.connect(**owner, autocommit=True) as c:
@@ -137,7 +138,10 @@ async def test_cutover_requires_fenced_source_reviews_and_installs_new_profile(
             )
     finally:
         db_pool.close_all()
-        monkeypatch.delenv("LEAD_DB_NAME", raising=False)
+        if previous_database is None:
+            monkeypatch.delenv("LEAD_DB_NAME", raising=False)
+        else:
+            monkeypatch.setenv("LEAD_DB_NAME",previous_database)
         with psycopg.connect(**owner, autocommit=True) as c:
             for name in (target, source):
                 if c.execute(

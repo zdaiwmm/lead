@@ -643,20 +643,20 @@ def test_channel_pilot_uses_actual_first_landing_and_server_identity(
         assert customers(c, target, cutoff, datetime.now(timezone.utc))["observed"] == 0
 
     response = client.post(
-        f"/api/agents/{aid}/plans/preferences",
+        f"/api/agents/{aid}/growth/commands",
         headers=pixel[3],
         json={
-            "expected_revision": 0,
-            "objective_event": "Purchase",
-            "acquisition_criteria": {"first_definition": "首次购买的新客户"},
+            "command_id":uid(),"expected_revision":1,"kind":"objective.update",
+            "payload":{"description":"首次购买的新客户","event_ref":{"connection_id":cid,
+                "event_name":"Purchase","definition_revision":1,"unit":"user"}},
         },
     )
     assert response.status_code == 200, response.text
-    result = client.get(f"/api/agents/{aid}/plans").json()
-    assert result["strategy"]["results_30d"]["first_entry"]["channels"] == {
-        "reddit": 1,
-        "facebook": 1,
-    }
+    result = client.get(f"/api/agents/{aid}/growth").json()
+    # Existing landing evidence remains valid, but does not by itself prove new
+    # core-value customers under the newly selected definition.
+    assert result["results"]["new_units"] is None
+    assert result["results"]["unknown_newness"] == 3
     # Two explicit business customers on one anonymous device make its earlier
     # landing ambiguous. Neither can take credit for the shared device's channel.
     purchase("E", arrive(b, "reddit"))

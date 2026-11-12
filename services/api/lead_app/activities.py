@@ -41,9 +41,17 @@ from .telemetry import trace_headers
 async def browser_rpc(path, data=None):
     # Read-only group observation has a 150-second server deadline.
     timeout = 165 if path.endswith("/community/step") and (data or {}).get("operation") == "observe" else 120
+    base = "http://127.0.0.1:8089"
+    matched = re.match(r"^/agents/([0-9a-fA-F-]{36})/", path)
+    if matched:
+        with tx(matched[1]) as c:
+            from .growth.store import enabled
+            if enabled(require_agent(c, matched[1])):
+                from .execution_routes import endpoint, request_route
+                base = endpoint(request_route(c, matched[1], path, data))
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         result = await client.post(
-            "http://127.0.0.1:8089" + path,
+            base + path,
             json=data or {},
             headers={"Authorization": "Bearer " + internal_token(), **trace_headers()},
         )
@@ -153,11 +161,16 @@ async def chat_job(args: dict):
         )
         if url and any_model_configured():
             page = await browser.command("open", {"url": url})
+        from .growth.store import enabled as growth_enabled
+        from .growth.views import render_growth
+        growth_status = await asyncio.to_thread(render_growth,aid) if growth_enabled(detail) else None
         decision = await run_model(
             Decision,
             {
                 "messages": history,
                 "server_context": {
+                    "growth":growth_status,
+                    **{
                     k: [t for t in detail[k] if t["type"] != "operating.decision"]
                     if k == "tasks"
                     else detail[k]
@@ -171,10 +184,8 @@ async def chat_job(args: dict):
                         "accounts",
                         "activity",
                         "tasks",
-                        "plans",
                         "assets",
-                        "operating_workflow",
-                    )
+                    )},
                 },
                 "untrusted_product_page": page,
                 "untrusted_cached_knowledge": knowledge,
@@ -566,6 +577,8 @@ async def execute_task(args: dict):
     aid, task_id = args["agent_id"], args["task_id"]
     with tx(aid) as c:
         task = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (task_id,))
+        if task and task["type"].startswith("growth."):
+            return {"state":"canceled","reason":"growth_owns_task"}
         if not task or task["state"] in ("succeeded", "canceled"):
             return {"state": task["state"] if task else "absent"}
         from .browser_challenges import for_task, waiting_result
@@ -923,7 +936,10 @@ async def _publication_cycle(args: dict):
 
     aid, cycle_id = args["agent_id"], args["cycle_id"]
     with tx(aid) as c:
-        current = one(c, "SELECT desired_state FROM lead.agents WHERE id=%s", (aid,))
+        current = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
+        from .growth.store import legacy_owns
+        if current and not legacy_owns(current):
+            return {"stop":True,"delay":86400,"reason":"growth_owns_scope"}
         if not current or current["desired_state"] == "archived":
             return {"delay": 86400, "idle": True, "archived": True}
         if current["desired_state"] != "running":

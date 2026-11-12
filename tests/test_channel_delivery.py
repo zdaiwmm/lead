@@ -52,7 +52,14 @@ def install_fixture_research(monkeypatch, actors):
     demand = "A store manager needs a shift handoff worksheet. Operators may share a relevant worksheet here."
 
     async def offline_route(controller, route):
-        platform = by_profile[str(controller.actor.profile["id"])]
+        # Public research deliberately has its own Profile. The fixture source
+        # is independent from the eventual publishing identity.
+        platform = by_profile.get(str(controller.actor.profile["id"]))
+        if not platform:
+            with tx(controller.actor.aid) as c:
+                task=one(c,"""SELECT t.input FROM lead.browser_runs r JOIN lead.tasks t ON t.id=r.task_id
+                    WHERE r.id=%s""",(controller.run_id,))
+                platform=task["input"]["platform"]
         url = route.request.url
         if url.startswith("https://www.google.com/search?"):
             markup = f'<div id="search"><h3>Staff scheduling discussion</h3><a href="{TARGETS[platform]}">Shift worksheet resource directory</a></div>'
@@ -70,6 +77,9 @@ def install_fixture_research(monkeypatch, actors):
 
     for actor in actors.values():
         monkeypatch.setattr(actor.forward_proxy, "validate_url", validate_fixture)
+    if actors:
+        proxy_type=type(next(iter(actors.values())).forward_proxy)
+        monkeypatch.setattr(proxy_type,"validate_url",lambda self,url:validate_fixture(url))
     monkeypatch.setattr(ResearchPage, "read_only_route", offline_route)
 
     class FixtureTransport(BrowserTools):
@@ -410,7 +420,7 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
                     c,
                     "SELECT count(*) AS n FROM lead.browser_sessions WHERE ended_at IS NULL",
                 )["n"]
-                == 2
+                == 3
             )
         await gateway.close_one(aid, str(profiles["facebook"]["id"]))
         with tx(aid) as c:
@@ -488,11 +498,13 @@ async def test_channels_deliver_and_credit_only_first_arrival(pixel, monkeypatch
             saved = await asyncio.to_thread(
                 backups.restore_profile, Path(tmp) / (record["id"] + ".leadbackup"), key
             )
+            with tx(aid) as c:
+                research_profile=one(c,"SELECT id FROM lead.browser_profiles WHERE slot='public-research'")
             assert set(
                 json.loads((Path(saved["path"]) / "manifest.json").read_text())[
                     "account_profiles"
                 ]
-            ) == {str(p["id"]) for p in profiles.values()}
+            ) == {str(p["id"]) for p in profiles.values()} | {str(research_profile["id"])}
     finally:
         await gateway.close(aid)
 

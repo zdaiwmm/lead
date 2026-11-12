@@ -75,6 +75,9 @@ def current(c, aid, args):
     from .channel_authority import driver_accounts
     c.execute("SET LOCAL lock_timeout='500ms'")
     agent = one(c, "SELECT * FROM lead.agents WHERE id=%s FOR SHARE", (aid,))
+    from .growth.store import legacy_owns
+    if agent and not legacy_owns(agent):
+        return None
     clock = one(
         c,
         """SELECT * FROM lead.tasks WHERE id=%s AND type='channel.clock'

@@ -4,6 +4,7 @@ import httpx
 from pydantic_ai import Tool
 
 from .db import uid
+from .execution_routes import research_endpoint
 from .research import begin_run, finish_run, public_url
 from .security import internal_token
 from .telemetry import trace_headers
@@ -68,7 +69,7 @@ class BrowserTools:
         async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
             try:
                 response = await client.post(
-                    "http://127.0.0.1:8089/agents/" + self.aid + "/research/command",
+                    research_endpoint(self.aid,self.run_id)+"/agents/" + self.aid + "/research/command",
                     json={
                         "run_id": self.run_id,
                         "command_id": uid(),
@@ -178,7 +179,7 @@ class BrowserTools:
         async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
             try:
                 await client.post(
-                    f"http://127.0.0.1:8089/agents/{self.aid}/research/{self.run_id}/close",
+                    research_endpoint(self.aid,self.run_id)+f"/agents/{self.aid}/research/{self.run_id}/close",
                     headers={
                         "Authorization": "Bearer " + internal_token(),
                         **trace_headers(),

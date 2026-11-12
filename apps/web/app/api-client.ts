@@ -18,7 +18,7 @@ export function workspaceHeaders(): Record<string, string> {
 export async function api(path: string, body?: Row, signal?: AbortSignal) {
   const scope =
     path === "/auth/me" || path === "/session" ? {} : workspaceHeaders();
-  const dashboardRead = !body && /^\/agents\/[^/]+\/(plans|operations|analytics\/overview)(?:\?|$)/.test(path);
+  const dashboardRead = !body && /^\/agents\/[^/]+\/(growth|analytics\/overview)(?:\?|$)/.test(path);
   const deadline = AbortSignal.timeout(body ? 60000 : 5000);
   const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const request = () => fetch("/api" + path, {

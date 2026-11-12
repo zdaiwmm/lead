@@ -969,8 +969,21 @@ def maintenance_window(old, sha):
             else:
                 # During a refused/aborted drain a profile may legitimately still be open.
                 verify(revision, fenced=True, require_idle=False)
-            run(site, "restore", sha)
-            run("systemctl", "start", "lead-home-live.path", "lead-home-ingress.socket")
+            if not growth_cutover_pending(sha):
+                run(site, "restore", sha)
+                run("systemctl", "start", "lead-home-live.path", "lead-home-ingress.socket")
+
+
+def growth_cutover_pending(sha):
+    """A root-owned upgrade journal retains the hold across executor cutovers."""
+    require(SHA.fullmatch(sha),"invalid cutover revision")
+    stage = STORE / ("maintenance-"+sha)
+    marker = stage / "growth-cutover.pending"
+    if not os.path.lexists(marker):
+        return False
+    executor_directory(stage,private=True)
+    require(executor_host_file(marker,private=True).decode().strip()==sha,"growth cutover journal differs")
+    return True
 
 
 # These node tools were deployed and verified independently of the application image.
@@ -1034,7 +1047,8 @@ FAULT_ISOLATION_FILES = {'scripts/fault_isolation_upgrade.py': '6fa2986893c3d1db
 
 def fault_schema_query():
     return """SELECT
-        (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0030_fault_isolation']
+        (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN
+            (ARRAY['0030_fault_isolation'],ARRAY['0031_growth_runtime'])
         AND (SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity)
              FROM pg_class WHERE oid IN (to_regclass('lead.runtime_issues'),to_regclass('lead.ui_revisions')))
         AND (SELECT count(*)=4 FROM pg_policies WHERE schemaname='lead'
@@ -1075,6 +1089,90 @@ def reviewed_fault_isolation(mirror, sha, extra):
     return paths
 
 
+GROWTH_RUNTIME_FILES = {'scripts/growth_runtime_upgrade.py': '2646c56b2a81a39b33f9bcbd2f7806e15142e4f3', 'infra/migrations/versions/0031_growth_runtime.py': 'ad10651410b6ecd5641c10dc6d6a1979675d9f48', 'infra/migrations/sql/0031_growth_runtime.sql': '862552a7ca10303415da81f1808a522234bbf7dc'}
+
+
+def growth_schema_query():
+    return """SELECT (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0031_growth_runtime']
+        AND (SELECT count(*)=3 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class WHERE oid IN
+            (to_regclass('lead.growth_experiments'),to_regclass('lead.account_operating_intents'),to_regclass('lead.profile_execution_routes')))
+        AND (SELECT count(*)=6 FROM pg_policies WHERE schemaname='lead'
+            AND tablename IN ('growth_experiments','account_operating_intents','profile_execution_routes')
+            AND policyname IN ('agent_scope','member_scope'))
+        AND has_table_privilege('lead_runtime','lead.growth_experiments','INSERT')
+        AND NOT has_table_privilege('lead_runtime','lead.account_operating_intents','INSERT')
+        AND NOT has_table_privilege('lead_runtime','lead.account_operating_intents','UPDATE')
+        AND NOT has_table_privilege('lead_runtime','lead.profile_execution_routes','UPDATE')
+        AND has_function_privilege('lead_auth','lead.growth_set_intent(uuid,uuid,text,text,text,bigint,jsonb)','EXECUTE')
+        AND NOT has_function_privilege('lead_runtime','lead.growth_set_intent(uuid,uuid,text,text,text,bigint,jsonb)','EXECUTE')
+        AND has_function_privilege('lead_runtime','lead.growth_receipt_valid(uuid)','EXECUTE')
+        AND has_function_privilege('lead_runtime','lead.growth_confirm_publication(uuid)','EXECUTE')
+        AND (SELECT count(*)=4 FROM pg_trigger WHERE tgenabled='O'
+            AND tgname IN ('growth_task_owner','growth_action_owner','content_target_before_action','growth_disconnect_intent'))
+        AND EXISTS(SELECT FROM pg_constraint WHERE conrelid='lead.tasks'::regclass AND conname='task_growth_experiment')
+        AND EXISTS(SELECT FROM pg_constraint WHERE conrelid='lead.browser_runs'::regclass AND conname='growth_research_profile')
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_content_target' AND md5(prosrc)='56d7b2d54aa0235a22d6fe7f769c2edc')
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_read_intent' AND md5(prosrc)='edf9680628a7b005069dbc45a42892e6')
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_read_route' AND md5(prosrc)='ae42619cd4089f6f2bbfc6f70e9d343d')
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_set_intent' AND md5(prosrc)='5cfb3ef37809d4c947cfbf4a30d856e3')
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_disconnect_intent' AND md5(prosrc)='b568fc706e1f0bfca2e071224facd5a3')
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_complete_connection' AND md5(prosrc)='cab9778a5c090dd092b03c2982327ba4')
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_receipt_valid' AND md5(prosrc)='a4bca05077668d2f9a28a7806ffbecc1')
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_confirm_publication' AND md5(prosrc)='1be562501250d3092463dadc05414241')
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_owner_fence' AND md5(prosrc)='5ac78ca4773b17f90ef940d253b885dd')
+    """
+
+
+def reviewed_growth_runtime(mirror,sha,extra):
+    paths = extra.intersection(GROWTH_RUNTIME_FILES)
+    if not paths:
+        return set()
+    for path in paths:
+        require(run('git','--git-dir',mirror,'rev-parse',f'{sha}:{path}')==GROWTH_RUNTIME_FILES[path],
+                'growth runtime upgrade requires compatibility review')
+    site = TOOLS/'home_live_maintenance.py'
+    require(site.is_file(),'existing node database verifier required')
+    program = ('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(growth_schema_query())+'))')
+    require(run('/usr/bin/python3','-IB','-c',program)=='t','growth runtime schema is not ready')
+    require(growth_cutover_pending(sha),'growth runtime cutover hold is missing')
+    return paths
+
+
+def complete_growth_cutover(sha):
+    """Keep the original deployment in progress until actual consumers agree."""
+    require(growth_cutover_pending(sha),'growth runtime cutover hold is missing')
+    stage=STORE/('maintenance-'+sha)
+    journal=json.loads(executor_host_file(stage/'growth-migration.json',private=True))
+    require(journal.get('sha')==sha and SHA.fullmatch(journal.get('old','')),'growth migration journal differs')
+    helper=stage/'source/scripts/growth_runtime_upgrade.py'
+    executor_host_file(helper)
+    expected=GROWTH_RUNTIME_FILES['scripts/growth_runtime_upgrade.py']
+    require(run('git','hash-object','--no-filters',helper)==expected,'growth finalizer source differs')
+    # This plan is root-owned, independently attested and journaled by the same
+    # provisioner used for existing executors. Reddit follows main-current and
+    # already restarted with the application; Telegram has its own cutover.
+    provision_executor(sha,EXECUTOR_REGISTRY.parent/'telegram-provision.json')
+    register_executors(sha)
+    run(EXECUTOR_PYTHON_SOURCE,'-I','-B',helper,'finish','--sha',sha,'--old',journal['old'],timeout=180)
+    require(not growth_cutover_pending(sha),'growth finalizer did not release its journal')
+
+
+def release_preflight(sha):
+    live=current()
+    pending=growth_cutover_pending(sha)
+    if pending:
+        journal=json.loads(executor_host_file(STORE/('maintenance-'+sha)/'growth-migration.json',private=True))
+        require(journal.get('sha')==sha and live in (journal.get('old'),sha),'growth preflight revision differs')
+    verify(live,fenced=pending,require_idle=not pending)
+    return live
+
+
+def finalize_cutover(sha):
+    if growth_cutover_pending(sha):
+        require(current()==sha,'application cutover has not completed; inspect original request')
+        complete_growth_cutover(sha)
+
+
 # These site units are installed and verified separately; only these reviewed blobs
 # are compatible with the home application's release. Future revisions need review.
 REDDIT_SITE_FILES = {
@@ -1108,6 +1206,7 @@ def reviewed_reddit_site(mirror, sha, extra):
 # The model-route dependency was independently provisioned on the home node.
 # These are exact reviewed manifests/tools, never a directory-wide exception.
 RUNTIME_COMPATIBILITY_FILES = {
+    "scripts/browser_use_runner.py": {'08cd818b33cbb6a484d181a436572fef19d13158'},
     "pyproject.toml": {"46a2c7c01a2866bcebcf9e4b4bb2a6570d80461f"},
     "scripts/verify_account_browser.py": {
         "69daf9b5065322206da080a4c64b66a27d74d179",  # PR #28
@@ -1127,7 +1226,9 @@ OPERATOR_ONLY_FILES = {
 }
 
 # Local verification sources stay outside tool bundles and application images.
-LOCAL_VERIFICATION_FILES = {"scripts/verify_cadence_ui.py"}
+LOCAL_VERIFICATION_FILES = {"scripts/verify_cadence_ui.py","scripts/verify_growth_runtime.py",
+    "scripts/verify_growth_ui.py","scripts/verify_growth_executor.py","scripts/evaluate_growth_model.py","scripts/render_operating_playbooks.py",
+    "scripts/verify_operating_board_model.cjs","scripts/verify_operating_ui.py"}
 
 
 def verify_model_runtime():
@@ -1172,7 +1273,7 @@ def deploy(sha):
     with (STORE / "deploy.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         old = current()
-        verify(old)
+        verify(old,fenced=growth_cutover_pending(sha),require_idle=False)
         if old == sha:
             return
         if not (STORE / sha).is_mount():
@@ -1190,7 +1291,7 @@ def deploy(sha):
         # This public adapter is application source in the same verified services image.
         # Adding it never installs node configuration or widens the script/infra exceptions.
         allowed_files = {"README.md", "AGENTS.md", "services/channel_adapters/reddit/entry.py",
-                         "services/channel_adapters/systemd/executor.conf.in"}
+                         "services/channel_adapters/telegram/entry.py","services/channel_adapters/systemd/executor.conf.in"}
         extra = {name for name in changes.split("\0") if name and not name.startswith(allowed)
                  and name not in allowed_files}
         extra -= OPERATOR_ONLY_FILES
@@ -1198,6 +1299,7 @@ def deploy(sha):
         extra -= reviewed_maintenance_files(mirror, sha, extra)
         extra -= reviewed_channel_schema(mirror, sha, extra)
         extra -= reviewed_fault_isolation(mirror, sha, extra)
+        extra -= reviewed_growth_runtime(mirror,sha,extra)
         extra -= reviewed_reddit_site(mirror, sha, extra)
         extra -= reviewed_runtime_files(mirror, sha, extra)
         extra -= reviewed_executor_image_files(mirror, sha, extra)
@@ -1238,12 +1340,12 @@ def deploy(sha):
             run("systemctl", "stop", fence)
             if not (TOOLS / "home_live_maintenance.py").is_file():
                 run("systemctl", "start", "lead-home-ingress.socket")
-        verify(sha)
+        verify(sha,fenced=growth_cutover_pending(sha))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("current", "deploy", "verify", "executors", "provision-executor", "register-executors"))
+    parser.add_argument("action", choices=("current", "deploy", "verify", "preflight", "finalize-cutover", "executors", "provision-executor", "register-executors"))
     parser.add_argument("sha", nargs="?")
     parser.add_argument("plan", nargs="?")
     args = parser.parse_args()
@@ -1256,6 +1358,10 @@ def main():
     try:
         if args.action == "current":
             print(current())
+        elif args.action == 'preflight':
+            print(release_preflight(args.sha))
+        elif args.action == 'finalize-cutover':
+            finalize_cutover(args.sha)
         elif args.action == "verify":
             verify(args.sha)
             # Final release acceptance covers provisioned independent consumers.
@@ -1270,6 +1376,8 @@ def main():
             print(json.dumps(verify_executors(args.sha), sort_keys=True))
         else:
             deploy(args.sha)
+            if growth_cutover_pending(args.sha):
+                complete_growth_cutover(args.sha)
     except Refused as error:
         sys.exit(str(error))
     except (OSError, ValueError, subprocess.SubprocessError):

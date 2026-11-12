@@ -813,6 +813,9 @@ async def cycle(args):
     def prepare():
         with tx(aid) as c:
             agent = require_agent(c, aid, True)
+            from .growth.store import legacy_owns
+            if not legacy_owns(agent):
+                return {"stop":True,"delay":86400,"reason":"growth_owns_scope"}
             if agent["desired_state"] != "running":
                 return {
                     "delay": 86400,

@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from .db import audit, emit, j, one, require_agent
+from .growth.contracts import GoalRef
 from .scope import current_tenant
 
 
@@ -12,6 +13,7 @@ class OperatingUpdate(BaseModel):
     source_quote: str = Field(min_length=2, max_length=1000)
     objective: str | None = Field(default=None, max_length=500)
     objective_event: Literal["lead", "signup", "trial", "purchase"] | None = None
+    event_ref: GoalRef | None = None
     audience: str | None = Field(default=None, max_length=500)
     language: str | None = Field(default=None, max_length=80)
     preferred_work: (
@@ -27,15 +29,11 @@ def configuration(agent, business=None):
         or facts.get("operating_goal")
         or facts.get("conversion_goal")
     )
-    from .growth_experiments import chamber_campaign
-    clicks_only = chamber_campaign(agent)
-    if clicks_only:
-        objective = "广泛探索真实受众，持续获得可归因的有效产品短链点击"
     return {
         "objective": objective or "了解真实需求并取得可验证的业务进展",
         "objective_status": "user_defined" if objective else "provisional",
-        "objective_event": None if clicks_only else saved.get("objective_event"),
-        "audience": "跨人群探索，按成熟短链点击调整" if clicks_only else saved.get("audience") or facts.get("audience", ""),
+        "objective_event": saved.get("objective_event"),
+        "audience": saved.get("audience") or facts.get("audience", ""),
         "language": saved.get("language", ""),
         "preferred_work": saved.get("preferred_work", []),
         "revision": saved.get("revision", 0),
@@ -65,13 +63,20 @@ def apply(c, aid, message, update, expected_revision):
     values = update.model_dump(exclude_none=True, exclude={"source_quote"})
     if valid and values:
         saved = agent["onboarding_state"].get("operating_contract", {})
+        if update.event_ref:
+            ref = update.event_ref
+            event = one(c,"""SELECT name FROM lead.pixel_definitions WHERE connection_id=%s AND name=%s
+                AND revision=%s AND method='server'""",(ref.connection_id,ref.event_name,ref.definition_revision))
+            if not event or event["name"] in ("PageView","Engagement","Identify"):
+                raise ValueError("核心成果需要当前业务服务端可证明的价值事件")
         if (
             "objective" in values
             and values["objective"] != saved.get("objective")
-            and "objective_event" not in values
+            and "objective_event" not in values and "event_ref" not in values
         ):
             # A new business goal cannot silently inherit the old goal's event.
             values["objective_event"] = None
+            values["event_ref"] = None
         saved = {
             **saved,
             **values,

@@ -11,9 +11,11 @@ type Row = Record<string, any>;
 export default function AgentResults({
   agent,
   readOnly,
+  growth,
 }: {
   agent: Row;
   readOnly: boolean;
+  growth?: Row | null;
 }) {
   const [task, setTask] = useState<PixelTask>(null);
   const [pixelData, setPixelData] = useState<Row | null>(null);
@@ -113,7 +115,12 @@ export default function AgentResults({
           />
         </div>
       </header>
-      <div className={styles.overview}><div><h3>今日数据</h3>
+      <div className={styles.goal} aria-label="真实业务新增">
+        <span>全项目核心价值新增{growth?.unit ? ` · ${{user:"用户",pair:"关系对",order:"订单",organization:"组织"}[growth.unit as string] || growth.unit}` : ""}</span>
+        <strong>{growth?.new_units == null ? "未知" : growth.new_units.toLocaleString("zh-CN")}</strong>
+        <small>{growth?.measurement === "healthy" ? "近 30 天，按当前服务端业务口径去重" : growth?.measurement === "stale" ? "业务回传已过期，当前结果可能不完整" : "业务结果尚未接通，访问数据仅作为学习线索"}</small>
+      </div>
+      <div className={styles.overview}><div><h3>今日访问线索</h3>
       <div className={styles.metrics} aria-label="今日获客指标">
         {metrics
           .filter(

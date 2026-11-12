@@ -121,6 +121,9 @@ def enqueue_connected(c, aid, agent, business):
 
 def refresh_connected(c, aid):
     agent = one(c, "SELECT * FROM lead.agents WHERE id=%s", (aid,))
+    from .growth.store import legacy_owns
+    if not legacy_owns(agent):
+        return
     if not channel_pilot(aid) and not agent["onboarding_state"].get("reddit_member_delivery") and not any(agent["onboarding_state"].get("managed_channel_delivery", {}).values()):
         return
     agent = one(c, "SELECT * FROM lead.agents WHERE id=%s FOR NO KEY UPDATE", (aid,))

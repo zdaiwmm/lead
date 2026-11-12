@@ -118,6 +118,15 @@ def provision_security(conn):
         "REVOKE INSERT,UPDATE,DELETE ON lead.recovery_observations FROM lead_runtime"
     )
     conn.execute("REVOKE DELETE ON ALL TABLES IN SCHEMA lead FROM lead_runtime")
+    if conn.execute("SELECT to_regclass('lead.account_operating_intents')").fetchone()[0]:
+        conn.execute("REVOKE INSERT,UPDATE,DELETE ON lead.account_operating_intents,lead.profile_execution_routes FROM lead_runtime")
+        conn.execute("GRANT SELECT ON lead.account_operating_intents,lead.profile_execution_routes TO lead_runtime")
+        conn.execute("GRANT EXECUTE ON FUNCTION lead.growth_set_intent(uuid,uuid,text,text,text,bigint,jsonb) TO lead_auth")
+        conn.execute("GRANT EXECUTE ON FUNCTION lead.growth_complete_connection(uuid,uuid,uuid,bigint,bigint,bigint,jsonb,text,jsonb) TO lead_auth")
+        conn.execute("GRANT SELECT,INSERT,UPDATE ON lead.profile_execution_routes TO lead_auth")
+        conn.execute("GRANT EXECUTE ON FUNCTION lead.growth_confirm_publication(uuid) TO lead_runtime")
+        conn.execute("GRANT EXECUTE ON FUNCTION lead.growth_receipt_valid(uuid) TO lead_runtime")
+        conn.execute("GRANT EXECUTE ON FUNCTION lead.growth_read_intent(uuid),lead.growth_read_route(uuid) TO lead_runtime")
     # Rebuildable snapshots may be replaced only within their forced Agent scope.
     conn.execute(
         "GRANT DELETE ON lead.analytics_geo_rollups,lead.analytics_rollups,lead.analytics_audience,lead.analytics_report_dirty TO lead_runtime"
