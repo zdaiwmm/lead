@@ -1176,8 +1176,33 @@ def end_takeover(aid: UUID, takeover: UUID | None = None):
     return {"ok": True}
 
 
+async def refresh_native_owner(aid, connection, *, write=False):
+    """Observe the original live owner page without a database lock across RPC."""
+    with tx(str(aid)) as c:
+        require_agent(c, str(aid), write)
+        native = one(c, """SELECT t.profile_id FROM lead.takeover_sessions t
+            JOIN lead.browser_profiles p ON p.id=t.profile_id WHERE t.id=%s
+            AND t.purpose='login' AND t.state='active' AND t.control_mode='owner'
+            AND t.expires_at>now() AND p.provider='chromium'
+            AND t.connection_data->>'site_url' IS NOT NULL""", (connection,))
+    if not native:
+        return
+    from .account_connection import rpc
+    try:
+        await rpc(str(aid), native['profile_id'], 'native/command', {
+            'run_id': str(connection), 'operation': 'owner_status',
+            'command_id': secrets.token_hex(16), 'args': {}}, timeout=15)
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == 409:
+            raise HTTPException(409, '当前本人验证已变化，请刷新窗口后重试') from None
+        raise HTTPException(503, '浏览器服务暂不可用，请稍后重试') from None
+    except (httpx.HTTPError, OSError):
+        raise HTTPException(503, '浏览器服务暂不可用，请稍后重试') from None
+
+
 @app.get("/api/agents/{aid}/connections/{takeover}")
-def connection_status(aid: UUID, takeover: UUID):
+async def connection_status(aid: UUID, takeover: UUID):
+    await refresh_native_owner(aid, takeover)
     with tx(str(aid)) as c:
         require_agent(c, str(aid))
         session = one(c, "SELECT state,purpose,completed_account_id,control_mode,challenge_version,expires_at,connection_data->>'owner_action' owner_action FROM lead.takeover_sessions WHERE id=%s", (takeover,))
@@ -1306,7 +1331,9 @@ class ConnectionControl(BaseModel):
 
 
 @app.post("/api/agents/{aid}/connections/{connection}/control")
-def connection_control(aid: UUID, connection: UUID, body: ConnectionControl):
+async def connection_control(aid: UUID, connection: UUID, body: ConnectionControl):
+    if body.action == 'resume':
+        await refresh_native_owner(aid, connection, write=True)
     from .connection_control import transition
     result=transition(str(aid),connection,body.challenge_version,'automatic',cancel=body.action=='cancel')
     from .growth.runtime import wake_connection
