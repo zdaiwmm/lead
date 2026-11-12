@@ -566,7 +566,7 @@ tests/test_growth_e2e.py、test_growth_generalization.py、test_growth_liveness.
 
 - [x] 首先用无外部网络测试渠道跑：产品输入/连接并行→自主实验→内容→一次渠道动作→触点/业务事件→复盘/新决定。不得人工往运行库塞策略。
 - [x] 按第 12 节 24 个场景验证；故障至少跨两个独立 Profile、三种资源和两个项目。
-- [ ] 按第 13 节冻结评估集/阈值测试真实模型，费用/提示版本/证据分别记录；合成结构测试不冒充智能。
+- [x] 按第 13 节冻结评估集/阈值测试真实模型，费用/提示版本/证据分别记录；合成结构测试不冒充智能。
 - [x] 完成本地与装配证据后按风险一次整体审阅和受影响修正；不重复逐阶段全量审计。
 - [ ] 真实渠道可执行、触达陌生人、产品新增激活、自主重复执行分别验收；其他渠道缺口独立可见，不能用零粉丝发帖冒充获客。
 
@@ -661,7 +661,7 @@ Temporal 1.34.0 已经 Context7 查询，参考 [对应版本官方说明](https
 本地有效证据：
 
 - 完整原有套件曾运行 1122 通过；旧 UI/独立研究 Profile 等相关失败已修正。macOS 缺少 Docker 的三项恢复检查留给必须执行的精确 main Linux CI，不能称本地全量通过。
-- 最终受影响范围 175 项通过，覆盖全部当时的 growth 测试及 pixel/budget/model/browser/migration/content/channel 直接消费者，103.98 秒；随后命令必填目标版本与实际校验反馈改动再验证决策/任务闭环/恢复 23 项通过，6.16 秒。新增独立性与模型传输契约也有单独证据。后续若再改输入，重验对应范围。
+- 最终受影响范围 180 项通过，覆盖全部当时的 growth 测试及 pixel/budget/model/browser/migration/content/channel 直接消费者，103.57 秒；随后显式命令/目标版本、实际校验反馈和结构化输出工具传输改动再验证决策/任务闭环及模型直接消费者 46 项通过，5.40 秒；发布与范围工具 187 项通过。新增独立性与模型传输契约也有单独证据。后续若再改输入，重验对应范围。
 - 真实 Temporal 时间跳跃、104 个长期等待跨继续运行、历史重放，以及 SQLite 持久队列真实停止/重启、两个项目按原引用继续；均实际执行，无必验跳过。
 - 两个独立浏览器上下文提交区间重叠，单账号暂停按锁确定顺序；另有公开研究保持阻塞时，内容和结果观察在 0.009 秒内完成，三类资源互不等待。报告 `parallel-pause.json`、`blocked-independence.json`。
 - 真实本地 Facebook 提交丢回执、暂停后核对、迟到旧控制返回：提交/原动作均一次；缺少原动作尝试证明不提升格式权限。
@@ -700,7 +700,9 @@ C01–C24 的实际验证入口：
 | C23 | test_growth_tools.py、test_growth_dependencies.py、test_growth_content.py |
 | C24 | test_growth_outcomes.py、test_growth_attribution.py、test_pixel_events.py |
 
-真实模型、精确提交 CI 与正式交付记录仍在本节后续更新。未通过的评估与配额失败报告私有保留，不以最终通过覆盖试验历史。测试模型调用使用显式有限预算；所有测试社媒外部发送为零。实际陌生人触达、新增激活和商业增长尚未证明，不能以工程完成替代。
+真实模型最终冻结候选 `5c71847464f45b3fefa1b5b0c04ab0bd41b9555c`、提示 `growth-v2.5`、输入 `growth-generalization-v2`，DeepSeek `deepseek-flash` 实跑 27 次，实际 201,804 token。按预设“正确瓶颈、可运行的有界行动、给定证据和停止条件”人工逐份核对，24/27 通过，各输入均至少 2/3，52 个证据引用均经同项目权威库核对，硬性违规为零。三项未通过如实保留：报价需求场景一份过早偏分发场所；报价测量一份后备 PageView 验证未充分说明核心价值口径边界；商品转化一份引用不存在的实验占位符，任务被安全拒绝、只留下有界实验。不能把该份算已执行。问题类别字符串的启发式匹配仅 22/27，原记录保留；它不替代对实际问题和行动的逐份语义核对。原始报告 SHA256 `d942f16e47168c2b4ce7a1b9e1a7575be9340cd73f8c9042537679de502cf5b3`，位于任务隔离报告目录，仅不含密钥的统计进入仓库。未调整预设总分或每输入阈值。
+
+PR #53（同一需求）已创建，首个精确 head 快检成功；合并前还需核对本次文档收尾 head 的必需检查。精确 main 完整 CI 与正式交付证据仍在本节后续更新。未通过的评估与配额失败报告私有保留，不以最终通过覆盖试验历史。测试模型调用使用显式有限预算；所有测试社媒外部发送为零。实际陌生人触达、新增激活和商业增长尚未证明，不能以工程完成替代。
 
 ### 正式切换步骤
 
@@ -711,4 +713,4 @@ C01–C24 的实际验证入口：
 5. 两主机正式签名协议的 `preflight <SHA>` 只允许该 SHA 对应的维护标记，并核对真实 mounted 版本；正式 deploy 内完成应用与 Telegram 交付、注册两个执行器、最终 schema/进程证明后才解除 hold。请求全程 in_progress。
 6. 中断后仅在实际应用为同一 SHA 时允许 `finalize-cutover <SHA>` 继续原执行器/释放标记阶段；不重复应用切换、不创建第二个请求。随后由独立命令/SSH 回读 Web/API、原持久工作流和两个实际执行器、原控制与权限，原请求 success 才算交付完成。不能在 schema 已迁移后盲目回退旧写入者。
 
-Pydantic AI 实装版本 2.63.0 的 Context7 未提供精确版本索引，已改核对该版本[官方源码](https://github.com/pydantic/pydantic-ai/blob/v2.63.0/pydantic_ai_slim/pydantic_ai/models/openai.py)及 [DeepSeek JSON 输出说明](https://api-docs.deepseek.com/guides/json_mode/)，不升级依赖；传输层 JSON 模式和单次付费重放均有实际请求回归。
+Pydantic AI 实装版本 2.63.0 的 Context7 未提供精确版本索引，已改核对该版本[官方源码](https://github.com/pydantic/pydantic-ai/blob/v2.63.0/pydantic_ai_slim/pydantic_ai/models/openai.py)及 [DeepSeek JSON 输出说明](https://api-docs.deepseek.com/guides/json_mode/)，不升级依赖；经营任务改用 SDK 的结构化输出工具通道，避免自由文本 JSON 包装错误；保留既有思考设置和一次修正上限。结构化工具请求、计费与单次付费重放均有实际请求回归。
