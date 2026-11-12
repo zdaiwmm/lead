@@ -56,3 +56,36 @@ class RequestOwnerTests(unittest.IsolatedAsyncioTestCase):
         gate.network.clear()
         with self.assertRaisesRegex(ValueError,'request_owner_unresolved'):
             await gate.resolve_owner(event)
+
+
+class WorkerRequestOwnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_frame_less_sw_bootstrap_requires_unique_network_identity_and_managed_context(self):
+        from lead_app.browser_runtime import NativeNetworkGate
+        gate=NativeNetworkGate(None,None,authorize=None,claim=None,lost=None,owner_timeout=.001)
+        gate.context_id='managed'
+        request={'url':'https://fixture.test/sw.js','method':'GET'}
+        gate.targets={'worker':{'targetId':'sw-1','type':'service_worker','browserContextId':'managed'}}
+        gate.network={('bootstrap','worker'):{'request':request,'frameId':None}}
+        event={'networkId':'bootstrap','request':request,'frameId':'initiating-page'}
+        self.assertEqual((await gate.resolve_owner(event))[0],'worker')
+        for patch in ({'type':'worker'},{'browserContextId':'other'}):
+            original=dict(gate.targets['worker'])
+            gate.targets['worker'].update(patch)
+            with self.assertRaisesRegex(ValueError,'request_owner_unresolved'):
+                await gate.resolve_owner(event)
+            gate.targets['worker']=original
+        gate.network[('bootstrap','worker')]['frameId']='another-page'
+        with self.assertRaisesRegex(ValueError,'request_owner_unresolved'):
+            await gate.resolve_owner(event)
+        gate.network[('bootstrap','worker')]['frameId']=None
+        gate.targets['second']={'targetId':'sw-2','type':'service_worker','browserContextId':'managed'}
+        gate.network[('bootstrap','second')]={'request':request,'frameId':None}
+        with self.assertRaisesRegex(ValueError,'request_owner_unresolved'):
+            await gate.resolve_owner(event)
+        gate.network.pop(('bootstrap','second'))
+        for changed in ({'url':'https://fixture.test/other.js'},{'method':'POST'},{'postData':'unexpected'}):
+            with self.assertRaisesRegex(ValueError,'request_owner_unresolved'):
+                await gate.resolve_owner({**event,'request':{**request,**changed}})
+        gate.targets.pop('worker')
+        with self.assertRaisesRegex(ValueError,'request_owner_unresolved'):
+            await gate.resolve_owner(event)

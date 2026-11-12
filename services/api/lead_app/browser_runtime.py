@@ -275,10 +275,21 @@ class NativeNetworkGate:
         identity = event.get('networkId')
         deadline = asyncio.get_running_loop().time()+self.owner_timeout
         while identity:
-            matches = [(session, recorded) for (request_id, session), recorded in self.network.items()
-                       if request_id == identity and session in self.targets
-                       and recorded.get('frameId') == event.get('frameId')
-                       and all(recorded['request'].get(k) == request.get(k) for k in ('url','method','postData'))]
+            current=[(session,recorded) for (request_id,session),recorded in self.network.items()
+                     if request_id==identity and session in self.targets]
+            matches=[(session,recorded) for session,recorded in current
+                     if recorded.get('frameId')==event.get('frameId')
+                     and all(recorded['request'].get(k)==request.get(k) for k in ('url','method','postData'))]
+            # Chromium's SW script bootstrap has an initiating Fetch frame but
+            # omits Network.frameId. Its unique network identity and current
+            # managed SW session remain necessary; URL-only guesses never bind.
+            if not matches and len(current)==1:
+                session,recorded=current[0]
+                target=self.targets[session]
+                if (target.get('type')=='service_worker' and self.context_id
+                        and target.get('browserContextId')==self.context_id and not recorded.get('frameId')
+                        and all(recorded['request'].get(k)==request.get(k) for k in ('url','method','postData'))):
+                    matches=current
             if len(matches) == 1:
                 session, recorded = matches[0]
                 return session, self.targets[session]
