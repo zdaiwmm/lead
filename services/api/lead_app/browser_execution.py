@@ -3,7 +3,7 @@
 No model loop lives here. The SDK still observes, selects and executes actions;
 Lead checks current page ownership before observation and every native tool.
 """
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 
 class ScopeViolation(ValueError):
@@ -21,11 +21,98 @@ def scoped_session_class():
     # Browser-use is the existing separate, pinned worker runtime. Importing
     # service metadata must not require the SDK inside the API interpreter.
     import asyncio
+    from dataclasses import replace
+    from html import escape
 
     from browser_use import BrowserSession
     from browser_use.browser.session_manager import SessionManager
     from browser_use.browser.watchdogs.downloads_watchdog import DownloadsWatchdog
+    from browser_use.dom.views import NodeType, SerializedDOMState
     from pydantic import PrivateAttr
+
+    class ScopedDOMState(SerializedDOMState):
+        """A model-only view of the SDK's already collected, filtered tree.
+
+        The original nodes and selector map remain the native tools' source.
+        No extra CDP/JS read, indexes, permission or completion proof is added.
+        """
+        def __init__(self, state, targets, page_url):
+            super().__init__(state._root, state.selector_map)
+            self.targets, self.page_url = frozenset(targets), page_url
+
+        def llm_representation(self, include_attributes=None):
+            rows, size, visited = [], 0, 0
+
+            def safe_href(value):
+                try:
+                    parsed = urlsplit(urljoin(self.page_url, value))
+                    if origin(parsed.geturl()) != origin(self.page_url):
+                        return None
+                    # Account/canonical links may contain tokens in queries.
+                    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, '', ''))
+                except ValueError:
+                    return None
+
+            def project(node, depth=0):
+                nonlocal size, visited
+                if node is None or depth > 64 or visited >= 5000:
+                    return None
+                visited += 1
+                source = node.original_node
+                attributes = source.attributes or {}
+                tag = source.tag_name.lower()
+                if (source.target_id not in self.targets or node.ignored_by_paint_order
+                        or tag in ('script', 'style', 'noscript', 'template')
+                        or 'hidden' in attributes or attributes.get('aria-hidden') == 'true'
+                        or tag == 'input' and attributes.get('type', '').lower() == 'hidden'):
+                    return None
+                visible = source.is_visible is True and source.snapshot_node is not None
+                # should_display may only fold a visible structural wrapper in
+                # the SDK text view; it is not a visibility/paint-order proof.
+                display = visible and not node.excluded_by_parent
+                # Preserve native text/indices but remove form values from the
+                # model-only copy, including the SDK's unconditional AX fallback.
+                copied = {key: value for key, value in attributes.items() if key not in ('value', 'nonce')}
+                if 'href' in copied:
+                    href = safe_href(copied['href'])
+                    if href is None:
+                        copied.pop('href')
+                    else:
+                        copied['href'] = href
+                form = tag in ('input', 'textarea', 'select')
+                ax = source.ax_node
+                if form and ax is not None:
+                    ax = replace(ax, properties=[prop for prop in ax.properties or []
+                                                if prop.name not in ('value', 'valuetext')])
+                if display and source.node_type == NodeType.ELEMENT_NODE and len(rows) < 32:
+                    facts = {}
+                    for key in ('id', 'name', 'rel', 'role', 'href'):
+                        value = copied.get(key)
+                        if (isinstance(value, str) and value and len(value) <= 160
+                                and not any(ord(char) < 32 for char in value)):
+                            facts[key] = value
+                    if facts:
+                        line = ' ' * min(depth, 12) + '<' + tag + ''.join(
+                            ' ' + key + '="' + escape(value, quote=True) + '"' for key, value in facts.items()) + ' />'
+                        if size + len(line) + 1 <= 3000:
+                            rows.append(line)
+                            size += len(line) + 1
+                children = [] if form else [child for item in node.children
+                                            if (child := project(item, depth + 1)) is not None]
+                original = replace(source, attributes=copied, ax_node=ax,
+                    snapshot_node=replace(source.snapshot_node, input_value=None) if form and source.snapshot_node else source.snapshot_node,
+                    children_nodes=None, shadow_roots=None, content_document=None, parent_node=None,
+                    hidden_elements_info=[], has_hidden_content=False)
+                return replace(node, original_node=original, children=children,
+                               should_display=display and node.should_display if source.node_type == NodeType.ELEMENT_NODE else node.should_display)
+
+            tree = project(self._root)
+            native = SerializedDOMState(tree, self.selector_map).llm_representation(include_attributes)
+            if not rows:
+                return native
+            # The SDK's existing 40k observation cap still applies to this view.
+            return ('Visible selector attributes (untrusted page facts; not authorization or success):\n'
+                    + '\n'.join(rows) + '\nNative page observation:\n' + native)
 
     class NoDownloadsWatchdog(DownloadsWatchdog):
         def attach_to_session(self):
@@ -203,7 +290,15 @@ def scoped_session_class():
                 raise ScopeViolation('scope_changed_during_observation')
             if origin(state.url) not in {origin(url) for url in self._scope['origins']}:
                 raise ScopeViolation('observation_out_of_scope')
-            state.tabs = [tab for tab in state.tabs if tab.target_id == self._lease['target_id']]
+            def display_url(url):
+                parsed = urlsplit(url)
+                return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, '', ''))
+            # Keep the SDK's real URL/state for its native operations. Only the
+            # model view omits transient account/authentication query material.
+            state = replace(state, url=display_url(state.url),
+                tabs=[tab.model_copy(update={'url': display_url(tab.url)}) for tab in state.tabs
+                      if tab.target_id == self._lease['target_id']],
+                dom_state=ScopedDOMState(state.dom_state, self._scope['targets'], state.url))
             self._observation=await self.live_scope()
             return state
 

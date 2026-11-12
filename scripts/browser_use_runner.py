@@ -145,8 +145,12 @@ async def main(data):
             return await command("scroll", {"pixels": pixels})
 
         native_scope = data.get("native_scope")
+        observation_attributes = None
         if native_scope:
+            from browser_use.dom.views import DEFAULT_INCLUDE_ATTRIBUTES
             from lead_app.browser_execution import guarded_tools, scoped_session_class
+            observation_attributes = [name for name in DEFAULT_INCLUDE_ATTRIBUTES
+                                      if name not in ('value', 'valuetext')] + ['rel']
             async def manager(operation, args=None):
                 from uuid import uuid4
                 response = await client.post(
@@ -214,6 +218,7 @@ async def main(data):
             browser=browser,
             tools=tools,
             use_vision=False,
+            include_attributes=observation_attributes,
             use_thinking=False,
             flash_mode=True,
             use_judge=False,
