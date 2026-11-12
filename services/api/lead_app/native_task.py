@@ -51,6 +51,8 @@ class NativeTask:
             task=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE',(self.task_id,))
             progress=(task['result'] or {}).get('runtime',{}).get('native_progress',{})
             progress['corrections']=progress.get('corrections',0)+1
+            if self.fragment_failures>=2:
+                progress['stopped_reason']='one_correction_exhausted'
             c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,native_progress}',%s) WHERE id=%s",(j(progress),self.task_id))
             self.total_corrections=progress['corrections']
 
@@ -65,17 +67,31 @@ class NativeTask:
         if not getattr(self,'reconcile',False):
             await self.verify_private_self()
         before=await self.document()
-        facts=await self.page.evaluate("""()=>({url:location.href,scroll:[scrollX,scrollY],
-            text:document.body?.innerText||'', fields:Array.from(document.querySelectorAll('input,textarea,select'))
-            .filter(node=>!['password','hidden'].includes(node.type)&&node.autocomplete!=='one-time-code')
-            .map(node=>[node.tagName,node.name,node.value])})""")
+        facts=await self.page.evaluate(r"""()=>{
+            const transient='script,style,noscript,time,[datetime],[role=status],[role=progressbar],[aria-live]:not([aria-live=off])';
+            const visible=node=>{const r=node.getBoundingClientRect();const s=getComputedStyle(node);
+                return r.width>0&&r.height>0&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.visibility!=='hidden'&&s.display!=='none';};
+            const normalized=text=>text.replace(/\b\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\b/g,'<time>')
+                .replace(/\b\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[AP]M)?\b/gi,'<time>').replace(/\s+/g,' ').trim();
+            const text=[];const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+            while(walker.nextNode()) {const node=walker.currentNode.parentElement;
+                if(node&&!node.closest(transient)&&visible(node)&&!node.getAnimations().length){const value=normalized(walker.currentNode.textContent);if(value)text.push(value);}}
+            const url=new URL(location.href); for(const key of [...url.searchParams.keys()])
+                if(/^(?:_|timestamp|cache_bust|cachebuster)$/i.test(key)) url.searchParams.delete(key);
+            return {url:url.href,text:text.join(' ').slice(0,200000),
+                viewport:[Math.floor(scrollX/Math.max(1,innerWidth)),Math.floor(scrollY/Math.max(1,innerHeight*.8))],
+                fields:Array.from(document.querySelectorAll('input,textarea,select')).filter(node=>visible(node)&&!['password','hidden'].includes(node.type)&&node.autocomplete!=='one-time-code')
+                    .map(node=>[node.tagName,node.name,node.value])};
+        }""")
         if before!=await self.document():
             raise ValueError('native_progress_document_changed')
-        signature=hashlib.sha256(json.dumps([facts,before[1]],sort_keys=True).encode()).hexdigest()
+        signature=hashlib.sha256(json.dumps(facts,sort_keys=True).encode()).hexdigest()
         with tx(self.actor.aid) as c:
             task=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE',(self.task_id,))
             progress=(task['result'] or {}).get('runtime',{}).get('native_progress',{})
-            progress['no_progress']=progress.get('no_progress',0)+1 if progress.get('state_hash')==signature else 0
+            seen=progress.get('seen_states',[])
+            progress['no_progress']=progress.get('no_progress',0)+1 if signature in seen else 0
+            progress['seen_states']=(seen+[signature])[-32:] if signature not in seen else seen
             progress['state_hash']=signature
             self.corrections=progress['no_progress']
             stopped=self.fragment_failures>=2 or self.corrections>=3 or self.total_corrections>=8 or self.steps>=20
@@ -237,7 +253,7 @@ class NativeTask:
             if operation=='tool_authorize' and not value.get('allowed'):
                 await asyncio.to_thread(self.note_correction)
             return value
-        except ValueError:
+        except (ValueError,KeyError,TypeError):
             if operation in ('record_method','report_receipt','tool_authorize'):
                 await asyncio.to_thread(self.note_correction)
             raise

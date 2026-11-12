@@ -76,8 +76,8 @@ async def verify_login(
                     "success": True,
                 }
             }
-            if workflow["kind"] == "no_progress":
-                action={"guarded_scroll":{"down":True,"pages":1}}
+            if workflow["kind"] in ("no_progress","clock","reload","scroll_cycle"):
+                action={"guarded_scroll":{"down":step%2==0 if workflow["kind"]=="scroll_cycle" else True,"pages":100 if workflow["kind"]=="scroll_cycle" else 1}}
             elif workflow["kind"] == "correction":
                 action={"propose_method":{"target_url":board.origin+"/home","operation":"publish",
                     "selectors":{"self_subject":"#missing-current-subject","editor_target":"#editor-target","editor_body":"textarea","submit":"button"},
