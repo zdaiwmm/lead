@@ -754,7 +754,13 @@ def submission_gate(c, actor, action,claim=None):
     if intent["scope"].get("target_scope")=="existing_grants" and target["external_target_id"] not in intent["scope"].get("target_ids",[]):
         raise ValueError("target_not_permitted")
     route = one(c,"SELECT * FROM lead.growth_read_route(%s)",(actor.profile["id"],))
-    if not route or route["generation"] != publication["execution_ref"]["route_generation"]:
+    from ..channel_contracts import ExecutionRef
+    from ..execution_routes import registered_reference
+    frozen_route = ExecutionRef.model_validate(publication["execution_ref"])
+    current_route = registered_reference(route) if route else None
+    if (current_route is None
+            or current_route.model_dump(exclude={"registry_revision"}) != frozen_route.model_dump(exclude={"registry_revision"})
+            or frozen_route.registry_revision is not None and current_route.registry_revision != frozen_route.registry_revision):
         raise ValueError("execution_route_changed")
     if not one(c,"SELECT profile_id FROM lead.profile_leases WHERE profile_id=%s AND epoch=%s AND state='held' AND expires_at>now() FOR SHARE",(actor.profile["id"],actor.epoch)):
         raise ValueError("profile_lease_lost")
