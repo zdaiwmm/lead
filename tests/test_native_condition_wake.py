@@ -1,11 +1,11 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 from lead_app import api
 from lead_app.connection_control import transition
 from lead_app.db import all_rows, one, tx
 from lead_app.growth.contracts import TaskSpec, Wait, WorkResult, utcnow
-from lead_app.growth.runtime import _resource_condition, advance, finish
+from lead_app.growth.runtime import _resource_condition, advance, finish, wake_connection
 from lead_app.security import token
 from test_growth_account_connection import account, login_work
 
@@ -77,3 +77,66 @@ def test_actual_same_account_reverification_changes_read_condition(growth_agent)
         before=_current_research_resource(c,scope)
         c.execute("UPDATE lead.social_accounts SET verified_at=verified_at+interval '1 second' WHERE id=%s",(identifier,))
         assert _current_research_resource(c,scope)!=before
+
+
+def automatic_connection_claim(aid):
+    identifier=account(aid)
+    row,connection,_=login_work(aid,identifier)
+    with tx(aid) as c:
+        c.execute("UPDATE lead.browser_profiles SET provider='chromium' WHERE id=%s",(connection['profile_id'],))
+        c.execute("UPDATE lead.takeover_sessions SET control_mode='automatic' WHERE id=%s",(connection['id'],))
+    ref={'agent_id':aid,'task_id':str(row['id']),'task_generation':row['input']['task_generation']}
+    admitted=advance(ref)
+    assert admitted['state']=='ready'
+    return ref,row,connection,admitted['claim']
+
+
+def test_resume_before_old_owner_wait_finishes_wakes_once_without_resetting_attempts(growth_agent):
+    aid=growth_agent
+    ref,row,connection,claim=automatic_connection_claim(aid)
+    owner=transition(aid,connection['id'],connection['challenge_version'],'owner')
+    # Owner sees the handoff before its old automatic worker has returned.
+    response=control(aid,connection,owner,'resume')
+    assert response.status_code==200,response.text
+    with tx(aid) as c:
+        before={str(event['id']) for event in all_rows(c,"SELECT id FROM lead.outbox_events WHERE event_type='growth.work'")}
+    result=finish(claim,WorkResult(outcome='waiting',wait=Wait(reason='challenge',producer='account_connection',
+        recovery_action='owner',episode_root=row['id'],check_at=utcnow()+timedelta(minutes=10))))
+    assert result['accepted_control']
+    with tx(aid) as c:
+        task=one(c,'SELECT state,input,result FROM lead.tasks WHERE id=%s',(row['id'],))
+        events=all_rows(c,"SELECT id,payload FROM lead.outbox_events WHERE event_type='growth.work'")
+    assert task['state']=='planned'
+    assert task['input']==row['input']
+    assert task['result']['runtime']['attempts']==1
+    assert task['result']['runtime']['attempt_token'] is None and task['result']['runtime']['lease_until'] is None
+    assert task['result']['runtime']['wait'] is None
+    assert [event['payload'] for event in events if str(event['id']) not in before]==[ref]
+    emitted={str(event['id']) for event in events}
+    for _ in range(2):
+        assert wake_connection(aid,connection['id'],response.json()['challenge_version'])==[]
+    with tx(aid) as c:
+        assert {str(event['id']) for event in all_rows(c,"SELECT id FROM lead.outbox_events WHERE event_type='growth.work'") }==emitted
+    ready=advance(ref)
+    assert ready['state']=='ready' and ready['claim']['attempt_token']!=claim['attempt_token']
+    with tx(aid) as c:
+        actual=one(c,'SELECT input,result FROM lead.tasks WHERE id=%s',(row['id'],))
+    assert actual['input']['task_generation']==ref['task_generation']
+    assert actual['result']['runtime']['attempts']==2
+
+
+def test_automatic_connection_recheck_preserves_backoff_and_emits_no_immediate_work(growth_agent):
+    aid=growth_agent
+    ref,row,_,claim=automatic_connection_claim(aid)
+    with tx(aid) as c:
+        before={str(event['id']) for event in all_rows(c,"SELECT id FROM lead.outbox_events WHERE event_type='growth.work'")}
+    wait=Wait(reason='temporarily_unavailable',producer='account_connection',recovery_action='recheck',
+        episode_root=row['id'],check_at=utcnow()+timedelta(seconds=10))
+    assert finish(claim,WorkResult(outcome='waiting',wait=wait))['accepted_control']
+    assert advance(ref)['state']=='wait'
+    with tx(aid) as c:
+        task=one(c,'SELECT state,result FROM lead.tasks WHERE id=%s',(row['id'],))
+        after={str(event['id']) for event in all_rows(c,"SELECT id FROM lead.outbox_events WHERE event_type='growth.work'")}
+    assert task['state']=='planned' and task['result']['runtime']['wait']['recovery_action']=='recheck'
+    assert datetime.fromisoformat(task['result']['runtime']['wait']['check_at'])==wait.check_at
+    assert after==before
