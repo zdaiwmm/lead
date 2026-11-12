@@ -535,11 +535,12 @@ class ResearchPage:
                 folder = STATE / "evidence" / self.actor.aid
                 folder.mkdir(parents=True, exist_ok=True, mode=0o700)
                 screenshot = folder / (step + ".png")
-                if metadata is None:
-                    await self.page.screenshot(path=str(screenshot))
+                screenshot_bytes=await self.page.screenshot() if metadata is None else None
                 if observation_scope != await self.observation_scope():
-                    screenshot.unlink(missing_ok=True)
                     raise ValueError("browser_document_changed_during_observation")
+                if screenshot_bytes is not None:
+                    screenshot.write_bytes(screenshot_bytes)
+                    screenshot.chmod(0o600)
                 bodyfile = folder / (step + ".json")
                 bodyfile.write_text(json.dumps(result, ensure_ascii=False))
                 with tx(self.actor.aid) as c:

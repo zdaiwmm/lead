@@ -104,7 +104,12 @@ class NativeTask:
         return {**scope,'cdp_url':self.actor.native_runtime.bridge.url,'headers':self.actor.native_runtime.bridge.headers}
 
     async def document(self,page=None,scope=None):
+        if page is not None and page is not self.page and scope is None:
+            scope=next((entry['scope'] for entry in self.actor.native_runtime.pages.values() if entry['page'] is page),None)
+            if scope is None:
+                raise ValueError('native_internal_page_missing')
         reader=NativeResearchPage(self.actor,self.task_id)
+        reader.identity_required=False
         reader.lease=scope or self.lease
         reader.page=page or self.page
         reader.context=self.actor.context
@@ -176,6 +181,7 @@ class NativeTask:
             if before!=await self.document() or permission_scope and permission_before!=await self.document(permission_page,permission_scope):
                 raise ValueError('method_document_changed')
             method['self_url']=account['private_self']['self_url']
+            method['platform_permission']['selector']=args['permission_selector']
             validate_method(method,account_id=account['id'],binding_version=account['binding_version'],target_url=target,operation=operation)
             observed={'external_target_id':target,'canonical_url':target,'target_type':'web',
                 'display_name':(await permission_page.title())[:200] or target,'acting_subject':account['external_account_id'],
