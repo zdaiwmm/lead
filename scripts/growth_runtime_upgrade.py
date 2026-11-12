@@ -36,6 +36,14 @@ def telegram_binding(verifier):
     return verifier['executor_binding'](json.loads(verifier['executor_config'](path)))
 
 
+def database_environment(live,settings):
+    if settings['PGDATABASE']!='lead' or settings['PGHOST']!=str(live/'pgsock'):
+        raise ValueError('Unexpected database target')
+    return dict(LEAD_STATE_DIR=str(live/'state'),LEAD_DB_HOST=settings['PGHOST'],
+        LEAD_DB_PORT=settings['PGPORT'],LEAD_DB_NAME='lead',
+        LEAD_DB_OWNER_USER=settings['PGUSER'],LEAD_DB_OWNER_PASSWORD=settings['PGPASSWORD'])
+
+
 @contextmanager
 def drill_role_connections(name,owner):
     """Use real restricted SQL roles in the isolated DB behind production HBA.
@@ -126,9 +134,7 @@ def main():
             raise ValueError('Upgrade source drift')
     site = runpy.run_path('/srv/lead-prod-vault/lead-onboard-87d151a/site-state.py')
     env = site['e']
-    if env['PGDATABASE']!='lead' or env['PGHOST']!=str(LIVE/'pgsock'):
-        raise ValueError('Unexpected database target')
-    os.environ.update(LEAD_STATE_DIR=str(LIVE/'state'),LEAD_DB_HOST=env['PGHOST'],LEAD_DB_PORT=env['PGPORT'],LEAD_DB_NAME='lead')
+    os.environ.update(database_environment(LIVE,env))
     sys.path[:0]=[str(source/'services/api'),str(LIVE/'bin/site')]
     import psycopg
     from lead_app.config import CONFIG

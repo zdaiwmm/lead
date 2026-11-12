@@ -18,6 +18,20 @@ def helper():
     return module
 
 
+def test_operator_uses_the_registered_site_owner_instead_of_a_development_default(tmp_path,monkeypatch):
+    upgrade=helper()
+    settings={'PGDATABASE':'lead','PGHOST':str(tmp_path/'pgsock'),'PGPORT':'25434',
+        'PGUSER':'synthetic_site_owner','PGPASSWORD':'fixture-only'}
+    with monkeypatch.context() as patch:
+        for key,value in upgrade.database_environment(tmp_path,settings).items():
+            patch.setenv(key,value)
+        selected=database_kwargs(owner=True)
+        assert selected['user']==settings['PGUSER'] and selected['password']==settings['PGPASSWORD']
+        assert selected['host']==settings['PGHOST'] and selected['dbname']=='lead'
+    with pytest.raises(ValueError,match='Unexpected database target'):
+        upgrade.database_environment(tmp_path,{**settings,'PGDATABASE':'unrelated'})
+
+
 def test_restored_database_role_transport_enforces_real_rls_and_restores_connections():
     upgrade=helper()
     name='lead_growth_drill_'+uuid4().hex[:12]
