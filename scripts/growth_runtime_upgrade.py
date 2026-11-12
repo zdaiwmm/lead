@@ -30,6 +30,11 @@ def run(*args,**kwargs):
     return subprocess.check_output(args,text=True,**kwargs).strip()
 
 
+def telegram_binding(verifier):
+    path=verifier['EXECUTOR_REGISTRY'].parent/'telegram.json'
+    return verifier['executor_binding'](json.loads(verifier['executor_config'](path)))
+
+
 def atomic_private(path,data,previous=None):
     info = (previous or path).stat()
     fd,name = tempfile.mkstemp(prefix='.growth-',dir=path.parent)
@@ -92,7 +97,7 @@ def main():
     options = dict(host=env['PGHOST'],port=int(env['PGPORT']),user=env['PGUSER'],password=env['PGPASSWORD'],
         connect_timeout=5,options=env.get('PGOPTIONS','')+' -c lock_timeout=5000 -c statement_timeout=120000')
     verifier = runpy.run_path(str(source/'scripts/home_systemd_release.py'))
-    binding = json.loads((TOOLS/'telegram.json').read_text())
+    binding = telegram_binding(verifier)
     config_path = LIVE/'state/config.json'
     config_before = config_path.read_bytes()
     config = json.loads(config_before)

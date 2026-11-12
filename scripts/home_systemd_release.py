@@ -1089,7 +1089,7 @@ def reviewed_fault_isolation(mirror, sha, extra):
     return paths
 
 
-GROWTH_RUNTIME_FILES = {'scripts/growth_runtime_upgrade.py': '2646c56b2a81a39b33f9bcbd2f7806e15142e4f3', 'infra/migrations/versions/0031_growth_runtime.py': 'ad10651410b6ecd5641c10dc6d6a1979675d9f48', 'infra/migrations/sql/0031_growth_runtime.sql': '862552a7ca10303415da81f1808a522234bbf7dc'}
+GROWTH_RUNTIME_FILES = {'scripts/growth_runtime_upgrade.py': '20f4def23eb0542c829d76054d14a2a10d880a62', 'infra/migrations/versions/0031_growth_runtime.py': 'ad10651410b6ecd5641c10dc6d6a1979675d9f48', 'infra/migrations/sql/0031_growth_runtime.sql': '862552a7ca10303415da81f1808a522234bbf7dc'}
 
 
 def growth_schema_query():
