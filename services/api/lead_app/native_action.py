@@ -33,16 +33,21 @@ class NativeAction(NativeTask):
             if (not action or action['state'] not in ('unknown','dispatching','confirmed') or not task or task['state']!='running'
                     or not attempt or str(action['intent']['execution_ref']['profile_id'])!=str(self.actor.profile['id'])):
                 raise ValueError('original_action_reconcile_unavailable')
+            private=one(c,"""SELECT connection_data FROM lead.takeover_sessions WHERE completed_account_id=%s
+                AND profile_id=%s AND connection_data->>'self_subject'=%s AND connection_data ? 'self_selector'
+                ORDER BY ended_at DESC NULLS LAST LIMIT 1""",(action['intent']['browser_method']['account_id'],self.actor.profile['id'],attempt['observed_account_id']))
+            if not private:
+                raise ValueError('original_private_identity_method_missing')
             self.action=action
-            return task,{'id':action['intent']['browser_method']['account_id'],'external_account_id':attempt['observed_account_id'],
+            return task,{'private_self':private['connection_data'],'id':action['intent']['browser_method']['account_id'],'external_account_id':attempt['observed_account_id'],
                 'binding_version':action['intent']['binding_version'],'profile_id':self.actor.profile['id']},{'revision':action['intent']['intent_revision']}
 
     async def start(self,url=None):
         self.phase('start_editor')
         method=self.action['intent']['browser_method']
         if self.reconcile:
-            task,_,_=await asyncio.to_thread(self.snapshot)
-            urls={method['target_url']}
+            task,account,_=await asyncio.to_thread(self.snapshot)
+            urls={method['target_url'],account['private_self']['self_url']}
             if self.action['intent'].get('parent_url'):
                 urls.add(self.action['intent']['parent_url'])
             scope={'task_id':self.task_id,'task_generation':task['input']['task_generation'],
@@ -50,6 +55,7 @@ class NativeAction(NativeTask):
                 'origins':[method['target_url']],'reconcile_action_id':self.action_id,'read_urls':list(urls)}
             self.lease=await self.actor.native_runtime.acquire_page(scope,method['target_url'])
             self.page=self.actor.native_runtime.pages[self.lease['target_id']]['page']
+            await self.verify_private_self()
         else:
             await super().start(url or self.action['intent'].get('parent_url') or method['target_url'])
             self.phase('start_private_identity')

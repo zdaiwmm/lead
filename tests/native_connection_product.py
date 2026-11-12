@@ -482,6 +482,29 @@ async def verify_login(
             finally:
                 for controller in controllers:
                     await controller.close()
+            # A proven different private subject invalidates health. Restore it
+            # through the real reauthentication contract, never a test DB patch.
+            from lead_app.growth.contracts import WorkResult
+            finish(work_claims[0],WorkResult(outcome="failed",failure_code="scope_changed"))
+            with tx(aid) as c:
+                assert one(c,"SELECT state FROM lead.social_accounts WHERE id=%s",(pending["account_id"],))["state"]=="needs_auth"
+            reauth=await begin(aid,"web",account_id=pending["account_id"],site_url=board.origin+"/login")
+            with tx(aid) as c:
+                reauth_task=one(c,"SELECT * FROM lead.tasks WHERE input#>>'{spec,payload,takeover_id}'=%s",(str(reauth["takeover_id"]),))
+            reauth_ref=TaskRef(agent_id=aid,task_id=reauth_task["id"],task_generation=reauth_task["input"]["task_generation"])
+            reauth_claim=advance(reauth_ref)["claim"]
+            with tx(aid) as c:
+                reauth_task=one(c,"SELECT * FROM lead.tasks WHERE id=%s",(reauth_task["id"],))
+            calls_before_reauth=len(model_calls)
+            reauthenticated=await execute_account(aid,reauth_task,AccountInput.model_validate(reauth_task["input"]["spec"]["payload"]))
+            assert reauthenticated.outcome=="completed" and len(model_calls)==calls_before_reauth
+            finish(reauth_claim,reauthenticated)
+            await actor.connection_pages[str(reauth["takeover_id"])].reconcile()
+            with tx(aid) as c:
+                assert one(c,"SELECT state FROM lead.social_accounts WHERE id=%s",(pending["account_id"],))["state"]=="connected"
+                works[0]=submit_work(c,aid,TaskSpec(kind="account",purpose="discover",account_id=pending["account_id"],
+                    payload={"target_urls":[board.origin+"/home"]},review_at=utcnow()+timedelta(hours=1),dedupe_key="native-after-private-health"))
+            work_claims[0]=advance(works[0])["claim"]
             workflow.update(kind="discovery", step=0)
             with tx(aid) as c:
                 discovery_task = one(

@@ -64,8 +64,7 @@ class NativeTask:
         from .db import j
         self.remaining_seconds()
         await self.descriptor()
-        if not getattr(self,'reconcile',False):
-            await self.verify_private_self()
+        await self.verify_private_self()
         before=await self.document()
         facts=await self.page.evaluate(r"""()=>{
             const transient='script,style,noscript,time,[datetime],[role=status],[role=progressbar],[aria-live]:not([aria-live=off])';
@@ -196,7 +195,12 @@ class NativeTask:
             if await field.count()!=1 or not await field.is_visible():
                 raise ValueError('native_self_subject_missing')
             actual=await field.evaluate("node=>('value' in node ? node.value : node.innerText||'').trim()")
-            if actual!=account['external_account_id'] or before!=await self.document(page,scope):
+            if actual!=account['external_account_id']:
+                with tx(self.actor.aid) as c:
+                    c.execute("UPDATE lead.social_accounts SET state='needs_auth' WHERE id=%s AND binding_version=%s AND external_account_id=%s AND state='connected'",
+                        (account['id'],account['binding_version'],account['external_account_id']))
+                raise ValueError('native_self_subject_changed')
+            if before!=await self.document(page,scope):
                 raise ValueError('native_self_subject_changed')
             return account
         finally:
@@ -275,6 +279,7 @@ class NativeTask:
 
     async def _command(self,operation,args):
         if operation=='scope':
+            await self.verify_private_self()
             return {key:value for key,value in (await self.descriptor()).items() if key not in ('cdp_url','headers')}
         if operation=='tool_authorize':
             return await self.authorize(args)

@@ -165,6 +165,13 @@ async def test_unknown_native_action_reads_original_receipt_without_resubmission
         with tx(aid) as c:
             frozen_intent=one(c,'SELECT * FROM lead.account_operating_intents WHERE account_id=%s',(context['pending']['account_id'],))
             frozen_grants=c.execute('SELECT * FROM lead.authorization_grants ORDER BY id').fetchall()
+        saved_sessions=dict(board.state.sessions)
+        board.state.sessions={key:'different-current-private-subject' for key in saved_sessions}
+        start=len(context['model_calls'])
+        wrong,action,attempts=await execute()
+        assert wrong.outcome=='unknown' and len(context['model_calls'])==start
+        assert action['id']==original['id'] and len(attempts)==1
+        board.state.sessions=saved_sessions
         context['workflow'].update(kind='reconcile',step=0,choose_old=True)
         old,action,attempts=await execute()
         assert old.outcome=='unknown' and action['id']==original['id'] and len(attempts)==1
