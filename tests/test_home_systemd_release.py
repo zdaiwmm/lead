@@ -515,6 +515,25 @@ def test_attended_request_finalizes_before_separate_readback(hook,monkeypatch):
     assert all(json.loads(line)['ok'] for line in replies.getvalue().splitlines())
 
 
+def test_growth_upgrade_uses_registered_executor_configuration(hook,tmp_path):
+    import json
+    upgrade=importlib.import_module('growth_runtime_upgrade')
+    config=tmp_path/'etc/lead-home-release'
+    config.mkdir(parents=True)
+    expected={'channel':'telegram','profile_slot':'synthetic-slot'}
+    (config/'telegram.json').write_text(json.dumps(expected))
+    reads=[]
+    def read(path):
+        reads.append(path)
+        return path.read_bytes()
+    verifier={'EXECUTOR_REGISTRY':config/'executors.json','executor_config':read,'executor_binding':lambda value:value}
+    assert upgrade.telegram_binding(verifier)==expected
+    assert reads==[config/'telegram.json']
+    (config/'telegram.json').unlink()
+    with pytest.raises(FileNotFoundError):
+        upgrade.telegram_binding(verifier)
+
+
 @pytest.fixture
 def executors(hook, monkeypatch, tmp_path):
     """Synthetic proc trees; only kernel mount identity and owner uid are substituted."""
