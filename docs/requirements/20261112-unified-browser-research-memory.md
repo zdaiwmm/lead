@@ -798,10 +798,12 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - C20增量反例：4条各6000汉字的合法经验使原context先丢当前证据再报超限，反而阻塞工作。真实DB先复现失败，改为超限优先舍弃可选低排序经验，保留当前证据/目标；决策、经验和定向评估27项通过。上述真实单例输入仅16537字节，不触发此分支，输入与system未变，复用原模型结果而不重复付费。
 - 两次较早Linux原生连接尝试超时，原DB各保留40000单位费用预留，合计80000状态未知、没有usage回执；不能认定已消费80000，也不能视作零调用/零费用或清账重跑。跨机DB延迟已用自有Linux本机PG隔离环境移除，机械链路改先用本地假模型核对。
 
-- `e3e7a5f`接入实际原生自动认证：Linux真实浏览器/原Task/ConnectionRef用本地假模型5次原生调用填两字段、只发一次`POST /session`、读私有`/account`后DB绑定真实Account ID，原任务completed；错误私有主体拒绝。固定Linux2项12.65秒通过，实际模型请求及SDK工作目录的用户名/密码双literal扫描均false，假HTTP接收端独立扫描同样无明文。此为执行器机械证据、真实模型API0，不是陌生页语义验收。独立cookie空identity probe仅允许既定GET，不能借社媒Cookie或POST；生产出口双公网来源仍待实测。
+- `e3e7a5f`接入实际原生自动认证：Linux真实浏览器/原Task/ConnectionRef用本地假模型5次原生调用填两字段、只发一次`POST /session`、读私有`/account`后DB绑定真实Account ID，执行器返回completed（原helper尚未调用finish落Task终态，此缺口已发现，待后续持久完成复核）；错误私有主体拒绝。固定Linux2项12.65秒通过，实际模型请求及SDK工作目录的用户名/密码双literal扫描均false，假HTTP接收端独立扫描同样无明文。此为执行器机械证据、真实模型API0，不是陌生页语义验收。独立cookie空identity probe仅允许既定GET，不能借社媒Cookie或POST；生产出口双公网来源仍待实测。
 - 同段补原ExecutionRef generation、出口usable及配置指纹逐次核对；owner重开仍保留有版本的原生协议；8模型调用/20主动步骤上限。主集成45项连接/动作/读取/当前回执投影与旧出口消费者通过。两个独立真实DB反例曾确认不同transport误共享并改A路由、原生Reddit遗漏已配置固定出口；修为兼容transport/出口cohort分组及保留原公共/社媒出口消费者后，两例转绿，旧Profile不迁移。
 
 - C28/C30另有独立三站夹具冻结于`622e49c`，源文件SHA256为`2c2b0e74eb3a6cda8366bbfe473889c35756e1b053879700ea779da97cdd9976`。真实完整Chromium151/Playwright1.62独立3项4.74秒、主集成3项4.49秒证明SW cache/合成/HttpOnly续期POST、POST读取、嵌套独立OOPIF、SSO正/错opener、旧认证端点SW借用及非幂等重放都可实际触发；仅Python oracle、无HTTP oracle且不记密码。夹具故意允许负例，产品门禁尚须在同实例组合证明0源站；不能把夹具自验计作C28/C30产品通过。standalone便利参数含无代理配置，严禁带入产品运行。
+
+- C07/C10产品准入增量`80f804d`：真实双Task触发旧profile全局排他，独立DB反例4红1过；现同一原生profile最多2个不同账号有效运行claim，同账号继续互斥，连接占用只阻当前账号，等待finish释放名额，旧Firefox/profile任务仍排他。故障resource按原生账号分开、进程/原动作隔离仍由原profile lease负责。修后直接消费者36项通过，补同号有空槽仍互斥后6项专测通过；真实双业务浏览器及内部身份辅助页并发待核心接续，不能用DB claims代替浏览器重叠。
 
 ### 22.2 尚未放行与部署约束
 
