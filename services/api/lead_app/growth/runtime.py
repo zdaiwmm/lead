@@ -62,6 +62,14 @@ def _browser_resource(c, row, spec):
     return profile, bool(record and record['provider'] == 'chromium'), account
 
 
+def _native_session_condition(c, profile):
+    return one(c, """SELECT l.epoch,b.id session_id,coalesce(b.state='ready',false) ready,
+        coalesce(l.state='held' AND l.expires_at>now(),false) held
+        FROM lead.profile_leases l LEFT JOIN lead.browser_sessions b
+            ON b.profile_id=l.profile_id AND b.epoch=l.epoch AND b.ended_at IS NULL
+        WHERE l.profile_id=%s""", (profile,))
+
+
 def _resource_condition(c, agent, row, spec):
     """Conditions come from actual references/configuration, never a model-supplied retry key."""
     if spec.kind in ("content", "decision") or _runtime(row).get("failure_stage")=="model":
@@ -91,7 +99,8 @@ def _resource_condition(c, agent, row, spec):
         resource = 'account:' + str(account_id) if native and account_id else 'profile:' + str(profile)
         connection = one(c, "SELECT id,challenge_version,control_mode,state,expires_at FROM lead.takeover_sessions WHERE id=%s",
                          (spec.payload['takeover_id'],)) if spec.payload.get('takeover_id') else None
-        return resource, digest([account,(route or {}).get("generation"),capability,connection])
+        session = _native_session_condition(c, profile) if native else None
+        return resource, digest([account,(route or {}).get("generation"),capability,connection,session])
     urls = spec.payload.get("urls") or []
     if not urls and spec.kind == "research":
         business = one(c, "SELECT product_url FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
@@ -128,10 +137,13 @@ def _current_research_resource(c, scope):
         aid = one(c, "SELECT current_setting('app.agent_id',true) aid")["aid"]
         condition = digest([condition, configuration_revision(scope['provider'],scope['operation'],aid,c)])
     if scope.get("account_id"):
-        account = one(c, """SELECT s.binding_version,s.state,s.verified_at,i.revision,i.desired,r.generation
+        account = one(c, """SELECT s.binding_version,s.state,s.verified_at,i.revision,i.desired,r.generation,
+            s.profile_id,p.provider
             FROM lead.social_accounts s LEFT JOIN lead.account_operating_intents i ON i.account_id=s.id
-            LEFT JOIN lead.profile_execution_routes r ON r.profile_id=s.profile_id WHERE s.id=%s""", (scope["account_id"],))
-        condition = digest([condition, account])
+            LEFT JOIN lead.profile_execution_routes r ON r.profile_id=s.profile_id
+            LEFT JOIN lead.browser_profiles p ON p.id=s.profile_id WHERE s.id=%s""", (scope["account_id"],))
+        session = _native_session_condition(c, account['profile_id']) if account and account['provider'] == 'chromium' else None
+        condition = digest([condition, account, session])
     return resource, condition
 
 
@@ -169,6 +181,53 @@ def wake_connection(aid, connection_id, challenge_version):
             # dependency. A changed challenge is permission to recheck, no proof.
             runtime['wait'] = None
             _save(c, row, 'planned', runtime, when=now)
+            ref = {'agent_id': str(aid), 'task_id': str(row['id']),
+                   'task_generation': row['input']['task_generation']}
+            emit(c, aid, 'growth.work', ref)
+            refs.append(ref)
+        return refs
+
+
+def wake_browser_session(aid, profile_id, session_id, epoch):
+    """Ready permits original nonterminal work to recheck; it proves no recovery."""
+    with tx(aid) as c:
+        _recovery_lock(c, aid)
+        agent = require_agent(c, aid, True)
+        all_rows(c, 'SELECT id FROM lead.social_accounts ORDER BY id FOR SHARE')
+        # Match the actual lease -> session heartbeat order.
+        lease = one(c, """SELECT epoch FROM lead.profile_leases WHERE profile_id=%s AND epoch=%s
+            AND state='held' AND expires_at>now() FOR SHARE""", (profile_id, epoch))
+        session = one(c, """SELECT b.id FROM lead.browser_sessions b JOIN lead.browser_profiles p ON p.id=b.profile_id
+            WHERE b.id=%s AND b.profile_id=%s AND b.epoch=%s AND b.state='ready' AND b.ended_at IS NULL
+                AND p.provider='chromium' FOR SHARE OF b""", (session_id, profile_id, epoch)) if lease else None
+        if not session:
+            return []
+        rows = all_rows(c, """SELECT * FROM lead.tasks WHERE type LIKE 'growth.%%'
+            AND state IN ('planned','queued','waiting_user','reconciling')
+            AND (coalesce(input->>'profile_id',input#>>'{spec,payload,profile_id}')=%s
+                OR coalesce(input#>>'{spec,account_id}',input#>>'{spec,payload,connection_account_id}',
+                    result#>>'{runtime,failure_scope,account_id}') IN
+                    (SELECT id::text FROM lead.social_accounts WHERE profile_id=%s))
+            ORDER BY id FOR UPDATE""", (str(profile_id), profile_id))
+        refs = []
+        revision = digest([str(session_id), epoch])
+        for row in rows:
+            runtime = _runtime(row)
+            wait = runtime.get('wait') or {}
+            if (runtime.get('browser_session_wake') == revision or wait.get('recovery_action') == 'owner'
+                    or wait.get('producer') in ('budget','home_release_maintenance')):
+                continue
+            action = one(c, 'SELECT state FROM lead.actions WHERE task_id=%s', (row['id'],))
+            reconcile = bool(action and action['state'] in ('dispatching','unknown','confirmed'))
+            if not reconcile and _resume_allowed(c, agent, row):
+                continue
+            resource, condition = _resource_condition(c, agent, row, TaskSpec.model_validate(row['input']['spec']))
+            if not runtime.get('condition_revision') or condition == runtime['condition_revision']:
+                continue
+            # Leave every dependency and recovery proof intact. Admission and
+            # the actual browser still revalidate current authority/identity.
+            runtime.update(wait=None, browser_session_wake=revision)
+            _save(c, row, 'reconciling' if reconcile else 'planned', runtime, when=utcnow())
             ref = {'agent_id': str(aid), 'task_id': str(row['id']),
                    'task_generation': row['input']['task_generation']}
             emit(c, aid, 'growth.work', ref)
