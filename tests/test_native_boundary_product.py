@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
-async def test_connection_session_keeps_sw_cache_and_nonpublication_posts(monkeypatch):
+async def test_connection_session_keeps_sw_cache_and_nonpublication_posts(monkeypatch, *, boundary_hook=None):
     from lead_app import account_profiles, api, browser, network_namespace
     from lead_app.account_connection import begin
     from lead_app.browser_runtime import NativeNetworkGate, PersistentRuntime
@@ -248,6 +248,10 @@ async def test_connection_session_keeps_sw_cache_and_nonpublication_posts(monkey
                 cache_text_ok=cache == 'Members may post and reply.', cache_install_source_count=cache_before,
                 cache_hit_source_delta=source_count('GET', '/cache/rules')-cache_before,
                 httponly_session=True, login_source_post_count=1)
+
+            if boundary_hook:
+                return await boundary_hook({'context':context,'actor':actor,'controller':controller,'page':page,'site':site,
+                    'source_count':source_count,'decisions':decisions,'post_seen':post_seen})
 
             # Normal SW-owned refresh and a normal reading POST keep their real
             # methods and bodies. Neither is converted into an Action publish.

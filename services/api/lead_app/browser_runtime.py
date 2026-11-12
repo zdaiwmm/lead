@@ -105,6 +105,8 @@ class NativeNetworkGate:
         self.proxy=proxy
         self.auth_seen=set()
         self.scripts={}
+        self.worker_versions={}
+        self.worker_versions_by_page={}
         self.authorize = authorize
         self.claim = claim
         self.lost = lost
@@ -175,6 +177,7 @@ class NativeNetworkGate:
                     root=self.owners.get(event['sessionId'])
                     if root in self.roots:
                         self.roots[root]['document_revision']=self.roots[root].get('document_revision',0)+1
+                    self.worker_versions_by_page.pop(event['sessionId'],None)
                     self.scripts={key:value for key,value in self.scripts.items() if key[0]!=event['sessionId']}
                     self.targets.pop(event['sessionId'], None)
                     self.owners.pop(event['sessionId'], None)
@@ -185,6 +188,20 @@ class NativeNetworkGate:
                     # Request correlation is bounded and never persists permission.
                     if len(self.network) > 4096:
                         self.network.pop(next(iter(self.network)))
+                    self.changed.set()
+                elif method=='ServiceWorker.workerVersionUpdated':
+                    ranks={'new':0,'installing':1,'installed':2,'activating':3,'activated':4,'redundant':5}
+                    for version in event['versions']:
+                        if session in self.targets and self.targets[session].get('type')=='page':
+                            self.worker_versions_by_page.setdefault(session,{})[version['versionId']]=version
+                        previous=self.worker_versions.get(version['versionId'])
+                        if previous and ranks.get(previous['status'],-1)>ranks.get(version['status'],-1):
+                            continue
+                        self.worker_versions[version['versionId']]=version
+                    if len(self.worker_versions)>1024:
+                        retired=[key for key,value in self.worker_versions.items() if value['status']=='redundant' or value['runningStatus']=='stopped']
+                        for key in retired[:len(self.worker_versions)-1024]:
+                            self.worker_versions.pop(key,None)
                     self.changed.set()
                 elif method=='Runtime.executionContextsCleared':
                     self.scripts={key:value for key,value in self.scripts.items() if key[0]!=session}
@@ -247,6 +264,8 @@ class NativeNetworkGate:
                 await self.send('Debugger.enable',{},session)
             if kind in ('page','iframe'):
                 await self.send('Page.enable',{},session)
+            if kind=='page':
+                await self.send('ServiceWorker.enable',{},session)
             await self.send('Runtime.runIfWaitingForDebugger', {}, session)
             self.initialized.add(session)
             self.changed.set()

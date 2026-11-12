@@ -124,13 +124,19 @@ async def authorize_maintenance(runtime,target,request):
                     continue
                 try:
                     await asyncio.to_thread(runtime.current_scope,scope)
-                    page=entry['page']
-                    await private_identity(runtime,scope,page)
-                    revision=scope.get('document_revision',0)
                     sessions=[sid for sid,info in gate.targets.items() if info['targetId']==scope['target_id']]
                     if len(sessions)!=1:
                         continue
                     page_session=sessions[0]
+                    versions=[value for value in gate.worker_versions_by_page.get(page_session,{}).values() if value.get('targetId')==target['targetId']
+                        and value['status']=='activated' and value['runningStatus']=='running' and scope['target_id'] in value.get('controlledClients',[])
+                        and gate.worker_versions.get(value['versionId'],{}).get('status')!='redundant']
+                    if len(versions)!=1:
+                        continue
+                    version=copy.deepcopy(versions[0])
+                    page=entry['page']
+                    await private_identity(runtime,scope,page)
+                    revision=scope.get('document_revision',0)
                     scripts=[(sid,info) for (owner,sid),info in list(gate.scripts.items()) if owner==page_session and info.get('url')==page.url]
                     if len(scripts)>20:
                         continue
@@ -142,12 +148,13 @@ async def authorize_maintenance(runtime,target,request):
                                 if envelope['url']!=request['url'] or envelope['fields']!=body:
                                     continue
                                 await asyncio.to_thread(runtime.current_scope,scope)
-                                if revision!=scope.get('document_revision',0) or gate.scripts.get((page_session,sid))!=page_meta or gate.scripts.get((session,script))!=worker_meta:
+                                if revision!=scope.get('document_revision',0) or gate.scripts.get((page_session,sid))!=page_meta or gate.scripts.get((session,script))!=worker_meta or gate.worker_versions_by_page.get(page_session,{}).get(version['versionId'])!=version or gate.worker_versions.get(version['versionId'],{}).get('status')=='redundant':
                                     continue
                                 digest=hashlib.sha256(repr(sorted(body.items())).encode()).hexdigest()
                                 key=(scope['target_id'],digest)
                                 candidates.append((key,{'role':'session_maintenance','task_id':scope['task_id'],'page_target_id':scope['target_id'],
                                     'binding_version':scope.get('binding_version'),'document_revision':revision,'worker_target_id':target['targetId'],
+                                    'worker_version_id':version['versionId'],'worker_registration_id':version['registrationId'],
                                     'worker_script_id':script,'worker_script_hash':hashlib.sha256(source.encode()).hexdigest(),
                                     'page_script_id':sid,'page_script_hash':hashlib.sha256(page_source.encode()).hexdigest(),'nonce_hash':digest}))
                 except (ValueError,KeyError):
