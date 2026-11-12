@@ -1,5 +1,7 @@
 """Real HTTPX hooks stop the next model transport when prior billing is unknown."""
+import ast
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -87,3 +89,73 @@ async def test_credential_literal_rejection_occurs_before_any_model_transport(co
         with pytest.raises(ValueError, match='redaction'):
             await client.post('https://model.fixture/messages', content=content)
     assert observed == [] and current.secret_seen
+
+
+def runner_usage(current):
+    """Evaluate the real serializer without importing the SDK or running a model."""
+    path = Path(__file__).resolve().parents[1] / 'scripts/browser_use_runner.py'
+    tree = ast.parse(path.read_text())
+    main = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == 'main')
+    values = [value for node in ast.walk(main) if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)
+              for key, value in zip(node.value.keys, node.value.values)
+              if isinstance(key, ast.Constant) and key.value == 'usage']
+    assert len(values) == 1
+    scope = {name: getattr(current, name) for name in (
+        'provider_usage', 'unmeasured_requests', 'provider_requests', 'provider_responses', 'secret_seen')}
+    scope['meter'] = current
+    return eval(compile(ast.Expression(values[0]), str(path), 'eval'), scope)
+
+
+def manager_known(function, usage):
+    """Exercise both actual native settlement predicates, with no database IO."""
+    path = Path(__file__).resolve().parents[1] / 'services/api/lead_app/native_runner.py'
+    tree = ast.parse(path.read_text())
+    caller = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == function)
+    values = [node.value for node in ast.walk(caller) if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == 'known' for target in node.targets)]
+    assert len(values) == 1
+    return eval(compile(ast.Expression(values[0]), str(path), 'eval'), {'usage': usage})
+
+
+@pytest.mark.parametrize('failure', ['headers', 'body'])
+async def test_partial_known_usage_then_response_loss_stays_unknown_in_actual_runner_and_manager(failure):
+    from lead_app.native_model_meter import ModelBillingUnknown
+
+    observed = []
+
+    class PartialBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"usage":'
+            raise httpx.ReadTimeout('synthetic body lost after 200 response headers')
+
+    async def upstream(request):
+        observed.append(request.content)
+        if len(observed) == 1:
+            return httpx.Response(200, json={'usage': {'prompt_tokens': 2, 'completion_tokens': 3, 'total_tokens': 5}})
+        if failure == 'headers':
+            raise httpx.ReadTimeout('synthetic loss before headers', request=request)
+        return httpx.Response(200, stream=PartialBody())
+
+    current = meter()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream),
+            event_hooks={'request': [current.measure_request], 'response': [current.measure_response]}) as client:
+        await client.post('https://model.fixture/messages', content=b'known first response')
+        with pytest.raises(httpx.ReadTimeout):
+            await client.post('https://model.fixture/messages', content=b'unknown second response')
+        with pytest.raises(ModelBillingUnknown):
+            await client.post('https://model.fixture/messages', content=b'SDK retry must not reach transport')
+    assert len(observed) == 2 and current.billing_unknown
+    usage = runner_usage(current)
+    assert usage['total_tokens'] == 5 and usage['entry_count'] == 1 and usage['request_count'] == 2
+    assert usage['unmeasured_requests'] >= usage['request_count'] - usage['entry_count']
+    assert usage['billing_unknown'] is True
+    assert not manager_known('connect', usage)
+    assert not manager_known('run_task', usage)
+
+
+@pytest.mark.parametrize('caller', ['connect', 'run_task'])
+@pytest.mark.parametrize('uncertain', ['entry_count_mismatch', 'explicit_unknown'])
+def test_native_settlement_does_not_release_an_uncertain_fragment(caller, uncertain):
+    usage = {'entry_count': 1, 'request_count': 2 if uncertain == 'entry_count_mismatch' else 1,
+             'total_tokens': 5, 'unmeasured_requests': 0, 'billing_unknown': uncertain == 'explicit_unknown'}
+    assert not manager_known(caller, usage)
