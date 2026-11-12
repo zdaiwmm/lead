@@ -150,6 +150,18 @@ def guarded_tools(session, authorize, *, sensitive_data=None):
             await session.cdp_client_for_node(node)
             node_ref = {'target_id': node.target_id, 'backend_node_id': node.backend_node_id,
                         'tag': node.tag_name, 'attributes': dict(node.attributes)}
+        values=dict(values)
+        if name=='input' and sensitive_data:
+            # Agent's outer registry substitutes secrets before custom actions.
+            # Restore one approved placeholder before the authorization RPC and
+            # let the native input registry perform the actual sensitive write.
+            text=values.get('text','')
+            matched=[key for key,secret in sensitive_data.items() if isinstance(secret,str) and text==secret]
+            if matched:
+                preferred='saved_password' if (node_ref or {}).get('attributes',{}).get('type')=='password' else 'saved_username'
+                values['text']=preferred if preferred in matched else matched[0]
+            elif any(isinstance(secret,str) and secret and secret in text for secret in sensitive_data.values()):
+                return ActionResult(error='Use exactly one approved saved credential placeholder.')
         decision = await authorize(name, values, node_ref)
         if not decision.get('allowed'):
             return ActionResult(error=decision.get('reason', 'Current task does not authorize this action'))
@@ -209,27 +221,42 @@ def validate_method(method, *, account_id, binding_version, target_url, operatio
     if value.get('role') not in ('owner', 'administrator', 'ordinary_member'):
         raise ValueError('browser_method_role_missing')
     selectors = value.get('selectors', {})
-    required = ['self_subject', 'editor_target', 'editor_body', 'submit', 'receipt_author', 'receipt_body', 'receipt_url']
+    required = ['self_subject', 'editor_target', 'editor_body', 'submit']
+    if value.get('receipt_state','observed')=='observed':
+        required += ['receipt_author','receipt_body','receipt_url']
+    elif value.get('receipt_state')!='unobserved':
+        raise ValueError('browser_receipt_contract_invalid')
     if operation == 'reply':
-        required += ['editor_parent', 'receipt_parent']
+        required += ['editor_parent']
+        if value.get('receipt_state','observed')=='observed':
+            required += ['receipt_parent']
     if any(not isinstance(selectors.get(key), str) or not 1 <= len(selectors[key]) <= 300 for key in required):
         raise ValueError('browser_method_observation_missing')
     # The schema intentionally has no JS/expression/evaluate fields. Selectors
     # are read through Playwright, not interpolated into JavaScript source.
     allowed = {'version', 'account_id', 'binding_version', 'target_url', 'self_url', 'operations',
-               'role', 'selectors', 'request', 'evidence_refs', 'checked_at', 'platform_permission'}
+               'role', 'selectors', 'request', 'evidence_refs', 'checked_at', 'platform_permission',
+               'receipt_state','self_subject_prefix','self_subject_suffix'}
     if set(value)-allowed:
         raise ValueError('browser_method_unknown_field')
     request = value['request']
     if (request.get('method') not in ('POST', 'PUT') or request.get('body_kind') not in ('json', 'form')
             or not isinstance(request.get('content_field'), str) or not request['content_field']
             or operation == 'reply' and not request.get('parent_field')
-            or set(request)-{'method', 'url', 'body_kind', 'content_field', 'parent_field', 'dynamic_fields'}):
+            or set(request)-{'method', 'url', 'body_kind', 'content_field', 'parent_field', 'dynamic_fields','fixed_fields'}):
         raise ValueError('browser_request_contract_missing')
     if not isinstance(request.get('dynamic_fields', []), list) or len(request.get('dynamic_fields', [])) > 12:
         raise ValueError('browser_request_contract_missing')
     if not all(isinstance(field, str) and 1 <= len(field) <= 100 for field in request.get('dynamic_fields', [])):
         raise ValueError('browser_request_contract_missing')
+    fixed=request.get('fixed_fields',{})
+    if (not isinstance(fixed,dict) or len(fixed)>20 or any(not isinstance(key,str) or not 1<=len(key)<=100
+            or not isinstance(item,str) or len(item)>2000 for key,item in fixed.items())
+            or set(fixed)&{request['content_field'],request.get('parent_field'),*request.get('dynamic_fields',[])}):
+        raise ValueError('browser_request_fixed_fields_invalid')
+    for key in ('self_subject_prefix','self_subject_suffix'):
+        if key in value and (not isinstance(value[key],str) or len(value[key])>300):
+            raise ValueError('browser_subject_contract_invalid')
     permission = value.get('platform_permission', {})
     if permission.get('state') != 'approved' or not permission.get('evidence_refs'):
         raise ValueError('platform_access_missing')
@@ -254,10 +281,12 @@ def match_request(method, request, intent):
         if any(len(value) != 1 for value in parsed.values()):
             raise ValueError('browser_request_ambiguous_field')
         values = {key: value[0] for key, value in parsed.items()}
-    fields = {spec['content_field'], *spec.get('dynamic_fields', [])}
+    fields = {spec['content_field'], *spec.get('dynamic_fields', []),*spec.get('fixed_fields',{})}
     if spec.get('parent_field'):
         fields.add(spec['parent_field'])
     if (not isinstance(values, dict) or set(values)-fields or values.get(spec['content_field']) != intent['body']
+            or any(values.get(key)!=item for key,item in spec.get('fixed_fields',{}).items())
             or intent.get('operation', 'publish') == 'reply' and values.get(spec['parent_field']) != intent.get('parent_url')):
         raise ValueError('browser_request_content_changed')
-    return hashlib.sha256(json.dumps([request['method'], request['url'], body], separators=(',', ':')).encode()).hexdigest()
+    semantic={key:item for key,item in values.items() if key not in spec.get('dynamic_fields',[])}
+    return hashlib.sha256(json.dumps([request['method'],request['url'],semantic],sort_keys=True,separators=(',', ':')).encode()).hexdigest()

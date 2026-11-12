@@ -134,7 +134,7 @@ async def begin(aid, platform, *, account_id=None, new_account=False, site_url=N
                 AND w.input#>>'{spec,payload,connection_account_id}'=%s)
             ORDER BY t.created_at DESC LIMIT 1""",(profile['id'],str(profile['account_id'])))
         if pending:
-            return connection_reply(pending,profile['account_id'],platform)
+            return connection_reply(pending,profile['account_id'],platform,native=profile['provider']=='chromium')
     try:
         await asyncio.to_thread(resolve, aid, profile_id=profile["id"])
     except ValueError as error:
@@ -166,13 +166,13 @@ async def begin(aid, platform, *, account_id=None, new_account=False, site_url=N
             payload={"takeover_id": str(takeover["id"]), "profile_id": str(profile["id"]),
                      "connection_account_id": str(profile["account_id"])},
             review_at=utcnow()+timedelta(minutes=30), dedupe_key="login:"+str(takeover["id"])))
-    return connection_reply(takeover,profile['account_id'],platform)
+    return connection_reply(takeover,profile['account_id'],platform,native=profile['provider']=='chromium')
 
 
-def connection_reply(row,account_id,platform):
+def connection_reply(row,account_id,platform,*,native=False):
     return {'takeover_id':row['id'],'account_id':account_id,'platform':platform,
             'status':'connected' if row.get('completed_account_id') else 'pending',
-            'automatic_connection':row['control_mode']=='automatic','control_mode':row['control_mode'],
+            'automatic_connection':native,'control_mode':row['control_mode'],
             'challenge_version':row['challenge_version'],'owner_action':row['connection_data'].get('owner_action'),
             'expires_at':row['expires_at'],'managed_target_start':False,'automation':False}
 
@@ -233,7 +233,7 @@ async def execute_account(aid, row, data):
     if snapshot['provider']=='chromium' and snapshot['control_mode']=='automatic':
         try:
             observed=await rpc(aid,data.profile_id,'account/automatic',{'task_id':str(row['id']),
-                'takeover':str(data.takeover_id),'account_id':str(data.connection_account_id)},timeout=100)
+                'takeover':str(data.takeover_id),'account_id':str(data.connection_account_id)},timeout=180)
         except httpx.HTTPError:
             wait.reason='temporarily_unavailable'
             return WorkResult(outcome='waiting',wait=wait)

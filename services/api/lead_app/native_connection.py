@@ -5,6 +5,7 @@ placeholders against a real password form; authentication never borrows a
 publication ActionRef. Identity evidence is read from the current self surface.
 """
 import asyncio
+import re
 from urllib.parse import urljoin
 
 from .browser_execution import origin
@@ -14,6 +15,9 @@ from .db import j, one, tx
 FORM_FACTS = '''function(){const form=this.form || this.closest('form'); if(!form)return null;
 return {tag:this.tagName.toLowerCase(),type:(this.type||this.getAttribute('type')||'text').toLowerCase(),
 name:this.getAttribute('name')||'',autocomplete:this.getAttribute('autocomplete')||'',method:form.method.toUpperCase(),action:form.action,
+passwordCount:form.querySelectorAll('input[type="password"]').length,
+newPassword:!!form.querySelector('input[autocomplete="new-password"]'),
+formText:form.innerText,heading:form.closest('main,section')?.querySelector('h1,h2')?.innerText||document.title,
 hasPassword:!!form.querySelector('input[type="password"]'),hasOtp:!!form.querySelector('input[autocomplete="one-time-code"]')};}'''
 
 
@@ -26,6 +30,7 @@ class NativeConnection:
         self.page=None
         self.observation=None
         self.proof_scope=None
+        self.self_entry=None
         self.anonymous_self=[]
         self.operation_lock=asyncio.Lock()
 
@@ -83,11 +88,14 @@ class NativeConnection:
             return await self.report_identity({'self_link_selector':'body'})
         if account.get('external_account_id'):
             with tx(self.actor.aid) as c:
-                previous=one(c,"""SELECT connection_data->>'self_selector' selector FROM lead.takeover_sessions
+                previous=one(c,"""SELECT connection_data->>'self_selector' selector,connection_data->>'self_url' self_url,
+                        connection_data->>'self_link_selector' link_selector FROM lead.takeover_sessions
                     WHERE completed_account_id=%s AND connection_data ? 'self_selector'
                     ORDER BY ended_at DESC NULLS LAST LIMIT 1""",(account['id'],))
-            if previous:
-                return await self.report_identity({'self_link_selector':previous['selector']})
+            if previous and previous.get('self_url'):
+                self.self_entry={'url':previous['self_url'],'selector':previous.get('link_selector')}
+                await self.page.goto(previous['self_url'],wait_until='domcontentloaded',timeout=30000)
+                return await self.report_identity({'subject_selector':previous['selector']})
         return None
 
     async def descriptor(self):
@@ -129,6 +137,11 @@ class NativeConnection:
         facts=await self.node_facts(node)
         if not facts or facts['hasOtp'] or facts['autocomplete']=='one-time-code':
             return {'allowed':False,'reason':'This is a person-only challenge or an unsupported control.'}
+        purpose=facts.get('formText','')+' '+facts.get('heading','')
+        if (facts.get('passwordCount')!=1 or facts.get('newPassword')
+                or not re.search(r'sign\s*in|log\s*in|login|authenticate|登录|登入',purpose,re.I)
+                or re.search(r'delete|remove|destroy|reset|change\s*password|register|sign\s*up|删除|重置|修改密码|注册',purpose,re.I)):
+            return {'allowed':False,'reason':'The current form is not a single-password sign-in form.'}
         if not facts['hasPassword'] or facts['method']!='POST' or origin(facts['action']) not in {origin(url) for url in self.lease['origins']}:
             return {'allowed':False,'reason':'This is not the current credential form.'}
         if name=='input':
@@ -170,6 +183,43 @@ class NativeConnection:
         self.observation=observed
         return observed
 
+    async def inspect_self(self,args):
+        await self.descriptor()
+        selector=args.get('self_link_selector','')
+        if not isinstance(selector,str) or not 1<=len(selector)<=300:
+            raise ValueError('self_surface_missing')
+        link=self.page.locator(selector)
+        if await link.count()!=1 or not await link.is_visible() or 'me' not in (await link.get_attribute('rel') or '').split():
+            raise ValueError('not_current_self_surface')
+        href=urljoin(self.page.url,await link.get_attribute('href') or '')
+        if origin(href) not in {origin(url) for url in self.lease['origins']}:
+            raise ValueError('self_surface_outside_connection')
+        acting_selector=args.get('acting_subject_selector','')
+        prefix=args.get('self_subject_prefix','')
+        suffix=args.get('self_subject_suffix','')
+        if (not isinstance(acting_selector,str) or not 1<=len(acting_selector)<=300
+                or not isinstance(prefix,str) or not isinstance(suffix,str) or len(prefix)>150 or len(suffix)>150
+                or not re.fullmatch(r'(?:(?:signed|logged)\s+in\s+as|posting\s+as|replying\s+as|current\s+account|当前(?:登录)?(?:账号|账户|身份))\s*[:：]?\s*',prefix,re.I)):
+            raise ValueError('current_acting_subject_semantics_missing')
+        acting=self.page.locator(acting_selector)
+        if await acting.count()!=1 or not await acting.is_visible():
+            raise ValueError('current_acting_subject_missing')
+        link_handle=await link.element_handle()
+        try:
+            related=await acting.evaluate("(node,link)=>node.contains(link)&&!node.closest('article,[role=article],blockquote')",link_handle)
+        finally:
+            await link_handle.dispose()
+        text=(await acting.inner_text()).strip()
+        if not related or not text.startswith(prefix) or suffix and not text.endswith(suffix):
+            raise ValueError('current_acting_subject_unestablished')
+        acting_subject=text[len(prefix):len(text)-len(suffix) if suffix else len(text)].strip()
+        if not acting_subject or len(acting_subject)>200:
+            raise ValueError('current_acting_subject_invalid')
+        self.self_entry={'url':href,'selector':selector,'acting_subject':acting_subject}
+        await self.page.goto(href,wait_until='domcontentloaded',timeout=30000)
+        await self.descriptor()
+        return {'state':'self_surface_opened','url':self.page.url}
+
     async def report_identity(self,args):
         await self.descriptor()
         _,connection,account=await asyncio.to_thread(self.snapshot)
@@ -178,27 +228,34 @@ class NativeConnection:
             from .account_connection import observe_identity
             observed=await observe_identity(self.page,account['platform'],self.actor.session)
             return self.remember_observation(observed.model_dump(mode='json'),expected)
-        selector=args.get('self_link_selector','')
+        selector=args.get('subject_selector','')
         if not isinstance(selector,str) or not 1<=len(selector)<=300:
-            raise ValueError('self_surface_missing')
-        link=self.page.locator(selector)
-        if await link.count()!=1 or not await link.is_visible():
-            raise ValueError('self_surface_ambiguous')
-        if 'me' not in (await link.get_attribute('rel') or '').split():
-            raise ValueError('not_current_self_surface')
-        href=urljoin(self.page.url,await link.get_attribute('href') or '')
-        subject=(await link.inner_text()).strip()
-        if origin(href)!=origin(account['connection_origin']) or not subject or len(subject)>200:
-            raise ValueError('self_surface_outside_connection')
-        # A public profile link present before credential submission is not self
-        # evidence. Generic sites lacking an authenticated self surface stop.
-        if (subject in self.anonymous_self or not self.lease.get('authentication_dispatched')) and subject!=account.get('external_account_id'):
+            raise ValueError('self_subject_missing')
+        if not self.self_entry or self.page.url!=self.self_entry['url']:
+            raise ValueError('self_surface_not_opened')
+        field=self.page.locator(selector)
+        if await field.count()!=1 or not await field.is_visible():
+            raise ValueError('self_subject_ambiguous')
+        observed=await field.evaluate("""node=>{const block=node.closest('p,dd,label,td,li');
+          const value=('value' in node ? node.value : node.innerText||'').trim();
+          const preceding=node.tagName==='DD' ? node.previousElementSibling?.innerText : '';
+          const label=node.getAttribute('aria-label')||preceding||(block ? block.innerText.replace(value,'') : '');
+          return {value,label};}""")
+        subject=observed['value']
+        if not re.search(r'account\s*(?:id|identifier)|user\s*(?:id|name)|username|handle|账号|帐号|用户标识',observed['label'],re.I):
+            raise ValueError('self_subject_not_account_field')
+        if self.self_entry.get('acting_subject') and subject!=self.self_entry['acting_subject']:
+            raise ValueError('private_self_and_acting_subject_disagree')
+        if not subject or len(subject)>200 or subject==observed['label'].strip():
+            raise ValueError('self_subject_invalid')
+        if not self.lease.get('authentication_dispatched') and subject!=account.get('external_account_id'):
             raise ValueError('self_surface_not_authenticated')
+        href=self.self_entry['url']
         self.observation={'status':'authenticated','operating_subject':{'namespace':'web','external_id':subject,'id_kind':'stable'},
             'evidence_refs':['native-self:'+self.connection_id+':'+str(self.lease['challenge_version'])]}
         with tx(self.actor.aid) as c:
             c.execute('UPDATE lead.takeover_sessions SET connection_data=connection_data || %s WHERE id=%s',
-                (j({'self_url':href,'self_selector':selector,'self_subject':subject}),self.connection_id))
+                (j({'self_url':href,'self_link_selector':self.self_entry['selector'],'self_selector':selector,'self_subject':subject}),self.connection_id))
         return self.remember_observation(self.observation,expected)
 
     async def command(self,operation,args):
@@ -206,6 +263,8 @@ class NativeConnection:
             return {key:value for key,value in (await self.descriptor()).items() if key not in ('cdp_url','headers')}
         if operation=='tool_authorize':
             return await self.authorize(args)
+        if operation=='inspect_self':
+            return await self.inspect_self(args)
         if operation=='report_connection':
             return await self.report_identity(args)
         raise ValueError('native_connection_operation_unsupported')
@@ -213,7 +272,15 @@ class NativeConnection:
     async def handoff(self,reason):
         if not self.lease:
             return
+        endpoints=await self.page.locator('form').evaluate_all("""forms=>forms.filter(form=>form.method.toUpperCase()==='POST' &&
+            form.querySelector('input[type="password"],input[autocomplete="one-time-code"]')).map(form=>form.action)""")
+        for endpoint in endpoints:
+            if origin(endpoint) in {origin(url) for url in self.lease['origins']} and endpoint not in self.lease['authentication_endpoints']:
+                self.lease['authentication_endpoints'].append(endpoint)
         _,connection,_=await asyncio.to_thread(self.snapshot)
+        with tx(self.actor.aid) as c:
+            c.execute('UPDATE lead.takeover_sessions SET connection_data=connection_data || %s WHERE id=%s AND challenge_version=%s',
+                (j({'authentication_endpoints':self.lease['authentication_endpoints']}),self.connection_id,connection['challenge_version']))
         current=transition(self.actor.aid,self.connection_id,connection['challenge_version'],'owner',reason=reason)
         # Keep this original page and its current challenge for the owner; release
         # the SDK execution slot without transferring cookies or page ownership.

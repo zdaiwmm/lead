@@ -122,6 +122,50 @@ def test_live_scope_rechecks_profile_lease_and_account_intent(growth_agent):
         runtime.current_scope(scope)
 
 
+def test_live_native_scope_cannot_follow_a_replaced_execution_route(growth_agent):
+    from lead_app.browser_runtime import PersistentRuntime
+    from lead_app.execution_routes import register
+    actor,action,claim,_,_,_=native_work(growth_agent)
+    with tx(growth_agent) as c:
+        task=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(action['task_id'],))
+        agent=one(c,'SELECT control_version FROM lead.agents WHERE id=%s',(growth_agent,))
+    scope={'task_id':str(task['id']),'control_version':agent['control_version'],
+        'task_generation':task['input']['task_generation'],'claim':claim,'origins':['https://fixture.test']}
+    runtime=PersistentRuntime(actor)
+    assert runtime.current_scope(scope)['id']==task['id']
+    register(growth_agent,actor.profile['id'],executor_ref='replacement-executor')
+    with pytest.raises(ValueError,match='browser_execution_route_changed'):
+        runtime.current_scope(scope)
+
+
+def test_live_native_scope_stops_when_its_actual_managed_exit_is_disabled(growth_agent):
+    from lead_app.browser_runtime import PersistentRuntime
+    from lead_app.config import database_kwargs
+    from lead_app.managed_network import add
+    actor,action,claim,_,_,_=native_work(growth_agent)
+    import uuid
+    marker=uuid.uuid4()
+    pool=add('native-exit-'+marker.hex,'http://127.0.0.1:19998',
+        '93.184.'+str(marker.bytes[0])+'.'+str(marker.bytes[1]),agent_id=growth_agent)
+    try:
+        with tx(growth_agent) as c:
+            task=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(action['task_id'],))
+            agent=one(c,'SELECT control_version FROM lead.agents WHERE id=%s',(growth_agent,))
+        scope={'task_id':str(task['id']),'control_version':agent['control_version'],
+            'task_generation':task['input']['task_generation'],'claim':claim,'origins':['https://fixture.test']}
+        runtime=PersistentRuntime(actor)
+        assert runtime.current_scope(scope)['id']==task['id']
+        with psycopg.connect(**database_kwargs(True)) as c:
+            c.execute("UPDATE lead.proxy_pool SET state='disabled' WHERE id=%s",(pool['id'],))
+        with pytest.raises(ValueError,match='browser_exit_changed'):
+            runtime.current_scope(scope)
+    finally:
+        # The isolated test pool must not affect a later test's automatic claim.
+        with psycopg.connect(**database_kwargs(True)) as c:
+            c.execute("UPDATE lead.proxy_assignments SET released_at=now() WHERE pool_id=%s",(pool['id'],))
+            c.execute("UPDATE lead.proxy_pool SET state='retired' WHERE id=%s",(pool['id'],))
+
+
 def test_control_loss_waits_for_late_prepared_attempt_and_invalidates_lease(growth_agent,monkeypatch):
     import threading
 

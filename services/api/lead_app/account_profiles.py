@@ -1,6 +1,5 @@
 """Resolve a login slot inside the project's tenant scope, never by display name."""
 
-from pathlib import Path
 from uuid import UUID
 
 from .atomic_dispatch import channel_pilot
@@ -10,8 +9,7 @@ from .operating_playbooks import channel_for
 
 
 def native_available():
-    folder = Path(env().get('LEAD_BROWSER_RUNTIME_DIR') or ROOT/'services/browser-runtime')
-    return (folder/'manifest.json').is_file()
+    return (ROOT/'services/browser-runtime/manifest.json').is_file()
 
 
 def connection_origin(site_url):
@@ -96,15 +94,21 @@ def for_platform(
             # Different sites may share the complete instance. Another identity
             # on the same origin gets a separate persistent profile.
             from urllib.parse import urlsplit
+
+            from .execution_routes import default_transport
             hostname=urlsplit(site_origin).hostname
             # A shared cookie Domain must be a common suffix. Comparing the last
             # two labels is deliberately conservative for multi-label public
             # suffixes: it may split extra instances, never share sibling sites.
             identity_site='.'.join(hostname.split('.')[-2:])
-            members=c.execute("""SELECT s.connection_origin FROM lead.social_accounts s JOIN lead.browser_profiles p ON p.id=s.profile_id
-                WHERE p.slot='native-shared'""").fetchall()
+            members=c.execute("""SELECT s.connection_origin,s.platform,r.transport_ref FROM lead.social_accounts s
+                JOIN lead.browser_profiles p ON p.id=s.profile_id
+                LEFT JOIN lead.profile_execution_routes r ON r.profile_id=p.id WHERE p.slot='native-shared'""").fetchall()
             conflict=any('.'.join(urlsplit(member['connection_origin']).hostname.split('.')[-2:])==identity_site
                 for member in members if member.get('connection_origin'))
+            tokyo={'reddit'} | (isolated_login_platforms(aid) & {'facebook','x'})
+            conflict=conflict or any((member['transport_ref'] or default_transport(member['platform']))!=default_transport(platform)
+                or (member['platform'] in tokyo)!=(platform in tokyo) for member in members)
             slot='native-'+uid() if new_binding or conflict else 'native-shared'
         profile = one(c, "SELECT * FROM lead.browser_profiles WHERE slot=%s", (slot,))
         if not profile:
@@ -161,18 +165,21 @@ def takeover_profile(aid, takeover):
 
 def public_research(aid):
     """A dedicated cookie-empty Profile, independent of every social account."""
+    native=native_available()
+    slot='native-public-research' if native else 'public-research'
     with tx(aid) as c:
         agent = require_agent(c,aid,True)
-        profile = one(c,"SELECT * FROM lead.browser_profiles WHERE slot='public-research'")
+        profile = one(c,"SELECT * FROM lead.browser_profiles WHERE slot=%s",(slot,))
         if not profile:
             base = one(c,"SELECT * FROM lead.browser_profiles WHERE slot='default'")
             pid = uid()
-            root = directory(aid,{"slot":"public-research","id":pid})
+            root = directory(aid,{"slot":slot,"id":pid})
             profile = one(c,"""INSERT INTO lead.browser_profiles(id,tenant_id,agent_id,provider,engine_version,
                 sdk_version,config_ref,config_hash,storage_ref,key_material_ref,network_identity_id,slot)
-                VALUES(%s,lead.ctx_tenant(),%s,%s,%s,%s,%s,%s,%s,%s,%s,'public-research') RETURNING *""",
-                (pid,aid,base["provider"],base["engine_version"],base["sdk_version"],str(root/"identity.json"),pid,
-                 str(root/"storage"),base["key_material_ref"],base["network_identity_id"]))
+                VALUES(%s,lead.ctx_tenant(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+                (pid,aid,'chromium' if native else base["provider"],'pending' if native else base["engine_version"],
+                 'browser-use/0.13.14' if native else base["sdk_version"],str(root/"identity.json"),pid,
+                 str(root/"storage"),base["key_material_ref"],base["network_identity_id"],slot))
             c.execute("""INSERT INTO lead.profile_leases(profile_id,tenant_id,agent_id,control_version)
                 VALUES(%s,lead.ctx_tenant(),%s,%s)""",(pid,aid,agent["control_version"]))
     from .execution_routes import default_transport, register, resolve

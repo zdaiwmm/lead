@@ -12,9 +12,19 @@ SOCKET = "socks5+unix:///run/lead-egress/reddit-v4.sock"
 
 
 def assign_exit(aid, profile):
-    research = profile["slot"] == "public-research"
+    research = profile["slot"] in ('public-research','native-public-research')
     platform = profile["slot"].split("-", 1)[0]
     network_id = uuid5(NAMESPACE_URL, f"lead:{aid}:{PROVIDER}")
+    if not research and profile['provider']=='chromium':
+        with tx(aid) as c:
+            platforms={row['platform'] for row in c.execute('SELECT platform FROM lead.social_accounts WHERE profile_id=%s',(profile['id'],))}
+        tokyo={'reddit'} | (isolated_login_platforms(aid) & {'facebook','x'})
+        if platforms & tokyo and platforms - tokyo:
+            raise ValueError('此共享环境的账号出口条件不兼容')
+        if platforms & tokyo:
+            platform='reddit' if 'reddit' in platforms else sorted(platforms & tokyo)[0]
+        elif str(profile['network_identity_id'])==str(network_id):
+            raise ValueError('此账号的东京登录出口已停用，请核对配置')
     if not research and platform != "reddit":
         if platform not in ("facebook", "x"):
             return None
@@ -36,7 +46,7 @@ def assign_exit(aid, profile):
         agent = require_agent(c, aid, True)
         if research:
             if not one(c,"""SELECT id FROM lead.browser_profiles WHERE id=%s AND agent_id=%s
-                AND slot='public-research'""",(profile["id"],aid)):
+                AND slot IN ('public-research','native-public-research')""",(profile["id"],aid)):
                 raise ValueError("公开研究环境不属于当前项目")
         else:
             c.execute(

@@ -23,8 +23,7 @@ RUNTIME = STATE / "browser-use-venv" / "bin" / "python"
 
 
 def available():
-    return env().get("LEAD_BROWSER_USE_ENABLED") == "1" and (RUNTIME.is_file() or
-        (ROOT/'services/browser-runtime/manifest.json').is_file())
+    return (ROOT/'services/browser-runtime/manifest.json').is_file() or (env().get('LEAD_BROWSER_USE_ENABLED')=='1' and RUNTIME.is_file())
 
 
 class HybridResearchPage(ResearchPage):

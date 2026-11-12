@@ -179,3 +179,39 @@ def test_archiving_original_project_clears_login_credentials(growth_agent):
     domain.set_control(growth_agent,'archive')
     with tx(growth_agent) as c:
         assert one(c,'SELECT state,encrypted_login FROM lead.takeover_sessions WHERE id=%s',(snapshot['id'],))=={'state':'expired','encrypted_login':None}
+
+
+def test_native_owner_connection_keeps_versioned_protocol_capability():
+    from lead_app.account_connection import connection_reply
+    value=connection_reply({'id':'fixture','completed_account_id':None,'control_mode':'owner',
+        'challenge_version':2,'connection_data':{'owner_action':'OTP'},'expires_at':utcnow()},'account','web',native=True)
+    assert value['automatic_connection'] is True and value['control_mode']=='owner' and value['challenge_version']==2
+
+
+def test_native_shared_profiles_keep_transport_and_exit_compatibility(growth_agent,monkeypatch):
+    import json
+
+    from lead_app import account_profiles
+    from lead_app.execution_routes import register, resolve
+    monkeypatch.setattr(account_profiles,'native_available',lambda:True)
+    monkeypatch.setenv('LEAD_BROWSER_TRANSPORTS',json.dumps({'shared':'http://127.0.0.1:19001','other':'http://127.0.0.1:19002'}))
+    monkeypatch.setenv('LEAD_BROWSER_ROUTE_DEFAULTS',json.dumps({'facebook':'other'}))
+    first=account_profiles.for_platform(growth_agent,'web',create=True,site_url='https://a.example/login')
+    original=register(growth_agent,first['id'])
+    facebook=account_profiles.for_platform(growth_agent,'facebook',create=True)
+    reddit=account_profiles.for_platform(growth_agent,'reddit',create=True)
+    assert first['id']!=facebook['id'] and first['id']!=reddit['id']
+    assert resolve(growth_agent,profile_id=first['id'])==original
+
+
+def test_native_public_and_social_slots_preserve_original_registered_exit(growth_agent,monkeypatch):
+    from lead_app import account_profiles, reddit_login
+    monkeypatch.setattr(account_profiles,'native_available',lambda:True)
+    login=account_profiles.for_platform(growth_agent,'reddit',create=True)
+    public=account_profiles.public_research(growth_agent)
+    assert public['provider']=='chromium' and public['slot']=='native-public-research'
+    assert reddit_login.assign_exit(growth_agent,public) is None
+    monkeypatch.setenv('LEAD_REDDIT_IPV4_'+growth_agent.replace('-','').upper(),'35.72.111.159')
+    assert reddit_login.assign_exit(growth_agent,login)=={'server':reddit_login.SOCKET}
+    assert reddit_login.assign_exit(growth_agent,public)=={'server':reddit_login.SOCKET}
+    assert login['network_identity_id']==public['network_identity_id'] and login['storage_ref']!=public['storage_ref']

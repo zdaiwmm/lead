@@ -99,9 +99,11 @@ class NativeNetworkGate:
     Permissions and request claims are callbacks into the original task/action
     transaction. There is intentionally no replacement authorization ledger here.
     """
-    def __init__(self, context, control, *, authorize, claim, lost, owner_timeout=.7):
+    def __init__(self, context, control, *, authorize, claim, lost, owner_timeout=.7, proxy=None):
         self.context = context
         self.control = control
+        self.proxy=proxy
+        self.auth_seen=set()
         self.authorize = authorize
         self.claim = claim
         self.lost = lost
@@ -179,6 +181,8 @@ class NativeNetworkGate:
                     if len(self.network) > 4096:
                         self.network.pop(next(iter(self.network)))
                     self.changed.set()
+                elif method=='Fetch.authRequired':
+                    self.schedule(self.authenticate_proxy(event))
                 elif method == 'Fetch.requestPaused':
                     self.schedule(self.paused(event))
         finally:
@@ -190,6 +194,17 @@ class NativeNetworkGate:
                 # The caller first invalidates the proxy token, then actively
                 # closes existing TLS/header connections and records uncertainty.
                 await self.lost()
+
+    async def authenticate_proxy(self,event):
+        request=event['requestId']
+        challenge=event.get('authChallenge',{})
+        response={'response':'CancelAuth'}
+        if (self.token and self.proxy and challenge.get('source')=='Proxy'
+                and origin_control(challenge.get('origin',''))==origin_control(self.proxy['server'])
+                and request not in self.auth_seen):
+            self.auth_seen.add(request)
+            response={'response':'ProvideCredentials','username':self.proxy['username'],'password':self.proxy['password']}
+        await self.send('Fetch.continueWithAuth',{'requestId':request,'authChallengeResponse':response})
 
     async def attached(self, event, parent):
         info, session = event['targetInfo'], event['sessionId']
@@ -222,7 +237,7 @@ class NativeNetworkGate:
                                      max_size=200*1024*1024, open_timeout=5)
         self.reader = asyncio.create_task(self.receive())
         await self.send('Target.setDiscoverTargets',{'discover':True})
-        await self.send('Fetch.enable', {'patterns': [{'urlPattern': '*', 'requestStage': 'Request'}]})
+        await self.send('Fetch.enable', {'patterns': [{'urlPattern': '*', 'requestStage': 'Request'}],'handleAuthRequests':True})
         await self.send('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': True,
             'flatten': True, 'filter': [{'type': 'page', 'exclude': False},
                                        {'type': 'service_worker', 'exclude': False}, {'exclude': True}]})
@@ -281,7 +296,10 @@ class NativeNetworkGate:
             if not self.token:
                 raise ValueError('control_not_ready')
             session, target = await self.resolve_owner(event)
-            if not self.context_id or target.get('browserContextId') != self.context_id:
+            root = self.owners.get(session)
+            scope = self.roots.get(root)
+            expected_context=scope.get('probe_context_id') if scope and scope.get('kind')=='identity_probe' else self.context_id
+            if not expected_context or target.get('browserContextId') != expected_context:
                 raise ValueError('request_context_unmanaged')
             request = event['request']
             if request.get('hasPostData') and 'postData' not in request:
@@ -336,7 +354,14 @@ class NativeNetworkGate:
 class PersistentRuntime:
     """The existing Actor's Chromium/context/proxy/control lifecycle owner."""
     def __init__(self, actor):
+        from .execution_routes import resolve
+        from .managed_network import policy
+
         self.actor = actor
+        # The instance keeps its original execution location and managed exit.
+        # A later route edit cannot lend this already-running process a new role.
+        self.execution_ref = resolve(actor.aid,profile_id=actor.profile['id']).model_dump(mode='json')
+        self.network_stamp = managed_exit_stamp(policy(actor.aid))
         self.context = None
         self.playwright = None
         self.gate = None
@@ -346,6 +371,8 @@ class PersistentRuntime:
         self.closing = False
         self.slots = asyncio.Semaphore(2)
         self.pages = {}
+        self.probes={}
+        self.identity_options={}
 
     def forward_token(self):
         return (self.actor.epoch, self.gate.token) if not self.closed and self.gate and self.gate.token else None
@@ -388,7 +415,10 @@ class PersistentRuntime:
             chooser.bind(('127.0.0.1',0))
             port = chooser.getsockname()[1]
         self.playwright = await async_playwright().start()
-        binary = ROOT/'services/browser-runtime/chromium/chrome-linux64/chrome'
+        assets_root = ROOT/'services/browser-runtime'
+        if env().get('LEAD_DEPLOYMENT_MODE') != 'production':
+            assets_root = Path(env().get('LEAD_BROWSER_RUNTIME_DIR') or assets_root)
+        binary = assets_root/'chromium/chrome-linux64/chrome'
         if env().get('LEAD_DEPLOYMENT_MODE') != 'production' and not binary.is_file():
             binary = Path(self.playwright.chromium.executable_path)
         if not binary.is_file():
@@ -399,9 +429,13 @@ class PersistentRuntime:
             '--proxy-bypass-list=<-loopback>','--force-webrtc-ip-handling-policy=disable_non_proxied_udp']}
         options = network_namespace.chromium_options(options,actor.aid,actor.forward_proxy,storage,
                                                       control_directory=self.control_directory,cdp_port=port)
+        from .managed_network import policy
+        network_policy=policy(actor.aid) or {}
+        self.identity_options={key:value for key,value in {'locale':network_policy.get('locale'),
+            'timezone_id':network_policy.get('timezone')}.items() if value}
         self.context = await self.playwright.chromium.launch_persistent_context(str(storage),headless=True,
             offline=True,service_workers='allow',accept_downloads=False,proxy=actor.forward_proxy.browser_proxy,
-            viewport={'width':1280,'height':800},**options)
+            viewport={'width':1280,'height':800},**self.identity_options,**options)
         actor.context = self.context
         actor.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         session = await self.context.new_cdp_session(actor.page)
@@ -413,7 +447,7 @@ class PersistentRuntime:
             response.raise_for_status()
             browser_path = urlsplit(response.json()['webSocketDebuggerUrl']).path
         self.gate = NativeNetworkGate(self.context,None,authorize=self.authorize_request,
-                                      claim=self.claim_request,lost=self.lost)
+                                      claim=self.claim_request,lost=self.lost,proxy=actor.forward_proxy.browser_proxy)
         await self.gate.start(socket_path,browser_path,info['browserContextId'])
         self.bridge = await ControlBridge(socket_path,browser_path).start()
         # No page scope has been granted yet. Existing SW requests remain behind
@@ -426,6 +460,9 @@ class PersistentRuntime:
         from .db import one, tx
         if not self.forward_token():
             return None
+        if scope and scope.get('kind')=='identity_probe':
+            await asyncio.to_thread(self.current_scope,scope)
+            return {'kind':'read'} if request['method']=='GET' and canonical_probe_url(request['url']) in {canonical_probe_url(url) for url in scope['probe_urls']} else None
         endpoint=(origin(request['url']),urlsplit(request['url']).path)
         with tx(self.actor.aid) as c:
             auth_rows=c.execute("""SELECT endpoint FROM lead.takeover_sessions t,
@@ -518,7 +555,29 @@ class PersistentRuntime:
     def current_scope(self, scope):
         from .db import one, tx
         from .growth.contracts import utcnow
+        from .managed_network import policy
+
+        network=policy(self.actor.aid)
+        if ((network is not None and not network['usable'])
+                or managed_exit_stamp(network)!=self.network_stamp):
+            raise ValueError('browser_exit_changed')
         with tx(self.actor.aid) as c:
+            route=one(c,'SELECT * FROM lead.profile_execution_routes WHERE profile_id=%s',(self.actor.profile['id'],))
+            if not route or any(str(route[key])!=str(self.execution_ref[ref]) for key,ref in
+                    (('profile_id','profile_id'),('executor_ref','executor_ref'),('transport_ref','transport_ref'),('generation','route_generation'))):
+                raise ValueError('browser_execution_route_changed')
+            if scope.get('kind')=='identity_probe':
+                valid=self.probes.get(scope.get('probe_ref'))
+                if not valid or valid is not scope:
+                    raise ValueError('identity_probe_scope_expired')
+                if not one(c,'''SELECT l.profile_id FROM lead.profile_leases l
+                    JOIN lead.browser_sessions b ON b.profile_id=l.profile_id AND b.epoch=l.epoch
+                    JOIN lead.agents a ON a.id=l.agent_id WHERE l.profile_id=%s AND l.epoch=%s AND l.state='held'
+                    AND l.expires_at>now() AND b.id=%s AND b.ended_at IS NULL
+                    AND a.control_version=%s AND a.desired_state<>'archived' ''',
+                    (self.actor.profile['id'],self.actor.epoch,self.actor.session,scope['control_version'])):
+                    raise ValueError('identity_probe_instance_changed')
+                return None
             row = one(c,'''SELECT t.*,a.control_version,a.desired_state FROM lead.tasks t
                 JOIN lead.agents a ON a.id=t.agent_id WHERE t.id=%s''',(scope['task_id'],))
             owner_connection=bool(scope.get('connection_ref') and scope.get('control_mode')=='owner')
@@ -534,7 +593,8 @@ class PersistentRuntime:
                 raise ValueError('browser_instance_changed')
             runtime = (row['result'] or {}).get('runtime',{})
             from datetime import datetime
-            if not owner_connection and (runtime.get('attempt_token') != scope['claim']['attempt_token'] or not runtime.get('lease_until')
+            if not owner_connection and (runtime.get('control_version')!=scope['control_version']
+                    or runtime.get('attempt_token') != scope['claim']['attempt_token'] or not runtime.get('lease_until')
                     or datetime.fromisoformat(runtime['lease_until']) <= utcnow()):
                 raise ValueError('browser_task_lease_expired')
             if scope.get('connection_ref'):
@@ -590,6 +650,39 @@ class PersistentRuntime:
         return await asyncio.to_thread(claim_request,self.actor,scope['action']['id'],scope['claim'],
                                        self.actor.epoch,request,observed)
 
+    async def acquire_identity_probe(self,urls):
+        from .db import one, tx
+        await asyncio.wait_for(self.slots.acquire(),30)
+        context=None
+        token=secrets.token_urlsafe(24)
+        try:
+            context=await self.context.browser.new_context(offline=True,service_workers='block',
+                viewport={'width':1280,'height':800},**self.identity_options)
+            page=await context.new_page()
+            session=await context.new_cdp_session(page)
+            info=(await session.send('Target.getTargetInfo'))['targetInfo']
+            await session.detach()
+            with tx(self.actor.aid) as c:
+                agent=one(c,'SELECT control_version FROM lead.agents WHERE id=%s',(self.actor.aid,))
+            scope={'kind':'identity_probe','probe_ref':token,'task_id':'identity:'+token,
+                'control_version':agent['control_version'],'origins':list(urls),'probe_urls':list(urls),
+                'probe_context_id':info['browserContextId'],'target_id':info['targetId'],'generation':self.actor.epoch}
+            self.probes[token]=scope
+            self.pages[info['targetId']]={'page':page,'scope':scope,'slot_held':True,'probe_context':context}
+            await self.gate.register(info['targetId'],scope)
+            await context.set_offline(False)
+            return page,info['targetId']
+        except BaseException:
+            self.probes.pop(token,None)
+            for target,entry in list(self.pages.items()):
+                if entry.get('probe_context') is context:
+                    self.pages.pop(target,None)
+                    self.gate.roots.pop(target,None)
+            if context:
+                await context.close()
+            self.slots.release()
+            raise
+
     async def acquire_page(self, scope, url):
         from .browser_execution import origin
         if self.closed or not self.forward_token():
@@ -643,7 +736,11 @@ class PersistentRuntime:
         entry = self.pages.pop(target,None)
         self.gate.roots.pop(target,None)
         if entry:
-            await entry['page'].close()
+            self.probes.pop(entry['scope'].get('probe_ref'),None)
+            if entry.get('probe_context'):
+                await entry['probe_context'].close()
+            else:
+                await entry['page'].close()
             if entry.get('slot_held',True):
                 self.slots.release()
 
@@ -724,3 +821,21 @@ async def launch_native_actor(actor):
     except BaseException:
         await runtime.close()
         raise
+
+
+def origin_control(url):
+    parsed=urlsplit(url)
+    return parsed.scheme,parsed.hostname,parsed.port or (443 if parsed.scheme=='https' else 80)
+
+
+def canonical_probe_url(url):
+    parsed=urlsplit(url)
+    return parsed._replace(path=parsed.path or '/',fragment='').geturl()
+
+
+def managed_exit_stamp(row):
+    if row is None:
+        return None
+    import hashlib
+    return (hashlib.sha256(bytes(row['cipher'])).hexdigest(),str(row['expected_ip']),
+            row['region'],row['timezone'],row['locale'])

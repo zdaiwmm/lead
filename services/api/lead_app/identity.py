@@ -1,5 +1,6 @@
 """First-party device sampling page; never measures website visitors."""
 
+import asyncio
 import base64
 import hashlib
 import ipaddress
@@ -44,10 +45,13 @@ async def check(actor):
     It sends no account cookies to the two measurement services.
     """
     aid = actor.aid
-    async with actor.lock:
+    native=getattr(actor,'native_runtime',None)
+    if native and not hasattr(actor,'identity_lock'):
+        actor.identity_lock=asyncio.Lock()
+    async with actor.identity_lock if native else actor.lock:
         with tx(aid) as c:
             require_agent(c, aid, True)
-            if one(
+            if not native and one(
                 c,
                 "SELECT 1 FROM lead.takeover_sessions WHERE state IN ('requested','active','ending') AND expires_at>now() AND profile_id=%s", (actor.profile['id'],)
             ):
@@ -69,7 +73,17 @@ async def check(actor):
             ),
             "os_boundary": actor.forward_proxy.boundary or {"state": "not_enforced"},
         }
-        sample = await actor.context.new_page()
+        probe_target=None
+        if native:
+            urls=[f'http://127.0.0.1:8088/lab/{aid}/identity/',
+                'https://api6.ipify.org?format=json' if actor.forward_proxy.bound_ipv6 else 'https://api.ipify.org?format=json',
+                'https://www.cloudflare.com/cdn-cgi/trace']
+            sample,probe_target=await native.acquire_identity_probe(urls)
+            command=await native.gate.send('Browser.getBrowserCommandLine')
+            result['native_webrtc_exit_enforced']=bool(result['os_egress_enforced'] and
+                '--force-webrtc-ip-handling-policy=disable_non_proxied_udp' in command.get('arguments',[]))
+        else:
+            sample = await actor.context.new_page()
         try:
             await sample.goto(
                 f"http://127.0.0.1:8088/lab/{aid}/identity/", timeout=15000
@@ -108,7 +122,10 @@ async def check(actor):
                 except Exception as e:
                     result["errors"].append({"probe": name, "error": type(e).__name__})
         finally:
-            await sample.close()
+            if probe_target:
+                await native.release_page(probe_target)
+            else:
+                await sample.close()
         ips = {v["ip"] for v in result["probes"].values()}
         expected = env().get("LEAD_EXPECTED_IP_" + aid.replace("-", "").upper()) or (
             str(network["expected_ip"]) if network["expected_ip"] else None
@@ -180,7 +197,7 @@ async def check(actor):
             and result["expected_ip_matches"]
             and result["probe_agreement"]
             and result["device"]
-            and result["device"].get("webRTCDisabled")
+            and (result["device"].get("webRTCDisabled") or result.get("native_webrtc_exit_enforced"))
         )
         observed = next(iter(ips)) if len(ips) == 1 else None
         check_id = uid()

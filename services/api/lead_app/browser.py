@@ -1155,6 +1155,7 @@ class Gateway:
                             await self.close_one(aid, key)
                         elif (
                             actor.lock.locked()
+                            or actor.native_runtime and actor.native_runtime.pages
                             or actor.research_pages
                             or self.locks[key].locked()
                             or self.keep_idle(aid, actor.session, time.monotonic() - actor.used)
