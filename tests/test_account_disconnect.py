@@ -276,7 +276,7 @@ async def test_late_browser_auth_error_cannot_reclaim_released_identity(
         raise error_type("fixture expired session")
 
     monkeypatch.setattr(telegram, "open_account", lost_session)
-    actor = SimpleNamespace(aid=aid, lock=asyncio.Lock(), page=None, touch=lambda: None)
+    actor = SimpleNamespace(aid=aid, profile={'id':account['profile_id']},lock=asyncio.Lock(), page=None, touch=lambda: None)
     assert (await Actor.publish_telegram(actor, str(action_id)))["state"] == "unknown"
     with tx(aid) as c:
         assert (

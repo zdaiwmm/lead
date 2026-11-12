@@ -1,11 +1,10 @@
 import asyncio
 import shutil
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
 from lead_app import domain
-from lead_app.config import ROOT, STATE
+from lead_app.config import ROOT
 from lead_app.db import uid
 from lead_app.growth import runtime
 from lead_app.growth.contracts import utcnow
@@ -42,12 +41,14 @@ async def test_real_queue_server_restart_resumes_both_original_projects(tmp_path
         common = __import__("subprocess").check_output(["git","rev-parse","--git-common-dir"],cwd=ROOT,text=True).strip()
         candidate=(ROOT/common).resolve().parent/".state/tools/temporal"
         binary=str(candidate) if candidate.is_file() else None
+    download=tmp_path/'server-cache'
+    download.mkdir()
     kwargs={"dev_server_database_filename":str(tmp_path/"queue.sqlite"),
-        "download_dest_dir":str(Path(STATE).parent/"test-server"),"dev_server_log_level":"error"}
+        "download_dest_dir":str(download),"dev_server_log_level":"error"}
     if binary:
         kwargs["dev_server_existing_path"]=binary
     seen,executed,completed=set(),[],set()
-    deadline=utcnow()+timedelta(seconds=3)
+    deadline=None
     @activity.defn(name="growth_advance")
     async def advance(ref:dict):
         seen.add(ref["task_id"])
@@ -68,6 +69,9 @@ async def test_real_queue_server_restart_resumes_both_original_projects(tmp_path
     refs=[{"agent_id":uid(),"task_id":uid(),"task_generation":1} for _ in range(2)]
     names=[]
     async with await WorkflowEnvironment.start_local(**kwargs) as env:
+        # Download/startup time is outside the simulated outage window. Both
+        # original workflows must still be waiting when this queue is stopped.
+        deadline=utcnow()+timedelta(seconds=3)
         async with Worker(env.client,task_queue=queue,workflows=[GrowthWorkWorkflow],activities=[advance,execute,finish]):
             for ref in refs:
                 name=uid()
@@ -76,6 +80,7 @@ async def test_real_queue_server_restart_resumes_both_original_projects(tmp_path
             async with asyncio.timeout(8):
                 while len(seen)<2:
                     await asyncio.sleep(.02)
+        assert not executed
         # Exiting really stops this test's queue process, leaving its SQLite.
     async with await WorkflowEnvironment.start_local(**kwargs) as env:
         async with Worker(env.client,task_queue=queue,workflows=[GrowthWorkWorkflow],activities=[advance,execute,finish]):
