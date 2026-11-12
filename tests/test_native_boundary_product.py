@@ -79,7 +79,7 @@ async def test_connection_session_keeps_sw_cache_and_nonpublication_posts(monkey
                 'scope_task_id': (scope or {}).get('task_id'),
                 'scope_connection_ref': (scope or {}).get('connection_ref'),
                 'scope_account_id': (scope or {}).get('account_id'),
-                'allowed': bool(decision), 'decision_kind': (decision or {}).get('kind')})
+                'allowed': bool(decision), 'decision_kind': (decision or {}).get('kind'),'read_proof':(decision or {}).get('read_proof')})
             if request['method'] == 'POST' and parsed.path in post_seen:
                 post_seen[parsed.path].set()
         if raised:
@@ -259,6 +259,18 @@ async def test_connection_session_keeps_sw_cache_and_nonpublication_posts(monkey
             } catch(error) {return {error:error.name};}}""")
             await asyncio.wait_for(post_seen['/read'].wait(), 5)
             await asyncio.sleep(.1)
+            proofs=[row['read_proof'] for row in decisions if row.get('read_proof')]
+            assert {proof['role'] for proof in proofs}=={'search','session_maintenance'}
+            maintenance=next(proof for proof in proofs if proof['role']=='session_maintenance')
+            assert maintenance['task_id']==str(task['id']) and maintenance['page_target_id']==controller.lease['target_id']
+            assert len(maintenance['worker_script_hash'])==64 and len(maintenance['page_script_hash'])==64
+            post_seen['/session/refresh'].clear()
+            await page.get_by_role('button',name='Refresh membership').click()
+            await asyncio.wait_for(post_seen['/session/refresh'].wait(),5)
+            await asyncio.sleep(.05)
+            assert source_count('POST','/session/refresh')==1
+            denied=await page.evaluate('''async()=>{try{await fetch('/read',{method:'POST',body:new URLSearchParams({query:'x',nonce:'fresh-read-nonce',body:'an-ungranted-write'})});return false}catch{return true}}''')
+            assert denied and source_count('POST','/read')==1
             snapshot.update(upstream_fetch_events=list(upstream_events.values()),
                 refresh_source_post_count=source_count('POST', '/session/refresh'),
                 reading_source_post_count=source_count('POST', '/read'), read_status=reading.get('status'),

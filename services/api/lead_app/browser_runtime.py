@@ -104,6 +104,7 @@ class NativeNetworkGate:
         self.control = control
         self.proxy=proxy
         self.auth_seen=set()
+        self.scripts={}
         self.authorize = authorize
         self.claim = claim
         self.lost = lost
@@ -174,6 +175,7 @@ class NativeNetworkGate:
                     root=self.owners.get(event['sessionId'])
                     if root in self.roots:
                         self.roots[root]['document_revision']=self.roots[root].get('document_revision',0)+1
+                    self.scripts={key:value for key,value in self.scripts.items() if key[0]!=event['sessionId']}
                     self.targets.pop(event['sessionId'], None)
                     self.owners.pop(event['sessionId'], None)
                     self.initialized.discard(event['sessionId'])
@@ -184,6 +186,14 @@ class NativeNetworkGate:
                     if len(self.network) > 4096:
                         self.network.pop(next(iter(self.network)))
                     self.changed.set()
+                elif method=='Runtime.executionContextsCleared':
+                    self.scripts={key:value for key,value in self.scripts.items() if key[0]!=session}
+                elif method=='Runtime.executionContextDestroyed':
+                    self.scripts={key:value for key,value in self.scripts.items() if key[0]!=session or value.get('executionContextId')!=event['executionContextId']}
+                elif method=='Debugger.scriptParsed' and session in self.targets:
+                    self.scripts[(session,event['scriptId'])]=event
+                    if len(self.scripts)>2048:
+                        self.scripts.pop(next(iter(self.scripts)))
                 elif method=='Fetch.authRequired':
                     self.schedule(self.authenticate_proxy(event))
                 elif method == 'Fetch.requestPaused':
@@ -229,6 +239,9 @@ class NativeNetworkGate:
                 await self.send('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': True,
                     'flatten': True, 'filter': [{'type': 'iframe', 'exclude': False}, {'exclude': True}]}, session)
             await self.send('Network.enable', {}, session)
+            if kind in ('page','iframe','service_worker'):
+                await self.send('Runtime.enable',{},session)
+                await self.send('Debugger.enable',{},session)
             if kind in ('page','iframe'):
                 await self.send('Page.enable',{},session)
             await self.send('Runtime.runIfWaitingForDebugger', {}, session)
@@ -321,7 +334,7 @@ class NativeNetworkGate:
             expected_context=scope.get('probe_context_id') if scope and scope.get('kind')=='identity_probe' else self.context_id
             if not expected_context or target.get('browserContextId') != expected_context:
                 raise ValueError('request_context_unmanaged')
-            request = event['request']
+            request = {**event['request'],'_native_network':{'session':session,'network_id':event.get('networkId')}}
             if request.get('hasPostData') and 'postData' not in request:
                 raise ValueError('request_body_unavailable')
             root = self.owners.get(session)
@@ -540,6 +553,10 @@ class PersistentRuntime:
                 return {'kind':'authentication'}
             if request['method'] in ('GET','HEAD'):
                 return {'kind':'read'} if not scope.get('read_urls') or request['url'] in scope['read_urls'] else None
+            if request['method']=='POST' and scope.get('kind')!='identity_probe':
+                from .native_read_roles import authorize_search
+                if proof:=await authorize_search(self,scope,target,request):
+                    return {'kind':'read','read_proof':proof}
             if scope.get('action'):
                 try:
                     match_request(scope['action']['intent']['browser_method'],request,scope['action']['intent'])
@@ -570,6 +587,10 @@ class PersistentRuntime:
             identities = {(item.get('account_id'),item.get('binding_version')) for item in readers}
             if request['method'] in ('GET','HEAD') and readers and len(identities) == 1:
                 return {'kind':'read'}
+            if request['method']=='POST':
+                from .native_read_roles import authorize_maintenance
+                if proof:=await authorize_maintenance(self,target,request):
+                    return {'kind':'read','read_proof':proof}
             candidates = []
             for value in self.pages.values():
                 lease = value['scope']
