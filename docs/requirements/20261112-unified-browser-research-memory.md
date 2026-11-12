@@ -821,6 +821,9 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - `1b9a5db`接入原生发布稳定段（源`4d7029a`）：真实Linux原Task→prepare/publish→SDK输入/点击→原代理唯一POST→303→当前DOM作者/正文/URL与baseline唯一新帖→原attempt/action confirmed→growth_receipt_valid及首次promotion→Task succeeded。单例20.03秒，动作阶段3次假模型请求，真实模型/实号均0。根集成直接消费者89项21.17秒通过；合并helper时重复的同值OTP诊断key已去重，未改变实际行为。
 - `d3e459e`接入普通成员reply及receipt关系守卫（源`4bb639f`）：Linux发布/回复两个产品case合42.76秒通过，实际reply POST只有1次，回执包含原parent。该轮整体另有3项DOM fixture错误，未记全绿；便携fixture修正后当地3项1.26秒通过，拒绝错父帖页面中全局导航或其他article的正确parent链接。截图先在内存采集，再核对document/scope与整份receipt，最后写0600证据。主集成上述DOM3项、C17和相关消费者共34项3.34秒通过；浏览器测试沿显式LEAD_BROWSER_TESTS开关，main CI已启用。
 - C17 `e136d9c`（源`a57ea2a`）：原growth未知动作不再永远5分钟轮询，三次有效claim完成原动作回查后转1小时级核对；初始prepared/发送、过期与重复finish不累计。保留ActionRef、原任务/期限、费用及检查次数，pending Wait同样受低频下界约束，暂停仍可回查原事实。冻结时钟反例先红；独立5项及原消费者30项2.26秒通过，主集成相关34项通过。纯本地37单位合成账本校验未产生模型或外部费用；同账号不同意图、其他渠道可实际prepare，原意图不能改名再发。实际native未知断响应仍待核心完整执行例。
+- `1494926`（源`d1310a0`）补实际native未知回查：Linux原提交断响应后只留原Action/attempt1、源站POST1；账号及项目均pause，先读到旧的同作者/正文帖子被baseline拒绝，随后新原帖DOM回执确认原Action，完整intent及grants均未改变。该轮unknown和便携DOM3共4绿，另一C15子例因测试复用同material返回旧终态Task而失败，未记整体绿；测试改独立dedupe_key后仅C15重验1项23.89秒。主集成相关55项23.14秒通过。
+- 同段C15已接官方Agent.run on_step_start：每步读取真实DOM/字段/滚动/文档状态，只持久hash；实际无新状态在3次假模型调用后停，两次无效方法（初次+一次修正）在2次后停，目标/grant零变化。不过完整innerText/loader/hash仍会将时钟、动画、自动reload或来回滚动误算进展，已列为未关闭缺口；有效进展耗片段后的原Task/checkpoint/due续接正例仍待补，不以这两个负例宣称C15完成。
+- C28/C30产品独立红例固定为测试`4409df4`（源码SHA256 `2132e09c74633907e0a5b8dcd8fd26cb7ca3f5a01af4874fbdd0c09972d44973`，夹具未改）：真实ConnectionRef认证POST1/HttpOnly会话成立、Chrome实际代理与三origin可信标记正确、secureContext=true、页面引用无随机端口冲突。SW脚本Fetch含frameId，关联的唯一当前SW Network会话缺frameId，但networkId/URL/method/context吻合，原resolve_owner因frame严格比较拒绝，sw.js源站0；普通/read POST正确解析page owner后authorize拒绝、源站0。首轮与两次只读诊断均保留，末轮1失败17.943秒；refresh尚未触发，cache/synthetic/OOPIF/SSO及完成绑定后的NativeResearch组合仍未覆盖。核心接最小关联修正与角色生产者，不按路径名或任意同源POST直接放行。
 
 ### 22.2 尚未放行与部署约束
 
