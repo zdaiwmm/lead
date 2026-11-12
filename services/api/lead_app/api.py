@@ -13,6 +13,8 @@ from uuid import UUID
 
 import httpx
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -214,6 +216,16 @@ async def local_auth(request, call_next):
                 f"default-src 'none'; script-src 'sha256-{SCRIPT_HASH}'; frame-ancestors 'none'"
             )
     return response
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request,error):
+    if re.fullmatch(r'/api/agents/[^/]+/connect',request.url.path):
+        # Pydantic's default errors include the rejected raw input. Login values
+        # must never be echoed, even when type/length/extra-field validation fails.
+        detail=[{'loc':item['loc'],'type':item['type'],'msg':'连接资料格式无效'} for item in error.errors()]
+        return JSONResponse({'detail':detail},status_code=422)
+    return await request_validation_exception_handler(request,error)
 
 
 @app.exception_handler(ValueError)

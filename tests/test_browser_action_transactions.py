@@ -120,3 +120,44 @@ def test_live_scope_rechecks_profile_lease_and_account_intent(growth_agent):
     set_intent(growth_agent,social['id'],'paused',source='owner_command',source_ref='revoke-observation')
     with pytest.raises(ValueError):
         runtime.current_scope(scope)
+
+
+def test_control_loss_waits_for_late_prepared_attempt_and_invalidates_lease(growth_agent,monkeypatch):
+    import threading
+
+    from lead_app.growth import tools
+    actor,action,claim,_,_,_=native_work(growth_agent)
+    checked=threading.Event()
+    release=threading.Event()
+    original=tools.submission_gate
+    def delayed(c,*args,**kwargs):
+        value=original(c,*args,**kwargs)
+        checked.set()
+        assert release.wait(5)
+        return value
+    monkeypatch.setattr(tools,'submission_gate',delayed)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        preparing=workers.submit(prepare_binding,actor,action['id'],claim,1)
+        assert checked.wait(5)
+        lost=workers.submit(mark_untrusted,actor,1)
+        assert not lost.done()
+        release.set()
+        preparing.result(timeout=5)
+        assert lost.result(timeout=5)==1
+    with tx(growth_agent) as c:
+        assert one(c,'SELECT state FROM lead.actions WHERE id=%s',(action['id'],))['state']=='unknown'
+        assert one(c,'SELECT state FROM lead.profile_leases WHERE profile_id=%s',(actor.profile['id'],))['state']=='released'
+
+
+async def test_normal_native_close_fences_prepared_action_and_records_unknown(growth_agent):
+    from unittest.mock import AsyncMock
+
+    from lead_app.browser_runtime import PersistentRuntime
+    actor,action,claim,_,_,_=native_work(growth_agent)
+    actor.forward_proxy=SimpleNamespace(close=AsyncMock())
+    prepare_binding(actor,action['id'],claim,1)
+    runtime=PersistentRuntime(actor)
+    await runtime.close()
+    with tx(growth_agent) as c:
+        assert one(c,'SELECT state FROM lead.actions WHERE id=%s',(action['id'],))['state']=='unknown'
+        assert one(c,'SELECT state,ended_at FROM lead.browser_sessions WHERE id=%s',(actor.session,))['ended_at']

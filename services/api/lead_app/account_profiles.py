@@ -20,7 +20,8 @@ def connection_origin(site_url):
     from .browser_execution import origin
     scheme,host,port=origin(site_url)
     parsed=urlsplit(site_url)
-    return f"{scheme}://{parsed.netloc.lower()}" if port not in (80,443) else f"{scheme}://{host}"
+    default=443 if scheme=='https' else 80
+    return f"{scheme}://{parsed.netloc.lower()}" if port!=default else f"{scheme}://{host}"
 
 def isolated_login_platforms(aid):
     settings = env()
@@ -94,8 +95,16 @@ def for_platform(
         if native:
             # Different sites may share the complete instance. Another identity
             # on the same origin gets a separate persistent profile.
-            conflict=one(c,"""SELECT s.id FROM lead.social_accounts s JOIN lead.browser_profiles p ON p.id=s.profile_id
-                WHERE p.slot='native-shared' AND s.connection_origin=%s""",(site_origin,))
+            from urllib.parse import urlsplit
+            hostname=urlsplit(site_origin).hostname
+            # A shared cookie Domain must be a common suffix. Comparing the last
+            # two labels is deliberately conservative for multi-label public
+            # suffixes: it may split extra instances, never share sibling sites.
+            identity_site='.'.join(hostname.split('.')[-2:])
+            members=c.execute("""SELECT s.connection_origin FROM lead.social_accounts s JOIN lead.browser_profiles p ON p.id=s.profile_id
+                WHERE p.slot='native-shared'""").fetchall()
+            conflict=any('.'.join(urlsplit(member['connection_origin']).hostname.split('.')[-2:])==identity_site
+                for member in members if member.get('connection_origin'))
             slot='native-'+uid() if new_binding or conflict else 'native-shared'
         profile = one(c, "SELECT * FROM lead.browser_profiles WHERE slot=%s", (slot,))
         if not profile:

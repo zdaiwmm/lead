@@ -32,6 +32,19 @@ async def main(data):
         index = next(i for i, node in state.dom_state.selector_map.items() if node.attributes.get('id') == 'entry')
         result = await tools.registry.execute_action('guarded_input', {'index': index, 'text': data['task_id']})
         assert not result.error, result.error
+        cdp=await session.get_or_create_cdp_session()
+        await cdp.cdp_client.send.Page.reload(params={'ignoreCache':True},session_id=cdp.session_id)
+        await asyncio.sleep(.2)
+        try:
+            await tools.registry.execute_action('guarded_input',{'index':index,'text':'stale-document-must-not-write'})
+        except RuntimeError as error:
+            assert isinstance(error.__cause__,ScopeViolation) and 'document_changed_reobserve' in str(error)
+        else:
+            raise AssertionError('same-URL stale document input accepted')
+        state=await session.get_browser_state_summary(include_screenshot=False)
+        index=next(i for i,node in state.dom_state.selector_map.items() if node.attributes.get('id')=='entry')
+        result=await tools.registry.execute_action('guarded_input',{'index':index,'text':data['task_id']})
+        assert not result.error,result.error
         try:
             await session.get_or_create_cdp_session(data['foreign_target'])
         except ScopeViolation:
@@ -47,7 +60,7 @@ async def main(data):
             raise AssertionError('revoked observation accepted')
         return {'task_id': data['task_id'], 'started': started, 'ended': time.monotonic(),
                 'fixed_page': True, 'foreign_page_denied': True, 'revoked_observation_denied': True,
-                'native_input': True}
+                'native_input': True,'stale_document_denied':True}
     finally:
         await session.stop()
 

@@ -27,6 +27,7 @@ def scoped_session_class():
         _lease: dict = PrivateAttr(default_factory=dict)
         _scope_reader: object = PrivateAttr(default=None)
         _scope: dict = PrivateAttr(default_factory=dict)
+        _observation: object = PrivateAttr(default=None)
 
         async def bind_scope(self, lease, read_scope):
             self._scope_reader = read_scope
@@ -49,7 +50,7 @@ def scoped_session_class():
             if not self._scope_reader:
                 raise ScopeViolation('page_lease_missing')
             scope = await self._scope_reader()
-            for key in ('task_id', 'generation', 'target_id'):
+            for key in ('task_id', 'generation', 'target_id', 'connection_ref', 'control_mode', 'challenge_version'):
                 if scope.get(key) != self._lease.get(key):
                     raise ScopeViolation('page_lease_changed')
             self._scope = scope
@@ -63,7 +64,16 @@ def scoped_session_class():
                 if (not target.get('attached') or target.get('type') not in ('page', 'iframe')
                         or origin(target.get('url', '')) not in allowed):
                     raise ScopeViolation('observation_target_out_of_scope')
-                facts.append((target_id, target['url']))
+                tree=await session.cdp_client.send.Page.getFrameTree(session_id=session.session_id)
+                def frame_facts(node):
+                    frame=node['frame']
+                    if origin(frame.get('url','')) not in allowed:
+                        raise ScopeViolation('observation_frame_out_of_scope')
+                    rows=[(frame['id'],frame.get('loaderId'),frame['url'])]
+                    for child in node.get('childFrames',[]):
+                        rows.extend(frame_facts(child))
+                    return rows
+                facts.append((target_id,target['url'],frame_facts(tree['frameTree'])))
             return scope, facts
 
         async def get_or_create_cdp_session(self, target_id=None, focus=True):
@@ -100,7 +110,12 @@ def scoped_session_class():
             if origin(state.url) not in {origin(url) for url in self._scope['origins']}:
                 raise ScopeViolation('observation_out_of_scope')
             state.tabs = [tab for tab in state.tabs if tab.target_id == self._lease['target_id']]
+            self._observation=await self.live_scope()
             return state
+
+        async def assert_fresh_observation(self):
+            if self._observation is None or self._observation != await self.live_scope():
+                raise ScopeViolation('document_changed_reobserve_before_action')
 
         async def on_NavigateToUrlEvent(self, event):
             if self._lease:
@@ -126,6 +141,7 @@ def guarded_tools(session, authorize, *, sensitive_data=None):
 
     async def execute(name, values):
         await session.live_scope()
+        await session.assert_fresh_observation()
         node_ref = None
         if 'index' in values:
             node = await session.get_dom_element_by_index(values['index'])

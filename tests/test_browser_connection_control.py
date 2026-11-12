@@ -86,3 +86,96 @@ def test_due_recovery_clears_expired_login_even_after_task_review(growth_agent):
         assert ended['challenge_version']==snap['challenge_version']+1
         assert ended['input_seq']==snap['input_seq']+1
         assert one(c,"SELECT count(*) n FROM lead.outbox_events WHERE payload->>'reason'='connection_expired'")['n']==1
+
+
+def test_web_origin_canonicalization_preserves_nondefault_protocol_ports():
+    from lead_app.account_profiles import connection_origin
+    assert connection_origin('http://example.com:443/login')=='http://example.com:443'
+    assert connection_origin('https://example.com:80/login')=='https://example.com:80'
+    assert connection_origin('https://example.com:443/login')=='https://example.com'
+
+
+def test_same_site_cookie_domains_do_not_share_an_identity_group(growth_agent,monkeypatch):
+    from lead_app import account_profiles
+    monkeypatch.setattr(account_profiles,'native_available',lambda:True)
+    first=account_profiles.for_platform(growth_agent,'web',create=True,site_url='https://one.example.com/login')
+    second=account_profiles.for_platform(growth_agent,'web',create=True,site_url='https://two.example.com/login')
+    assert first['id']!=second['id']
+
+
+def test_connection_control_uses_account_permission():
+    from lead_app.admin_permissions import workbench_permission
+    assert workbench_permission('POST','/api/agents/fixture/connections/connection/control')=='accounts.manage'
+
+
+def test_old_connection_identity_proof_does_not_cross_challenge_version(growth_agent):
+    import psycopg
+    from lead_app.account_connection import complete
+    sid=account(growth_agent)
+    row,snapshot,social=login_work(growth_agent,sid)
+    transition(growth_agent,snapshot['id'],1,'automatic')
+    observed={'status':'authenticated','operating_subject':{'namespace':'lab','external_id':social['external_account_id'],
+        'id_kind':'stable'},'evidence_refs':['fixture:old-proof']}
+    with pytest.raises(psycopg.errors.RaiseException,match='connection_changed'):
+        complete(growth_agent,row,snapshot,observed)
+
+
+def test_human_input_must_finish_before_automatic_control_can_resume(growth_agent):
+    sid=account(growth_agent)
+    _,snapshot,_=login_work(growth_agent,sid)
+    with tx(growth_agent) as c:
+        c.execute('UPDATE lead.takeover_sessions SET input_inflight=true WHERE id=%s',(snapshot['id'],))
+    with pytest.raises(ValueError,match='input_in_progress'):
+        transition(growth_agent,snapshot['id'],1,'automatic')
+
+
+@pytest.mark.parametrize('login',[
+    {'username':'fixture','password':'SENSITIVE-PASSWORD-'+('x'*2100)},
+    {'username':'fixture','password':{'SENSITIVE-PASSWORD':'invalid-type'}},
+    {'username':'fixture','password':'SENSITIVE-PASSWORD','unexpected':'SENSITIVE-EXTRA'},
+])
+def test_login_validation_never_echoes_rejected_secret(growth_agent,login):
+    from fastapi.testclient import TestClient
+    from lead_app import api
+    from lead_app.security import token
+    with TestClient(api.app) as client:
+        client.cookies.set('lead_session',token('owner'))
+        response=client.post(f'/api/agents/{growth_agent}/connect',json={'platform':'web','site_url':'https://fixture.example/login','login':login},
+            headers={'Origin':'http://127.0.0.1:3100','X-Lead-Request':'1'})
+    assert response.status_code==422
+    assert 'SENSITIVE-' not in response.text and 'input' not in response.json()['detail'][0]
+
+
+async def test_begin_reuses_only_same_account_connection_in_shared_instance(growth_agent,monkeypatch):
+    from lead_app import account_connection, account_profiles
+    monkeypatch.setattr(account_profiles,'native_available',lambda:True)
+    calls=[]
+    async def opened(aid,profile_id,path,body=None,**kwargs):
+        calls.append((profile_id,path))
+        with tx(aid) as c:
+            session=one(c,"SELECT id FROM lead.browser_sessions WHERE profile_id=%s AND ended_at IS NULL",(profile_id,))
+            if not session:
+                session=one(c,"""INSERT INTO lead.browser_sessions(tenant_id,agent_id,profile_id,node_id,actor_id,epoch,control_version,state)
+                    VALUES(lead.ctx_tenant(),%s,%s,'synthetic','fixture',1,1,'ready') RETURNING id""",(aid,profile_id))
+        return {'session_id':session['id'],'profile_id':str(profile_id)}
+    monkeypatch.setattr(account_connection,'rpc',opened)
+    first=await account_connection.begin(growth_agent,'web',site_url='https://a.example/login')
+    second=await account_connection.begin(growth_agent,'web',site_url='https://b.example/login')
+    repeated=await account_connection.begin(growth_agent,'web',site_url='https://a.example/login')
+    assert first['takeover_id']!=second['takeover_id'] and first['account_id']!=second['account_id']
+    assert repeated['takeover_id']==first['takeover_id']
+    assert len(calls)==2
+    with tx(growth_agent) as c:
+        assert one(c,"SELECT count(*) n FROM lead.takeover_sessions WHERE state='active'")['n']==2
+
+
+def test_archiving_original_project_clears_login_credentials(growth_agent):
+    from lead_app import domain
+    sid=account(growth_agent)
+    _,snapshot,_=login_work(growth_agent,sid)
+    cipher=seal(growth_agent,snapshot['id'],{'username':'synthetic','password':'password'})
+    with tx(growth_agent) as c:
+        c.execute('UPDATE lead.takeover_sessions SET encrypted_login=%s WHERE id=%s',(cipher,snapshot['id']))
+    domain.set_control(growth_agent,'archive')
+    with tx(growth_agent) as c:
+        assert one(c,'SELECT state,encrypted_login FROM lead.takeover_sessions WHERE id=%s',(snapshot['id'],))=={'state':'expired','encrypted_login':None}

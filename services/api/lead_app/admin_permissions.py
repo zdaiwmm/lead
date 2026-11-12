@@ -180,6 +180,8 @@ def workbench_permission(method, path):
         return "admin.budgets"
     if suffix in ("messages", "retry"):
         return "agents.chat"
+    if suffix.startswith("connections/"):
+        return "accounts.manage"
     if suffix == "control" or suffix.endswith("/control"):
         return "agents.control"
     if suffix.startswith(("analytics", "tracking-links")):

@@ -129,7 +129,10 @@ async def begin(aid, platform, *, account_id=None, new_account=False, site_url=N
     with tx(aid) as c:
         pending=one(c,"""SELECT t.* FROM lead.takeover_sessions t JOIN lead.browser_sessions b ON b.id=t.browser_session_id
             WHERE t.profile_id=%s AND t.purpose='login' AND t.state='active' AND t.expires_at>now()
-            AND b.ended_at IS NULL ORDER BY t.created_at DESC LIMIT 1""",(profile['id'],))
+            AND b.ended_at IS NULL AND EXISTS(SELECT FROM lead.tasks w WHERE
+                w.input#>>'{spec,payload,takeover_id}'=t.id::text
+                AND w.input#>>'{spec,payload,connection_account_id}'=%s)
+            ORDER BY t.created_at DESC LIMIT 1""",(profile['id'],str(profile['account_id'])))
         if pending:
             return connection_reply(pending,profile['account_id'],platform)
     try:
@@ -144,12 +147,15 @@ async def begin(aid, platform, *, account_id=None, new_account=False, site_url=N
         agent = require_agent(c, aid)
         if str(opened.get("profile_id")) != str(profile["id"]):
             raise ValueError("profile_changed")
-        c.execute("UPDATE lead.takeover_sessions SET state='expired',ended_at=now() WHERE profile_id=%s AND state IN ('requested','active','ending')", (profile["id"],))
+        c.execute("""UPDATE lead.takeover_sessions t SET state='expired',ended_at=now() WHERE profile_id=%s
+            AND state IN ('requested','active','ending') AND (expires_at<=now() OR EXISTS(SELECT FROM lead.tasks w
+            WHERE w.input#>>'{spec,payload,takeover_id}'=t.id::text
+            AND w.input#>>'{spec,payload,connection_account_id}'=%s))""", (profile["id"],str(profile['account_id'])))
         takeover = one(c, """INSERT INTO lead.takeover_sessions(tenant_id,agent_id,browser_session_id,profile_id,
-            token_hash,control_version,purpose,state,expires_at,control_mode,connection_data) VALUES(lead.ctx_tenant(),%s,%s,%s,%s,%s,'login','active',now()+interval '30 minutes',%s,%s) RETURNING *""",
+            token_hash,control_version,purpose,state,expires_at,control_mode,connection_data,connection_account_id) VALUES(lead.ctx_tenant(),%s,%s,%s,%s,%s,'login','active',now()+interval '30 minutes',%s,%s,%s) RETURNING *""",
             (aid, opened["session_id"], profile["id"], hashlib.sha256(secrets.token_bytes(32)).hexdigest(), agent["control_version"],
              'automatic' if profile['provider']=='chromium' else 'owner',
-             j({'site_url':site_url or next((url for name,_,url in PLATFORMS if name==platform),None)})))
+             j({'site_url':site_url or next((url for name,_,url in PLATFORMS if name==platform),None)}),profile['account_id']))
         if login:
             if profile['provider']!='chromium':
                 raise ValueError('automatic_login_requires_native_profile')
@@ -199,8 +205,9 @@ def connected(aid, account_id):
 
 def _snapshot(aid, data):
     with tx(aid) as c:
-        return one(c, """SELECT t.*,s.platform,s.binding_version,r.generation route_generation FROM lead.takeover_sessions t
+        return one(c, """SELECT t.*,s.platform,s.binding_version,p.provider,r.generation route_generation FROM lead.takeover_sessions t
             JOIN lead.social_accounts s ON s.id=%s AND s.profile_id=t.profile_id
+            JOIN lead.browser_profiles p ON p.id=t.profile_id
             JOIN lead.profile_execution_routes r ON r.profile_id=t.profile_id WHERE t.id=%s""",
             (data.connection_account_id, data.takeover_id))
 
@@ -216,13 +223,25 @@ async def execute_account(aid, row, data):
     if snapshot["completed_account_id"]:
         return WorkResult(outcome="completed", output={"account_id": str(snapshot["completed_account_id"])})
     if snapshot["state"] != "active" or snapshot["expires_at"] <= utcnow():
+        with tx(aid) as c:
+            c.execute("UPDATE lead.takeover_sessions SET state='expired',ended_at=coalesce(ended_at,now()),encrypted_login=NULL WHERE id=%s AND expires_at<=now()",(snapshot['id'],))
         return WorkResult(outcome="failed", failure_code="connection_expired")
     wait = Wait(reason="login_in_progress", producer="account_connection", recovery_action="recheck",
                 check_at=utcnow()+timedelta(seconds=10), episode_root=row["id"], scope_ref=str(data.profile_id))
     if snapshot["input_inflight"] or snapshot["composing"] or (snapshot["last_input_at"] and snapshot["last_input_at"] > utcnow()-timedelta(seconds=2)):
         return WorkResult(outcome="waiting", wait=wait)
-    observed = await rpc(aid, data.profile_id, "account/observe", {"platform": snapshot["platform"],
-        "account_id": str(data.connection_account_id), "takeover": str(data.takeover_id)})
+    if snapshot['provider']=='chromium' and snapshot['control_mode']=='automatic':
+        try:
+            observed=await rpc(aid,data.profile_id,'account/automatic',{'task_id':str(row['id']),
+                'takeover':str(data.takeover_id),'account_id':str(data.connection_account_id)},timeout=100)
+        except httpx.HTTPError:
+            wait.reason='temporarily_unavailable'
+            return WorkResult(outcome='waiting',wait=wait)
+        if observed.get('control_mode')=='owner':
+            observed={'status':'challenge','owner_action':observed.get('owner_action') or '请在原窗口完成本人步骤。'}
+    else:
+        observed = await rpc(aid, data.profile_id, "account/observe", {"platform": snapshot["platform"],
+            "account_id": str(data.connection_account_id), "takeover": str(data.takeover_id)})
     observation = SessionObservation.model_validate(observed)
     if observation.status == "authenticated":
         import psycopg

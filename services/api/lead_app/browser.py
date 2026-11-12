@@ -87,6 +87,7 @@ class Actor:
         self.session = None
         self.epoch = None
         self.research_pages = {}
+        self.connection_pages = {}
         self.forward_proxy = None
         self.disconnected = False
         self.native_runtime = None
@@ -355,6 +356,7 @@ class Actor:
             if hasattr(controller, "close"):
                 await controller.close()
         self.research_pages.clear()
+        self.connection_pages.clear()
         try:
             self.measure()
         except Exception:
@@ -1047,7 +1049,7 @@ class Gateway:
         for key, actor in sorted(
             list(self.actors.items()), key=lambda pair: pair[1].used
         ):
-            if actor.lock.locked() or actor.research_pages:
+            if actor.lock.locked() or actor.research_pages or actor.native_runtime and actor.native_runtime.pages:
                 continue
             with tx(actor.aid) as c:
                 from .browser_challenges import pending
@@ -1145,6 +1147,10 @@ class Gateway:
                 for key, actor in list(self.actors.items()):
                     aid=actor.aid
                     try:
+                        if actor.native_runtime:
+                            for connection_id,controller in list(actor.connection_pages.items()):
+                                if not await controller.reconcile():
+                                    actor.connection_pages.pop(connection_id,None)
                         if actor.disconnected and not actor.lock.locked():
                             await self.close_one(aid, key)
                         elif (
@@ -1227,6 +1233,32 @@ class InputRequest(BaseModel):
     challenge_version: int | None = None
 
 
+class AutomaticConnectionRequest(BaseModel):
+    task_id: UUID
+    takeover: UUID
+    account_id: UUID
+
+
+@app.post("/agents/{aid}/account/automatic")
+async def automatic_connection(aid: UUID,body: AutomaticConnectionRequest):
+    from .execution_routes import endpoint, resolve
+    from .native_connection import NativeConnection
+    from .native_runner import connect
+    aid=str(aid)
+    with tx(aid) as c:
+        account=one(c,'SELECT * FROM lead.social_accounts WHERE id=%s',(body.account_id,))
+    if not account:
+        raise ValueError('connection_account_changed')
+    actor=await gateway.get(aid,account['profile_id'],allow_challenge=True)
+    if not actor.native_runtime:
+        raise ValueError('automatic_connection_requires_native_profile')
+    controller=actor.connection_pages.setdefault(str(body.takeover),NativeConnection(actor,body.task_id,body.takeover))
+    async with controller.operation_lock:
+        if controller.current_observation():
+            return controller.current_observation()
+        return await connect(controller,endpoint(resolve(aid,profile_id=account['profile_id'])))
+
+
 @app.post("/agents/{aid}/account/observe")
 async def observe_account(aid: UUID, body: OpenRequest):
     from .account_connection import observe_identity
@@ -1234,6 +1266,19 @@ async def observe_account(aid: UUID, body: OpenRequest):
     aid = str(aid)
     profile = account_profiles.for_platform(aid, body.platform, account_id=body.account_id)
     actor = await gateway.get(aid, profile["id"], allow_challenge=True)
+    if actor.native_runtime:
+        controller=actor.connection_pages.get(str(body.takeover))
+        if not controller or not controller.page:
+            return SessionObservation(status='temporarily_unavailable').model_dump(mode='json')
+        if controller.current_observation():
+            return controller.current_observation()
+        if body.platform=='web':
+            _,connection,_=controller.snapshot()
+            selector=connection['connection_data'].get('self_selector')
+            if selector and connection['control_mode']=='automatic':
+                return await controller.report_identity({'self_link_selector':selector})
+            return SessionObservation(status='challenge',owner_action='请完成原窗口的本人步骤，然后交回自动核验。').model_dump(mode='json')
+        return (await observe_identity(controller.page,body.platform,actor.session)).model_dump(mode='json')
     if not hasattr(actor,"connection_observer_lock"):
         actor.connection_observer_lock = asyncio.Lock()
     async with actor.connection_observer_lock:
@@ -1747,6 +1792,20 @@ def research_profile(aid, run_id):
         return row["profile_id"]
 
 
+@app.post("/agents/{aid}/native/command")
+async def native_command(aid: UUID,body: ResearchCommand):
+    aid=str(aid)
+    with tx(aid) as c:
+        connection=one(c,'SELECT profile_id FROM lead.takeover_sessions WHERE id=%s',(body.run_id,))
+    if not connection:
+        raise ValueError('native_connection_missing')
+    actor=await gateway.get(aid,connection['profile_id'],allow_challenge=True)
+    controller=actor.connection_pages.get(str(body.run_id))
+    if not controller:
+        raise ValueError('native_connection_page_missing')
+    return await controller.command(body.operation,body.args)
+
+
 @app.post("/agents/{aid}/research/command")
 async def research_command(aid: UUID, body: ResearchCommand):
     from .research import ResearchPage
@@ -1876,16 +1935,29 @@ def require_takeover(aid, actor, takeover):
             raise HTTPException(409, "接管已过期")
 
 
+async def connection_page(actor,takeover):
+    if not actor.native_runtime:
+        return actor.page
+    if not takeover:
+        raise HTTPException(409,'请指定当前账号连接窗口')
+    controller=actor.connection_pages.get(str(takeover))
+    if not controller or not controller.lease or not controller.page:
+        raise HTTPException(409,'当前连接页面尚未就绪')
+    await asyncio.to_thread(actor.native_runtime.current_scope,controller.lease)
+    return controller.page
+
+
 @app.get("/agents/{aid}/screenshot")
 async def screenshot(aid: str, format: str = "png", takeover: UUID | None = None):
     actor = await gateway.get(aid,account_profiles.takeover_profile(aid,takeover) if takeover else None, allow_challenge=True)
     async with manual_control(actor):
         if takeover:
             require_takeover(aid, actor, takeover)
+        page=await connection_page(actor,takeover)
         return Response(
-            await actor.page.screenshot(type="jpeg", quality=48 if takeover else 72)
+            await page.screenshot(type="jpeg", quality=48 if takeover else 72)
             if format == "jpeg"
-            else await actor.page.screenshot(),
+            else await page.screenshot(),
             media_type="image/jpeg" if format == "jpeg" else "image/png",
             headers={"Cache-Control": "no-store"},
         )
@@ -1930,14 +2002,15 @@ async def input_guard(aid, actor, body):
 async def user_input(aid: str, body: InputRequest):
     actor = await gateway.get(aid,account_profiles.takeover_profile(aid,body.takeover) if body.takeover else None, allow_challenge=True)
     async with manual_control(actor), input_guard(aid,actor,body):
+        page=await connection_page(actor,body.takeover)
         if body.kind in ("composition_start", "composition_end"):
             return {"ok": True}
         if body.kind == "click":
-            await actor.page.mouse.click(
+            await page.mouse.click(
                 max(0, min(body.x, 1280)), max(0, min(body.y, 900))
             )
         elif body.kind == "text":
-            await actor.page.keyboard.insert_text(body.text)
+            await page.keyboard.insert_text(body.text)
         elif body.kind == "key" and body.text in (
             "Enter",
             "Tab",
@@ -1952,18 +2025,18 @@ async def user_input(aid: str, body: InputRequest):
             "End",
             "ControlOrMeta+A",
         ):
-            await actor.page.keyboard.press(body.text)
+            await page.keyboard.press(body.text)
         elif body.kind in ("back", "forward", "reload"):
             if body.kind == "reload":
-                await actor.page.reload(wait_until="domcontentloaded", timeout=30000)
+                await page.reload(wait_until="domcontentloaded", timeout=30000)
             elif body.kind == "back":
-                await actor.page.go_back(wait_until="domcontentloaded", timeout=30000)
+                await page.go_back(wait_until="domcontentloaded", timeout=30000)
             else:
-                await actor.page.go_forward(
+                await page.go_forward(
                     wait_until="domcontentloaded", timeout=30000
                 )
         elif body.kind == "scroll":
-            await actor.page.mouse.wheel(0, max(-800, min(body.y, 800)))
+            await page.mouse.wheel(0, max(-800, min(body.y, 800)))
         else:
             raise HTTPException(400, "不支持的输入")
         actor.touch()

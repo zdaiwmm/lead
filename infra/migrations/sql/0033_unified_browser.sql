@@ -5,6 +5,13 @@ ALTER TABLE lead.takeover_sessions ADD COLUMN challenge_version bigint NOT NULL 
 ALTER TABLE lead.takeover_sessions ADD COLUMN automatic_attempts integer NOT NULL DEFAULT 0 CHECK(automatic_attempts BETWEEN 0 AND 3);
 ALTER TABLE lead.takeover_sessions ADD COLUMN connection_data jsonb NOT NULL DEFAULT '{}';
 ALTER TABLE lead.takeover_sessions ADD COLUMN encrypted_login bytea;
+ALTER TABLE lead.takeover_sessions ADD COLUMN connection_account_id uuid;
+ALTER TABLE lead.takeover_sessions ADD CONSTRAINT connection_scoped_account FOREIGN KEY(tenant_id,agent_id,connection_account_id)
+ REFERENCES lead.social_accounts(tenant_id,agent_id,id);
+DROP INDEX lead.one_live_takeover;
+CREATE UNIQUE INDEX one_live_takeover ON lead.takeover_sessions(profile_id,
+ (coalesce(connection_account_id,'00000000-0000-0000-0000-000000000000'::uuid)))
+ WHERE state IN ('requested','active','ending');
 ALTER TABLE lead.social_accounts ADD COLUMN connection_origin text;
 DROP INDEX lead.one_account_controller;
 CREATE UNIQUE INDEX one_account_controller ON lead.social_accounts
@@ -21,6 +28,17 @@ BEGIN
 END $$;
 CREATE TRIGGER connection_login_lifetime BEFORE INSERT OR UPDATE ON lead.takeover_sessions
  FOR EACH ROW EXECUTE FUNCTION lead.clear_connection_login();
+CREATE FUNCTION lead.expire_login_on_control_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.control_version<>OLD.control_version OR NEW.desired_state='archived' THEN
+  UPDATE lead.takeover_sessions SET state='expired',ended_at=coalesce(ended_at,now()),encrypted_login=NULL,
+   challenge_version=challenge_version+1,input_seq=input_seq+1
+   WHERE agent_id=NEW.id AND tenant_id=NEW.tenant_id AND purpose='login' AND state IN ('requested','active','ending');
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER expire_login_control AFTER UPDATE OF control_version,desired_state ON lead.agents
+ FOR EACH ROW EXECUTE FUNCTION lead.expire_login_on_control_change();
 CREATE UNIQUE INDEX browser_request_original_action ON lead.action_attempts
  (tenant_id,agent_id,(observation#>>'{browser_request,profile_id}'),(observation#>>'{browser_request,fingerprint}'))
  WHERE observation#>>'{browser_request,fingerprint}' IS NOT NULL;
@@ -50,6 +68,7 @@ BEGIN
  SELECT * INTO account FROM lead.social_accounts WHERE id=(work.input#>>'{spec,payload,connection_account_id}')::uuid
   AND agent_id=p_agent AND tenant_id=lead.ctx_tenant() AND profile_id=takeover.profile_id FOR UPDATE;
  IF account.id IS NULL OR account.binding_version<>p_binding OR account.platform<>p_subject->>'namespace'
+  OR (takeover.connection_account_id IS NOT NULL AND takeover.connection_account_id<>account.id)
  THEN RAISE EXCEPTION 'account_changed'; END IF;
  connected:=account.id;
  IF account.external_account_id IS NOT NULL AND account.external_account_id<>p_subject->>'external_id'

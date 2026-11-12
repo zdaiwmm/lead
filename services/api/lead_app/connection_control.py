@@ -62,10 +62,13 @@ def transition(aid, connection, expected_version, mode, *, reason=None, cancel=F
         if cancel:
             c.execute("UPDATE lead.takeover_sessions SET state='ended',ended_at=now(),encrypted_login=NULL,challenge_version=challenge_version+1 WHERE id=%s",(connection,))
             return {'state':'ended','challenge_version':row['challenge_version']+1}
+        if mode=='automatic' and (row['input_inflight'] or row['composing']
+                or row['last_input_at'] and (utcnow()-row['last_input_at']).total_seconds()<2):
+            raise ValueError('connection_input_in_progress')
         if mode=='automatic' and row['automatic_attempts']>=3:
             raise ValueError('connection_attempt_limit')
         version=row['challenge_version']+1
-        c.execute('''UPDATE lead.takeover_sessions SET control_mode=%s,challenge_version=%s,
+        c.execute('''UPDATE lead.takeover_sessions SET control_mode=%s,challenge_version=%s,input_seq=input_seq+1,
             connection_data=connection_data || %s WHERE id=%s''',
             (mode,version,j({'owner_action':str(reason)[:500] if reason else None}),connection))
-        return {'state':'active','control_mode':mode,'challenge_version':version}
+        return {'state':'active','control_mode':mode,'challenge_version':version,'input_seq':row['input_seq']+1}

@@ -91,6 +91,16 @@ def mark_untrusted(actor, generation):
         # Keep the standard lock order: project control, account, action.
         c.execute('SELECT id FROM lead.agents WHERE id=%s FOR SHARE', (actor.aid,))
         c.execute('SELECT id FROM lead.social_accounts WHERE profile_id=%s ORDER BY id FOR SHARE', (actor.profile['id'],))
+        # Invalidate the original lease before scanning. This waits for any
+        # submission transaction already holding its SHARE lock, so its newly
+        # prepared attempt is included. Later transactions cannot pass the gate.
+        c.execute("UPDATE lead.profile_leases SET state='released',expires_at=now() WHERE profile_id=%s AND epoch=%s",
+            (actor.profile['id'],actor.epoch))
+        c.execute("UPDATE lead.browser_sessions SET state='closed',ended_at=coalesce(ended_at,now()) WHERE id=%s AND epoch=%s",
+            (actor.session,actor.epoch))
+        c.execute("""UPDATE lead.takeover_sessions SET state='expired',ended_at=coalesce(ended_at,now()),encrypted_login=NULL,
+            challenge_version=challenge_version+1,input_seq=input_seq+1
+            WHERE browser_session_id=%s AND purpose='login' AND state IN ('active','requested','ending')""",(actor.session,))
         rows = c.execute('''SELECT a.id, a.state, ap.id attempt_id FROM lead.actions a
             JOIN lead.action_attempts ap ON ap.action_id=a.id
             WHERE ap.browser_session_id=%s AND ap.epoch=%s

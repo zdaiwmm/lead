@@ -163,6 +163,11 @@ class NativeNetworkGate:
                 method = message.get('method')
                 if method == 'Target.attachedToTarget':
                     self.schedule(self.attached(event, session))
+                elif method == 'Target.targetInfoChanged':
+                    info=event['targetInfo']
+                    for current in self.targets.values():
+                        if current['targetId']==info['targetId']:
+                            current.update(info)
                 elif method == 'Target.detachedFromTarget':
                     self.targets.pop(event['sessionId'], None)
                     self.owners.pop(event['sessionId'], None)
@@ -216,6 +221,7 @@ class NativeNetworkGate:
         self.ws = await unix_connect(socket_path, uri='ws://localhost'+browser_path,
                                      max_size=200*1024*1024, open_timeout=5)
         self.reader = asyncio.create_task(self.receive())
+        await self.send('Target.setDiscoverTargets',{'discover':True})
         await self.send('Fetch.enable', {'patterns': [{'urlPattern': '*', 'requestStage': 'Request'}]})
         await self.send('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': True,
             'flatten': True, 'filter': [{'type': 'page', 'exclude': False},
@@ -417,7 +423,16 @@ class PersistentRuntime:
 
     async def authorize_request(self, scope, target, request):
         from .browser_execution import match_request, origin
+        from .db import one, tx
         if not self.forward_token():
+            return None
+        endpoint=(origin(request['url']),urlsplit(request['url']).path)
+        with tx(self.actor.aid) as c:
+            auth_rows=c.execute("""SELECT endpoint FROM lead.takeover_sessions t,
+                LATERAL jsonb_array_elements_text(coalesce(t.connection_data->'authentication_endpoints','[]')) AS endpoints(endpoint)
+                WHERE t.profile_id=%s AND t.purpose='login'""",(self.actor.profile['id'],)).fetchall()
+        known_auth={(origin(row['endpoint']),urlsplit(row['endpoint']).path) for row in auth_rows}
+        if endpoint in known_auth and (not scope or not scope.get('connection_ref') or target['type']=='service_worker'):
             return None
         if scope:
             await asyncio.to_thread(self.current_scope, scope)
@@ -427,7 +442,32 @@ class PersistentRuntime:
             endpoint = (origin(request['url']),urlsplit(request['url']).path)
             authentication = {(origin(url),urlsplit(url).path) for url in scope.get('authentication_endpoints',[])}
             if endpoint in authentication:
-                return {'kind':'authentication'} if scope.get('connection_ref') and target['type'] != 'service_worker' else None
+                if not scope.get('connection_ref') or target['type']=='service_worker':
+                    return None
+                if request['method'] not in ('GET','HEAD'):
+                    import json
+                    from urllib.parse import parse_qs
+
+                    from .connection_control import unseal
+                    with tx(self.actor.aid) as c:
+                        connection=one(c,'SELECT encrypted_login,control_mode FROM lead.takeover_sessions WHERE id=%s',(scope['connection_ref'],))
+                    if not connection or connection['control_mode']!='automatic':
+                        return {'kind':'authentication'} if connection and connection['control_mode']=='owner' else None
+                    credentials=unseal(self.actor.aid,scope['connection_ref'],connection['encrypted_login'])
+                    fields=scope.get('authentication_fields',{})
+                    try:
+                        body=json.loads(request.get('postData',''))
+                    except ValueError:
+                        values=parse_qs(request.get('postData',''),keep_blank_values=True)
+                        if any(len(items)!=1 for items in values.values()):
+                            return None
+                        body={key:items[0] for key,items in values.items()}
+                    if (not credentials or not isinstance(body,dict) or not fields
+                            or 'saved_password' not in fields.values()
+                            or any(body.get(key)!=credentials[value.removeprefix('saved_')] for key,value in fields.items())):
+                        return None
+                    scope['authentication_dispatched']=True
+                return {'kind':'authentication'}
             if request['method'] in ('GET','HEAD'):
                 return {'kind':'read'}
             if scope.get('action'):
@@ -481,7 +521,8 @@ class PersistentRuntime:
         with tx(self.actor.aid) as c:
             row = one(c,'''SELECT t.*,a.control_version,a.desired_state FROM lead.tasks t
                 JOIN lead.agents a ON a.id=t.agent_id WHERE t.id=%s''',(scope['task_id'],))
-            if (not row or row['state'] != 'running' or row['control_version'] != scope['control_version']
+            owner_connection=bool(scope.get('connection_ref') and scope.get('control_mode')=='owner')
+            if (not row or row['state'] not in (('running','waiting_user','planned','queued') if owner_connection else ('running',)) or row['control_version'] != scope['control_version']
                     or row['input'].get('task_generation') != scope['task_generation']):
                 raise ValueError('browser_task_scope_changed')
             if not one(c,'''SELECT 1 FROM lead.profile_leases WHERE profile_id=%s AND state='held'
@@ -493,17 +534,17 @@ class PersistentRuntime:
                 raise ValueError('browser_instance_changed')
             runtime = (row['result'] or {}).get('runtime',{})
             from datetime import datetime
-            if (runtime.get('attempt_token') != scope['claim']['attempt_token'] or not runtime.get('lease_until')
+            if not owner_connection and (runtime.get('attempt_token') != scope['claim']['attempt_token'] or not runtime.get('lease_until')
                     or datetime.fromisoformat(runtime['lease_until']) <= utcnow()):
                 raise ValueError('browser_task_lease_expired')
             if scope.get('connection_ref'):
                 connection = one(c,"SELECT * FROM lead.takeover_sessions WHERE id=%s AND purpose='login'",(scope['connection_ref'],))
                 if (not connection or connection['expires_at'] <= utcnow() or connection['state'] != 'active'
-                        or connection.get('control_mode') != 'automatic' or str(connection['browser_session_id']) != str(self.actor.session)
+                        or connection.get('control_mode') != scope.get('control_mode','automatic') or str(connection['browser_session_id']) != str(self.actor.session)
                         or str(connection['profile_id']) != str(self.actor.profile['id'])
                         or connection['control_version'] != scope['control_version']
                         or connection['challenge_version'] != scope.get('challenge_version')
-                        or connection['input_seq'] != scope.get('input_seq')):
+                        or not owner_connection and connection['input_seq'] != scope.get('input_seq')):
                     raise ValueError('connection_control_changed')
             elif row['desired_state'] != 'running':
                 raise ValueError('browser_project_paused')
@@ -518,8 +559,11 @@ class PersistentRuntime:
                     if not intent or intent['desired'] != 'running' or intent['revision'] != scope.get('intent_revision'):
                         raise ValueError('browser_account_intent_changed')
             if not scope.get('connection_ref') and one(c,'''SELECT id FROM lead.takeover_sessions
-                    WHERE profile_id=%s AND state IN ('requested','active','ending') AND expires_at>now()''',
-                    (self.actor.profile['id'],)):
+                    WHERE profile_id=%s AND state IN ('requested','active','ending') AND expires_at>now()
+                    AND (purpose<>'login' OR EXISTS(SELECT FROM lead.tasks w
+                        WHERE w.input#>>'{spec,payload,takeover_id}'=lead.takeover_sessions.id::text
+                        AND w.input#>>'{spec,payload,connection_account_id}'=%s))''',
+                    (self.actor.profile['id'],str(scope.get('account_id')))):
                 raise ValueError('browser_owner_control_active')
             return row
 
@@ -563,7 +607,7 @@ class PersistentRuntime:
             info = (await cdp.send('Target.getTargetInfo'))['targetInfo']
             await cdp.detach()
             scope = {**scope,'target_id':info['targetId'],'generation':self.actor.epoch}
-            self.pages[scope['target_id']] = {'scope':scope,'page':page}
+            self.pages[scope['target_id']] = {'scope':scope,'page':page,'slot_held':True}
             await self.gate.register(scope['target_id'],scope)
             await page.goto(url,wait_until='domcontentloaded',timeout=45000)
             return scope
@@ -586,14 +630,22 @@ class PersistentRuntime:
         targets = {info['targetId']:target for session,info in self.gate.targets.items()
                    if self.gate.owners.get(session) == target}
         return {'task_id':scope['task_id'],'generation':scope['generation'],'target_id':target,
-                'origins':scope['origins'],'targets':targets}
+                'origins':scope['origins'],'targets':targets,
+                **{key:scope[key] for key in ('connection_ref','control_mode','challenge_version') if key in scope}}
+
+    async def yield_page(self,target):
+        entry=self.pages.get(target)
+        if entry and entry.get('slot_held',True):
+            entry['slot_held']=False
+            self.slots.release()
 
     async def release_page(self, target):
         entry = self.pages.pop(target,None)
         self.gate.roots.pop(target,None)
         if entry:
             await entry['page'].close()
-            self.slots.release()
+            if entry.get('slot_held',True):
+                self.slots.release()
 
     async def close(self):
         import shutil
@@ -605,6 +657,9 @@ class PersistentRuntime:
         # original authenticated proxy still has live upstream connections.
         if self.actor.forward_proxy:
             await self.actor.forward_proxy.close()
+        if self.actor.session:
+            from .browser_actions import mark_untrusted
+            await asyncio.to_thread(mark_untrusted,self.actor,self.actor.epoch)
         if self.bridge:
             await self.bridge.close()
         if self.gate:
