@@ -11,6 +11,32 @@ def public_source(aid, title='community sources', body='Public useful source'):
         c.execute("INSERT INTO lead.knowledge_chunks(tenant_id,agent_id,document_id,ordinal,body,search_vector) VALUES(lead.ctx_tenant(),%s,%s,0,%s,to_tsvector('simple',%s))",(aid,doc,body,body))
         return str(doc)
 
+
+def test_sharing_setting_revokes_existing_projection_and_prevents_new_one(growth_agent):
+    from lead_app import admin_config, admin_settings
+
+    aid = growth_agent
+    other = domain.create_agent(runtime_engine='growth')
+    try:
+        document = public_source(aid, 'community', 'Public source quote')
+        args = dict(kind='research', problem='community', conclusion='Private interpretation',
+                    source_document_id=document, public_projection={'problem': 'community',
+                    'conclusion': 'Public source quote', 'conditions': {}, 'sources': ['https://example.com/guide']})
+        experiences.record_experience(aid, 'sharing:before', **args)
+        assert experiences.retrieve_experience(other, {}, 'community')
+        with tx() as c:
+            settings = admin_settings.defaults('models')
+            settings['tools']['share_public_research'] = False
+            key = 'models/' + aid
+            old = admin_config.read(c, key)
+            admin_config.write(c, key, settings, old['version'])
+        assert experiences.retrieve_experience(other, {}, 'community') == []
+        experiences.record_experience(aid, 'sharing:after', **args)
+        assert experiences.retrieve_experience(other, {}, 'community') == []
+        assert experiences.retrieve_experience(aid, {}, 'community')
+    finally:
+        domain.set_control(other, 'archive')
+
 def test_applicability_and_counterevidence(growth_agent):
     aid = growth_agent
     item = experiences.record_experience(aid, 'fixture:research:1', kind='research', problem='community research',

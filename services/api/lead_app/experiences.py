@@ -53,6 +53,10 @@ def record_experience(aid, extraction_key, *, kind, problem, conclusion, conditi
         raise ValueError('Public projection requires a persisted public source')
     with tx(aid) as c:
         require_agent(c, aid, True)
+        from .admin_settings import effective
+        settings, _ = effective(c, 'models', aid)
+        if not settings.get('tools', {}).get('share_public_research', True):
+            projection = None
         old = one(c, 'SELECT id FROM lead.experiences WHERE extraction_key=%s', (extraction_key,))
         if old:
             return str(old['id'])
@@ -132,9 +136,10 @@ def extract_task(aid, task_id):
             source=None
             evidence=[]
             conclusion=None
+            projection=None
             if row['type']=='growth.research':
                 for finding in output.get('findings',[])[:4]:
-                    doc=one(c, '''SELECT d.id,d.source_ref,string_agg(k.body,' ' ORDER BY k.ordinal) body
+                    doc=one(c, '''SELECT d.id,d.source_ref,d.title,d.source_type,string_agg(k.body,' ' ORDER BY k.ordinal) body
                         FROM lead.knowledge_documents d JOIN lead.knowledge_chunks k ON k.document_id=d.id
                         WHERE d.id=%s AND d.deleted_at IS NULL GROUP BY d.id''',(finding.get('document_id'),))
                     quote=finding.get('quote','')
@@ -142,6 +147,11 @@ def extract_task(aid, task_id):
                         source=str(doc['id'])
                         conclusion=finding['finding']
                         evidence=[{'kind':'task','id':str(task_id)},{'kind':'document','id':source,'quote':quote}]
+                        url = urlsplit(doc['source_ref'] or '')
+                        if (doc['source_type'] == 'public_read' and url.scheme == 'https'
+                                and url.hostname and not any((url.username, url.password, url.query, url.fragment))):
+                            projection = {'problem': doc['title'], 'conclusion': ' '.join(quote.split())[:500],
+                                          'conditions': {}, 'sources': [doc['source_ref']]}
                         break
             elif output.get('measurement')=='healthy' and output.get('window_status')=='closed' and (output.get('new_units') or 0)>0 and output.get('evidence_refs'):
                 # Only observed positive units, never 'channel ineffective' from
@@ -157,7 +167,8 @@ def extract_task(aid, task_id):
         identifier=None
         if conclusion:
             identifier=record_experience(aid,'task:'+str(task_id),kind='research' if row['type']=='growth.research' else 'business',
-                problem=problem[:1500],conclusion=conclusion[:6000],conditions=conditions,evidence=evidence,source_document_id=source)
+                problem=problem[:1500],conclusion=conclusion[:6000],conditions=conditions,evidence=evidence,
+                source_document_id=source,public_projection=projection)
         with tx(aid) as c:
             c.execute('UPDATE lead.tasks SET result=result || %s WHERE id=%s',
                 (j({'experience_extraction':{'state':'saved' if identifier else 'no_supported_learning','experience_id':identifier}}),task_id))

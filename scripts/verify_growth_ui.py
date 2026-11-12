@@ -31,12 +31,17 @@ async def verify(state):
     fixture.joinpath("page.tsx").write_text('''"use client";
 import GrowthStatus from "../growth-status";
 import SocialAccounts from "../social-accounts";
+import ResearchProviders from "../admin/research-providers";
+import {useState} from "react";
+import "../admin/admin.css";
 const agent={id:"growth-ui-fixture",desired_state:"running",onboarding_state:{},accounts:[
  {id:"account-one",platform:"facebook",state:"connected",display_name:"测试账号甲",operating_intent:{desired:"running",revision:3}},
  {id:"account-two",platform:"facebook",state:"connected",display_name:"测试账号乙",operating_intent:{desired:"paused",revision:7},discovery:{state:"succeeded",output:{missing_conditions:[{code:"target_discovery_unresolved"}]}}}]};
-export default function Check(){return <main style={{maxWidth:920,margin:"32px auto",padding:20}}><h1>合成数据验证</h1>
+export default function Check(){const [providers,setProviders]=useState({});return <main style={{maxWidth:920,margin:"32px auto",padding:20}}><h1>合成数据验证</h1>
 <SocialAccounts agent={agent} platforms={[]} readOnly={false} onConnect={p=>{document.title=JSON.stringify(p)}} onComplete={async()=>{}}/>
-<GrowthStatus aid="growth-ui-fixture" agent={agent} readOnly={false}/></main>}''')
+<GrowthStatus aid="growth-ui-fixture" agent={agent} readOnly={false}/>
+<div className="admin-shell" style={{display:"block",height:"auto",minHeight:0}}><ResearchProviders value={providers} change={setProviders} status={{tavily:{"web.search":{available:false,reason:"missing_key"}}}}/>
+</div><output hidden id="provider-fixture-state">{JSON.stringify(providers)}</output></main>}''')
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     requests,commands,errors,external = [],[],[],[]
@@ -50,7 +55,8 @@ export default function Check(){return <main style={{maxWidth:920,margin:"32px a
             {"id":"publishing","title":"推进渠道操作","state":"running","platform":"facebook"}],
         "waiting":[{"id":"identity","title":"核对账号与可运营位置","state":"waiting_user","platform":"x",
                     "wait":{"reason":"challenge","responsibility":"owner","check_at":"2026-11-13T10:00:00Z"}}],
-        "owner_actions":[{"id":"identity"}],"recent_work":[]}
+        "owner_actions":[{"id":"identity"}],"recent_work":[
+            {"id":"probe","title":"检查受影响能力","state":"succeeded","probe":{"state":"still_blocked","resumed_count":0}}]}
     try:
         async with httpx.AsyncClient(trust_env=False,timeout=2) as client:
             for _ in range(100):
@@ -95,6 +101,12 @@ export default function Check(){return <main style={{maxWidth:920,margin:"32px a
                 await page.get_by_text("未知",exact=True).wait_for()
                 await page.get_by_text("需要在原窗口完成验证",exact=False).wait_for()
                 await page.get_by_text("陌生用户能否独立完成第一次价值行为？",exact=True).wait_for()
+                await page.get_by_role("button",name="查看近期记录",exact=True).click()
+                await page.get_by_text("检查完成，此能力仍受阻",exact=True).wait_for()
+                await page.get_by_text("服务端密钥未配置",exact=False).wait_for()
+                await page.get_by_label("Tavily",exact=True).check()
+                await page.get_by_label("连接共享额度（credits）",exact=True).fill("2.5")
+                assert json.loads(await page.locator("#provider-fixture-state").inner_text())["tavily"]["limit_units"] == 2500
                 assert await page.get_by_text("Facebook",exact=False).count()
                 assert not any("/plans" in url for url in requests)
                 assert not await page.get_by_text("日计划",exact=False).count()

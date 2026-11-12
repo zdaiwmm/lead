@@ -371,6 +371,7 @@ function Models({
             ["advanced_research", "进阶网页研究"],
             ["community_research", "社群线索研究"],
             ["media_creation", "原创图文与视频制作"],
+            ["share_public_research", "同工作室复用公开来源摘录（不共享私有分析）"],
           ].map(([key, label]) => (
             <label className="admin-checkbox" key={key}>
               <input

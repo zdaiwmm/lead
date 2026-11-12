@@ -38,6 +38,7 @@ class ToolSettings(SettingsModel):
     advanced_research: bool = True
     community_research: bool = True
     media_creation: bool = True
+    share_public_research: bool = True
 
 
 class TaskModels(SettingsModel):

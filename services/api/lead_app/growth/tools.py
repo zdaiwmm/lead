@@ -641,7 +641,8 @@ def prepare_channel(aid, task_id, data):
         content = _bind_publication(c,aid,row,content,target)
         platform = target["platform"]
         release = SPECS[platform].version if platform in SPECS else "local-v1"
-        method = target["verified_permissions"].get("browser_method")
+        method = (target["verified_permissions"].get("browser_method")
+                  if isinstance(target["verified_permissions"], dict) else None)
         if method:
             from ..browser_execution import validate_method
             method = validate_method(method, account_id=str(spec.account_id),

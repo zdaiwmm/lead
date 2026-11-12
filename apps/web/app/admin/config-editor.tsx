@@ -159,6 +159,7 @@ const fieldNames: Row = {
   tools: "可用工具",
   public_web: "公开网页读取",
   advanced_research: "进阶网页研究",
+  share_public_research: "同工作室公开来源摘录复用",
   community_research: "社群线索研究",
   media_creation: "原创素材制作",
   voice: "表达语气",
