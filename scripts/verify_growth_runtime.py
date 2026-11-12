@@ -24,7 +24,7 @@ SUITES = {
     "outcomes": ["tests/test_growth_outcomes.py", "tests/test_growth_attribution.py", "tests/test_growth_costs.py"],
     "submission": ["tests/test_growth_channel_operation.py", "tests/test_growth_verification_proof.py", "tests/test_growth_unknown_receipts.py", "tests/test_growth_verification_scope.py"],
     "ui": ["tests/test_growth_views.py"],
-    "migration": ["tests/test_growth_migration.py", "tests/test_growth_legacy_exit.py"],
+    "migration": ["tests/test_growth_migration.py", "tests/test_growth_legacy_exit.py", "tests/test_growth_drill.py"],
     "e2e": ["tests/test_growth_e2e.py", "tests/test_growth_generalization.py", "tests/test_growth_liveness.py", "tests/test_growth_task_loop.py"],
 }
 

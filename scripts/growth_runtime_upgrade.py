@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 BASELINE = '0030_fault_isolation'
@@ -33,6 +34,48 @@ def run(*args,**kwargs):
 def telegram_binding(verifier):
     path=verifier['EXECUTOR_REGISTRY'].parent/'telegram.json'
     return verifier['executor_binding'](json.loads(verifier['executor_config'](path)))
+
+
+@contextmanager
+def drill_role_connections(name,owner):
+    """Use real restricted SQL roles in the isolated DB behind production HBA.
+
+    Existing HBA/CONNECT rules intentionally admit business logins only to lead.
+    The administrator opens the restored drill DB, then PostgreSQL applies the
+    actual requested role before any application query. Production connections
+    and roles outside this exact disposable DB are untouched.
+    """
+    if not re.fullmatch(r'lead_growth_drill_[a-f0-9]{12}',name):
+        raise ValueError('Role transport is limited to an isolated drill database')
+    from unittest.mock import patch
+
+    import psycopg
+
+    original=psycopg.Connection.connect
+    def connect(cls,conninfo='',**kwargs):
+        role=kwargs.get('user')
+        delegated=kwargs.get('dbname')==name and role in ('lead_auth','lead_runtime')
+        if delegated:
+            if conninfo or str(kwargs.get('host'))!=str(owner['host']) or str(kwargs.get('port'))!=str(owner['port']):
+                raise ValueError('Drill connection target differs')
+            kwargs={**kwargs,'user':owner['user'],'password':owner['password'],
+                'options':kwargs.get('options','')+' -c role='+role}
+        connection=original.__func__(cls,conninfo,**kwargs)
+        if delegated:
+            row=connection.execute('SELECT current_user AS role').fetchone()
+            actual=row['role'] if isinstance(row,dict) else row[0]
+            if actual!=role:
+                connection.close()
+                raise ValueError('Restricted drill role was not applied')
+            if not connection.autocommit:
+                connection.rollback()
+        return connection
+    with patch.object(psycopg.Connection,'connect',classmethod(connect)),patch.object(psycopg,'connect',psycopg.Connection.connect):
+        try:
+            yield
+        finally:
+            from lead_app.db_pool import close_all
+            close_all()
 
 
 def atomic_private(path,data,previous=None):
@@ -163,15 +206,18 @@ def main():
             try:
                 admin.execute(sql.SQL('REVOKE CONNECT ON DATABASE {} FROM PUBLIC').format(sql.Identifier(name)))
                 subprocess.run([pg/'pg_restore','--exit-on-error','-d',name,dump],env=env,check=True)
-                summaries=migrate(name)
-                upgrade({**options,'dbname':name},roles=True)
-                if version(name)!=[GOAL]:
-                    raise ValueError('Repeat schema upgrade changed the result')
+                with drill_role_connections(name,options):
+                    summaries=migrate(name)
+                    upgrade({**options,'dbname':name},roles=True)
+                    if version(name)!=[GOAL]:
+                        raise ValueError('Repeat schema upgrade changed the result')
             finally:
                 admin.execute(sql.SQL('DROP DATABASE {} WITH (FORCE)').format(sql.Identifier(name)))
         with dump.open('rb') as stream:
             sha=hashlib.file_digest(stream,'sha256').hexdigest()
-        proof.write_text(json.dumps({'sha':args.sha,'dump_sha256':sha,'transfers':summaries,'config_before_sha256':hashlib.sha256(config_before).hexdigest()}))
+        proof.write_text(json.dumps({'sha':args.sha,'dump_sha256':sha,'transfers':summaries,
+            'role_transport':'isolated-db-admin-login-with-verified-restricted-role',
+            'config_before_sha256':hashlib.sha256(config_before).hexdigest()}))
         print('Restored backup schema, ownership, original authority and costs verified',flush=True)
         return
     with dump.open('rb') as stream:
