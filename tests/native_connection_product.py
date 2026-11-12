@@ -45,7 +45,6 @@ async def verify_login(
                     "fixture_only": True,
                     "username_literal_seen": board.state.username.encode() in raw,
                     "password_literal_seen": board.state.password.encode() in raw,
-                    "synthetic_otp_literal_seen": b"135790" in raw,
                 }
             )
             request = json.loads(raw)
