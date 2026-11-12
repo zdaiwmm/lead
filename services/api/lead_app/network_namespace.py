@@ -15,7 +15,7 @@ def required():
     )
 
 
-def apply(options, aid, proxy, storage=None):
+def apply(options, aid, proxy, storage=None, *, wrapper=None):
     if not required():
         return options
     if (
@@ -24,7 +24,7 @@ def apply(options, aid, proxy, storage=None):
         or not Path("/usr/bin/python3").is_file()
     ):
         raise ValueError("此浏览器节点不能提供系统级出口隔离")
-    wrapper = ROOT / "scripts/browser_namespace.py"
+    wrapper = wrapper or ROOT / "scripts/browser_namespace.py"
     if not os.access(wrapper, os.X_OK):
         raise ValueError("浏览器隔离启动程序未安装")
     # SDK validation and fingerprint configuration run against the real binary;
@@ -65,7 +65,9 @@ def chromium_options(options, aid, proxy, storage, *, control_directory, cdp_por
                         ("--remote-debugging-address", "127.0.0.1")):
         if [arg for arg in args if arg == name or arg.startswith(name + "=")] != [name + "=" + value]:
             raise ValueError("Chromium arguments differ from the assigned control endpoint")
-    settings = apply(options, aid, proxy, storage)
+    wrapper = (ROOT / "services/browser-runtime/browser_namespace.py"
+               if env().get("LEAD_DEPLOYMENT_MODE") == "production" else ROOT / "scripts/browser_namespace.py")
+    settings = apply(options, aid, proxy, storage, wrapper=wrapper)
     settings["env"].update({
         "LEAD_BROWSER_CONTROL_DIRECTORY": str(directory),
         "LEAD_BROWSER_CDP_PORT": str(port),

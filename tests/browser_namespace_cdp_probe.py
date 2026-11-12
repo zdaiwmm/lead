@@ -52,7 +52,7 @@ async def main(wrapper, binary):
                     code, content = '200 OK', b'ok'
                 elif line.startswith('GET http://fixture.test/'):
                     requests.append(line)
-                    code, content = '200 OK', b'<html><body>isolated fixture</body></html>'
+                    code, content = '200 OK', b'<html><body>isolated fixture<input id=entry aria-label=Entry></body></html>'
                 else:
                     code, content = '403 Forbidden', b'fixture only'
                 with contextlib.suppress(OSError):
@@ -118,9 +118,24 @@ async def main(wrapper, binary):
                         if answer.get('id') == 1:
                             assert 'error' not in answer, answer
                             return answer['result']
+                from lead_app.browser_runtime import NativeNetworkGate
+                context_id = next(item['browserContextId'] for item in (await rpc(first, 'Target.getTargets'))['targetInfos'] if item['type']=='page')
+                control_lost = asyncio.Event()
+                async def authorize(scope, target, request):
+                    if scope and request['method']=='GET' and request['url'].startswith('http://fixture.test/'):
+                        return {'kind':'read'}
+                    return None
+                async def claim(*args):
+                    raise AssertionError('Read fixture must never claim an action')
+                async def lost():
+                    control_lost.set()
+                gate = NativeNetworkGate(None, None, authorize=authorize, claim=claim, lost=lost)
+                await gate.start(control, __import__('urllib.parse', fromlist=['urlsplit']).urlsplit(uri).path, context_id)
                 async def page(ws, name):
-                    target = (await rpc(ws, 'Target.createTarget', {'url': 'http://fixture.test/'+name}))['targetId']
+                    target = (await rpc(ws, 'Target.createTarget', {'url': 'about:blank'}))['targetId']
+                    await gate.register(target, {'task_id':name,'origins':['http://fixture.test']})
                     session = (await rpc(ws, 'Target.attachToTarget', {'targetId': target, 'flatten': True}))['sessionId']
+                    await rpc(ws, 'Page.navigate', {'url':'http://fixture.test/'+name}, session)
                     for _ in range(50):
                         result = await rpc(ws, 'Runtime.evaluate', {'expression': 'document.body && document.body.innerText', 'returnByValue': True}, session)
                         if result['result'].get('value') == 'isolated fixture':
@@ -129,6 +144,29 @@ async def main(wrapper, binary):
                     raise AssertionError(result)
                 targets = await asyncio.gather(page(first, 'one'), page(second, 'two'))
                 assert len(set(targets)) == 2 and len(requests) >= 2
+                # Separate SDK workers avoid the pinned SDK's process-global event lock.
+                from lead_app.browser_runtime import ControlBridge
+                bridge = await ControlBridge(control, __import__('urllib.parse', fromlist=['urlsplit']).urlsplit(uri).path).start()
+                async def worker(index):
+                    child_env = {**os.environ, 'ANONYMIZED_TELEMETRY': 'false', 'BROWSER_USE_CLOUD_SYNC': 'false'}
+                    child = await asyncio.create_subprocess_exec(sys.executable, str(Path(__file__).with_name('browser_native_scope_probe.py')),
+                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=child_env)
+                    payload = {'url': bridge.url, 'headers': bridge.headers, 'task_id': 'task-'+str(index),
+                               'target_id': targets[index], 'foreign_target': targets[1-index]}
+                    try:
+                        out, err = await asyncio.wait_for(child.communicate(json.dumps(payload).encode()), 45)
+                    except BaseException:
+                        child.kill()
+                        await child.wait()
+                        raise
+                    if child.returncode:
+                        raise AssertionError(err.decode()[-4000:])
+                    return json.loads(out.decode().splitlines()[-1])
+                try:
+                    workers = await asyncio.gather(worker(0), worker(1))
+                    assert max(w['started'] for w in workers) < min(w['ended'] for w in workers)
+                finally:
+                    await bridge.close()
                 process.kill()
                 await asyncio.to_thread(process.wait, 5)
                 for ws in (first, second):
@@ -137,8 +175,10 @@ async def main(wrapper, binary):
                             await asyncio.wait_for(ws.recv(), 5)
                     except Exception as exc:
                         assert not isinstance(exc, asyncio.TimeoutError), 'control tunnel retained after parent death'
-                print(json.dumps({'chromium': version['Browser'], 'unix_cdp': True, 'two_independent_targets': True,
-                                  'fixture_pages': len(requests), 'network_attestation': attestations[0],
+                await asyncio.wait_for(control_lost.wait(),5)
+                await gate.close()
+                print(json.dumps({'native_network_gate_reads':True,'chromium': version['Browser'], 'unix_cdp': True, 'two_independent_targets': True,
+                                  'fixture_pages': len(requests), 'native_workers': workers, 'network_attestation': attestations[0],
                                   'host_cdp_not_listening': True, 'control_eof_on_parent_death': True}))
         finally:
             if process.poll() is None:

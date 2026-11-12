@@ -89,6 +89,7 @@ class Actor:
         self.research_pages = {}
         self.forward_proxy = None
         self.disconnected = False
+        self.native_runtime = None
         from .browser_metering import Counter
 
         self.counter = Counter(self.folder / "storage")
@@ -97,6 +98,9 @@ class Actor:
         self.disconnected = True
 
     async def launch(self):
+        if self.profile.get("provider") == "chromium":
+            from .browser_runtime import launch_native_actor
+            return await launch_native_actor(self)
         from .resources import ensure_capacity
 
         ensure_capacity(256)
@@ -355,6 +359,9 @@ class Actor:
             self.measure()
         except Exception:
             logging.warning("Browser final usage sample unavailable")
+        if self.native_runtime:
+            await self.native_runtime.close()
+            self.native_runtime = None
         if self.manager:
             try:
                 await self.manager.__aexit__(None, None, None)
