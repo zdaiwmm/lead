@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from fastapi.testclient import TestClient
 from lead_app import api
 from lead_app.connection_control import transition
-from lead_app.db import all_rows, one, tx
+from lead_app.db import all_rows, j, one, tx
 from lead_app.growth.contracts import TaskSpec, Wait, WorkResult, utcnow
 from lead_app.growth.runtime import (
     _resource_condition,
@@ -145,3 +145,19 @@ def test_automatic_connection_recheck_preserves_backoff_and_emits_no_immediate_w
     assert task['state']=='planned' and task['result']['runtime']['wait']['recovery_action']=='recheck'
     assert datetime.fromisoformat(task['result']['runtime']['wait']['check_at'])==wait.check_at
     assert after==before
+
+
+def test_current_execution_method_changes_condition_without_rotating_authority(growth_agent):
+    from test_browser_action_transactions import native_work
+    _, action, claim, _, _, _ = native_work(growth_agent)
+    before = condition(growth_agent, claim['ref'])
+    method = action['intent']['browser_method']
+    changed = {**method, 'selectors': {**method['selectors'], 'submit': '#corrected-submit'}}
+    with tx(growth_agent) as c:
+        grant = one(c, 'SELECT * FROM lead.authorization_grants WHERE id=%s', (action['grant_id'],))
+        c.execute("UPDATE lead.account_targets SET verified_permissions=verified_permissions || %s WHERE id=%s",
+                  (j({'browser_method': changed}), action['target_id']))
+    assert condition(growth_agent, claim['ref']) != before
+    with tx(growth_agent) as c:
+        assert one(c, 'SELECT * FROM lead.authorization_grants WHERE id=%s', (action['grant_id'],)) == grant
+        assert one(c, 'SELECT intent FROM lead.actions WHERE id=%s', (action['id'],))['intent'] == action['intent']

@@ -79,12 +79,15 @@ def _resource_condition(c, agent, row, spec):
             LEFT JOIN lead.account_operating_intents i ON i.account_id=s.id WHERE s.id=%s""",(account_id,)) if account_id else None
         capability = None
         if spec.kind=="channel":
+            operation = spec.payload.get('operation', 'publish')
             capability = one(c,"""SELECT t.state,t.verified_permissions->>'adapter_version' adapter_version,
+                coalesce(t.verified_permissions->'browser_methods'->%s,
+                    t.verified_permissions->'browser_method') browser_method,
                 g.id grant_id,g.version,g.allowed_actions,g.limits,pc.permission_state,pc.technical_state,
                 pc.adapter_version installed_version FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id
-                LEFT JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.target_type=t.target_type AND pc.action_type='publish'
+                LEFT JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.target_type=t.target_type AND pc.action_type=%s
                 LEFT JOIN LATERAL (SELECT * FROM lead.authorization_grants WHERE target_id=t.id AND revoked_at IS NULL ORDER BY version DESC LIMIT 1) g ON true
-                WHERE t.id=%s""",(spec.target_id,))
+                WHERE t.id=%s""",(operation,operation,spec.target_id))
         resource = 'account:' + str(account_id) if native and account_id else 'profile:' + str(profile)
         connection = one(c, "SELECT id,challenge_version,control_mode,state,expires_at FROM lead.takeover_sessions WHERE id=%s",
                          (spec.payload['takeover_id'],)) if spec.payload.get('takeover_id') else None
