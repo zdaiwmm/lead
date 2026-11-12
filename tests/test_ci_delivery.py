@@ -245,6 +245,14 @@ def test_sdk_is_built_once_and_same_attempt_artifact_reaches_tests_and_image():
     native = next(s for s in backend if s.get('name') == 'Native fixed-page SDK and namespace contract')
     assert 'browser_namespace_cdp_probe.py' in native['run'] and '-B -S' in native['run']
     assert 'continue-on-error' not in native and 'if' not in native
+    product = next(s for s in backend if s.get('name') == 'Database, media and authorization tests')
+    import shlex
+    command = shlex.split(product['run'])
+    invocation = next(i for i, argument in enumerate(command) if argument.endswith('/pytest'))
+    environment = dict(argument.split('=', 1) for argument in command[:invocation])
+    assert environment['LEAD_NATIVE_PRODUCT_TESTS'] == '1'
+    assert environment['LEAD_NETWORK_NAMESPACE'] == environment['LEAD_BROWSER_TESTS'] == '1'
+    assert 'continue-on-error' not in product and 'if' not in product
     package = next(s for s in frontend if s.get('name') == 'Package the tested Linux application')
     assert '"$RUNNER_TEMP/lead-browser-runtime"' in package['run']
     assert any(s.get('with',{}).get('python-version') == '3.12' for s in frontend)
