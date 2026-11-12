@@ -359,6 +359,7 @@ def model_options():
         "provider": connection["provider"],
         "providers": providers,
         "advanced_research_available": available(),
+        "research_providers": __import__("lead_app.research_providers", fromlist=["capabilities"]).capabilities(),
         "credentials_managed_by_server": True,
     }
 

@@ -15,8 +15,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from .config import env
+from .config import TENANT, env
 from .db import j, one, require_agent, tx
+from .scope import current_tenant
 
 ENDPOINTS = {
     ('tavily', 'web.search'): ('POST', 'https://api.tavily.com/search'),
@@ -38,15 +39,49 @@ def _failure(provider, operation, reason, **extra):
         'access_mode':'provider_public'}, **extra}
 
 
-def configuration(provider, operation):
+def configuration(provider, operation, aid=None):
     values = env()
     if (provider,operation) not in ENDPOINTS:
         return None, 'unsupported_operation'
-    key = values.get(provider.upper()+'_API_KEY')
+    tenant_suffix=current_tenant().replace('-','').upper()
+    key=values.get(provider.upper()+'_API_KEY_'+tenant_suffix)
+    if not key and str(current_tenant())==str(TENANT):
+        key=values.get(provider.upper()+'_API_KEY')
     if not key:
         return None, 'missing_key'
+    # One credential has one workspace owner, including explicitly suffixed keys.
+    prefix=provider.upper()+'_API_KEY'
+    owners=set()
+    for name,value in values.items():
+        if value!=key:
+            continue
+        if name==prefix:
+            owners.add(str(TENANT).replace('-','').upper())
+        elif name.startswith(prefix+'_') and re.fullmatch(r'[0-9A-F]{32}',name[len(prefix)+1:]):
+            owners.add(name[len(prefix)+1:])
+    if owners!={tenant_suffix}:
+        return None,'credential_scope_conflict'
+
     try:
-        conf = json.loads(values.get('LEAD_RESEARCH_ALLOWANCES') or '{}')[provider]
+        from .admin_settings import effective
+        with tx(aid) as c:
+            # Only the workspace default owns a shared connection allowance.
+            shared,_=effective(c,'models')
+            conf=shared.get('research_providers',{}).get(provider)
+            if not conf or not conf.get('enabled'):
+                return None,'not_enabled'
+            conf=dict(conf)
+            if aid:
+                local,_=effective(c,'models',aid)
+                tool='public_web' if provider=='tavily' else 'community_research'
+                if not local.get('tools',{}).get(tool,True):
+                    return None,'project_disabled'
+                override=local.get('research_providers',{}).get(provider)
+                if override:
+                    if not override.get('enabled'):
+                        return None,'project_disabled'
+                    conf['project_limit_units']=min(conf['project_limit_units'],override['project_limit_units'])
+                    conf['question_limit_units']=min(conf['question_limit_units'],override['question_limit_units'])
         pricing = conf['operations'][operation]
         start, end = (datetime.fromisoformat(conf[k]) for k in ('starts_at','ends_at'))
         if not start <= _now() < end or not conf['evidence_ref'] or not pricing['price_version']:
@@ -172,7 +207,39 @@ def normalize(provider, operation, data, request_id=None):
         'has_more':page.get('hasNextPage'), 'usage':data.get('usage')}
 
 
-def _reserve(aid, task_id, provider, operation, payload, call_key, conf):
+
+def _validate_claim(c, aid, task_id, agent, task, claim):
+    from .growth.store import objective_revision
+    now=_now()
+    if not task or task['state']!='running' or agent['desired_state'] in ('paused','archived'):
+        raise ValueError('task_unavailable')
+    runtime=(task['result'] or {}).get('runtime',{})
+    ref=(claim or {}).get('ref',{})
+    if (str(ref.get('agent_id'))!=str(aid) or str(ref.get('task_id'))!=str(task_id)
+            or ref.get('task_generation')!=task['input'].get('task_generation')
+            or not runtime.get('attempt_token') or runtime['attempt_token']!=(claim or {}).get('attempt_token')
+            or (claim or {}).get('control_version')!=agent['control_version']
+            or runtime.get('control_version')!=agent['control_version']
+            or not runtime.get('lease_until') or datetime.fromisoformat(runtime['lease_until'])<=now):
+        raise ValueError('stale_execution_claim')
+    spec=task['input'].get('spec',{})
+    if not spec.get('review_at') or datetime.fromisoformat(spec['review_at'])<=now:
+        raise ValueError('task_window_ended')
+    if task.get('experiment_id'):
+        experiment=one(c,'SELECT * FROM lead.growth_experiments WHERE id=%s FOR SHARE',(task['experiment_id'],))
+        if (not experiment or experiment['state'] not in ('active','observing')
+                or datetime.fromisoformat(experiment['specification']['review_at'])<=now
+                or experiment['objective_revision']!=objective_revision(agent)):
+            raise ValueError('experiment_unavailable')
+    product_research=spec.get('kind')=='research' and spec.get('purpose')=='product' and not task.get('experiment_id')
+    if not product_research and task['input'].get('goal_revision')!=objective_revision(agent):
+        raise ValueError('objective_changed')
+    if 'business_profile_id' in task['input']:
+        business=one(c,'SELECT id FROM lead.business_profiles ORDER BY revision DESC LIMIT 1')
+        if task['input']['business_profile_id']!=(str(business['id']) if business else None):
+            raise ValueError('product_changed')
+
+def _reserve(aid, task_id, provider, operation, payload, call_key, conf, execution_claim=None):
     digest=hashlib.sha256(json.dumps([task_id,provider,operation,payload],sort_keys=True).encode()).hexdigest()
     opkey='research:'+call_key
     with tx(aid) as c:
@@ -183,9 +250,8 @@ def _reserve(aid, task_id, provider, operation, payload, call_key, conf):
         quota=one(c,'''SELECT * FROM lead.research_allowances WHERE connection_ref=%s AND period_key=%s FOR UPDATE''',
             (conf['connection'],conf['period_key']))
         agent=require_agent(c,aid,True)
-        task=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(task_id,))
-        if not task or task['state'] in ('cancelled','failed') or agent['desired_state'] in ('paused','archived'):
-            raise ValueError('task_unavailable')
+        task=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE',(task_id,))
+        _validate_claim(c,aid,task_id,agent,task,execution_claim)
         old=one(c,'SELECT * FROM lead.budget_reservations WHERE operation_key=%s',(opkey,))
         if old:
             snapshot=old['pricing_snapshot']['research']
@@ -207,7 +273,7 @@ def _reserve(aid, task_id, provider, operation, payload, call_key, conf):
           WHERE r.period_id=%s AND r.state<>'released' AND r.pricing_snapshot#>>'{research,question}'=%s''',(period['id'],question))['n']
         if spent+units>conf['question_limit_units']:
             raise ValueError('question_quota_exhausted')
-        snapshot={'research':{'args_hash':digest,'question':question,'task_id':str(task_id),
+        snapshot={'research':{'args_hash':digest,'question':question,'task_id':str(task_id),'experiment_id':str(task['experiment_id']) if task.get('experiment_id') else None,
             'connection':conf['connection'],'period_key':conf['period_key'],'unit':conf['unit'],
             'price_version':conf['price_version'],'provider':provider,'operation':operation}}
         row=one(c,'''INSERT INTO lead.budget_reservations(tenant_id,agent_id,period_id,operation_key,units,state,expires_at,provider,pricing_snapshot)
@@ -242,15 +308,15 @@ def _settle(aid, reservation, conf, result, actual=None):
              'request_id':result.get('request_id'),'billing':'known','money_usd':actual/1_000_000 if conf['unit']=='usd_micros' else None})))
 
 
-async def research_call(aid, task_id, provider, operation, args, call_key):
-    conf, reason=configuration(provider,operation)
+async def research_call(aid, task_id, provider, operation, args, call_key, *, execution_claim=None):
+    conf, reason=configuration(provider,operation,aid)
     if reason:
         return _failure(provider,operation,reason)
     try:
         if not isinstance(call_key,str) or not 1<=len(call_key)<=200:
             raise ValueError('invalid_call_key')
         payload=_args(provider,operation,args)
-        reservation,cached=_reserve(aid,task_id,provider,operation,payload,call_key,conf)
+        reservation,cached=_reserve(aid,task_id,provider,operation,payload,call_key,conf,execution_claim)
     except ValueError as error:
         return _failure(provider,operation,str(error))
     if cached is not None:
@@ -280,4 +346,17 @@ async def research_call(aid, task_id, provider, operation, args, call_key):
     except (httpx.HTTPError,ValueError,TypeError,AttributeError):
         result=_failure(provider,operation,'transport_unknown',billing_state='unknown')
     _settle(aid,reservation,conf,result,actual)
+    return result
+
+
+def capabilities(aid=None):
+    """No keys, account data or optimistic readiness in the settings projection."""
+    result={}
+    for provider, operation in ENDPOINTS:
+        conf,reason=configuration(provider,operation,aid)
+        result.setdefault(provider,{})[operation]={
+            'available':conf is not None,'reason':reason,
+            'unit':'provider_millicredits' if provider=='tavily' else 'usd_micros',
+            'max_units':conf['max_units'] if conf else None,
+        }
     return result

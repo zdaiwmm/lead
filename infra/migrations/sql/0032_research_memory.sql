@@ -36,6 +36,28 @@ LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,lead AS $$
  AND lead.member_agent_allowed(p_agent) AND lead.member_agent_allowed(e.agent_id)
  AND e.revoked_at IS NULL AND e.public_projection IS NOT NULL AND (e.review_at IS NULL OR e.review_at>now())
  AND EXISTS(SELECT 1 FROM lead.agents a WHERE a.id=e.agent_id AND a.tenant_id=e.tenant_id AND a.desired_state<>'archived')
- AND (e.source_document_id IS NULL OR EXISTS(SELECT 1 FROM lead.knowledge_documents d WHERE d.id=e.source_document_id AND d.tenant_id=e.tenant_id AND d.agent_id=e.agent_id AND d.deleted_at IS NULL));
+ AND (e.source_document_id IS NULL OR EXISTS(SELECT 1 FROM lead.knowledge_documents d WHERE d.id=e.source_document_id AND d.tenant_id=e.tenant_id AND d.agent_id=e.agent_id AND d.source_type='public_read' AND d.deleted_at IS NULL));
 $$;
 REVOKE ALL ON FUNCTION lead.public_experiences(uuid) FROM PUBLIC;
+
+-- Sharing is a controlled projection even if another trusted writer bypasses
+-- the Python helper. It cannot turn a private document into a public source.
+CREATE FUNCTION lead.check_experience_projection() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,lead AS $$
+DECLARE d lead.knowledge_documents; body text; projection jsonb;
+BEGIN
+ projection=NEW.public_projection;
+ IF projection IS NULL THEN RETURN NEW; END IF;
+ SELECT * INTO d FROM lead.knowledge_documents WHERE id=NEW.source_document_id
+   AND tenant_id=NEW.tenant_id AND agent_id=NEW.agent_id AND deleted_at IS NULL;
+ SELECT string_agg(k.body,' ' ORDER BY ordinal) INTO body FROM lead.knowledge_chunks k
+   WHERE k.document_id=d.id AND k.tenant_id=NEW.tenant_id AND k.agent_id=NEW.agent_id;
+ IF d.id IS NULL OR d.source_type<>'public_read' OR projection->>'problem' IS DISTINCT FROM d.title
+   OR projection->'sources' IS DISTINCT FROM jsonb_build_array(d.source_ref)
+   OR length(coalesce(projection->>'conclusion','')) NOT BETWEEN 1 AND 500
+   OR position(regexp_replace(projection->>'conclusion','\s+',' ','g') IN regexp_replace(coalesce(body,''),'\s+',' ','g'))=0
+ THEN RAISE EXCEPTION 'public_experience_source_required'; END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER experience_projection BEFORE INSERT OR UPDATE OF public_projection,source_document_id
+ ON lead.experiences FOR EACH ROW EXECUTE FUNCTION lead.check_experience_projection();

@@ -49,8 +49,8 @@ def record_experience(aid, extraction_key, *, kind, problem, conclusion, conditi
         raise ValueError('Invalid experience content')
     conditions = _conditions(conditions or {})
     projection = _projection(public_projection)
-    if projection and source_document_id is None and not evidence:
-        raise ValueError('Public projection requires source evidence')
+    if projection and source_document_id is None:
+        raise ValueError('Public projection requires a persisted public source')
     with tx(aid) as c:
         require_agent(c, aid, True)
         old = one(c, 'SELECT id FROM lead.experiences WHERE extraction_key=%s', (extraction_key,))
@@ -58,6 +58,17 @@ def record_experience(aid, extraction_key, *, kind, problem, conclusion, conditi
             return str(old['id'])
         if source_document_id and not one(c, 'SELECT id FROM lead.knowledge_documents WHERE id=%s AND deleted_at IS NULL', (source_document_id,)):
             raise ValueError('Experience source is unavailable')
+        if projection:
+            document=one(c,"""SELECT d.*, (SELECT string_agg(k.body,' ' ORDER BY ordinal) FROM lead.knowledge_chunks k WHERE k.document_id=d.id) AS source_body
+                FROM lead.knowledge_documents d WHERE d.id=%s AND d.deleted_at IS NULL""",(source_document_id,))
+            body=' '.join((document or {}).get('source_body','').split())
+            quote=' '.join(projection['conclusion'].split())
+            if (not document or document['source_type']!='public_read'
+                    or projection['sources']!=[document['source_ref']]
+                    or projection['problem']!=document['title'] or not quote or quote not in body
+                    or len(quote)>500
+                    or any(v.casefold() not in body.casefold() for v in projection['conditions'].values())):
+                raise ValueError('Public projection must be a bounded extract of its actual public source')
         if supersedes:
             if not one(c, 'UPDATE lead.experiences SET revoked_at=now(),version=version+1 WHERE id=%s RETURNING id', (supersedes,)):
                 raise ValueError('Experience replacement outside scope')
@@ -99,3 +110,65 @@ def retrieve_experience(aid, product, question, limit=4):
     except Exception:
         log.info('Optional experience retrieval unavailable', exc_info=False)
         return []
+
+
+def extract_task(aid, task_id):
+    """At most one optional deterministic extraction after durable task success.
+
+    No new model request and no invented finding. A failed extraction is marked
+    once; completion of the original work is never rolled back or retried.
+    """
+    try:
+        with tx(aid) as c:
+            row = one(c, 'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE', (task_id,))
+            if not row or row['state'] != 'succeeded' or row['type'] not in ('growth.research','growth.observe'):
+                return None
+            result = row['result'] or {}
+            if 'experience_extraction' in result:
+                return result['experience_extraction'].get('experience_id')
+            c.execute("UPDATE lead.tasks SET result=result || %s WHERE id=%s",(j({'experience_extraction':{'state':'attempted'}}),task_id))
+            output=result.get('output',{}).get('output',{})
+            spec=row['input'].get('spec',{})
+            source=None
+            evidence=[]
+            conclusion=None
+            if row['type']=='growth.research':
+                for finding in output.get('findings',[])[:4]:
+                    doc=one(c, '''SELECT d.id,d.source_ref,string_agg(k.body,' ' ORDER BY k.ordinal) body
+                        FROM lead.knowledge_documents d JOIN lead.knowledge_chunks k ON k.document_id=d.id
+                        WHERE d.id=%s AND d.deleted_at IS NULL GROUP BY d.id''',(finding.get('document_id'),))
+                    quote=finding.get('quote','')
+                    if doc and quote and ' '.join(quote.split()) in ' '.join(doc['body'].split()) and finding.get('finding'):
+                        source=str(doc['id'])
+                        conclusion=finding['finding']
+                        evidence=[{'kind':'task','id':str(task_id)},{'kind':'document','id':source,'quote':quote}]
+                        break
+            elif output.get('measurement')=='healthy' and output.get('window_status')=='closed' and (output.get('new_units') or 0)>0 and output.get('evidence_refs'):
+                # Only observed positive units, never 'channel ineffective' from
+                # missing reach/measurement or an immature observation window.
+                conclusion=f"Observed {output['new_units']} new {output.get('unit','units')} under the frozen value definition; this does not establish scalable channel effectiveness."
+                evidence=[{'kind':'task','id':str(task_id),'evidence_revision':output.get('evidence_revision')}]
+            problem=spec.get('payload',{}).get('question') or spec.get('purpose') or 'Observed business evidence'
+            conditions={}
+            # Project-local conclusion is still tied to its original product.
+            business=one(c,'SELECT product_url FROM lead.business_profiles ORDER BY revision DESC LIMIT 1')
+            if business and business['product_url']:
+                conditions['product']=business['product_url'][:300]
+        identifier=None
+        if conclusion:
+            identifier=record_experience(aid,'task:'+str(task_id),kind='research' if row['type']=='growth.research' else 'business',
+                problem=problem[:1500],conclusion=conclusion[:6000],conditions=conditions,evidence=evidence,source_document_id=source)
+        with tx(aid) as c:
+            c.execute('UPDATE lead.tasks SET result=result || %s WHERE id=%s',
+                (j({'experience_extraction':{'state':'saved' if identifier else 'no_supported_learning','experience_id':identifier}}),task_id))
+        return identifier
+    except Exception:
+        log.info('Optional experience extraction unavailable', exc_info=False)
+        return None
+
+
+def stop_sharing(aid):
+    """Revoke only public projections; retain private evidence and conclusions."""
+    with tx(aid) as c:
+        require_agent(c, aid, True)
+        c.execute("UPDATE lead.experiences SET public_projection=NULL,version=version+1 WHERE public_projection IS NOT NULL")

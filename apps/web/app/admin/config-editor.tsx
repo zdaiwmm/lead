@@ -48,6 +48,18 @@ function differences(
 }
 
 const fieldNames: Row = {
+  research_providers: "研究工具与费用",
+  trial_eligible: "端点试用资格",
+  price_version: "价格核验版本",
+  max_units: "单次预留单位",
+  limit_units: "连接共享额度单位",
+  project_limit_units: "项目额度单位",
+  question_limit_units: "研究问题额度单位",
+  paid_authorization_ref: "付费授权依据",
+  evidence_ref: "核验依据",
+  starts_at: "周期开始",
+  ends_at: "周期结束",
+
   members: "成员权限",
   issuer: "登录服务",
   subject: "成员身份",

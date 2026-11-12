@@ -65,15 +65,23 @@ def operating_signals(c,as_of,connection_id=None,experiment_id=None):
     from ..db import all_rows, one
     connection=one(c,"SELECT id,state,last_received_at FROM lead.analytics_connections WHERE state<>'disconnected' AND (%s::uuid IS NULL OR id=%s) ORDER BY created_at DESC LIMIT 1",(connection_id,connection_id))
     costs=one(c,"""SELECT coalesce(sum(units),0) tokens FROM lead.usage_events
-        WHERE created_at<=%s AND (%s::uuid IS NULL OR reservation_id IN(SELECT id FROM lead.budget_reservations
+        WHERE category='model_tokens' AND created_at<=%s AND (%s::uuid IS NULL OR reservation_id IN(SELECT id FROM lead.budget_reservations
             WHERE pricing_snapshot#>>'{growth,experiment_id}'=%s))""",(as_of,experiment_id,str(experiment_id) if experiment_id else None))
     held=one(c,"""SELECT coalesce(sum(units),0) tokens,count(*) FILTER(WHERE state='unknown') unknown
-        FROM lead.budget_reservations WHERE state IN ('reserved','unknown') AND created_at<=%s
+        FROM lead.budget_reservations WHERE state IN ('reserved','unknown') AND period_id IN (SELECT id FROM lead.budget_periods WHERE unit='tokens') AND created_at<=%s
         AND (%s::uuid IS NULL OR pricing_snapshot#>>'{growth,experiment_id}'=%s)""",(as_of,experiment_id,str(experiment_id) if experiment_id else None))
+    provider_costs=all_rows(c,"""SELECT b.unit,
+        coalesce(sum(CASE WHEN r.state IN ('reserved','unknown') THEN r.units ELSE 0 END),0) held_units,
+        coalesce(sum(u.units),0) spent_units,count(*) FILTER(WHERE r.state='unknown') unknown_calls
+        FROM lead.budget_reservations r JOIN lead.budget_periods b ON b.id=r.period_id
+        LEFT JOIN (SELECT reservation_id,sum(units) units FROM lead.usage_events WHERE category='research_provider' GROUP BY reservation_id) u ON u.reservation_id=r.id
+        WHERE r.created_at<=%s AND r.pricing_snapshot ? 'research'
+        AND (%s::uuid IS NULL OR r.pricing_snapshot#>>'{research,experiment_id}'=%s)
+        GROUP BY b.unit""",(as_of,experiment_id,str(experiment_id) if experiment_id else None))
     result={'exposure':{'value':None,'coverage':'platform_insights_not_connected'},
         'visits':{'visitors':None,'page_views':None,'qualified_visits':None,'coverage':'missing','connection_id':None},
         'event_funnel':[],'costs':{'model_tokens':int(costs['tokens']),'held_tokens':int(held['tokens']),
-            'unknown_billing_calls':held['unknown'],'advertising':None,'paid_cooperation':None}}
+            'unknown_billing_calls':held['unknown'],'advertising':None,'paid_cooperation':None,'research_providers':provider_costs}}
     if not connection:
         return result
     c.execute("SELECT set_config('app.analytics_scope','live',true)")
