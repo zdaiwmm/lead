@@ -1089,7 +1089,7 @@ def reviewed_fault_isolation(mirror, sha, extra):
     return paths
 
 
-GROWTH_RUNTIME_FILES = {'scripts/growth_runtime_upgrade.py': '2cb90fb88c11fb1417996a80b7cbe306bf5635ea', 'infra/migrations/versions/0031_growth_runtime.py': 'ad10651410b6ecd5641c10dc6d6a1979675d9f48', 'infra/migrations/sql/0031_growth_runtime.sql': '862552a7ca10303415da81f1808a522234bbf7dc'}
+GROWTH_RUNTIME_FILES = {'scripts/growth_runtime_upgrade.py': '5a98672c797361272a1a22148ba7b3539ca09aba', 'infra/migrations/versions/0031_growth_runtime.py': 'ad10651410b6ecd5641c10dc6d6a1979675d9f48', 'infra/migrations/sql/0031_growth_runtime.sql': '862552a7ca10303415da81f1808a522234bbf7dc'}
 
 
 def growth_schema_query():
@@ -1148,10 +1148,10 @@ def complete_growth_cutover(sha):
     executor_host_file(helper)
     expected=GROWTH_RUNTIME_FILES['scripts/growth_runtime_upgrade.py']
     require(run('git','hash-object','--no-filters',helper)==expected,'growth finalizer source differs')
-    # This plan is root-owned, independently attested and journaled by the same
-    # provisioner used for existing executors. Reddit follows main-current and
-    # already restarted with the application; Telegram has its own cutover.
-    provision_executor(sha,EXECUTOR_REGISTRY.parent/'telegram-provision.json')
+    # Both consumers need this revision's actual provisioning proof. Following
+    # main-current updates Reddit's code mount, but does not create its journal.
+    for channel in ('telegram','reddit'):
+        provision_executor(sha,EXECUTOR_REGISTRY.parent/(channel+'-provision.json'))
     register_executors(sha)
     run(EXECUTOR_PYTHON_SOURCE,'-I','-B',helper,'finish','--sha',sha,'--old',journal['old'],timeout=180)
     require(not growth_cutover_pending(sha),'growth finalizer did not release its journal')

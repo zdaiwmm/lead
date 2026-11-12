@@ -81,6 +81,48 @@ async def test_structured_repair_receives_exact_validation_error_without_source_
     assert 'input' not in repair['errors'][0] and 'fixture-text' not in str(repair)
 
 
+async def test_group_repair_receives_committed_receipts_and_preserves_atomic_rejected_work(growth_agent, monkeypatch):
+    from lead_app.growth import agent
+    calls = []
+    deadline = utcnow() + timedelta(hours=1)
+
+    def group(key, queries):
+        experiment = ExperimentSpec(question_type='audience', question='Who needs ' + key + '?',
+            hypothesis='Public evidence may distinguish a specific audience', learning_signal='A sourced request',
+            audience=key, token_limit=1000, review_at=deadline)
+        task = TaskSpec(kind='research', purpose='Check ' + key, review_at=deadline,
+            payload={'question': 'Find specific public requests', 'queries': queries})
+        return [Command(command_key=key + '-experiment', group_key=key, kind='experiment.create',
+                        goal_ref={'revision': 1}, payload=experiment.model_dump(mode='json')),
+                Command(command_key=key + '-research', group_key=key, kind='task.create',
+                        goal_ref={'revision': 1}, payload=task.model_dump(mode='json'))]
+
+    async def provider(schema, context, **kwargs):
+        calls.append(context)
+        if len(calls) == 1:
+            commands = group('healthy', ['one']) + group('rejected', ['one', 'two', 'three'])
+        else:
+            repair = context['repair']
+            assert repair['groups'] == ['rejected']
+            assert len(repair['accepted']) == 1
+            receipt = repair['accepted'][0]
+            assert receipt['group'] == 'healthy' and len(receipt['task_refs']) == 1
+            with tx(growth_agent) as c:
+                assert one(c, 'SELECT id FROM lead.growth_experiments WHERE id=%s', (receipt['experiment_id'],))
+                assert one(c, 'SELECT count(*) n FROM lead.growth_experiments')["n"] == 1
+            commands = group('rejected', ['one', 'two'])
+        return DecisionProposal(context_key=context['context_key'], rationale='Repair the complete rejected group only',
+                                commands=commands)
+
+    monkeypatch.setattr(agent, 'run_model', provider)
+    result = await agent.decide(growth_agent)
+    assert len(calls) == 2 and not result['rejected']
+    assert len(result['accepted']) == 2
+    with tx(growth_agent) as c:
+        assert one(c, 'SELECT count(*) n FROM lead.growth_experiments')['n'] == 2
+        assert one(c, "SELECT count(*) n FROM lead.tasks WHERE type='growth.research'")['n'] == 2
+
+
 def test_product_changed_while_model_worked_rejects_stale_business_input(growth_agent):
     from lead_app.growth.runtime import advance
     from test_growth_runtime import new_work

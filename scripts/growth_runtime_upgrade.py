@@ -107,6 +107,24 @@ def atomic_private(path,data,previous=None):
             os.unlink(name)
 
 
+def finish_cutover(stage,sha,verifier,site):
+    if (stage/'growth-cutover.pending').read_text().strip()!=sha:
+        raise ValueError('Cutover hold is missing')
+    intake=run('systemctl','show','lead-home-ingress.socket','-p','ActiveState','--value')
+    if intake not in ('active','inactive'):
+        raise ValueError('Cannot reconcile the current ingress state')
+    # Restore is idempotent. A previous call may have resumed scheduling before
+    # losing its response, with either ingress state and legitimate busy work.
+    verifier['verify'](sha,fenced=intake=='inactive',require_idle=False)
+    verifier['verify_executors'](sha)
+    if site['sql'](verifier['growth_schema_query']())!='t':
+        raise ValueError('Final schema readback failed')
+    run(TOOLS/'home_live_maintenance.py','restore',sha)
+    run('systemctl','start','lead-home-live.path','lead-home-ingress.socket')
+    run(TOOLS/'home_systemd_release.py','verify',sha)
+    os.replace(stage/'growth-cutover.pending',stage/'growth-cutover.complete')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('phase',choices=('rehearse','apply','finish'))
@@ -233,16 +251,7 @@ def main():
     with (STORE/'deploy.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         if args.phase=='finish':
-            if (stage/'growth-cutover.pending').read_text().strip()!=args.sha:
-                raise ValueError('Cutover hold is missing')
-            verifier['verify'](args.sha,fenced=True)
-            verifier['verify_executors'](args.sha)
-            if site['sql'](verifier['growth_schema_query']())!='t':
-                raise ValueError('Final schema readback failed')
-            run(TOOLS/'home_live_maintenance.py','restore',args.sha)
-            run('systemctl','start','lead-home-live.path','lead-home-ingress.socket')
-            run(TOOLS/'home_systemd_release.py','verify',args.sha)
-            os.replace(stage/'growth-cutover.pending',stage/'growth-cutover.complete')
+            finish_cutover(stage,args.sha,verifier,site)
             print('Application and independent executors verified; original scheduling restored',flush=True)
             return
         if run(TOOLS/'home_systemd_release.py','current')!=args.old:

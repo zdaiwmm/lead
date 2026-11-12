@@ -410,7 +410,7 @@ def test_growth_hold_marker_fails_closed_on_changed_identity(hook,monkeypatch):
     assert hook.growth_cutover_pending(sha)
 
 
-@pytest.mark.parametrize('failure',[None,'provision','finish'])
+@pytest.mark.parametrize('failure',[None,'provision','reddit','finish'])
 def test_growth_cutover_finishes_only_after_actual_executor_delivery(hook,monkeypatch,failure):
     import json
     sha,old='b'*40,'a'*40
@@ -426,9 +426,10 @@ def test_growth_cutover_finishes_only_after_actual_executor_delivery(hook,monkey
         return b'# attested source'
     monkeypatch.setattr(hook,'executor_host_file',host_file)
     def provision(revision,path):
-        calls.append('provision')
-        assert revision==sha and path==hook.EXECUTOR_REGISTRY.parent/'telegram-provision.json'
-        if failure=='provision':
+        channel=path.name.removesuffix('-provision.json')
+        calls.append('provision:'+channel)
+        assert revision==sha and path==hook.EXECUTOR_REGISTRY.parent/(channel+'-provision.json')
+        if failure=='provision' or failure==channel:
             raise hook.Refused('provision failed')
     monkeypatch.setattr(hook,'provision_executor',provision)
     monkeypatch.setattr(hook,'register_executors',lambda revision:calls.append('register'))
@@ -451,7 +452,9 @@ def test_growth_cutover_finishes_only_after_actual_executor_delivery(hook,monkey
     else:
         hook.complete_growth_cutover(sha)
         assert not pending
-    assert calls==(['provision'] if failure=='provision' else ['provision','register','finish'])
+    assert calls==(['provision:telegram'] if failure=='provision' else
+        ['provision:telegram','provision:reddit'] if failure=='reddit' else
+        ['provision:telegram','provision:reddit','register','finish'])
 
 
 def test_deploy_cli_does_not_report_completion_before_growth_finalization(hook,monkeypatch):
@@ -1103,6 +1106,57 @@ def test_registry_registration_requires_both_completed_channels(provisioning, mo
     with pytest.raises((p.h.Refused, OSError)):
         p.h.register_executors(p.sha)
     assert not p.h.EXECUTOR_REGISTRY.exists()
+
+
+def test_growth_cutover_delivers_both_channels_before_real_registry_acceptance(provisioning, monkeypatch):
+    import copy
+    import json
+    import shutil
+
+    p = provisioning
+    other = copy.deepcopy(p.plan)
+    other['channel'] = 'reddit'
+    other['service'] = 'lead-fixture-reddit.service'
+    other['binding']['channel'] = 'reddit'
+    other['binding']['executor_id'] = 'fixture-reddit'
+    other['core_mode'] = 'main-current'
+    other_path = p.path.with_name('reddit-provision.json')
+    other_path.write_text(json.dumps(other))
+    other_path.chmod(0o600)
+    env = p.path.with_name('reddit.env')
+    env.write_bytes(p.path.with_name('telegram.env').read_bytes())
+    env.chmod(0o600)
+    shutil.copytree(p.base / 'adapters', p.h.STORE / 'executors/reddit/adapters')
+    stage = p.h.STORE / ('maintenance-' + p.sha)
+    stage.mkdir(mode=0o700)
+    (stage / 'growth-cutover.pending').write_text(p.sha + '\n')
+    (stage / 'growth-migration.json').write_text(json.dumps({'sha': p.sha, 'old': 'a' * 40}))
+    (stage / 'growth-cutover.pending').chmod(0o600)
+    (stage / 'growth-migration.json').chmod(0o600)
+    helper = stage / 'source/scripts/growth_runtime_upgrade.py'
+    helper.parent.mkdir(parents=True)
+    helper.write_text('# source-attested operator fixture\n')
+    original_run = p.h.run
+
+    def run(*args, **kwargs):
+        if args[:3] == ('git', 'hash-object', '--no-filters'):
+            return p.h.GROWTH_RUNTIME_FILES['scripts/growth_runtime_upgrade.py']
+        if args[0] == p.h.EXECUTOR_PYTHON_SOURCE:
+            assert p.h.EXECUTOR_REGISTRY.exists(), 'both real journals must be accepted before finishing'
+            (stage / 'growth-cutover.pending').rename(stage / 'growth-cutover.complete')
+            return ''
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(p.h, 'run', run)
+    monkeypatch.setattr(p.h, 'verify_executor_entries', lambda sha, entries, **kw: [
+        {'channel': entry['channel'], 'revision': sha} for entry in entries])
+    p.h.complete_growth_cutover(p.sha)
+    entries = json.loads(p.h.EXECUTOR_REGISTRY.read_text())['executors']
+    assert {entry['channel'] for entry in entries} == {'telegram', 'reddit'}
+    for channel in ('telegram', 'reddit'):
+        journal = p.h.STORE / 'executors' / channel / 'journal' / (p.sha + '.json')
+        assert json.loads(journal.read_text())['state'] == 'verified'
+    assert (stage / 'growth-cutover.complete').read_text() == p.sha + '\n'
 
 
 def test_registry_registration_is_final_readonly_service_step(provisioning, monkeypatch):
