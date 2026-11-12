@@ -477,7 +477,20 @@ def _finish(claim, value):
         elif result.outcome == "waiting":
             wait = result.wait.model_dump(mode="json")
             state = "waiting_user" if result.wait.recovery_action == "owner" else "planned"
-            _save(c, row, state, {**runtime, "wait": wait}, output, wait["check_at"])
+            connection = None
+            if (row['type'] == 'growth.account' and result.wait.producer == 'account_connection'
+                    and result.wait.recovery_action == 'owner'):
+                # Owner resume can commit while this old worker still holds its
+                # claim. Its late owner Wait must not swallow the real wake.
+                connection = one(c, "SELECT * FROM lead.takeover_sessions WHERE id=%s AND purpose='login' FOR UPDATE",
+                    (row['input']['spec']['payload'].get('takeover_id'),))
+            now = utcnow()
+            if (connection and connection['state'] == 'active' and connection['control_mode'] == 'automatic'
+                    and connection['control_version'] == claim['control_version'] and connection['expires_at'] > now):
+                _save(c, row, 'planned', {**runtime, 'wait': None}, output, now)
+                emit(c, str(ref.agent_id), 'growth.work', ref.model_dump(mode='json'))
+            else:
+                _save(c, row, state, {**runtime, "wait": wait}, output, wait["check_at"])
         elif result.failure_code in PERMANENT or runtime.get("failure_attempts", 0) >= 3:
             _save(c, row, "failed", {**runtime, "reason": result.failure_code}, output)
         else:

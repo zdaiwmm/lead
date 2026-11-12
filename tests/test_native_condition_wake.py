@@ -5,7 +5,12 @@ from lead_app import api
 from lead_app.connection_control import transition
 from lead_app.db import all_rows, one, tx
 from lead_app.growth.contracts import TaskSpec, Wait, WorkResult, utcnow
-from lead_app.growth.runtime import _resource_condition, advance, finish, wake_connection
+from lead_app.growth.runtime import (
+    _resource_condition,
+    advance,
+    finish,
+    wake_connection,
+)
 from lead_app.security import token
 from test_growth_account_connection import account, login_work
 
