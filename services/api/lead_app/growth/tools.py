@@ -243,7 +243,11 @@ async def _read_source(aid,row,data,url,*,external_links=False,check_resources=F
     try:
         rendered = await asyncio.wait_for(browser.command("open",{"url":url}),45)
         if rendered.get("error"):
-            raise SourceReadError(scope, "transport")
+            conditions = {'ACCOUNT_SUBJECT_CHANGED':'account_subject_changed',
+                          'ACCOUNT_IDENTITY_UNVERIFIED':'account_identity_unverified'}
+            condition = conditions.get(rendered['error']) if isinstance(rendered['error'],str) else None
+            raise SourceReadError(scope, condition if data.access_mode=='account' and condition
+                                  and rendered.get('condition')==condition else "transport")
         if condition := source_failure(rendered):
             raise SourceReadError(scope, condition)
         if external_links:
