@@ -95,6 +95,10 @@ def research_resource(scope):
     location = endpoint.split("?", 1)[0] if scope.get("endpoint") else origin
     key = [scope.get("provider", "unknown"), scope.get("operation", "read"), location,
            scope.get("access_mode", "public"), str(scope.get("account_id") or "")]
+    if "limiting_resource" in scope:
+        # Local admission failures keep the actual consuming question, project
+        # or TaskRef isolated; ordinary provider/source keys remain unchanged.
+        key.append(scope["limiting_resource"])
     return "research:" + digest(key), digest([key, scope.get("condition_revision", "initial")])
 
 

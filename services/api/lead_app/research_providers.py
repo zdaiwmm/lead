@@ -33,11 +33,36 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _failure(provider, operation, reason, **extra):
+class AdmissionError(ValueError):
+    """A rejected local admission carries its server-observed limiting scope."""
+    def __init__(self, reason, limiting_resource):
+        super().__init__(reason)
+        self.limiting_resource = limiting_resource
+
+
+def _task_resource(aid, task_id, task):
+    resource = {'kind':'task', 'agent_id':str(task['agent_id']) if task else str(aid),
+                'task_id':str(task['id']) if task else str(task_id)}
+    if task and task.get('input',{}).get('task_generation') is not None:
+        resource['task_generation'] = task['input']['task_generation']
+    return resource
+
+
+def _local_failure_resource(aid, task_id, *, project=False):
+    # Invalid arguments have not entered _reserve. Resolve identity through the
+    # same scoped DB, never from claim/argument fields supplied by the caller.
+    with tx(aid) as c:
+        task = one(c, 'SELECT id,agent_id,input FROM lead.tasks WHERE id=%s', (task_id,))
+    resource = _task_resource(aid, task_id, task)
+    return {'kind':'project','agent_id':resource['agent_id']} if project else resource
+
+
+def _failure(provider, operation, reason, *, limiting_resource=None, **extra):
     return {'state':'unavailable', 'reason':reason, 'provider':provider, 'operation':operation,
         'sources':[], 'access_mode':'provider_public', 'failure_scope':{'provider':provider,
         'operation':operation, 'endpoint':ENDPOINTS.get((provider,operation),('',None))[1],
-        'access_mode':'provider_public'}, **extra}
+        'access_mode':'provider_public',
+        **({'limiting_resource':limiting_resource} if limiting_resource is not None else {})}, **extra}
 
 
 def configuration(provider, operation, aid=None, *, connection=None):
@@ -274,36 +299,45 @@ def _reserve(aid, task_id, provider, operation, payload, call_key, conf, executi
             (conf['connection'],conf['period_key']))
         agent=require_agent(c,aid,True)
         task=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE',(task_id,))
-        _validate_claim(c,aid,task_id,agent,task,execution_claim)
+        task_scope = _task_resource(aid, task_id, task)
+        try:
+            _validate_claim(c,aid,task_id,agent,task,execution_claim)
+        except ValueError as error:
+            raise AdmissionError(str(error), task_scope) from None
         # Publishing models config takes the same project lock. Resolve again
         # after acquiring it: DNS/argument preparation must not carry an old
         # allowance or revoked credential into a new paid request.
         current, reason = configuration(provider,operation,aid,connection=c)
         if reason:
-            raise ValueError(reason)
+            limiting = {'kind':'project','agent_id':str(agent['id'])} if reason == 'project_disabled' else None
+            raise AdmissionError(reason, limiting)
         if current != conf:
-            raise ValueError('provider_configuration_changed')
+            raise AdmissionError('provider_configuration_changed', task_scope)
         old=one(c,'SELECT * FROM lead.budget_reservations WHERE operation_key=%s',(opkey,))
         if old:
             snapshot=old['pricing_snapshot']['research']
             if snapshot['args_hash']!=digest:
-                raise ValueError('call_key_conflict')
-            return None,snapshot.get('result') or _failure(provider,operation,'billing_unknown',call_key=call_key)
+                raise AdmissionError('call_key_conflict', task_scope)
+            return None,snapshot.get('result') or _failure(provider,operation,'billing_unknown',
+                limiting_resource=task_scope,call_key=call_key)
         experiment=one(c,'SELECT question_key FROM lead.growth_experiments WHERE id=%s',(task['experiment_id'],)) if task.get('experiment_id') else None
         question=experiment['question_key'] if experiment else task['input'].get('purpose') or task['type']
         units=conf['max_units']
         if quota['unit']!=conf['unit'] or quota['spent_units']+quota['reserved_units']+units>min(quota['limit_units'],conf['limit_units']):
-            raise ValueError('shared_quota_exhausted')
+            raise AdmissionError('shared_quota_exhausted', {'kind':'connection','tenant_id':str(current_tenant()),
+                'connection_ref':conf['connection'],'period_key':conf['period_key']})
         unit=provider+':'+conf['unit']
         c.execute('''INSERT INTO lead.budget_periods(tenant_id,agent_id,starts_at,ends_at,unit,limit_units)
           VALUES(lead.ctx_tenant(),%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING''',(aid,conf['start'],conf['end'],unit,conf['project_limit_units']))
         period=one(c,'SELECT * FROM lead.budget_periods WHERE starts_at=%s AND unit=%s FOR UPDATE',(conf['start'],unit))
         if period['spent_units']+period['reserved_units']+units>min(period['limit_units'],conf['project_limit_units']):
-            raise ValueError('project_quota_exhausted')
+            raise AdmissionError('project_quota_exhausted', {'kind':'project','agent_id':str(agent['id']),
+                'period_key':conf['period_key']})
         spent=one(c,'''SELECT coalesce(sum(r.units),0) n FROM lead.budget_reservations r
           WHERE r.period_id=%s AND r.state<>'released' AND r.pricing_snapshot#>>'{research,question}'=%s''',(period['id'],question))['n']
         if spent+units>conf['question_limit_units']:
-            raise ValueError('question_quota_exhausted')
+            raise AdmissionError('question_quota_exhausted', {'kind':'question','agent_id':str(agent['id']),
+                'question_key':question,'period_key':conf['period_key']})
         snapshot={'research':{'args_hash':digest,'question':question,'task_id':str(task_id),'experiment_id':str(task['experiment_id']) if task.get('experiment_id') else None,
             'connection':conf['connection'],'period_key':conf['period_key'],'unit':conf['unit'],
             'price_version':conf['price_version'],'provider':provider,'operation':operation,
@@ -343,14 +377,17 @@ def _settle(aid, reservation, conf, result, actual=None):
 async def research_call(aid, task_id, provider, operation, args, call_key, *, execution_claim=None):
     conf, reason=configuration(provider,operation,aid)
     if reason:
-        return _failure(provider,operation,reason)
+        limiting = _local_failure_resource(aid,task_id,project=True) if reason == 'project_disabled' else None
+        return _failure(provider,operation,reason,limiting_resource=limiting)
     try:
         if not isinstance(call_key,str) or not 1<=len(call_key)<=200:
             raise ValueError('invalid_call_key')
         payload=_args(provider,operation,args)
         reservation,cached=_reserve(aid,task_id,provider,operation,payload,call_key,conf,execution_claim)
+    except AdmissionError as error:
+        return _failure(provider,operation,str(error),limiting_resource=error.limiting_resource)
     except ValueError as error:
-        return _failure(provider,operation,str(error))
+        return _failure(provider,operation,str(error),limiting_resource=_local_failure_resource(aid,task_id))
     if cached is not None:
         return {**cached,'replayed':True}
     method,url=ENDPOINTS[(provider,operation)]
