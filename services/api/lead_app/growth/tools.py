@@ -11,7 +11,7 @@ from pydantic import Field, model_validator
 
 from ..config import STATE
 from ..db import all_rows, j, one, require_agent, tx, uid
-from ..fetch import fetch_product
+from ..fetch import fetch_product, observed_source_urls
 from ..model import run_model
 from ..scope import current_tenant
 from .contracts import Contract, EvidenceRef, TaskSpec, Wait, WorkResult, utcnow
@@ -137,6 +137,31 @@ def _remember(aid, page):
     return EvidenceRef(kind="document", id=identifier), True
 
 
+async def _read_source(aid,row,data,url,*,external_links=False):
+    from ..operating_work import unavailable_source
+    try:
+        page = await asyncio.wait_for(fetch_product(url,**({"external_links":True} if external_links else {"discover_links":True})),30)
+    except PermissionError:
+        raise
+    except (OSError,httpx.TransportError):
+        page = None
+    if page is not None and (not page.get("requires_javascript") or unavailable_source(page)):
+        return page
+    from ..browser_tools import BrowserTools
+    browser = BrowserTools(aid,data.question,task_id=str(row["id"]),mode="autonomous")
+    state = "failed"
+    try:
+        rendered = await asyncio.wait_for(browser.command("open",{"url":url}),45)
+        if rendered.get("error"):
+            raise OSError("Public browser read unavailable")
+        if external_links:
+            rendered["links"] = observed_source_urls([item["href"] for item in rendered.get("elements",[]) if item.get("href")],rendered["url"])
+        state = "succeeded"
+        return rendered
+    finally:
+        await asyncio.wait_for(browser.finish(state),20)
+
+
 async def research(aid, row, spec):
     data = ResearchInput.model_validate(spec.payload)
     urls = list(data.urls)
@@ -162,12 +187,12 @@ async def research(aid, row, spec):
     for query in data.queries:
         index_url = "https://html.duckduckgo.com/html/?q="+quote_plus(query)
         try:
-            index = await asyncio.wait_for(fetch_product(index_url,external_links=True),30)
+            index = await _read_source(aid,row,data,index_url,external_links=True)
             if not unavailable_source(index):
                 urls.extend(index.get("links",[])[:4])
             else:
                 errors.append({"url":index_url,"code":"search_source_unavailable"})
-        except (ValueError,TimeoutError,httpx.HTTPError) as error:
+        except (ValueError,OSError,httpx.HTTPError) as error:
             errors.append({"url":index_url,"code":type(error).__name__})
     if not urls:
         if local_refs:
@@ -185,26 +210,17 @@ async def research(aid, row, spec):
                         "learning":"The owner supplied a product introduction; independent validation is still required."})
         return WorkResult(outcome="failed", failure_code="source_unavailable" if errors else "research_input_missing",output={"read_errors":errors})
     evidence, pages, progress = local_refs, local_pages, False
-    # Each network read is bounded and holds no Profile, transaction or model slot.
+    # Direct/browser reads are bounded; the fallback owns only its public research run.
     for url in list(dict.fromkeys(urls))[:4]:
         try:
-            page = await asyncio.wait_for(fetch_product(url, discover_links=True), timeout=30)
-            if page.get("requires_javascript") and not unavailable_source(page):
-                from ..browser_tools import BrowserTools
-                browser = BrowserTools(aid,data.question,task_id=str(row["id"]),mode="autonomous")
-                try:
-                    rendered = await asyncio.wait_for(browser.command("open",{"url":url}),45)
-                    if not rendered.get("error"):
-                        page = rendered
-                finally:
-                    await browser.finish()
+            page = await _read_source(aid,row,data,url)
             ref, added = await asyncio.to_thread(_remember, aid, page)
             if ref:
                 evidence.append(ref)
                 progress = progress or added
                 pages.append({"url": page["url"], "title": page.get("title"), "document_id": str(ref.id),
                               "observed_links": page.get("links", []), "trust": "observed_source_claims"})
-        except (ValueError, TimeoutError,httpx.HTTPError) as error:
+        except (ValueError,OSError,httpx.HTTPError) as error:
             errors.append({"url": url, "code": type(error).__name__})
     if not evidence:
         return WorkResult(outcome="failed", failure_code="source_unavailable", output={"read_errors": errors})

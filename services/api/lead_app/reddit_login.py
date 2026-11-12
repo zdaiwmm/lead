@@ -1,4 +1,4 @@
-"""Bind eligible isolated login profiles to the project's existing Tokyo IPv4."""
+"""Bind isolated login/research profiles to the project's registered Tokyo IPv4."""
 
 from ipaddress import IPv4Address
 from uuid import NAMESPACE_URL, uuid5
@@ -12,9 +12,10 @@ SOCKET = "socks5+unix:///run/lead-egress/reddit-v4.sock"
 
 
 def assign_exit(aid, profile):
+    research = profile["slot"] == "public-research"
     platform = profile["slot"].split("-", 1)[0]
     network_id = uuid5(NAMESPACE_URL, f"lead:{aid}:{PROVIDER}")
-    if platform != "reddit":
+    if not research and platform != "reddit":
         if platform not in ("facebook", "x"):
             return None
         if platform not in isolated_login_platforms(aid):
@@ -23,6 +24,8 @@ def assign_exit(aid, profile):
             return None
     expected = env().get("LEAD_REDDIT_IPV4_" + str(aid).replace("-", "").upper())
     if not expected:
+        if research and str(profile["network_identity_id"]) != str(network_id):
+            return None
         if platform != "reddit" or str(profile["network_identity_id"]) == str(network_id):
             raise ValueError("此账号的固定出口尚未配置")
         return None
@@ -31,18 +34,24 @@ def assign_exit(aid, profile):
         raise ValueError("账号登录需要固定公网 IPv4")
     with tx(aid) as c:
         agent = require_agent(c, aid, True)
-        c.execute(
-            """INSERT INTO lead.network_identities
-            (id,tenant_id,agent_id,provider_ref,endpoint_ref,secret_ref,mode,expected_ip,expected_region,policy_version)
-            VALUES(%s,%s,%s,%s,%s,'local-unix-socket','dedicated',%s,'JP',1)
-            ON CONFLICT (id) DO NOTHING""",
-            (network_id, agent["tenant_id"], aid, PROVIDER, SOCKET, str(address)),
-        )
+        if research:
+            if not one(c,"""SELECT id FROM lead.browser_profiles WHERE id=%s AND agent_id=%s
+                AND slot='public-research'""",(profile["id"],aid)):
+                raise ValueError("公开研究环境不属于当前项目")
+        else:
+            c.execute(
+                """INSERT INTO lead.network_identities
+                (id,tenant_id,agent_id,provider_ref,endpoint_ref,secret_ref,mode,expected_ip,expected_region,policy_version)
+                VALUES(%s,%s,%s,%s,%s,'local-unix-socket','dedicated',%s,'JP',1)
+                ON CONFLICT (id) DO NOTHING""",
+                (network_id, agent["tenant_id"], aid, PROVIDER, SOCKET, str(address)),
+            )
         route = one(
             c,
             """SELECT id FROM lead.network_identities WHERE id=%s
-            AND provider_ref=%s AND endpoint_ref=%s AND expected_ip=%s AND state<>'retired'""",
-            (network_id, PROVIDER, SOCKET, str(address)),
+            AND agent_id=%s AND mode='dedicated' AND provider_ref=%s AND endpoint_ref=%s
+            AND expected_ip=%s AND state<>'retired'""",
+            (network_id, aid, PROVIDER, SOCKET, str(address)),
         )
         if not route:
             raise ValueError("账号出口绑定已变化，需要重新核对")

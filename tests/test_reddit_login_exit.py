@@ -62,3 +62,34 @@ def test_facebook_and_x_opt_into_same_exit_with_separate_profiles(monkeypatch):
     monkeypatch.delenv("LEAD_SPLIT_FACEBOOK_X_LOGIN_AGENT_IDS")
     with pytest.raises(ValueError, match="出口已停用"):
         reddit_login.assign_exit(aid, x)
+
+
+def test_public_research_uses_only_its_registered_project_exit(monkeypatch):
+    first,second = domain.create_agent(),domain.create_agent()
+    public = account_profiles.public_research(first)
+    other = account_profiles.public_research(second)
+    base = account_profiles.for_platform(first,"telegram")
+    assert reddit_login.assign_exit(first,public) is None
+    monkeypatch.setenv("LEAD_REDDIT_IPV4_"+first.replace("-","").upper(),"1.1.1.1")
+    login = account_profiles.for_platform(first,"reddit",create=True,isolated_login=True)
+    reddit_login.assign_exit(first,login)
+    assert reddit_login.assign_exit(first,public)=={"server":reddit_login.SOCKET}
+    assert public["network_identity_id"]==login["network_identity_id"]
+    assert public["id"]!=login["id"] and public["storage_ref"]!=login["storage_ref"]
+    assert account_profiles.for_platform(first,"telegram")["network_identity_id"]==base["network_identity_id"]
+    assert reddit_login.assign_exit(second,other) is None
+    with pytest.raises(ValueError):
+        reddit_login.assign_exit(first,other)
+    monkeypatch.setenv("LEAD_REDDIT_IPV4_"+first.replace("-","").upper(),"8.8.8.8")
+    with pytest.raises(ValueError,match="绑定已变化"):
+        reddit_login.assign_exit(first,public)
+
+
+def test_public_research_never_invents_or_silently_replaces_an_exit(monkeypatch):
+    aid = domain.create_agent()
+    public = account_profiles.public_research(aid)
+    monkeypatch.setenv("LEAD_REDDIT_IPV4_"+aid.replace("-","").upper(),"1.1.1.1")
+    with pytest.raises(ValueError):
+        reddit_login.assign_exit(aid,public)
+    with tx(aid) as c:
+        assert not one(c,"SELECT id FROM lead.network_identities WHERE provider_ref=%s",(reddit_login.PROVIDER,))

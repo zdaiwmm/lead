@@ -122,10 +122,15 @@ async def pinned_get(client, url):
 
 def observed_source_links(soup,url):
     """Search results are candidates. Their original pages must still be read."""
-    found = []
     anchors = soup.select('a.result__a[href]') or soup.select('a[href]')
-    for anchor in anchors:
-        link = urldefrag(urljoin(url,anchor['href']))[0]
+    return observed_source_urls([anchor['href'] for anchor in anchors],url)
+
+
+def observed_source_urls(hrefs,url):
+    """Normalize actual HTML/DOM links, never URLs proposed by a model."""
+    found = []
+    for href in hrefs:
+        link = urldefrag(urljoin(url,href))[0]
         parsed = urlsplit(link)
         if (parsed.hostname or '').endswith('duckduckgo.com'):
             link = parse_qs(parsed.query).get('uddg',[link])[0]
