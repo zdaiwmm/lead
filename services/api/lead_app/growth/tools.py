@@ -722,6 +722,11 @@ def prepare_channel(aid, task_id, data):
                        "publication_purpose":data.publication_purpose,"verification_required":verification}
         if method:
             publication["browser_method"] = method
+            from ..browser_actions import method_hash
+            producers=permissions.get('browser_method_producers') or {}
+            producer=producers.get(data.operation) if isinstance(producers,dict) else None
+            if isinstance(producer,dict) and producer.get('method_hash')==method_hash(method):
+                publication['browser_method_producer']=producer
         if not method and isinstance(target["verified_permissions"],dict) and target["verified_permissions"].get("access_mode")=="ordinary_member":
             publication["reddit_rules_sha256"] = target["verified_permissions"].get("rules",{}).get("sha256")
         action = one(c,"""INSERT INTO lead.actions(tenant_id,agent_id,task_id,target_id,grant_id,content_id,operation_key,type,
@@ -733,7 +738,7 @@ def prepare_channel(aid, task_id, data):
         return action
 
 
-def submission_gate(c, actor, action,claim=None):
+def submission_gate(c, actor, action,claim=None,*,allow_method_repair=False):
     """Compatible control locks allow different Profiles to click concurrently."""
     from ..adapters.catalog import SPECS
     from ..admin_controls import enforce_channel
@@ -803,6 +808,7 @@ def submission_gate(c, actor, action,claim=None):
     platform, kind = account["platform"], publication.get("format","text")
     method = publication.get("browser_method")
     if method:
+        from ..browser_actions import execution_method, prepare_method_repair
         from ..browser_execution import validate_method
         permissions = target["verified_permissions"] if isinstance(target["verified_permissions"],dict) else {}
         methods = permissions.get("browser_methods") or {}
@@ -811,8 +817,18 @@ def submission_gate(c, actor, action,claim=None):
         current_method = validate_method(methods.get(operation) or permissions.get("browser_method"),
             account_id=str(account["id"]), binding_version=account["binding_version"],
             target_url=target["canonical_url"], operation=operation)
+        method=execution_method(c,action)
         if current_method != method:
-            raise ValueError("browser_method_changed")
+            if not allow_method_repair:
+                raise ValueError("browser_method_changed")
+            method=prepare_method_repair(c,actor,action,task)
+        if task['input']['task_generation']!=publication['task_generation']:
+            repair=(one(c,'SELECT observation FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1',
+                (action['id'],)) or {}).get('observation',{}).get('method_repair',{})
+            if not repair and allow_method_repair:
+                repair=lease.get('browser_method_repair') or {}
+            if repair.get('task_generation')!=task['input']['task_generation']:
+                raise ValueError('stale_submission_claim')
     elif operation == "reply":
         raise ValueError("reply_browser_method_missing")
     if kind not in grant["limits"].get("formats",[kind]):
@@ -865,6 +881,8 @@ def submission_gate(c, actor, action,claim=None):
         raise ValueError("scope_publish_limit")
     enforce_channel(c,actor.aid,platform,target["id"],content_format=kind,action_id=action["id"])
     guard_action(c,action)
+    if allow_method_repair and method:
+        agent={**agent,'_native_method':method}
     return agent
 
 

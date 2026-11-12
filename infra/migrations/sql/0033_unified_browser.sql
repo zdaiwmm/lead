@@ -108,13 +108,19 @@ LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,lead AS $$
    AND coalesce(a.intent->>'content_hash',content.content_hash)=content.content_hash
    AND coalesce(a.intent->'media','[]')=coalesce(content.body->'media','[]')
    AND (NOT a.intent ? 'browser_method' OR EXISTS(SELECT FROM lead.action_attempts br WHERE br.action_id=a.id
-      AND br.outcome='confirmed' AND br.observation#>>'{browser_receipt,author}'=s.external_account_id
+      AND br.outcome='confirmed' AND br.observation#>>'{browser_request,claimed}'='true'
+      AND br.observation#>>'{browser_receipt,author}'=br.observed_account_id
       AND br.observation#>>'{browser_receipt,body}'=a.intent->>'body'
       AND br.observation#>>'{browser_receipt,url}'=a.external_url
-      AND (a.type<>'reply' OR br.observation#>>'{browser_receipt,parent_url}'=a.intent->>'parent_url')))
+      AND (a.type<>'reply' OR br.observation#>>'{browser_receipt,parent_url}'=a.intent->>'parent_url')
+      AND (NOT br.observation ? 'effective_method' OR (
+        br.observation#>>'{method_repair,revision}'='1'
+        AND br.observation#>'{method_repair,original_method}'=a.intent->'browser_method'
+        AND br.observation#>>'{method_repair,method_hash}'=br.observation#>>'{browser_request,method_hash}'
+        AND br.observation#>>'{method_repair,original_method_hash}'=br.observation#>>'{browser_request,initial_method_hash}'))))
    AND ((s.platform='lab' AND EXISTS(SELECT FROM lead.lab_posts l WHERE l.agent_id=a.agent_id AND l.operation_key=a.operation_key))
     OR (a.evidence_ref IS NOT NULL AND EXISTS(SELECT FROM lead.action_attempts ap WHERE ap.action_id=a.id
-      AND ap.outcome='confirmed' AND ap.observed_account_id=s.external_account_id
+      AND ap.outcome='confirmed' AND (ap.observed_account_id=s.external_account_id OR a.intent ? 'browser_method')
       AND ap.observed_target_id=t.external_target_id AND ap.control_version=a.expected_control_version
       AND ap.started_at>=g.granted_at AND (g.revoked_at IS NULL OR ap.started_at<g.revoked_at)))));
 $$;
@@ -122,29 +128,30 @@ REVOKE ALL ON FUNCTION lead.growth_receipt_valid(uuid) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION lead.growth_confirm_publication(p_action uuid) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,lead AS $$
-DECLARE target_uuid uuid; channel text; kind text; release text; native_action lead.actions;
+DECLARE target_uuid uuid; channel text; kind text; release text; native_action lead.actions; native_method jsonb; native_method_hash text;
 BEGIN
  IF NOT lead.growth_receipt_valid(p_action) THEN RETURN false; END IF;
  SELECT * INTO native_action FROM lead.actions WHERE id=p_action AND tenant_id=lead.ctx_tenant() AND agent_id=lead.ctx_agent();
  IF native_action.intent ? 'browser_method' THEN
+  SELECT coalesce(ap.observation->'effective_method',native_action.intent->'browser_method'),ap.observation#>>'{browser_request,method_hash}'
+    INTO native_method,native_method_hash FROM lead.action_attempts ap
+    WHERE ap.action_id=p_action AND ap.outcome='confirmed' ORDER BY ap.attempt DESC LIMIT 1;
   IF NOT EXISTS(SELECT FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id
     JOIN lead.authorization_grants g ON g.id=native_action.grant_id AND g.target_id=t.id
     WHERE t.id=native_action.target_id AND s.state='connected' AND t.state='active'
      AND s.binding_version=(native_action.intent->>'binding_version')::bigint
-     AND coalesce(t.verified_permissions->'browser_methods'->native_action.type,t.verified_permissions->'browser_method')=native_action.intent->'browser_method'
+     AND coalesce(t.verified_permissions->'browser_methods'->native_action.type,t.verified_permissions->'browser_method')=native_method
      AND g.revoked_at IS NULL AND g.allowed_actions ? native_action.type)
   THEN RETURN false; END IF;
   IF EXISTS(SELECT FROM lead.account_targets t WHERE t.id=native_action.target_id
     AND t.verified_permissions->'browser_verified_operations'->native_action.type->>'binding_version'=native_action.intent->>'binding_version'
-    AND t.verified_permissions->'browser_verified_operations'->native_action.type->>'method_hash'=(SELECT ap.observation#>>'{browser_request,method_hash}'
-      FROM lead.action_attempts ap WHERE ap.action_id=p_action AND ap.outcome='confirmed' ORDER BY ap.attempt DESC LIMIT 1))
+    AND t.verified_permissions->'browser_verified_operations'->native_action.type->>'method_hash'=native_method_hash)
   THEN RETURN false; END IF;
   UPDATE lead.account_targets SET verified_permissions=verified_permissions || jsonb_build_object(
     'browser_verified_operations',coalesce(verified_permissions->'browser_verified_operations','{}'::jsonb) ||
       jsonb_build_object(native_action.type,jsonb_build_object('action_id',p_action::text,
-        'binding_version',native_action.intent->'binding_version','method_version',native_action.intent#>>'{browser_method,version}',
-        'method_hash',(SELECT ap.observation#>>'{browser_request,method_hash}' FROM lead.action_attempts ap
-          WHERE ap.action_id=p_action AND ap.outcome='confirmed' ORDER BY ap.attempt DESC LIMIT 1))))
+        'binding_version',native_action.intent->'binding_version','method_version',native_method->>'version',
+        'method_hash',native_method_hash)))
     WHERE id=native_action.target_id;
   RETURN true;
  END IF;

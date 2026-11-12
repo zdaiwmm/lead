@@ -18,7 +18,7 @@ def verified_operations(c, account_id):
             AND a.intent->>'binding_version'=proof.value->>'binding_version'
             AND proof.value->>'method_hash'=ap.observation#>>'{browser_request,method_hash}'
             AND coalesce(t.verified_permissions#>ARRAY['browser_methods',proof.key],
-                         t.verified_permissions->'browser_method')=a.intent->'browser_method'
+                         t.verified_permissions->'browser_method')=coalesce(ap.observation->'effective_method',a.intent->'browser_method')
             AND g.revoked_at IS NULL AND g.allowed_actions ? proof.key
             AND lead.growth_receipt_valid(a.id)
         ORDER BY operation""",(account_id,))

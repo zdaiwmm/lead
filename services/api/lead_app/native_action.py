@@ -3,7 +3,7 @@ import asyncio
 import time
 from urllib.parse import urljoin
 
-from .browser_actions import claim_request, prepare_binding
+from .browser_actions import claim_request, execution_action, prepare_binding
 from .browser_execution import match_request, origin
 from .db import j, one, tx
 from .native_task import NativeTask
@@ -17,7 +17,8 @@ class NativeAction(NativeTask):
             raise ValueError('original_action_missing')
         super().__init__(actor,action['task_id'])
         self.action_id=str(action_id)
-        self.action=action
+        with tx(actor.aid) as c:
+            self.action=execution_action(c,action)
         self.claim=claim
         self.reconcile=action['state'] in ('unknown','dispatching','confirmed')
         self.receipt=None
@@ -38,7 +39,7 @@ class NativeAction(NativeTask):
                 ORDER BY ended_at DESC NULLS LAST LIMIT 1""",(action['intent']['browser_method']['account_id'],self.actor.profile['id'],attempt['observed_account_id']))
             if not private:
                 raise ValueError('original_private_identity_method_missing')
-            self.action=action
+            self.action=execution_action(c,action)
             return task,{'private_self':private['connection_data'],'id':action['intent']['browser_method']['account_id'],'external_account_id':attempt['observed_account_id'],
                 'binding_version':action['intent']['binding_version'],'profile_id':self.actor.profile['id']},{'revision':action['intent']['intent_revision']}
 
@@ -62,6 +63,9 @@ class NativeAction(NativeTask):
             await self.verify_private_self()
             self.phase('start_binding')
             await asyncio.to_thread(prepare_binding,self.actor,self.action_id,self.claim,self.actor.epoch)
+            with tx(self.actor.aid) as c:
+                frozen=one(c,'SELECT * FROM lead.actions WHERE id=%s',(self.action_id,))
+                self.action=execution_action(c,frozen)
             self.phase('start_baseline')
             await self.baseline()
             self.lease.update(action=self.action,claim=self.claim)
