@@ -24,7 +24,7 @@ from lead_app.growth.tools import AccountInput
 from native_browser_fixture import BoardState, NativeBoard
 
 
-async def verify_login(monkeypatch, *, mode="login"):
+async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
     from lead_app import native_runner
 
     model_calls = []
@@ -70,7 +70,19 @@ async def verify_login(monkeypatch, *, mode="login"):
                     "success": True,
                 }
             }
-            if workflow["kind"] == "discovery":
+            if workflow["kind"] == "resume":
+                if step == 0:
+                    action = {
+                        "inspect_self": {
+                            "self_link_selector": "a[rel~=me]",
+                            "acting_subject_selector": "main > p",
+                            "self_subject_prefix": "Signed in as ",
+                            "self_subject_suffix": " · Your account settings",
+                        }
+                    }
+                elif step == 1:
+                    action = {"report_connection": {"subject_selector": "#subject"}}
+            elif workflow["kind"] == "discovery":
                 if step == 0:
                     action = {"guarded_navigate": {"url": board.origin + "/home"}}
                 elif step == 1:
@@ -112,7 +124,7 @@ async def verify_login(monkeypatch, *, mode="login"):
                 ]
                 if matches:
                     action = {"guarded_click": {"index": matches[-1]}}
-            elif step == 3 and mode != "owner_otp":
+            elif step == 3 and (mode != "owner_otp" or workflow.get("allow_identity")):
                 action = {
                     "inspect_self": {
                         "self_link_selector": "a[rel~=me]",
@@ -121,7 +133,7 @@ async def verify_login(monkeypatch, *, mode="login"):
                         "self_subject_suffix": " · Your account settings",
                     }
                 }
-            elif step == 4 and mode != "owner_otp":
+            elif step == 4 and (mode != "owner_otp" or workflow.get("allow_identity")):
                 action = {"report_connection": {"subject_selector": "#subject"}}
             model_calls[-1]["action"] = list(action)[0]
             model_calls[-1]["elements"] = [
@@ -252,6 +264,24 @@ async def verify_login(monkeypatch, *, mode="login"):
             aid, task, AccountInput.model_validate(task["input"]["spec"]["payload"])
         )
         finish(claim, result)
+        owner_check = (
+            await owner_hook(
+                {
+                    "aid": aid,
+                    "task": task,
+                    "pending": pending,
+                    "claim": claim,
+                    "result": result,
+                    "board": board,
+                    "boards": boards,
+                    "workflow": workflow,
+                    "model_calls": model_calls,
+                    "gateway_endpoint": f"http://127.0.0.1:{port}",
+                }
+            )
+            if owner_hook
+            else None
+        )
         probe_checks = None
         discovery = None
         if mode == "login" and result.outcome == "completed":
@@ -439,6 +469,7 @@ async def verify_login(monkeypatch, *, mode="login"):
         worker = json.loads(result_path.read_text())
         return {
             "privacy": worker["credential_scan"],
+            "owner_check": owner_check,
             "identity_probe": probe_checks,
             "task_state": task_state,
             "discovery": discovery.model_dump(mode="json") if discovery else None,
