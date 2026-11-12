@@ -127,6 +127,8 @@ def provision_security(conn):
         conn.execute("GRANT EXECUTE ON FUNCTION lead.growth_confirm_publication(uuid) TO lead_runtime")
         conn.execute("GRANT EXECUTE ON FUNCTION lead.growth_receipt_valid(uuid) TO lead_runtime")
         conn.execute("GRANT EXECUTE ON FUNCTION lead.growth_read_intent(uuid),lead.growth_read_route(uuid) TO lead_runtime")
+    if conn.execute("SELECT to_regprocedure('lead.public_experiences(uuid)')").fetchone()[0]:
+        conn.execute("GRANT EXECUTE ON FUNCTION lead.public_experiences(uuid) TO lead_runtime")
     # Rebuildable snapshots may be replaced only within their forced Agent scope.
     conn.execute(
         "GRANT DELETE ON lead.analytics_geo_rollups,lead.analytics_rollups,lead.analytics_audience,lead.analytics_report_dirty TO lead_runtime"
