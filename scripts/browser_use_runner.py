@@ -281,8 +281,8 @@ async def main(data):
                 "entry_count": len(provider_usage),
                 "credential_literal_seen": bool(secret_seen),
                 "request_count": len(provider_requests),
-                "unmeasured_requests": len(unmeasured_requests)
-                + max(0, len(provider_requests) - len(provider_responses)),
+                "unmeasured_requests": max(len(unmeasured_requests), len(provider_requests) - len(provider_usage)),
+                "billing_unknown": meter.billing_unknown,
                 "cache_breakdown_verified": bool(provider_usage)
                 and all(
                     "prompt_cache_hit_tokens" in u

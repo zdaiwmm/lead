@@ -89,7 +89,8 @@ async def connect(controller,gateway_endpoint):
         (folder/'result.json').write_text(json.dumps(result,ensure_ascii=False))
         if usage.get('credential_literal_seen') or leaked_files:
             raise ValueError('connection_credential_redaction_failed')
-        known=bool(usage.get('entry_count')) and not usage.get('unmeasured_requests')
+        known=(bool(usage.get('entry_count')) and usage.get('request_count')==usage['entry_count']
+            and not usage.get('billing_unknown') and not usage.get('unmeasured_requests'))
         settle(aid,reservation,actual=usage.get('total_tokens') if known else None,
             details={'provider':connection['provider'],'model':model_reference(connection),'configuration_version':version,
                 'requests':usage.get('entry_count',0),'input_tokens':usage.get('total_prompt_tokens',0),
@@ -152,7 +153,8 @@ async def run_task(controller,gateway_endpoint,*,kind,goal):
         folder.mkdir(parents=True,exist_ok=True,mode=0o700)
         (folder/'result.json').write_text(json.dumps(result,ensure_ascii=False))
         usage=result.get('usage') or {}
-        known=bool(usage.get('entry_count')) and not usage.get('unmeasured_requests')
+        known=(bool(usage.get('entry_count')) and usage.get('request_count')==usage['entry_count']
+            and not usage.get('billing_unknown') and not usage.get('unmeasured_requests'))
         settle(aid,reservation,actual=usage.get('total_tokens') if known else None,
             details={'provider':model['provider'],'model':model_reference(model),'configuration_version':version,
                 'requests':usage.get('entry_count',0),'purpose':'native_'+kind},incomplete=not known)

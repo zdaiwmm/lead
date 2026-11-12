@@ -48,7 +48,11 @@ class ModelCallMeter:
         if not response.is_success:
             self.unmeasured_requests.append(1)
             return
-        await response.aread()
+        try:
+            await response.aread()
+        except BaseException:
+            self.unmeasured_requests.append(1)
+            raise
         try:
             usage = response.json().get('usage')
             fields = ('prompt_tokens', 'completion_tokens', 'total_tokens')
