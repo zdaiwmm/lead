@@ -252,3 +252,12 @@ async def test_expired_probe_window_never_calls_source(growth_agent, monkeypatch
         row = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (root["task_id"],))
     result = await runtime.probe_episode(growth_agent, row, RecoverInput(episode_root=root["task_id"],condition_revision=row["result"]["runtime"]["condition_revision"]))
     assert result.output["reason"] == "recovery_deadline"
+
+
+def test_claim_keeps_monotonic_project_control_version(growth_agent):
+    ref = new_work(growth_agent)
+    claim = runtime.advance(ref)["claim"]
+    with tx(growth_agent) as c:
+        saved = one(c, "SELECT result#>'{runtime,control_version}' version FROM lead.tasks WHERE id=%s", (ref["task_id"],))["version"]
+        current = one(c, "SELECT control_version FROM lead.agents WHERE id=%s", (growth_agent,))["control_version"]
+    assert claim["control_version"] == saved == current

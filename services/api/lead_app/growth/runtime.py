@@ -315,12 +315,14 @@ def advance(value, attempt_token=None, *, now=None):
         if runtime.get("recovery_permit"):
             runtime["recovery_permit"] -= 1
         runtime.update(attempt_token=token, attempts=attempts + 1, wait=None,
+                       control_version=agent["control_version"],
                        lease_until=(now + timedelta(minutes=9)).isoformat(),
                        last_progress_at=now.isoformat(), operation_ref=str(original["id"]) if original else None)
         _save(c, row, "running", runtime)
         c.execute("UPDATE lead.tasks SET started_at=coalesce(started_at,now()) WHERE id=%s", (row["id"],))
         claim = {"ref": ref.model_dump(mode="json"), "attempt_token": token,
-                 "lease_until": runtime["lease_until"], "operation_ref": runtime["operation_ref"], "kind": spec.kind}
+                 "lease_until": runtime["lease_until"], "operation_ref": runtime["operation_ref"], "kind": spec.kind,
+                 "control_version": runtime["control_version"]}
         return {"state": "ready", "claim": claim}
 
 
