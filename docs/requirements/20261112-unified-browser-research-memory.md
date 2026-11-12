@@ -824,6 +824,10 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - `1494926`（源`d1310a0`）补实际native未知回查：Linux原提交断响应后只留原Action/attempt1、源站POST1；账号及项目均pause，先读到旧的同作者/正文帖子被baseline拒绝，随后新原帖DOM回执确认原Action，完整intent及grants均未改变。该轮unknown和便携DOM3共4绿，另一C15子例因测试复用同material返回旧终态Task而失败，未记整体绿；测试改独立dedupe_key后仅C15重验1项23.89秒。主集成相关55项23.14秒通过。
 - 同段C15已接官方Agent.run on_step_start：每步读取真实DOM/字段/滚动/文档状态，只持久hash；实际无新状态在3次假模型调用后停，两次无效方法（初次+一次修正）在2次后停，目标/grant零变化。不过完整innerText/loader/hash仍会将时钟、动画、自动reload或来回滚动误算进展，已列为未关闭缺口；有效进展耗片段后的原Task/checkpoint/due续接正例仍待补，不以这两个负例宣称C15完成。
 - C28/C30产品独立红例固定为测试`4409df4`（源码SHA256 `2132e09c74633907e0a5b8dcd8fd26cb7ca3f5a01af4874fbdd0c09972d44973`，夹具未改）：真实ConnectionRef认证POST1/HttpOnly会话成立、Chrome实际代理与三origin可信标记正确、secureContext=true、页面引用无随机端口冲突。SW脚本Fetch含frameId，关联的唯一当前SW Network会话缺frameId，但networkId/URL/method/context吻合，原resolve_owner因frame严格比较拒绝，sw.js源站0；普通/read POST正确解析page owner后authorize拒绝、源站0。首轮与两次只读诊断均保留，末轮1失败17.943秒；refresh尚未触发，cache/synthetic/OOPIF/SSO及完成绑定后的NativeResearch组合仍未覆盖。核心接最小关联修正与角色生产者，不按路径名或任意同源POST直接放行。
+- `eb01a47`（源`1d2d037`）仅修上述SW无frame关联特例，仍要求唯一同networkId的当前SW会话、同managed context及精确URL/method/body；错context/type/非空frame/歧义/退役均拒。实际Linux7.88秒轮已证明sw.js/cache安装各源站1次、SW合成响应源站0、再次cache读取源站增量0；POST refresh/read都真正进入门禁并被拒、源站0，结束认证后的worker借用同样0且有拒绝观测。整轮1失败，普通POST角色尚未完成。根关联/动作/读取消费者14项1.20秒通过。
+- C09独立首阶段`17f52a9`（源`e940cf5`）：真实Linux唯一Chrome主PID经本test父链、精确user-data-dir/实际exe/无--type/CDPport双核对后SIGKILL；双原Task页关闭、runtime.closed/actor.disconnected、旧session结束/旧有效租约失效、双scope_view/current_scope拒绝、原forward token撤销，零新增模型。1项15.60秒全绿；当前仅证明共享实例死亡撤销，不能替代恢复换代/当前私有身份再核或独立另一实例正常，后两项继续补。
+- C10 `ca0cdc3`（源`fd20ac4`）补原ActionRef稳定共享锁和原dispatch Task attempt token；同Action/同claim重复RPC不另起SDK，其他Action不锁整个profile。Linux实际并发2次调用只产生一套4次假模型步骤、POST1/attempt1，两返回unknown；下一原claim仍可只读拒旧帖并确认新帖，pause/intent/grants不变，Actor锁字典最终清空。1项28.65秒通过，无真实模型。
+- C17/C23增量`613ef00`（源`920f1aa`）修复真实DB复现的两层去重缺口：旧planned material与已有unknown Action都曾把同ContentRef的publish/replyP1/replyP2合成一项。现按operation/实际reply parent区分，默认publish及publish无效parent仍归同意图，旧hash仅在原语义相同时兼容复用；same primitive/parent改名仍回原Task，reply grant/method校验未变。6项红例→独立42项3.44秒、主集成29项1.83秒通过，没有模型/浏览器或新增权限。
 
 ### 22.2 尚未放行与部署约束
 
