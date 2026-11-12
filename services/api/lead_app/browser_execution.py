@@ -20,14 +20,90 @@ def origin(url):
 def scoped_session_class():
     # Browser-use is the existing separate, pinned worker runtime. Importing
     # service metadata must not require the SDK inside the API interpreter.
+    import asyncio
+
     from browser_use import BrowserSession
+    from browser_use.browser.session_manager import SessionManager
     from pydantic import PrivateAttr
+
+    class OwnedSessionManager(SessionManager):
+        """Keep SDK startup/watchdog initialization inside the assigned scope.
+
+        browser-use 0.13.14 otherwise attaches every existing tab before scope
+        binding. Its page/network initialization can await another task's slow
+        navigation even though later agent observations are correctly fenced.
+        """
+        async def _initialize_existing_targets(self):
+            scope = await self.browser_session.refresh_assigned_scope()
+            client = self.browser_session._cdp_client_root
+            targets = (await client.send.Target.getTargets()).get('targetInfos', [])
+            owned = [target for target in targets if target['targetId'] in scope['targets']
+                     and target.get('type') in ('page', 'iframe', 'tab')]
+            if not any(target['targetId'] == scope['target_id'] for target in owned):
+                raise ScopeViolation('assigned_page_missing_at_start')
+            owned.sort(key=lambda target: target['targetId'] != scope['target_id'])
+            for target in owned:
+                await client.send.Target.attachToTarget(params={'targetId': target['targetId'], 'flatten': True})
+            # The SDK's attach callback still creates sessions and enables its
+            # native monitoring. Wait only for these already-authorized targets.
+            def ready(target):
+                session = self._get_session_for_target(target['targetId'])
+                return session is not None and (target['type'] not in ('page', 'tab')
+                    or getattr(session, '_lifecycle_events', None) is not None)
+            async with asyncio.timeout(2):
+                while not all(ready(target) for target in owned):
+                    await asyncio.sleep(.02)
+
+        async def _handle_target_attached(self, event):
+            target = event['targetInfo']
+            if target.get('type') not in ('page', 'iframe', 'tab'):
+                return
+            # An event callback must not perform an RPC that itself needs CDP
+            # while a request is paused. Observation/actions still recheck live.
+            scope = self.browser_session._scope or self.browser_session._startup_scope
+            if target['targetId'] not in scope['targets']:
+                return
+            return await super()._handle_target_attached(event)
+
+        def get_all_page_targets(self):
+            browser = self.browser_session
+            scope = browser._scope or browser._startup_scope
+            targets = [target for target in super().get_all_page_targets() if target.target_id in scope.get('targets', {})]
+            return sorted(targets, key=lambda target: target.target_id != scope.get('target_id'))
 
     class ScopedSession(BrowserSession):
         _lease: dict = PrivateAttr(default_factory=dict)
+        _startup_scope: dict = PrivateAttr(default_factory=dict)
         _scope_reader: object = PrivateAttr(default=None)
         _scope: dict = PrivateAttr(default_factory=dict)
         _observation: object = PrivateAttr(default=None)
+
+        def __setattr__(self, name, value):
+            # The pinned SDK assigns its manager inside connect(), overriding
+            # constructor injection. Replace that empty instance before its
+            # start_monitoring call; no installed SDK files/global patching.
+            if (name == 'session_manager' and isinstance(value, SessionManager)
+                    and not isinstance(value, OwnedSessionManager) and getattr(self, '_startup_scope', None)):
+                value = OwnedSessionManager(self)
+            return super().__setattr__(name, value)
+
+        async def refresh_assigned_scope(self):
+            if not self._scope_reader:
+                raise ScopeViolation('page_lease_missing')
+            scope = await self._scope_reader()
+            expected = self._lease or self._startup_scope
+            for key in ('task_id', 'generation', 'target_id', 'connection_ref', 'control_mode', 'challenge_version'):
+                if scope.get(key) != expected.get(key):
+                    raise ScopeViolation('page_lease_changed')
+            self._scope = scope
+            return scope
+
+        async def start_scoped(self, lease, read_scope):
+            self._startup_scope = dict(lease)
+            self._scope_reader = read_scope
+            await self.refresh_assigned_scope()
+            await self.start()
+            await self.bind_scope(lease, read_scope)
 
         async def bind_scope(self, lease, read_scope):
             self._scope_reader = read_scope
@@ -58,7 +134,7 @@ def scoped_session_class():
             allowed = {origin(url) for url in scope['origins']}
             facts = []
             for target_id in sorted(scope['targets']):
-                session = await BrowserSession.get_or_create_cdp_session(self, target_id=target_id, focus=False)
+                session = await self.get_or_create_cdp_session(target_id=target_id, focus=False)
                 info = await session.cdp_client.send.Target.getTargetInfo(params={'targetId': target_id}, session_id=session.session_id)
                 target = info['targetInfo']
                 if (not target.get('attached') or target.get('type') not in ('page', 'iframe')
@@ -83,6 +159,11 @@ def scoped_session_class():
                 if target_id != self._lease['target_id'] and (focus or target_id not in self._scope['targets']):
                     # Native DOM collection skips foreign frames on ValueError.
                     raise ScopeViolation('foreign_frame_target')
+                if self.session_manager.get_target(target_id) is None:
+                    # The SDK event can precede the manager's frame ownership
+                    # event. Reattach only after scope proves this exact target.
+                    await self._cdp_client_root.send.Target.attachToTarget(
+                        params={'targetId': target_id, 'flatten': True})
             return await super().get_or_create_cdp_session(target_id=target_id, focus=focus)
 
         async def get_tabs(self):

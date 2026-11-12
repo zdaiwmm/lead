@@ -190,8 +190,7 @@ async def main(data):
                 return await manager('tool_authorize',{'name':name,'values':values,'node':node})
             browser = scoped_session_class()(cdp_url=native_scope['cdp_url'],headers=native_scope['headers'],
                         keep_alive=True,enable_default_extensions=False)
-            await browser.start()
-            await browser.bind_scope(native_scope,live_scope)
+            await browser.start_scoped(native_scope,live_scope)
             diagnostics('native_scope_bound')
             tools = guarded_tools(browser,authorize,sensitive_data=data.get('sensitive_data'))
             if data.get('native_kind')=='connection':
