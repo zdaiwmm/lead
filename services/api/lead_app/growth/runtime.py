@@ -49,6 +49,13 @@ def _wait(row, reason, now, *, producer="growth.runtime", action="recheck", dela
                 episode_root=row["id"], responsibility=owner).model_dump(mode="json")
 
 
+def _browser_resource(c, row, spec):
+    profile = row['input'].get('profile_id') or spec.payload.get('profile_id')
+    record = one(c, 'SELECT provider FROM lead.browser_profiles WHERE id=%s', (profile,)) if profile else None
+    account = spec.account_id or spec.payload.get('connection_account_id')
+    return profile, bool(record and record['provider'] == 'chromium'), account
+
+
 def _resource_condition(c, agent, row, spec):
     """Conditions come from actual references/configuration, never a model-supplied retry key."""
     if spec.kind in ("content", "decision") or _runtime(row).get("failure_stage")=="model":
@@ -60,10 +67,10 @@ def _resource_condition(c, agent, row, spec):
     if spec.kind == "research" and _runtime(row).get("failure_scope"):
         return _current_research_resource(c, _runtime(row)["failure_scope"])
     if spec.account_id or spec.payload.get("profile_id"):
-        profile = row["input"].get("profile_id") or spec.payload.get("profile_id")
+        profile, native, account_id = _browser_resource(c, row, spec)
         route = one(c, "SELECT generation FROM lead.profile_execution_routes WHERE profile_id=%s", (profile,))
         account = one(c,"""SELECT s.binding_version,s.state,i.revision,i.desired,i.scope FROM lead.social_accounts s
-            LEFT JOIN lead.account_operating_intents i ON i.account_id=s.id WHERE s.id=%s""",(spec.account_id,)) if spec.account_id else None
+            LEFT JOIN lead.account_operating_intents i ON i.account_id=s.id WHERE s.id=%s""",(account_id,)) if account_id else None
         capability = None
         if spec.kind=="channel":
             capability = one(c,"""SELECT t.state,t.verified_permissions->>'adapter_version' adapter_version,
@@ -72,7 +79,8 @@ def _resource_condition(c, agent, row, spec):
                 LEFT JOIN lead.platform_capabilities pc ON pc.platform=s.platform AND pc.target_type=t.target_type AND pc.action_type='publish'
                 LEFT JOIN LATERAL (SELECT * FROM lead.authorization_grants WHERE target_id=t.id AND revoked_at IS NULL ORDER BY version DESC LIMIT 1) g ON true
                 WHERE t.id=%s""",(spec.target_id,))
-        return "profile:"+str(profile), digest([account,(route or {}).get("generation"),capability])
+        resource = 'account:' + str(account_id) if native and account_id else 'profile:' + str(profile)
+        return resource, digest([account,(route or {}).get("generation"),capability])
     urls = spec.payload.get("urls") or []
     if not urls and spec.kind == "research":
         business = one(c, "SELECT product_url FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
@@ -303,18 +311,34 @@ def advance(value, attempt_token=None, *, now=None):
                 wait = _wait(row, "account_paused", now, producer="account_intents", action="configuration", owner="owner")
                 _save(c, row, "planned", {**runtime, "wait": wait}, when=wait["check_at"])
                 return {"state": "wait", "wait": wait}
-            resource = "profile:" + str(account["profile_id"] if account else spec.payload["profile_id"])
+            profile, native, scoped_account = _browser_resource(c, row, spec)
+            group = 'profile:' + str(profile)
+            resource = 'account:' + str(scoped_account) if native and scoped_account else group
             # Short admission serialization; never hold this lock across browser IO.
-            if not one(c, "SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0)) ok", (resource,))["ok"]:
+            if not one(c, "SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0)) ok", (group,))["ok"]:
                 return {"state": "wait", "wait": _wait(row, "resource_wait", now, delay=1, owner="resource")}
-            busy = one(c, """SELECT id FROM lead.tasks WHERE id<>%s AND state='running'
-                AND result#>>'{runtime,resource}'=%s
-                AND (result#>>'{runtime,lease_until}')::timestamptz>now() LIMIT 1""", (row["id"], resource))
+            running = all_rows(c, """SELECT id,result#>>'{runtime,resource}' resource,
+                    coalesce(input#>>'{spec,account_id}',input#>>'{spec,payload,connection_account_id}') account_id
+                FROM lead.tasks WHERE id<>%s AND state='running'
+                AND coalesce(result#>>'{runtime,browser_profile_id}',input->>'profile_id',input#>>'{spec,payload,profile_id}')=%s
+                AND (result#>>'{runtime,lease_until}')::timestamptz>%s""", (row['id'],str(profile),now))
+            busy = bool(running)
+            if native and scoped_account:
+                busy = len(running) >= 2 or any(item['account_id'] == str(scoped_account) or item['resource'] == group for item in running)
+                control = one(c, """SELECT id FROM lead.takeover_sessions t WHERE profile_id=%s
+                    AND state IN ('requested','active','ending') AND expires_at>%s
+                    AND (%s::uuid IS NULL OR id<>%s)
+                    AND (purpose<>'login' OR connection_account_id=%s OR EXISTS(SELECT FROM lead.tasks w
+                        WHERE w.input#>>'{spec,payload,takeover_id}'=t.id::text
+                        AND w.input#>>'{spec,payload,connection_account_id}'=%s)) LIMIT 1""",
+                    (profile,now,spec.payload.get('takeover_id'),spec.payload.get('takeover_id'),scoped_account,str(scoped_account)))
+                busy = busy or bool(control)
             if busy:
                 wait = _wait(row, "resource_wait", now, delay=1, owner="resource")
                 _save(c, row, "queued", {**runtime, "wait": wait}, when=wait["check_at"])
                 return {"state": "wait", "wait": wait}
             runtime["resource"] = resource
+            runtime['browser_profile_id'] = str(profile)
         attempts = runtime.get("attempts", 0)
         if runtime.get("failure_attempts", 0) >= 3 and not runtime.get("recovery_permit") and not reconcile:
             _save(c, row, "failed", {**runtime, "reason": "recovery_exhausted"})
