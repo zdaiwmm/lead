@@ -177,11 +177,10 @@ async def test_account_read_never_silently_uses_public_fetch(monkeypatch):
 
 @pytest.mark.parametrize('mode,provider', [('public','browser'),('account','account_browser')])
 async def test_browser_recovery_uses_current_probe_task_and_original_transport(monkeypatch,mode,provider):
+    from datetime import timedelta
     from uuid import uuid4
 
     from lead_app import browser_tools
-    from datetime import timedelta
-
     from lead_app.growth.contracts import EvidenceRef, TaskSpec, utcnow
     calls=[]
     class Browser:
