@@ -171,6 +171,9 @@ class NativeNetworkGate:
                         if current['targetId']==info['targetId']:
                             current.update(info)
                 elif method == 'Target.detachedFromTarget':
+                    root=self.owners.get(event['sessionId'])
+                    if root in self.roots:
+                        self.roots[root]['document_revision']=self.roots[root].get('document_revision',0)+1
                     self.targets.pop(event['sessionId'], None)
                     self.owners.pop(event['sessionId'], None)
                     self.initialized.discard(event['sessionId'])
@@ -185,6 +188,10 @@ class NativeNetworkGate:
                     self.schedule(self.authenticate_proxy(event))
                 elif method == 'Fetch.requestPaused':
                     self.schedule(self.paused(event))
+                elif method in ('Page.frameNavigated','Page.navigatedWithinDocument','Page.frameDetached'):
+                    root=self.owners.get(session)
+                    if root in self.roots:
+                        self.roots[root]['document_revision']=self.roots[root].get('document_revision',0)+1
         finally:
             self.ready = False
             for future in list(self.pending.values()):
@@ -222,6 +229,8 @@ class NativeNetworkGate:
                 await self.send('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': True,
                     'flatten': True, 'filter': [{'type': 'iframe', 'exclude': False}, {'exclude': True}]}, session)
             await self.send('Network.enable', {}, session)
+            if kind in ('page','iframe'):
+                await self.send('Page.enable',{},session)
             await self.send('Runtime.runIfWaitingForDebugger', {}, session)
             self.initialized.add(session)
             self.changed.set()
@@ -315,6 +324,7 @@ class NativeNetworkGate:
                 if not self.token:
                     raise ValueError('control_lost_before_continue')
                 return await self.send('Fetch.continueRequest', {'requestId': event['requestId']})
+            decision['sender_frame']=event.get('frameId')
             # Current permission checks and request claim are one original DB
             # transaction. A prior claim returns False: only reconcile the action.
             if not await self.claim(scope, target, request, decision):
@@ -323,14 +333,20 @@ class NativeNetworkGate:
                 raise ValueError('control_lost_after_claim')
             headers = {k: v for k, v in request.get('headers', {}).items()
                        if k.lower() not in ('host', 'content-length', 'connection', 'cookie')}
+            headers['Cookie']=decision.get('cookie_header','')
             try:
                 response = await self.context.request.fetch(request['url'], method=request['method'], headers=headers,
                     data=(request.get('postData') or '').encode(), max_redirects=0, max_retries=0, timeout=15000)
+                if decision.get('record_transport'):
+                    await decision['record_transport']({'status':response.status})
                 await self.send('Fetch.fulfillRequest', {'requestId': event['requestId'],
-                    'responseCode': response.status, 'responseHeaders': response.headers_array,
+                    'responseCode': response.status, 'responseHeaders': [header for header in response.headers_array
+                        if header['name'].lower() not in ('content-length','content-encoding','transfer-encoding')],
                     'body': base64.b64encode(await response.body()).decode()})
                 await response.dispose()
-            except Exception:
+            except Exception as error:
+                if decision.get('record_transport'):
+                    await decision['record_transport']({'error_type':type(error).__name__})
                 # DB remains dispatching; a transport response is never a receipt.
                 await self.reject(event, 502)
         except Exception:
@@ -512,7 +528,7 @@ class PersistentRuntime:
                     scope['authentication_dispatched']=True
                 return {'kind':'authentication'}
             if request['method'] in ('GET','HEAD'):
-                return {'kind':'read'}
+                return {'kind':'read'} if not scope.get('read_urls') or request['url'] in scope['read_urls'] else None
             if scope.get('action'):
                 try:
                     match_request(scope['action']['intent']['browser_method'],request,scope['action']['intent'])
@@ -535,6 +551,8 @@ class PersistentRuntime:
                     if ((origin(request['url']),urlsplit(request['url']).path) in auth_paths):
                         return None
                     if origin(target['url']) in allowed and origin(request['url']) in allowed:
+                        if lease.get('read_urls') and request['url'] not in lease['read_urls']:
+                            continue
                         readers.append(lease)
                 except (ValueError,KeyError):
                     continue
@@ -575,11 +593,18 @@ class PersistentRuntime:
                 or managed_exit_stamp(network)!=self.network_stamp):
             raise ValueError('browser_exit_changed')
         with tx(self.actor.aid) as c:
+            reconcile=None
+            if scope.get('reconcile_action_id'):
+                reconcile=one(c,"SELECT * FROM lead.actions WHERE id=%s AND task_id=%s AND state IN ('unknown','dispatching','confirmed')",
+                    (scope['reconcile_action_id'],scope['task_id']))
+                if (not reconcile or reconcile['intent'].get('execution_ref')!=self.execution_ref
+                        or scope['origins']!=[reconcile['intent']['browser_method']['target_url']]):
+                    raise ValueError('original_action_execution_unavailable')
             if profile_exit_stamp(c,self.actor.aid,self.actor.profile['id'])!=self.profile_exit:
                 raise ValueError('browser_profile_exit_changed')
             route=one(c,'SELECT * FROM lead.profile_execution_routes WHERE profile_id=%s',(self.actor.profile['id'],))
-            if not route or any(str(route[key])!=str(self.execution_ref[ref]) for key,ref in
-                    (('profile_id','profile_id'),('executor_ref','executor_ref'),('transport_ref','transport_ref'),('generation','route_generation'))) or endpoint(ExecutionRef.model_validate(self.execution_ref))!=self.transport_endpoint:
+            if (not reconcile and (not route or any(str(route[key])!=str(self.execution_ref[ref]) for key,ref in
+                    (('profile_id','profile_id'),('executor_ref','executor_ref'),('transport_ref','transport_ref'),('generation','route_generation'))))) or endpoint(ExecutionRef.model_validate(self.execution_ref))!=self.transport_endpoint:
                 raise ValueError('browser_execution_route_changed')
             if scope.get('kind')=='identity_probe':
                 valid=self.probes.get(scope.get('probe_ref'))
@@ -621,7 +646,7 @@ class PersistentRuntime:
                         or connection['challenge_version'] != scope.get('challenge_version')
                         or not owner_connection and connection['input_seq'] != scope.get('input_seq')):
                     raise ValueError('connection_control_changed')
-            elif row['desired_state'] != 'running':
+            elif row['desired_state'] != 'running' and not reconcile:
                 raise ValueError('browser_project_paused')
             if scope.get('account_id'):
                 account = one(c,'SELECT * FROM lead.social_accounts WHERE id=%s',(scope['account_id'],))
@@ -648,27 +673,11 @@ class PersistentRuntime:
             return row
 
     async def claim_request(self, scope, target, request, decision):
-        from .browser_actions import claim_request
         scope = decision.get('scope') or scope
         if not scope or not scope.get('action'):
             return False
-        page = self.pages[scope['target_id']]['page']
-        method = scope['action']['intent']['browser_method']
-        selectors = method['selectors']
-        from urllib.parse import urljoin
-        target_href = await page.locator(selectors['editor_target']).get_attribute('href', timeout=3000)
-        if not target_href:
-            return False
-        observed = {'subject':(await page.locator(selectors['self_subject']).inner_text(timeout=3000)).strip(),
-                    'target_url':urljoin(page.url, target_href),
-                    'body':await page.locator(selectors['editor_body']).input_value(timeout=3000)}
-        if scope['action']['type'] == 'reply':
-            parent_href = await page.locator(selectors['editor_parent']).get_attribute('href',timeout=3000)
-            if not parent_href:
-                return False
-            observed['parent_url'] = urljoin(page.url, parent_href)
-        return await asyncio.to_thread(claim_request,self.actor,scope['action']['id'],scope['claim'],
-                                       self.actor.epoch,request,observed)
+        controller=self.pages[scope['target_id']].get('action_controller')
+        return await controller.verify_request(request,decision) if controller else False
 
     async def acquire_identity_probe(self,urls):
         from .db import one, tx

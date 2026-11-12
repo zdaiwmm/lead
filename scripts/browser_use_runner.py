@@ -78,6 +78,11 @@ async def main(data):
     secret_seen = []
     model_timeout = max(15, min(45, int(data.get("timeout_seconds", 45))))
 
+    def diagnostics(stage):
+        (folder/'transport-status.json').write_text(json.dumps({'stage':stage,
+            'requests_started':len(provider_requests),'responses_received':len(provider_responses),
+            'measured_responses':len(provider_usage),'credential_literal_seen':bool(secret_seen)}))
+
     async def measure_request(request):
         for secret in (data.get('sensitive_data') or {}).values():
             if secret and (secret.encode() in request.content or json.dumps(secret)[1:-1].encode() in request.content):
@@ -92,9 +97,11 @@ async def main(data):
             if used+len(request.content)+int(data.get('max_output_tokens',1800))>int(data['max_total_tokens']):
                 raise ValueError('Model token envelope reached')
         provider_requests.append(1)
+        diagnostics('model_request')
 
     async def measure(response):
         provider_responses.append(1)
+        diagnostics('model_response')
         if not response.is_success:
             return
         await response.aread()
@@ -185,6 +192,7 @@ async def main(data):
                         keep_alive=True,enable_default_extensions=False)
             await browser.start()
             await browser.bind_scope(native_scope,live_scope)
+            diagnostics('native_scope_bound')
             tools = guarded_tools(browser,authorize,sensitive_data=data.get('sensitive_data'))
             if data.get('native_kind')=='connection':
                 @tools.action('Open the freshly observed current self account settings link, identified by rel=me. The manager checks this actual link before navigating.')
@@ -209,6 +217,12 @@ async def main(data):
                         'selectors':selectors,'self_subject_prefix':self_subject_prefix,'self_subject_suffix':self_subject_suffix,
                         'permission_selector':permission_selector,'permission_quote':permission_quote})
                     return ActionResult(is_done=True,success=True,extracted_content=json.dumps(observed))
+            elif data.get('native_kind')=='action':
+                @tools.action('Report the actual current post or reply receipt. Give observed value selectors for author/body/url and parent for a reply; the manager independently verifies the DOM, identity, baseline and uniqueness on the original action.')
+                async def report_receipt(selectors: dict[str,str]):
+                    await browser.assert_fresh_observation()
+                    observed=await manager('report_receipt',{'selectors':selectors})
+                    return ActionResult(is_done=True,success=observed.get('state')=='confirmed',extracted_content=json.dumps(observed))
             else:
                 await command('read')
         else:
@@ -242,6 +256,7 @@ async def main(data):
             available_file_paths=[],
             calculate_cost=False,
         )
+        diagnostics('agent_initialized')
         class PersonStepRequired(Exception):
             pass
         async def before_step(_agent):
@@ -253,13 +268,13 @@ async def main(data):
             if native_scope and data.get('native_kind') not in ('connection','discovery','action'):
                 await command('read')
         except PersonStepRequired:
-            pass
+            diagnostics('person_step_required')
         finally:
             if native_scope:
                 await browser.stop()
         return {
             "success": bool(history and history.is_successful()),
-            "text": (history.final_result() or "") if history else "A current person-only step requires the account owner.",
+            "text": (history.final_result() or "") if history else 'A current person-only step requires the account owner.',
             "usage": {
                 "total_prompt_tokens": sum(u["prompt_tokens"] for u in provider_usage),
                 "total_completion_tokens": sum(

@@ -1735,11 +1735,21 @@ async def _publish_action(aid: UUID, body: PublishRequest):
     aid = str(aid)
     with tx(aid) as c:
         action = one(
-            c, "SELECT a.intent,s.profile_id FROM lead.actions a JOIN lead.account_targets t ON t.id=a.target_id JOIN lead.social_accounts s ON s.id=t.account_id WHERE a.id=%s", (body.action_id,)
+            c, "SELECT a.intent,a.state,s.profile_id FROM lead.actions a JOIN lead.account_targets t ON t.id=a.target_id JOIN lead.social_accounts s ON s.id=t.account_id WHERE a.id=%s", (body.action_id,)
         )
         if not action:
             raise HTTPException(404)
-    actor = await gateway.get(aid,action["profile_id"])
+    profile_id=action['intent']['execution_ref']['profile_id'] if action['state'] in ('dispatching','unknown','confirmed') and action['intent'].get('execution_ref') else action['profile_id']
+    actor = await gateway.get(aid,profile_id)
+    if actor.native_runtime and action['intent'].get('browser_method'):
+        if env().get('LEAD_DEPLOYMENT_MODE')=='production' and action['state']=='prepared':
+            from .identity import check, verified_profile
+            with tx(aid) as c:
+                verified=verified_profile(c,actor.profile['id'])
+            if not verified and not (await check(actor))['verified']:
+                raise BrowserBusy('运营环境核验未通过，平台会自动复查')
+        from .social_publish import execute
+        return await execute(actor,body.action_id,growth_claim=body.growth_claim)
     if (
         action["intent"].get("platform") in SPECS
         and env().get("LEAD_DEPLOYMENT_MODE") == "production"

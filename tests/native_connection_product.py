@@ -24,7 +24,9 @@ from lead_app.growth.tools import AccountInput
 from native_browser_fixture import BoardState, NativeBoard
 
 
-async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
+async def verify_login(
+    monkeypatch, *, mode="login", owner_hook=None, after_discovery=None
+):
     from lead_app import native_runner
 
     model_calls = []
@@ -43,6 +45,7 @@ async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
                     "fixture_only": True,
                     "username_literal_seen": board.state.username.encode() in raw,
                     "password_literal_seen": board.state.password.encode() in raw,
+                    "synthetic_otp_literal_seen": b"135790" in raw,
                 }
             )
             request = json.loads(raw)
@@ -61,7 +64,9 @@ async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
             candidates = []
             for line in text.splitlines():
                 index = re.search(r"\[(\d+)\]", line)
-                if index and any(tag in line.lower() for tag in ("<input", "<button")):
+                if index and any(
+                    tag in line.lower() for tag in ("<input", "<button", "<textarea")
+                ):
                     candidates.append((int(index[1]), line))
             step = workflow["step"]
             workflow["step"] += 1
@@ -71,7 +76,37 @@ async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
                     "success": True,
                 }
             }
-            if workflow["kind"] == "resume":
+            if workflow["kind"] == "action":
+                if step == 0:
+                    matches = [
+                        index
+                        for index, line in candidates
+                        if "<textarea" in line.lower()
+                    ]
+                    if matches:
+                        action = {
+                            "guarded_input": {
+                                "index": matches[-1],
+                                "text": workflow["body"],
+                                "clear": True,
+                            }
+                        }
+                elif step == 1:
+                    matches = [
+                        index for index, line in candidates if "<button" in line.lower()
+                    ]
+                    if matches:
+                        action = {"guarded_click": {"index": matches[-1]}}
+                elif step == 2:
+                    receipt = {
+                        "author": "#author",
+                        "body": "#post-body",
+                        "url": "a[rel~=canonical]",
+                    }
+                    if workflow.get("operation") == "reply":
+                        receipt["parent"] = "#receipt-parent"
+                    action = {"report_receipt": {"selectors": receipt}}
+            elif workflow["kind"] == "resume":
                 if step == 0:
                     action = {
                         "inspect_self": {
@@ -85,12 +120,16 @@ async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
                     action = {"report_connection": {"subject_selector": "#subject"}}
             elif workflow["kind"] == "discovery":
                 if step == 0:
-                    action = {"guarded_navigate": {"url": board.origin + "/home"}}
+                    action = {
+                        "guarded_navigate": {
+                            "url": workflow.get("editor_url") or board.origin + "/home"
+                        }
+                    }
                 elif step == 1:
                     action = {
                         "propose_method": {
                             "target_url": board.origin + "/home",
-                            "operation": "publish",
+                            "operation": workflow.get("operation", "publish"),
                             "selectors": {
                                 "self_subject": "main > p",
                                 "editor_target": "#editor-target",
@@ -104,6 +143,10 @@ async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
                             "Automated browser tools are permitted for these member actions. You have no administrator privileges.",
                         }
                     }
+                    if workflow.get("operation") == "reply":
+                        action["propose_method"]["selectors"]["editor_parent"] = (
+                            "#editor-parent"
+                        )
             elif step in (0, 1):
                 field = "username" if step == 0 else "password"
                 matches = [
@@ -137,6 +180,9 @@ async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
             elif step == 4 and (mode != "owner_otp" or workflow.get("allow_identity")):
                 action = {"report_connection": {"subject_selector": "#subject"}}
             model_calls[-1]["action"] = list(action)[0]
+            from lead_app.config import STATE
+
+            (STATE / "synthetic-model-status.json").write_text(json.dumps(model_calls))
             model_calls[-1]["elements"] = [
                 {
                     "index": index,
@@ -285,6 +331,7 @@ async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
         )
         probe_checks = None
         discovery = None
+        action_check = None
         if mode == "login" and result.outcome == "completed":
             actor = await browser.gateway.get(
                 aid, task["input"]["spec"]["payload"]["profile_id"]
@@ -425,6 +472,21 @@ async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
                 )
             discovery = await discover(aid, discovery_task)
             finish(work_claims[0], discovery)
+            if after_discovery:
+
+                action_check = await after_discovery(
+                    {
+                        "aid": aid,
+                        "board": board,
+                        "boards": boards,
+                        "workflow": workflow,
+                        "actor": actor,
+                        "pending": pending,
+                        "discovery": discovery,
+                        "model_calls": model_calls,
+                        "gateway_endpoint": f"http://127.0.0.1:{port}",
+                    }
+                )
         with tx(aid) as c:
             final = one(
                 c,
@@ -450,7 +512,7 @@ async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
                 "SELECT verified_permissions FROM lead.account_targets WHERE account_id=%s AND target_type='web'",
                 (pending["account_id"],),
             )
-            if learned:
+            if learned and not after_discovery:
                 assert (
                     learned["verified_permissions"]["browser_methods"]["publish"][
                         "receipt_state"
@@ -471,6 +533,7 @@ async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
         return {
             "privacy": worker["credential_scan"],
             "owner_check": owner_check,
+            "action_check": action_check,
             "identity_probe": probe_checks,
             "task_state": task_state,
             "discovery": discovery.model_dump(mode="json") if discovery else None,

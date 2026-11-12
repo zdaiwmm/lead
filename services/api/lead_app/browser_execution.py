@@ -151,16 +151,17 @@ def guarded_tools(session, authorize, *, sensitive_data=None):
             node_ref = {'target_id': node.target_id, 'backend_node_id': node.backend_node_id,
                         'tag': node.tag_name, 'attributes': dict(node.attributes)}
         values=dict(values)
-        if name=='input' and sensitive_data:
+        credential_data={key:value for key,value in (sensitive_data or {}).items() if key in ('saved_username','saved_password')}
+        if name=='input' and credential_data:
             # Agent's outer registry substitutes secrets before custom actions.
             # Restore one approved placeholder before the authorization RPC and
             # let the native input registry perform the actual sensitive write.
             text=values.get('text','')
-            matched=[key for key,secret in sensitive_data.items() if isinstance(secret,str) and text==secret]
+            matched=[key for key,secret in credential_data.items() if isinstance(secret,str) and text==secret]
             if matched:
                 preferred='saved_password' if (node_ref or {}).get('attributes',{}).get('type')=='password' else 'saved_username'
                 values['text']=preferred if preferred in matched else matched[0]
-            elif any(isinstance(secret,str) and secret and secret in text for secret in sensitive_data.values()):
+            elif any(isinstance(secret,str) and secret and secret in text for secret in credential_data.values()):
                 return ActionResult(error='Use exactly one approved saved credential placeholder.')
         decision = await authorize(name, values, node_ref)
         if not decision.get('allowed'):
