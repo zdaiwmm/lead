@@ -130,7 +130,11 @@ class NativeTask:
             return await self.descriptor()
         with tx(self.actor.aid) as c:
             origins=account_read_origins(c,account['id'],account['binding_version'])
-        url=url or (task['input'].get('spec',{}).get('payload',{}).get('target_urls') or [account['private_self']['self_url']])[0]
+        checkpoint=(task['result'] or {}).get('runtime',{}).get('checkpoint',{})
+        resume=checkpoint if checkpoint.get('stage')=='native_discovery' else {}
+        if resume and resume.get('execution_ref')!=self.actor.native_runtime.execution_ref:
+            raise ValueError('native_checkpoint_execution_changed')
+        url=url or resume.get('url') or (task['input'].get('spec',{}).get('payload',{}).get('target_urls') or [account['private_self']['self_url']])[0]
         if origin(url) not in {origin(value) for value in origins}:
             raise ValueError('native_task_url_outside_account')
         scope={'task_id':self.task_id,'control_version':task['current_control'],'task_generation':task['input']['task_generation'],
@@ -144,7 +148,18 @@ class NativeTask:
         await self.actor.forward_proxy.validate_url(url)
         self.lease=await self.actor.native_runtime.acquire_page(scope,url)
         self.page=self.actor.native_runtime.pages[self.lease['target_id']]['page']
+        if resume and resume.get('execution_ref')==self.actor.native_runtime.execution_ref:
+            await self.page.evaluate('point=>scrollTo(point[0],point[1])',resume.get('scroll',[0,0]))
         return await self.descriptor()
+
+    async def checkpoint(self):
+        before=await self.document()
+        scroll=await self.page.evaluate('()=>[scrollX,scrollY]')
+        value={'stage':'native_discovery','url':self.page.url,'scroll':scroll,
+            'execution_ref':self.actor.native_runtime.execution_ref}
+        if before!=await self.document():
+            raise ValueError('native_checkpoint_document_changed')
+        return value
 
     async def descriptor(self):
         scope=await self.actor.native_runtime.scope_view(self.lease['target_id'])

@@ -261,11 +261,16 @@ async def main(data):
             pass
         class BoundedProgressStop(Exception):
             pass
+        class FragmentBudgetStop(Exception):
+            pass
+        fragment_exhausted=False
         async def before_step(_agent):
             if native_scope and data.get('native_kind')=='connection' and (await manager('preflight')).get('owner_required'):
                 raise PersonStepRequired()
             if native_scope and data.get('native_kind') in ('discovery','action') and (await manager('progress')).get('stop'):
                 raise BoundedProgressStop()
+            if native_scope and data.get('native_kind') in ('discovery','action') and len(provider_requests)>=int(data.get('max_requests',8)):
+                raise FragmentBudgetStop()
         history=None
         try:
             history = await agent.run(max_steps=max(1, min(20 if data.get("native_kind") in ('connection','discovery','action') else 6, int(data.get("max_steps", 6)))),on_step_start=before_step)
@@ -275,11 +280,15 @@ async def main(data):
             diagnostics('person_step_required')
         except BoundedProgressStop:
             diagnostics('bounded_progress_stop')
+        except FragmentBudgetStop:
+            fragment_exhausted=True
+            diagnostics('fragment_request_limit')
         finally:
             if native_scope:
                 await browser.stop()
         return {
             "success": bool(history and history.is_successful()),
+            "fragment_exhausted": fragment_exhausted,
             "text": (history.final_result() or "") if history else 'The current bounded fragment stopped before another model call.',
             "usage": {
                 "total_prompt_tokens": sum(u["prompt_tokens"] for u in provider_usage),

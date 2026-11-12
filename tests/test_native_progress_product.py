@@ -97,3 +97,80 @@ async def test_native_clocks_reload_and_revisited_scroll_do_not_extend_progress(
         return counts
     result=await verify_login(monkeypatch,after_discovery=bounded)
     assert result['action_check']=={'clock':3,'reload':3,'scroll_cycle':4}
+
+
+@pytest.mark.asyncio
+async def test_useful_native_fragment_releases_page_and_resumes_original_due_task(monkeypatch):
+    import asyncio
+    from datetime import datetime
+
+    from lead_app import account_profiles
+    from lead_app.account_connection import discover
+    from lead_app.browser_runtime import PersistentRuntime
+    from lead_app.db import one, tx
+    from lead_app.growth.contracts import TaskSpec, utcnow
+    from lead_app.growth.runtime import advance, finish, recover_due
+    from lead_app.growth.store import submit_work
+    from lead_app.native_task import NativeTask
+    from native_connection_product import verify_login
+    monkeypatch.setattr(account_profiles,'native_available',lambda:True)
+    async def fragmented(context):
+        aid=context['aid']
+        with tx(aid) as c:
+            ref=submit_work(c,aid,TaskSpec(kind='account',purpose='discover',account_id=context['pending']['account_id'],
+                payload={'target_urls':[context['board'].origin+'/home']},review_at=utcnow()+timedelta(hours=1),dedupe_key='native-useful-fragments'))
+        original_acquire=PersistentRuntime.acquire_page
+        original_start=NativeTask.start
+        starts=[]
+        async def long_document(runtime,scope,url,**kwargs):
+            lease=await original_acquire(runtime,scope,url,**kwargs)
+            if scope.get('task_id')==str(ref['task_id']) and not kwargs.get('internal_parent'):
+                await runtime.pages[lease['target_id']]['page'].evaluate("""()=>{
+                    const section=document.createElement('section');for(let i=0;i<120;i++){const p=document.createElement('p');p.textContent='Controlled substantive discussion paragraph '+i;p.style.height='100px';section.append(p)}document.querySelector('main').append(section)}""")
+            return lease
+        async def start(controller,*args,**kwargs):
+            value=await original_start(controller,*args,**kwargs)
+            if controller.task_id==str(ref['task_id']):
+                starts.append(await controller.page.evaluate('()=>scrollY'))
+            return value
+        monkeypatch.setattr(PersistentRuntime,'acquire_page',long_document)
+        monkeypatch.setattr(NativeTask,'start',start)
+        claim=advance(ref)['claim']
+        with tx(aid) as c:
+            task=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(ref['task_id'],))
+        context['workflow'].update(kind='fragment',step=0)
+        initial_requests=len(context['model_calls'])
+        first=await discover(aid,task)
+        finish(claim,first)
+        assert first.outcome=='waiting' and first.wait.reason=='bounded_browser_fragment'
+        assert len(context['model_calls'])-initial_requests==8
+        with tx(aid) as c:
+            waiting=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(ref['task_id'],))
+        assert waiting['state']=='planned' and waiting['result']['runtime']['attempt_token'] is None
+        assert waiting['result']['runtime']['checkpoint']['scroll'][1]>0
+        assert waiting['result']['runtime']['native_progress']['no_progress']==0
+        assert not any(value['scope']['task_id']==str(ref['task_id']) for value in context['actor'].native_runtime.pages.values())
+        assert str(ref['task_id']) not in context['actor'].task_pages
+        await asyncio.sleep(max(0,(datetime.fromisoformat(waiting['result']['runtime']['wait']['check_at'])-utcnow()).total_seconds())+.05)
+        with tx(aid) as c:
+            previous={row['id'] for row in c.execute("SELECT id FROM lead.outbox_events WHERE event_type='growth.work'").fetchall()}
+        recover_due(aid)
+        with tx(aid) as c:
+            emitted=c.execute("SELECT id,payload FROM lead.outbox_events WHERE event_type='growth.work' AND payload->>'task_id'=%s",(str(ref['task_id']),)).fetchall()
+            assert any(row['id'] not in previous and row['payload']==ref for row in emitted)
+        resumed=advance(ref)['claim']
+        assert resumed['ref']==claim['ref'] and resumed['attempt_token']!=claim['attempt_token']
+        with tx(aid) as c:
+            task=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(ref['task_id'],))
+        context['workflow'].update(kind='discovery',step=0)
+        second=await discover(aid,task)
+        finish(resumed,second)
+        assert second.outcome=='completed' and second.output['targets']
+        with tx(aid) as c:
+            final=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(ref['task_id'],))
+        assert final['state']=='succeeded' and final['input']['task_generation']==ref['task_generation']
+        assert final['result']['runtime']['native_progress']['fragments']==2
+        assert starts[0]==0 and starts[1]>0
+        return {'first_requests':8,'continuation_requests':context['workflow']['step'],'same_task':True,'released':True}
+    result=await verify_login(monkeypatch,after_discovery=fragmented)
+    assert result['action_check']=={'first_requests':8,'continuation_requests':2,'same_task':True,'released':True}

@@ -273,6 +273,10 @@ async def discover(aid, row):
         'task_id':str(row['id']),
         "target_urls":row["input"]["spec"]["payload"].get("target_urls",[])})
     targets = await asyncio.to_thread(derive_targets,aid,account,observed.get('targets',[])[:20])
+    if not targets and observed.get('continuation'):
+        return WorkResult(outcome='waiting',checkpoint=observed['continuation'],
+            wait=Wait(reason='bounded_browser_fragment',producer='account_connection',recovery_action='recheck',
+                check_at=utcnow()+timedelta(seconds=15),episode_root=row['id'],scope_ref=str(account['profile_id'])))
     return WorkResult(outcome="completed", output={"targets": targets, "missing_conditions": observed.get("missing_conditions", []),
                                                   "knowledge_progress": any(value.get('knowledge_progress',True) for value in targets)})
 
