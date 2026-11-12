@@ -268,9 +268,40 @@ async def probe_research_resource(aid, root, scope, probe_row=None):
     original = TaskSpec.model_validate(root["input"]["spec"])
     data = ResearchInput.model_validate(original.payload)
     url = scope.get("url")
+    provider = scope.get("provider")
+    if provider in ("tavily", "tikhub"):
+        if scope.get("access_mode") != "provider_public" or not any(
+                call.provider == provider and call.operation == scope.get("operation") for call in data.provider_calls):
+            return WorkResult(outcome="failed", failure_code="recovery_scope_missing")
+        # Reuse a later, actual response from the original billing ledger. This
+        # read never retransmits a paid request or settles an uncertain bill.
+        from ..research_providers import configuration, configuration_revision
+        episode = root.get("result", {}).get("runtime", {}).get("recovery", {})
+        with tx(aid) as c:
+            conf, reason = configuration(provider, scope["operation"], aid, connection=c)
+            revision = configuration_revision(provider, scope["operation"], aid, c)
+            ready = None
+            if conf and not reason and episode.get("last_failure_at"):
+                allowance = one(c, """SELECT 1 FROM lead.research_allowances
+                    WHERE connection_ref=%s AND period_key=%s
+                    AND spent_units+reserved_units+%s<=least(limit_units,%s)""",
+                    (conf["connection"],conf["period_key"],conf["max_units"],conf["limit_units"]))
+                if allowance:
+                    ready = one(c, """SELECT id FROM lead.budget_reservations
+                        WHERE state IN ('settled','unknown') AND created_at>%s
+                        AND pricing_snapshot#>>'{research,provider}'=%s
+                        AND pricing_snapshot#>>'{research,operation}'=%s
+                        AND pricing_snapshot#>>'{research,configuration_revision}'=%s
+                        AND pricing_snapshot#>>'{research,result,state}' IN ('complete','partial')
+                        ORDER BY created_at DESC LIMIT 1""",
+                        (episode["last_failure_at"],provider,scope["operation"],revision))
+        if not ready:
+            return WorkResult(outcome="failed", failure_code="recovery_evidence_pending", output={"failure_scope":scope})
+        return WorkResult(outcome="completed", output={"recovery_checks":[{
+            "resource":scope["resource"],"condition_revision":scope["condition_revision"],
+            "state":"ready","evidence_ref":"reservation:"+str(ready["id"])}]})
     if not url or scope.get("access_mode") != data.access_mode:
         return WorkResult(outcome="failed", failure_code="recovery_scope_missing")
-    provider = scope.get("provider")
     if provider not in ("direct_http", "browser", "account_browser"):
         # Paid tools need their own claim/charge proof. A public read cannot
         # establish their recovery or authorize a repeat of an unknown bill.

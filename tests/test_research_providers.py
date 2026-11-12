@@ -74,7 +74,8 @@ async def test_shared_quota_and_unknown_billing(growth_agent, monkeypatch):
         replay=reserve(aid,tid,key)
         assert replay[0] is None and replay[1]['reason']=='transport_unknown'
         with tx(aid) as c:
-            assert one(c,'SELECT reserved_units FROM lead.research_allowances')['reserved_units']==1000
+            assert one(c,'SELECT reserved_units FROM lead.research_allowances WHERE connection_ref=%s AND period_key=%s',
+                (conf['connection'],conf['period_key']))['reserved_units']==1000
             assert one(c,'SELECT count(*) n FROM lead.usage_events')['n']==0
         assert reserve(aid,tid,'new-call')=='shared_quota_exhausted'
     finally:

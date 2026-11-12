@@ -67,3 +67,22 @@ def test_account_read_does_not_inherit_another_shared_account_origin(growth_agen
         c.execute("UPDATE lead.social_accounts SET state='connected',external_account_id='synthetic-self' WHERE id=ANY(%s::uuid[])",([str(first['account_id']),str(second['account_id'])],))
         assert account_read_origins(c,first['account_id'],1)==['https://a.example']
         assert account_read_origins(c,second['account_id'],1)==['https://b.example']
+
+
+def test_due_recovery_clears_expired_login_even_after_task_review(growth_agent):
+    from lead_app.growth.runtime import recover_due
+    sid=account(growth_agent)
+    row,snap,_=login_work(growth_agent,sid)
+    cipher=seal(growth_agent,snap['id'],{'username':'fixture','password':'temporary'})
+    deadline=utcnow()-timedelta(seconds=1)
+    with tx(growth_agent) as c:
+        c.execute("UPDATE lead.takeover_sessions SET encrypted_login=%s,expires_at=%s WHERE id=%s",(cipher,deadline,snap['id']))
+        c.execute("UPDATE lead.tasks SET state='failed',completed_at=now() WHERE id=%s",(row['id'],))
+    recover_due(growth_agent)
+    recover_due(growth_agent)
+    with tx(growth_agent) as c:
+        ended=one(c,'SELECT * FROM lead.takeover_sessions WHERE id=%s',(snap['id'],))
+        assert ended['state']=='expired' and ended['encrypted_login'] is None
+        assert ended['challenge_version']==snap['challenge_version']+1
+        assert ended['input_seq']==snap['input_seq']+1
+        assert one(c,"SELECT count(*) n FROM lead.outbox_events WHERE payload->>'reason'='connection_expired'")['n']==1

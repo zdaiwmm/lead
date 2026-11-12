@@ -103,6 +103,22 @@ def configuration(provider, operation, aid=None, *, connection=None):
         return None, 'eligibility_unverified'
 
 
+def configuration_revision(provider, operation, aid, connection):
+    """Non-secret condition identity, excluding mutable spend/reservations."""
+    values = env()
+    suffix = current_tenant().replace('-', '').upper()
+    key = values.get(provider.upper()+'_API_KEY_'+suffix)
+    if not key and str(current_tenant()) == str(TENANT):
+        key = values.get(provider.upper()+'_API_KEY')
+    credential = hashlib.sha256(key.encode()).hexdigest() if key else None
+    conf, reason = configuration(provider, operation, aid, connection=connection)
+    eligible = ({name:conf.get(name) for name in ('connection','start','end','unit','price_version',
+        'max_units','limit_units','project_limit_units','question_limit_units',
+        'evidence_ref','paid_authorization_ref','trial_eligible')} if conf else None)
+    return hashlib.sha256(json.dumps([credential,reason,eligible],
+        sort_keys=True,default=str,separators=(',',':')).encode()).hexdigest()
+
+
 def _args(provider, operation, args):
     if provider == 'tavily':
         if operation == 'web.search':
@@ -290,7 +306,8 @@ def _reserve(aid, task_id, provider, operation, payload, call_key, conf, executi
             raise ValueError('question_quota_exhausted')
         snapshot={'research':{'args_hash':digest,'question':question,'task_id':str(task_id),'experiment_id':str(task['experiment_id']) if task.get('experiment_id') else None,
             'connection':conf['connection'],'period_key':conf['period_key'],'unit':conf['unit'],
-            'price_version':conf['price_version'],'provider':provider,'operation':operation}}
+            'price_version':conf['price_version'],'provider':provider,'operation':operation,
+            'configuration_revision':configuration_revision(provider,operation,aid,c)}}
         row=one(c,'''INSERT INTO lead.budget_reservations(tenant_id,agent_id,period_id,operation_key,units,state,expires_at,provider,pricing_snapshot)
           VALUES(lead.ctx_tenant(),%s,%s,%s,%s,'reserved',%s,%s,%s) RETURNING id''',
           (aid,period['id'],opkey,units,conf['end'],provider,j(snapshot)))

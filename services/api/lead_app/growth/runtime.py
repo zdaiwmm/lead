@@ -100,6 +100,10 @@ def research_resource(scope):
 
 def _current_research_resource(c, scope):
     resource, condition = research_resource(scope)
+    if scope.get("provider") in ("tavily", "tikhub"):
+        from ..research_providers import configuration_revision
+        aid = one(c, "SELECT current_setting('app.agent_id',true) aid")["aid"]
+        condition = digest([condition, configuration_revision(scope['provider'],scope['operation'],aid,c)])
     if scope.get("account_id"):
         account = one(c, """SELECT s.binding_version,s.state,i.revision,i.desired,r.generation
             FROM lead.social_accounts s LEFT JOIN lead.account_operating_intents i ON i.account_id=s.id
@@ -188,7 +192,7 @@ def _record_failure(c, row, runtime, code):
     episode["attempts"] += 1
     if was_recovered:
         episode.update(blocked_notified=False, transition=episode.get("transition", 0)+1)
-    episode.update(error_code=code, status="blocked" if episode["attempts"] >= 3 or code in PERMANENT else "recovering",
+    episode.update(last_failure_at=utcnow().isoformat(), error_code=code, status="blocked" if episode["attempts"] >= 3 or code in PERMANENT else "recovering",
                    next_check_at=(utcnow()+timedelta(minutes=min(60, 5*2**min(episode["probes"], 5)))).isoformat())
     if runtime.get("failure_scope"):
         episode["failure_scope"] = runtime["failure_scope"]
@@ -458,6 +462,17 @@ def recover_due(aid, now=None, cursor=None):
     checked = []
     with tx(aid) as c:
         _recovery_lock(c, aid)
+        # A connection's task may expire before it executes again. Persist the
+        # expiry independently so encrypted input and the original page role do
+        # not survive their deadline merely because the task is now terminal.
+        expired_connections = all_rows(c, """UPDATE lead.takeover_sessions
+            SET state='expired',ended_at=coalesce(ended_at,%s),encrypted_login=NULL,
+                challenge_version=challenge_version+1,input_seq=input_seq+1
+            WHERE purpose='login' AND state IN ('requested','active','ending') AND expires_at<=%s
+            RETURNING id,profile_id""", (now,now))
+        for connection in expired_connections:
+            emit(c,aid,"growth.wake",{"reason":"connection_expired",
+                "connection_id":str(connection["id"]),"profile_id":str(connection["profile_id"])})
         from .store import experiment_progress, question_costs, submit_work
         for experiment in all_rows(c,"""SELECT * FROM lead.growth_experiments WHERE state IN ('active','observing')
             ORDER BY recovery_checked_at,id LIMIT 20 FOR UPDATE SKIP LOCKED"""):
