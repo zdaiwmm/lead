@@ -39,6 +39,7 @@ _SNAPSHOT = r'''patterns => {
      const elements = Array.from(form.elements);
      if (elements.length > 60) return null;
      return {action: form.action, method: form.method, enctype: form.enctype,
+       target: form.getAttribute('target') ?? document.querySelector('base[target]')?.getAttribute('target') ?? '_self',
        charset: form.acceptCharset, text: form.innerText,
        labels: [...labels(form), form.getAttribute('role') || ''],
        controls: elements.map(node => {
@@ -85,6 +86,10 @@ def _quotes(form):
 
 
 def _request(form, *, page_url, quote):
+    # An empty target also selects the current navigable. An explicit form
+    # target overrides the first base[target], including an empty form target.
+    if form['target'].lower() not in ('', '_self'):
+        raise ValueError('browser_read_target_unsupported')
     if (form['method'].lower() != 'post'
             or form['enctype'].lower() != 'application/x-www-form-urlencoded'
             or form['charset'].lower() not in ('', 'utf-8')

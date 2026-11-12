@@ -89,6 +89,51 @@ async def test_named_submit_and_external_associated_hidden_fields_are_complete(d
         'community_id': 'community-7', 'operation': 'search', 'collection': 'members'}
 
 
+@pytest.mark.parametrize('form_target,base_target', [
+    ('_blank', None), ('another-page', None), ('_parent', None), ('_top', None),
+    (None, '_blank'), (None, 'another-page'),
+])
+async def test_effective_target_must_stay_in_assigned_page(dom, form_target, base_target):
+    page, requests = dom
+    if form_target is not None:
+        await page.locator('form').evaluate('(form,target)=>form.target=target', form_target)
+    if base_target is not None:
+        await page.locator('head').evaluate(
+            '(head,target)=>{const base=document.createElement("base");base.target=target;head.append(base)}',
+            base_target)
+    with pytest.raises(ValueError, match='target'):
+        await inspect_search_form(page)
+    assert all(method == 'GET' for method, _ in requests)
+
+
+@pytest.mark.parametrize('base_target', [None, '_self', '_blank', 'another-page'])
+async def test_explicit_self_target_overrides_base_without_changing_envelope(dom, base_target):
+    page, _ = dom
+    before = await inspect_search_form(page)
+    await page.locator('form').evaluate('form=>form.target="_self"')
+    if base_target is not None:
+        await page.locator('head').evaluate(
+            '(head,target)=>{const base=document.createElement("base");base.target=target;head.append(base)}',
+            base_target)
+    assert await inspect_search_form(page) == before
+
+
+@pytest.mark.parametrize('targets,allowed', [
+    (['_self', '_blank'], True), (['_blank', '_self'], False),
+])
+async def test_only_first_base_with_target_sets_default_destination(dom, targets, allowed):
+    page, _ = dom
+    await page.locator('head').evaluate('''(head,targets)=>{
+        head.insertAdjacentHTML('beforeend','<base href="/">');
+        for(const target of targets){const base=document.createElement('base');base.target=target;head.append(base)}
+    }''', targets)
+    if allowed:
+        assert (await inspect_search_form(page))['source_url'] == SOURCE
+    else:
+        with pytest.raises(ValueError, match='target'):
+            await inspect_search_form(page)
+
+
 @pytest.mark.parametrize('change', [
     'form.method="get"',
     'form.enctype="multipart/form-data"',
