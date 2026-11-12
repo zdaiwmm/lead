@@ -98,6 +98,18 @@ class NativeConnection:
                 return await self.report_identity({'subject_selector':previous['selector']})
         return None
 
+    async def person_only_challenge(self):
+        from .adapters.core import HumanVerificationRequired, check_challenge
+        fields=self.page.locator('input[autocomplete="one-time-code"]')
+        for index in range(min(await fields.count(),20)):
+            if await fields.nth(index).is_visible():
+                return True
+        try:
+            await check_challenge(self.page)
+        except HumanVerificationRequired:
+            return True
+        return False
+
     async def descriptor(self):
         scope=await self.actor.native_runtime.scope_view(self.lease['target_id'])
         task,connection,account=await asyncio.to_thread(self.snapshot)
@@ -259,6 +271,9 @@ class NativeConnection:
         return self.remember_observation(self.observation,expected)
 
     async def command(self,operation,args):
+        if operation=='preflight':
+            await self.descriptor()
+            return {'owner_required':await self.person_only_challenge()}
         if operation=='scope':
             return {key:value for key,value in (await self.descriptor()).items() if key not in ('cdp_url','headers')}
         if operation=='tool_authorize':

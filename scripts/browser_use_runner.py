@@ -242,16 +242,24 @@ async def main(data):
             available_file_paths=[],
             calculate_cost=False,
         )
+        class PersonStepRequired(Exception):
+            pass
+        async def before_step(_agent):
+            if native_scope and data.get('native_kind')=='connection' and (await manager('preflight')).get('owner_required'):
+                raise PersonStepRequired()
+        history=None
         try:
-            history = await agent.run(max_steps=max(1, min(20 if data.get("native_kind") in ('connection','discovery','action') else 6, int(data.get("max_steps", 6)))))
+            history = await agent.run(max_steps=max(1, min(20 if data.get("native_kind") in ('connection','discovery','action') else 6, int(data.get("max_steps", 6)))),on_step_start=before_step)
             if native_scope and data.get('native_kind') not in ('connection','discovery','action'):
                 await command('read')
+        except PersonStepRequired:
+            pass
         finally:
             if native_scope:
                 await browser.stop()
         return {
-            "success": bool(history.is_successful()),
-            "text": history.final_result() or "",
+            "success": bool(history and history.is_successful()),
+            "text": (history.final_result() or "") if history else "A current person-only step requires the account owner.",
             "usage": {
                 "total_prompt_tokens": sum(u["prompt_tokens"] for u in provider_usage),
                 "total_completion_tokens": sum(
@@ -277,8 +285,8 @@ async def main(data):
                     for u in provider_usage
                 ),
             },
-            "errors": [error for error in history.errors() if error][-3:],
-            "steps": len(history.history),
+            "errors": [error for error in history.errors() if error][-3:] if history else [],
+            "steps": len(history.history) if history else len(provider_requests),
         }
 
 

@@ -21,6 +21,8 @@ async def connect(controller,gateway_endpoint):
         if not verified and not (await check(controller.actor))['verified']:
             raise ValueError('connection_exit_identity_unverified')
     scope=await controller.start()
+    if await controller.person_only_challenge():
+        return await controller.handoff('当前仍是平台本人验证，请先在原窗口完成并提交，再交回自动核验。')
     observed=await controller.observe_current()
     if observed and observed.get('status')=='authenticated':
         return observed
