@@ -261,6 +261,12 @@ def wake_browser_method(aid, target_id, operation):
             candidate = method_repair_candidate(c, action)
             if not candidate:
                 continue
+            previous = runtime.get('browser_method_repair') or {}
+            if (previous.get('method_hash') == candidate['method_hash']
+                    and previous.get('browser_session_id') == candidate['browser_session_id']
+                    and previous.get('browser_epoch') == candidate['browser_epoch']
+                    and previous.get('grant_id') == str(action['grant_id'])):
+                continue
             resource, condition = _resource_condition(c, agent, row, TaskSpec.model_validate(row['input']['spec']))
             if resource != runtime.get('resource_key') or condition == runtime.get('condition_revision'):
                 continue
@@ -269,9 +275,16 @@ def wake_browser_method(aid, target_id, operation):
             if episode.get('resource') != resource or episode.get('condition_revision') != runtime.get('condition_revision'):
                 continue
             proof = candidate['proof_ref']
+            marker = {'target_id': str(target_id), 'operation': operation, 'method_hash': candidate['method_hash'],
+                'grant_id': str(action['grant_id']), 'proof_ref': proof,
+                'browser_session_id': candidate['browser_session_id'], 'browser_epoch': candidate['browser_epoch'],
+                'producer_task_id': candidate['producer_task_id'],
+                'task_generation': row['input']['task_generation'] + (row['state'] == 'failed')}
             if row['state'] == 'failed':
                 episode.update(status='recovered', proof_ref=proof, observed_condition=condition)
-                ref = _resume_proven(c, aid, agent, row, episode, proof)
+                current = {**row, 'result': {**(row['result'] or {}),
+                    'runtime': {**runtime, 'browser_method_repair': marker}}}
+                ref = _resume_proven(c, aid, agent, current, episode, proof)
                 if ref:
                     refs.append(ref)
                 continue
@@ -281,7 +294,8 @@ def wake_browser_method(aid, target_id, operation):
                 continue
             remaining = [dep for dep in runtime.get('blocked_resources') or []
                 if dep.get('resource') != resource or dep.get('condition_revision') != episode['condition_revision']]
-            runtime.update(recovery_proofs=[*consumed, proof_key], blocked_resources=remaining)
+            runtime.update(recovery_proofs=[*consumed, proof_key], blocked_resources=remaining,
+                           browser_method_repair=marker)
             if remaining:
                 _save(c, row, row['state'], runtime)
                 continue
@@ -817,6 +831,9 @@ def _resume_proven(c, aid, agent, row, episode, proof_ref):
         runtime["recovery"] = {**episode, "resumed": True}
     runtime.update(wait=None, lease_until=None, attempt_token=None, reason="condition_recovered", recovery_permit=1)
     new_input = {**row["input"], "task_generation": row["input"]["task_generation"]+1}
+    if runtime.get('browser_method_repair'):
+        runtime['browser_method_repair'] = {**runtime['browser_method_repair'],
+            'task_generation': new_input['task_generation']}
     c.execute("UPDATE lead.tasks SET input=%s WHERE id=%s", (j(new_input), row["id"]))
     _save(c, row, "planned", runtime, when=utcnow())
     ref = {"agent_id": str(aid), "task_id": str(row["id"]), "task_generation": new_input["task_generation"]}

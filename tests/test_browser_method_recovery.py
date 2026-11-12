@@ -54,7 +54,7 @@ def work_events(c, task_id):
 
 def test_trusted_correction_wakes_original_wait_once_and_preserves_input(growth_agent):
     aid = growth_agent
-    _, ref, action, _, before, _ = corrected_prepared(aid)
+    _, ref, action, actor, before, method = corrected_prepared(aid)
     from lead_app.growth.runtime import wake_browser_method
     with tx(aid) as c:
         events = work_events(c, ref['task_id'])
@@ -65,6 +65,11 @@ def test_trusted_correction_wakes_original_wait_once_and_preserves_input(growth_
         assert task['input'] == before['input']
         assert task['result']['runtime']['attempts'] == before['result']['runtime']['attempts']
         assert task['result']['runtime']['wait'] is None
+        marker = task['result']['runtime']['browser_method_repair']
+        assert marker['target_id'] == str(action['target_id']) and marker['operation'] == 'publish'
+        assert marker['grant_id'] == str(action['grant_id']) and marker['task_generation'] == ref['task_generation']
+        assert marker['browser_session_id'] == str(actor.session) and marker['browser_epoch'] == actor.epoch
+        assert marker['method_hash'] == method_hash(method) and marker['proof_ref'].startswith('native-method:')
         assert work_events(c, ref['task_id']) == [*events, {'payload': ref}]
         assert one(c, 'SELECT intent,grant_id FROM lead.actions WHERE id=%s', (action['id'],)) == {
             'intent': action['intent'], 'grant_id': action['grant_id']}
@@ -135,7 +140,21 @@ def test_terminal_method_failure_resumes_same_task_with_new_workflow_generation(
         assert task['result']['runtime']['attempts'] == 3
         assert task['result']['runtime']['failure_attempts'] == 3
         assert task['result']['runtime']['recovery_permit'] == 1
+        assert task['result']['runtime']['browser_method_repair']['task_generation'] == resumed['task_generation']
     assert advance(resumed)['state'] == 'ready'
     with tx(aid) as c:
         runtime = one(c, 'SELECT result FROM lead.tasks WHERE id=%s', (ref['task_id'],))['result']['runtime']
         assert runtime['attempts'] == 4 and runtime['failure_attempts'] == 3 and runtime['recovery_permit'] == 0
+
+
+def test_new_original_action_uses_current_control_without_requiring_a_browser_restart(growth_agent):
+    # A retained browser records its launch control, while a new Action and
+    # producer carry the current control after the owner resumes the project.
+    with tx(growth_agent) as c:
+        c.execute('UPDATE lead.agents SET control_version=control_version+1 WHERE id=%s', (growth_agent,))
+    _, ref, action, actor, _, _ = corrected_prepared(growth_agent)
+    with tx(growth_agent) as c:
+        c.execute('UPDATE lead.browser_sessions SET control_version=control_version-1 WHERE id=%s', (actor.session,))
+        assert one(c, 'SELECT control_version FROM lead.agents WHERE id=%s', (growth_agent,))['control_version'] == action['expected_control_version']
+    from lead_app.growth.runtime import wake_browser_method
+    assert wake_browser_method(growth_agent, action['target_id'], 'publish') == [ref]

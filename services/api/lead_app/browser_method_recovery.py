@@ -86,9 +86,11 @@ def method_repair_candidate(c, action):
     if not one(c, """SELECT profile_id FROM lead.profile_leases WHERE profile_id=%s AND epoch=%s
         AND state='held' AND expires_at>now() FOR SHARE""", (account['profile_id'], epoch)):
         return None
+    # Session control_version records launch. A retained browser can serve a
+    # new original Action after resume; that Action and producer must both
+    # match current control above. An older Action still fails that comparison.
     if not one(c, """SELECT id FROM lead.browser_sessions WHERE id=%s AND profile_id=%s AND epoch=%s
-        AND control_version=%s AND state='ready' AND ended_at IS NULL FOR SHARE""",
-        (session, account['profile_id'], epoch, agent['control_version'])):
+        AND state='ready' AND ended_at IS NULL FOR SHARE""", (session, account['profile_id'], epoch)):
         return None
     attempts = all_rows(c, 'SELECT * FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt', (action['id'],))
     # Without an original session binding, continuity with the frozen method
