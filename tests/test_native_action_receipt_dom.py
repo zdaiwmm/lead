@@ -1,4 +1,5 @@
 """Receipt field relationships in a real DOM, including misleading global links."""
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -6,7 +7,8 @@ import pytest_asyncio
 from lead_app.native_action import NativeAction
 from playwright.async_api import async_playwright
 
-pytestmark=pytest.mark.asyncio
+pytestmark=[pytest.mark.asyncio,pytest.mark.skipif(os.environ.get('LEAD_BROWSER_TESTS')!='1',
+    reason='Explicit installed browser test runtime required')]
 
 
 @pytest_asyncio.fixture
