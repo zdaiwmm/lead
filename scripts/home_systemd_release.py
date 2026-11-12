@@ -969,7 +969,7 @@ def maintenance_window(old, sha):
             else:
                 # During a refused/aborted drain a profile may legitimately still be open.
                 verify(revision, fenced=True, require_idle=False)
-            if not growth_cutover_pending(sha):
+            if not cutover_pending(sha):
                 run(site, "restore", sha)
                 run("systemctl", "start", "lead-home-live.path", "lead-home-ingress.socket")
 
@@ -984,6 +984,28 @@ def growth_cutover_pending(sha):
     executor_directory(stage,private=True)
     require(executor_host_file(marker,private=True).decode().strip()==sha,"growth cutover journal differs")
     return True
+
+
+def unified_cutover_pending(sha):
+    require(SHA.fullmatch(sha),"invalid cutover revision")
+    stage=STORE/("maintenance-"+sha)
+    marker=stage/"unified-browser-cutover.pending"
+    if not os.path.lexists(marker):
+        return False
+    executor_directory(stage,private=True)
+    require(executor_host_file(marker,private=True).decode().strip()==sha,"unified-browser cutover journal differs")
+    return True
+
+
+def cutover_kind(sha):
+    growth=growth_cutover_pending(sha)
+    unified=unified_cutover_pending(sha)
+    require(not (growth and unified),'ambiguous cutover journals')
+    return 'growth' if growth else 'unified-browser' if unified else None
+
+
+def cutover_pending(sha):
+    return cutover_kind(sha) is not None
 
 
 # These node tools were deployed and verified independently of the application image.
@@ -1048,7 +1070,7 @@ FAULT_ISOLATION_FILES = {'scripts/fault_isolation_upgrade.py': '6fa2986893c3d1db
 def fault_schema_query():
     return """SELECT
         (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN
-            (ARRAY['0030_fault_isolation'],ARRAY['0031_growth_runtime'])
+            (ARRAY['0030_fault_isolation'],ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'])
         AND (SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity)
              FROM pg_class WHERE oid IN (to_regclass('lead.runtime_issues'),to_regclass('lead.ui_revisions')))
         AND (SELECT count(*)=4 FROM pg_policies WHERE schemaname='lead'
@@ -1093,7 +1115,7 @@ GROWTH_RUNTIME_FILES = {'scripts/growth_runtime_upgrade.py': '5a98672c797361272a
 
 
 def growth_schema_query():
-    return """SELECT (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0031_growth_runtime']
+    return """SELECT (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN (ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'])
         AND (SELECT count(*)=3 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class WHERE oid IN
             (to_regclass('lead.growth_experiments'),to_regclass('lead.account_operating_intents'),to_regclass('lead.profile_execution_routes')))
         AND (SELECT count(*)=6 FROM pg_policies WHERE schemaname='lead'
@@ -1116,9 +1138,9 @@ def growth_schema_query():
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_read_route' AND md5(prosrc)='ae42619cd4089f6f2bbfc6f70e9d343d')
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_set_intent' AND md5(prosrc)='5cfb3ef37809d4c947cfbf4a30d856e3')
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_disconnect_intent' AND md5(prosrc)='b568fc706e1f0bfca2e071224facd5a3')
-        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_complete_connection' AND md5(prosrc)='cab9778a5c090dd092b03c2982327ba4')
-        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_receipt_valid' AND md5(prosrc)='a4bca05077668d2f9a28a7806ffbecc1')
-        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_confirm_publication' AND md5(prosrc)='1be562501250d3092463dadc05414241')
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_complete_connection' AND md5(prosrc) IN ('cab9778a5c090dd092b03c2982327ba4','UNFROZEN_UNIFIED_CONNECTION'))
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_receipt_valid' AND md5(prosrc) IN ('a4bca05077668d2f9a28a7806ffbecc1','UNFROZEN_UNIFIED_RECEIPT'))
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_confirm_publication' AND md5(prosrc) IN ('1be562501250d3092463dadc05414241','UNFROZEN_UNIFIED_CONFIRM'))
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_owner_fence' AND md5(prosrc)='5ac78ca4773b17f90ef940d253b885dd')
     """
 
@@ -1157,20 +1179,87 @@ def complete_growth_cutover(sha):
     require(not growth_cutover_pending(sha),'growth finalizer did not release its journal')
 
 
+# Exact blobs are frozen only after core/schema/runtime packaging has passed its
+# targeted checks. Unfrozen values deliberately cannot admit a release.
+UNIFIED_BROWSER_FILES = {
+    'scripts/unified_browser_upgrade.py': 'UNFROZEN',
+    'infra/migrations/versions/0032_research_memory.py': 'UNFROZEN',
+    'infra/migrations/sql/0032_research_memory.sql': 'UNFROZEN',
+    'infra/migrations/versions/0033_unified_browser.py': 'UNFROZEN',
+    'infra/migrations/sql/0033_unified_browser.sql': 'UNFROZEN',
+    'scripts/browser_namespace.py': 'UNFROZEN',
+    'scripts/browser_use_runner.py': 'UNFROZEN',
+    'scripts/build_home_image.sh': 'UNFROZEN',
+}
+
+
+def unified_schema_query():
+    return "SELECT ("+growth_schema_query().removeprefix("SELECT ")+""" )
+        AND (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0033_unified_browser']
+        AND (SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class WHERE oid IN
+            (to_regclass('lead.experiences'),to_regclass('lead.research_allowances')))
+        AND (SELECT count(*)=3 FROM pg_policies WHERE schemaname='lead'
+            AND (tablename,policyname) IN (('experiences','agent_scope'),('experiences','member_scope'),('research_allowances','tenant_scope')))
+        AND has_table_privilege('lead_runtime','lead.experiences','SELECT')
+        AND has_table_privilege('lead_runtime','lead.experiences','INSERT')
+        AND has_table_privilege('lead_runtime','lead.research_allowances','UPDATE')
+        AND has_function_privilege('lead_runtime','lead.public_experiences(uuid)','EXECUTE')
+        AND NOT EXISTS(SELECT FROM pg_proc p,aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE p.oid=to_regprocedure('lead.public_experiences(uuid)') AND a.grantee=0 AND a.privilege_type='EXECUTE')
+        AND EXISTS(SELECT FROM pg_trigger WHERE tgrelid='lead.experiences'::regclass
+            AND tgname='experience_projection' AND tgenabled='O' AND tgfoid=to_regprocedure('lead.check_experience_projection()'))
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.public_experiences(uuid)') AND prosecdef AND md5(prosrc)='UNFROZEN_PUBLIC_EXPERIENCES')
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.check_experience_projection()') AND md5(prosrc)='UNFROZEN_PROJECTION_CHECK')
+        AND false /* Core 0033 constraints are not frozen yet; refuse release. */
+    """
+
+
+def reviewed_unified_browser(mirror,sha,extra):
+    paths=extra.intersection(UNIFIED_BROWSER_FILES)
+    if not paths:
+        return set()
+    require(all(SHA.fullmatch(value) for value in UNIFIED_BROWSER_FILES.values()),'unified-browser release blobs are not frozen')
+    for path in paths:
+        require(run('git','--git-dir',mirror,'rev-parse',f'{sha}:{path}')==UNIFIED_BROWSER_FILES[path],
+                'unified-browser files require compatibility review')
+    site=TOOLS/'home_live_maintenance.py'
+    require(site.is_file(),'existing node database verifier required')
+    program=('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(unified_schema_query())+'))')
+    require(run('/usr/bin/python3','-IB','-c',program)=='t','unified-browser schema is not ready')
+    require(unified_cutover_pending(sha),'unified-browser cutover hold is missing')
+    return paths
+
+
+def complete_unified_cutover(sha):
+    require(unified_cutover_pending(sha),'unified-browser cutover hold is missing')
+    stage=STORE/('maintenance-'+sha)
+    journal=json.loads(executor_host_file(stage/'unified-browser-migration.json',private=True))
+    require(journal.get('sha')==sha and SHA.fullmatch(journal.get('old','')),'unified-browser migration journal differs')
+    helper=stage/'source/scripts/unified_browser_upgrade.py'
+    executor_host_file(helper)
+    expected=UNIFIED_BROWSER_FILES['scripts/unified_browser_upgrade.py']
+    require(SHA.fullmatch(expected) and run('git','hash-object','--no-filters',helper)==expected,'unified-browser finalizer source differs')
+    for channel in ('telegram','reddit'):
+        provision_executor(sha,EXECUTOR_REGISTRY.parent/(channel+'-provision.json'))
+    register_executors(sha)
+    run(EXECUTOR_PYTHON_SOURCE,'-I','-B',helper,'finish','--sha',sha,'--old',journal['old'],timeout=180)
+    require(not unified_cutover_pending(sha),'unified-browser finalizer did not release its journal')
+
+
 def release_preflight(sha):
     live=current()
-    pending=growth_cutover_pending(sha)
-    if pending:
-        journal=json.loads(executor_host_file(STORE/('maintenance-'+sha)/'growth-migration.json',private=True))
-        require(journal.get('sha')==sha and live in (journal.get('old'),sha),'growth preflight revision differs')
-    verify(live,fenced=pending,require_idle=not pending)
+    kind=cutover_kind(sha)
+    if kind:
+        journal=json.loads(executor_host_file(STORE/('maintenance-'+sha)/(kind+'-migration.json'),private=True))
+        require(journal.get('sha')==sha and live in (journal.get('old'),sha),'cutover preflight revision differs')
+    verify(live,fenced=bool(kind),require_idle=not kind)
     return live
 
 
 def finalize_cutover(sha):
-    if growth_cutover_pending(sha):
+    kind=cutover_kind(sha)
+    if kind:
         require(current()==sha,'application cutover has not completed; inspect original request')
-        complete_growth_cutover(sha)
+        (complete_growth_cutover if kind=='growth' else complete_unified_cutover)(sha)
 
 
 # These site units are installed and verified separately; only these reviewed blobs
@@ -1273,7 +1362,7 @@ def deploy(sha):
     with (STORE / "deploy.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         old = current()
-        verify(old,fenced=growth_cutover_pending(sha),require_idle=False)
+        verify(old,fenced=cutover_pending(sha),require_idle=False)
         if old == sha:
             return
         if not (STORE / sha).is_mount():
@@ -1298,6 +1387,7 @@ def deploy(sha):
         extra -= LOCAL_VERIFICATION_FILES
         extra -= reviewed_maintenance_files(mirror, sha, extra)
         extra -= reviewed_channel_schema(mirror, sha, extra)
+        extra -= reviewed_unified_browser(mirror, sha, extra)
         extra -= reviewed_fault_isolation(mirror, sha, extra)
         extra -= reviewed_growth_runtime(mirror,sha,extra)
         extra -= reviewed_reddit_site(mirror, sha, extra)
@@ -1340,7 +1430,7 @@ def deploy(sha):
             run("systemctl", "stop", fence)
             if not (TOOLS / "home_live_maintenance.py").is_file():
                 run("systemctl", "start", "lead-home-ingress.socket")
-        verify(sha,fenced=growth_cutover_pending(sha))
+        verify(sha,fenced=cutover_pending(sha))
 
 
 def main():
@@ -1376,8 +1466,9 @@ def main():
             print(json.dumps(verify_executors(args.sha), sort_keys=True))
         else:
             deploy(args.sha)
-            if growth_cutover_pending(args.sha):
-                complete_growth_cutover(args.sha)
+            kind=cutover_kind(args.sha)
+            if kind:
+                (complete_growth_cutover if kind=='growth' else complete_unified_cutover)(args.sha)
     except Refused as error:
         sys.exit(str(error))
     except (OSError, ValueError, subprocess.SubprocessError):

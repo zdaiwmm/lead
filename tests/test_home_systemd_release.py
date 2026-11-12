@@ -1412,3 +1412,48 @@ def test_failed_provision_restores_previous_writable_layout_bytes(provisioning, 
         p.h.provision_executor(p.sha, p.path)
     assert layout.read_bytes() == prior
     assert layout.stat().st_mode & 0o777 == 0o600
+
+
+def test_unified_compatibility_only_consumes_exact_frozen_files(hook,tmp_path,monkeypatch):
+    tools=tmp_path/'tools'
+    tools.mkdir()
+    (tools/'home_live_maintenance.py').write_text('# fixture')
+    monkeypatch.setattr(hook,'TOOLS',tools)
+    monkeypatch.setattr(hook,'UNIFIED_BROWSER_FILES',{'scripts/browser_namespace.py':'c'*40})
+    monkeypatch.setattr(hook,'unified_cutover_pending',lambda sha:True)
+    def run(*args,**kwargs):
+        return 'c'*40 if args[0]=='git' else 't'
+    monkeypatch.setattr(hook,'run',run)
+    assert hook.reviewed_unified_browser('/mirror','b'*40,{'scripts/browser_namespace.py','scripts/arbitrary.py'})=={'scripts/browser_namespace.py'}
+    monkeypatch.setattr(hook,'run',lambda *a,**kw:'d'*40)
+    with pytest.raises(hook.Refused,match='compatibility review'):
+        hook.reviewed_unified_browser('/mirror','b'*40,{'scripts/browser_namespace.py'})
+
+
+def test_unified_unfrozen_schema_runtime_never_releases(hook,monkeypatch):
+    monkeypatch.setattr(hook,'UNIFIED_BROWSER_FILES',{'scripts/browser_namespace.py':'UNFROZEN'})
+    with pytest.raises(hook.Refused,match='not frozen'):
+        hook.reviewed_unified_browser('/mirror','b'*40,{'scripts/browser_namespace.py'})
+
+
+def test_ambiguous_cutover_journals_refuse(hook,monkeypatch):
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda sha:True)
+    monkeypatch.setattr(hook,'unified_cutover_pending',lambda sha:True)
+    with pytest.raises(hook.Refused,match='ambiguous'):
+        hook.cutover_kind('b'*40)
+
+
+def test_unified_preflight_uses_original_hold_and_revision(hook,monkeypatch):
+    import json
+    old,sha='a'*40,'b'*40
+    reads=[]
+    monkeypatch.setattr(hook,'current',lambda:old)
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda revision:False)
+    monkeypatch.setattr(hook,'unified_cutover_pending',lambda revision:True)
+    def host_file(path,**kwargs):
+        assert path.name=='unified-browser-migration.json'
+        return json.dumps({'sha':sha,'old':old}).encode()
+    monkeypatch.setattr(hook,'executor_host_file',host_file)
+    monkeypatch.setattr(hook,'verify',lambda *a,**kw:reads.append((a,kw)))
+    assert hook.release_preflight(sha)==old
+    assert reads==[((old,),{'fenced':True,'require_idle':False})]
