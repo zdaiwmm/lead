@@ -39,7 +39,7 @@ def complete_discovery(aid, observed):
            WorkResult(outcome='completed'))
 
 
-def prepare_original(aid):
+def prepare_original(aid, *, bind=True):
     account, observed = observed_method(aid)
     target = derive_target(aid, account, observed)
     complete_discovery(aid, observed)
@@ -56,7 +56,8 @@ def prepare_original(aid):
     with tx(aid) as c:
         session = one(c, 'SELECT * FROM lead.browser_sessions WHERE profile_id=%s AND ended_at IS NULL', (account['profile_id'],))
     actor = SimpleNamespace(aid=aid, profile={'id': account['profile_id']}, epoch=session['epoch'], session=session['id'])
-    prepare_binding(actor, action['id'], claim, actor.epoch)
+    if bind:
+        prepare_binding(actor, action['id'], claim, actor.epoch)
     token = budget.growth_cost_context.set({'task_id': str(ref['task_id']), 'experiment_id': None})
     try:
         reservation = budget.reserve(aid, uid(), 100, 'test-model', 'test')

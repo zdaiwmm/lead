@@ -93,10 +93,29 @@ def method_repair_candidate(c, action):
         AND state='ready' AND ended_at IS NULL FOR SHARE""", (session, account['profile_id'], epoch)):
         return None
     attempts = all_rows(c, 'SELECT * FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt', (action['id'],))
-    # Without an original session binding, continuity with the frozen method
-    # cannot be established. A new session must not rescue an old ActionRef.
     if not attempts:
-        return None
+        # Before the first browser binding, only the server producer frozen in
+        # the immutable intention can prove continuity. Never infer it from a
+        # replacement browser or from the new method's producer alone.
+        frozen = publication.get('browser_method_producer')
+        if (not isinstance(frozen, dict) or frozen.get('method_hash') != original_hash
+                or frozen.get('browser_session_id') != str(session) or frozen.get('browser_epoch') != epoch
+                or frozen.get('control_version') != agent['control_version']
+                or frozen.get('intent_revision') != intent['revision']):
+            return None
+        try:
+            frozen_task_id = UUID(str(frozen.get('task_id')))
+            if ExecutionRef.model_validate(frozen.get('execution_ref')) != current_route:
+                return None
+        except (ValueError, TypeError):
+            return None
+        frozen_work = one(c, 'SELECT type,input FROM lead.tasks WHERE id=%s', (frozen_task_id,))
+        if (not frozen_work or frozen_work['type'] != 'growth.account'
+                or frozen_work['input']['spec'].get('purpose') != 'discover'
+                or str(frozen_work['input']['spec'].get('account_id')) != str(account['id'])
+                or frozen_work['input'].get('binding_version') != account['binding_version']
+                or frozen_work['input'].get('task_generation') != frozen.get('task_generation')):
+            return None
     for attempt in attempts:
         observation = attempt['observation'] or {}
         binding = observation.get('browser_request') or {}
