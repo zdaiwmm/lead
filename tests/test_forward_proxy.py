@@ -10,7 +10,8 @@ from lead_app.forward_proxy import BrowserForwardProxy
 
 
 @pytest.mark.asyncio
-async def test_old_tunnel_cannot_send_after_control_generation_changes(monkeypatch):
+@pytest.mark.parametrize('target_port',[80,443])
+async def test_old_tunnel_cannot_send_after_control_generation_changes(monkeypatch,target_port):
     received = bytearray()
 
     async def echo(reader, writer):
@@ -33,7 +34,7 @@ async def test_old_tunnel_cannot_send_after_control_generation_changes(monkeypat
     monkeypatch.setattr(proxy, "connect", connect)
     reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
     try:
-        writer.write(("CONNECT 1.1.1.1:443 HTTP/1.1\r\n"
+        writer.write((f"CONNECT 1.1.1.1:{target_port} HTTP/1.1\r\n"
                       f"Proxy-Authorization: {proxy.auth}\r\n\r\n").encode())
         await writer.drain()
         assert b"200" in await reader.readuntil(b"\r\n\r\n")
@@ -51,6 +52,62 @@ async def test_old_tunnel_cannot_send_after_control_generation_changes(monkeypat
         await proxy.close()
         upstream.close()
         await upstream.wait_closed()
+
+
+async def test_node_api_request_posts_once_through_authenticated_public_http_tunnel(monkeypatch):
+    from playwright.async_api import async_playwright
+
+    bodies=[]
+    async def origin(reader,writer):
+        try:
+            header=await reader.readuntil(b'\r\n\r\n')
+            length=int(next(line.split(b':',1)[1] for line in header.split(b'\r\n') if line.lower().startswith(b'content-length:')))
+            bodies.append(await reader.readexactly(length))
+            writer.write(b'HTTP/1.1 201 Created\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK')
+            await writer.drain()
+        finally:
+            writer.close()
+    server=await asyncio.start_server(origin,'127.0.0.1',0)
+    proxy=await BrowserForwardProxy(uid()).start()
+    destinations=[]
+    async def connect(ip,port):
+        assert ip=='1.1.1.1' and port==80
+        destinations.append((ip,port))
+        return await asyncio.open_connection('127.0.0.1',server.sockets[0].getsockname()[1])
+    monkeypatch.setattr(proxy,'connect',connect)
+    try:
+        async with async_playwright() as manager:
+            request=await manager.request.new_context(proxy=proxy.browser_proxy)
+            try:
+                response=await request.post('http://1.1.1.1/submission',data=b'one-original-body',max_retries=0,max_redirects=0,timeout=4000)
+                assert response.status==201 and await response.text()=='OK'
+            finally:
+                await request.dispose()
+        assert destinations==[('1.1.1.1',80)] and bodies==[b'one-original-body']
+    finally:
+        await proxy.close()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize('authority',['1.1.1.1:81','1.1.1.1:8443','127.0.0.1:80','[::1]:80','169.254.169.254:80'])
+async def test_connect_rejects_private_and_non_web_ports_before_upstream(monkeypatch,authority):
+    proxy=await BrowserForwardProxy(uid()).start()
+    destinations=[]
+    async def connect(ip,port):
+        destinations.append((ip,port))
+        raise AssertionError('A denied CONNECT must not reach its upstream')
+    monkeypatch.setattr(proxy,'connect',connect)
+    reader,writer=await asyncio.open_connection('127.0.0.1',proxy.port)
+    try:
+        writer.write((f'CONNECT {authority} HTTP/1.1\r\nProxy-Authorization: {proxy.auth}\r\n\r\n').encode())
+        await writer.drain()
+        assert not (await asyncio.wait_for(reader.read(1024),2)).startswith(b'HTTP/1.1 200')
+        assert destinations==[]
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await proxy.close()
 
 
 @pytest.mark.asyncio

@@ -373,7 +373,7 @@ class BrowserForwardProxy:
                     target = f"[{ipaddress.IPv6Address(address)}]:{int(port_text)}"
                 authority = urlsplit("//" + target)
                 host, port = authority.hostname, authority.port or 443
-                if port != 443 or not host:
+                if port not in (80, 443) or not host:
                     raise ValueError("Unsupported CONNECT target")
                 ip = await self.resolve(host)
                 up_reader, remote = await self.connect(ip, port)
