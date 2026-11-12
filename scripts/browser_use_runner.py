@@ -13,6 +13,7 @@ from pathlib import Path
 
 import httpx
 from browser_use import ActionResult, Agent, Browser, ChatDeepSeek, ChatOpenAI, Tools
+from lead_app.native_model_meter import ModelBillingUnknown, ModelCallMeter
 
 
 @dataclass
@@ -71,11 +72,14 @@ async def main(data):
             tools.registry.exclude_action(name)
     assert set(tools.registry.registry.actions) == {"done"}
     latest = {}
-    provider_usage = []
-    unmeasured_requests = []
-    provider_requests = []
-    provider_responses = []
-    secret_seen = []
+    meter = ModelCallMeter(max_requests=data.get('max_requests',8),
+        max_total_tokens=data.get('max_total_tokens',0), max_output_tokens=data.get('max_output_tokens',1800),
+        sensitive_data=data.get('sensitive_data'))
+    provider_usage = meter.provider_usage
+    unmeasured_requests = meter.unmeasured_requests
+    provider_requests = meter.provider_requests
+    provider_responses = meter.provider_responses
+    secret_seen = meter.secret_seen
     model_timeout = max(15, min(45, int(data.get("timeout_seconds", 45))))
 
     def diagnostics(stage):
@@ -83,46 +87,14 @@ async def main(data):
             'requests_started':len(provider_requests),'responses_received':len(provider_responses),
             'measured_responses':len(provider_usage),'credential_literal_seen':bool(secret_seen)}))
 
-    async def measure_request(request):
-        for secret in (data.get('sensitive_data') or {}).values():
-            if secret and (secret.encode() in request.content or json.dumps(secret)[1:-1].encode() in request.content):
-                secret_seen.append(True)
-                raise ValueError('Credential redaction boundary rejected the model request')
-        if len(provider_requests) >= min(8, int(data.get("max_requests", 8))):
-            raise ValueError("Model request limit reached")
-        if data.get('max_total_tokens'):
-            used=sum(item['total_tokens'] for item in provider_usage)
-            # UTF-8 request bytes conservatively bound tokenizer input. Stop
-            # before another paid request when the remaining envelope is small.
-            if used+len(request.content)+int(data.get('max_output_tokens',1800))>int(data['max_total_tokens']):
-                raise ValueError('Model token envelope reached')
-        provider_requests.append(1)
-        diagnostics('model_request')
-
-    async def measure(response):
-        provider_responses.append(1)
-        diagnostics('model_response')
-        if not response.is_success:
-            return
-        await response.aread()
-        try:
-            usage = response.json().get("usage")
-            if not usage or not all(
-                isinstance(usage.get(k), int)
-                for k in ("prompt_tokens", "completion_tokens", "total_tokens")
-            ):
-                unmeasured_requests.append(1)
-            else:
-                provider_usage.append(usage)
-        except (ValueError, TypeError):
-            unmeasured_requests.append(1)
+    meter.diagnostics = diagnostics
 
     async with (
         httpx.AsyncClient(timeout=45, trust_env=False) as client,
         httpx.AsyncClient(
             timeout=model_timeout,
             trust_env=False,
-            event_hooks={"request": [measure_request], "response": [measure]},
+            event_hooks={"request": [meter.measure_request], "response": [meter.measure_response]},
         ) as provider_http,
     ):
 
@@ -265,6 +237,7 @@ async def main(data):
             pass
         fragment_exhausted=False
         async def before_step(_agent):
+            meter.require_measured()
             if native_scope and data.get('native_kind')=='connection' and (await manager('preflight')).get('owner_required'):
                 raise PersonStepRequired()
             if native_scope and data.get('native_kind') in ('discovery','action') and (await manager('progress')).get('stop'):
@@ -276,6 +249,8 @@ async def main(data):
             history = await agent.run(max_steps=max(1, min(20 if data.get("native_kind") in ('connection','discovery','action') else 6, int(data.get("max_steps", 6)))),on_step_start=before_step)
             if native_scope and data.get('native_kind') not in ('connection','discovery','action'):
                 await command('read')
+        except ModelBillingUnknown:
+            diagnostics('model_billing_unknown')
         except PersonStepRequired:
             diagnostics('person_step_required')
         except BoundedProgressStop:
