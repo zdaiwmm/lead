@@ -254,7 +254,8 @@ class NativeTask:
                 'access_mode':'ordinary_member','evidence_refs':[evidence],'browser_method':method,
                 'producer_scope':{'task_id':self.task_id,'task_generation':task['input']['task_generation'],
                     'attempt_token':task['result']['runtime']['attempt_token'],'control_version':task['current_control'],
-                    'intent_revision':intent['revision'],'execution_ref':self.actor.native_runtime.execution_ref}}
+                    'intent_revision':intent['revision'],'execution_ref':self.actor.native_runtime.execution_ref,
+                    'browser_session_id':str(self.actor.session),'browser_epoch':self.actor.epoch}}
             self.observations=[value for value in self.observations if (value['canonical_url'],value['browser_method']['operations'])!=(target,[operation])]
             self.observations.append(observed)
             return {'state':'method_observed','target_url':target,'operation':operation,'role':'ordinary_member','receipt_state':'unobserved'}

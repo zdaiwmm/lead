@@ -363,10 +363,22 @@ def derive_browser_target(aid,account,observed,*,connection=None):
                 (('generation','route_generation'),('executor_ref','executor_ref'),('transport_ref','transport_ref'))):
             raise ValueError('native_method_observation_expired')
         endpoint(execution)
+        from uuid import UUID
+        try:
+            browser_session=UUID(str(producer.get('browser_session_id')))
+        except (ValueError,TypeError):
+            raise ValueError('native_method_observation_expired') from None
+        browser_epoch=producer.get('browser_epoch')
+        if type(browser_epoch) is not int or browser_epoch<1 or not one(c,"""SELECT b.id FROM lead.browser_sessions b
+            JOIN lead.profile_leases l ON l.profile_id=b.profile_id AND l.epoch=b.epoch
+            WHERE b.id=%s AND b.profile_id=%s AND b.epoch=%s AND b.state='ready' AND b.ended_at IS NULL
+                AND l.state='held' AND l.expires_at>now() FOR SHARE OF b,l""",(browser_session,current['profile_id'],browser_epoch)):
+            raise ValueError('native_method_observation_expired')
         old=one(c,'SELECT * FROM lead.account_targets WHERE account_id=%s AND target_type=%s AND external_target_id=%s FOR UPDATE',
             (account['id'],'web',observed['external_target_id']))
         permissions=old['verified_permissions'] if old else {}
-        if not isinstance(permissions,dict) or not isinstance(permissions.get('browser_methods',{}),dict):
+        if (not isinstance(permissions,dict) or not isinstance(permissions.get('browser_methods',{}),dict)
+                or not isinstance(permissions.get('browser_method_producers',{}),dict)):
             raise ValueError('browser_method_scope_changed')
         previous=permissions.get('browser_methods',{}).get(operation)
         def facts(value):
@@ -379,6 +391,8 @@ def derive_browser_target(aid,account,observed,*,connection=None):
             method=previous
         methods={**permissions.get('browser_methods',{}),operation:method}
         allowed=sorted(methods)
+        from .browser_actions import method_hash
+        permissions['browser_method_producers']={**permissions.get('browser_method_producers',{}),operation:{**producer,'method_hash':method_hash(method)}}
         permissions.update(browser_methods=methods,actions=allowed,access_mode='ordinary_member',binding_version=account['binding_version'])
         target=one(c,"""INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,external_target_id,
             canonical_url,display_name,verified_permissions,state) VALUES(lead.ctx_tenant(),%s,%s,'web',%s,%s,%s,%s,'active')

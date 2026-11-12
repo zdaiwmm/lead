@@ -16,7 +16,7 @@ def observed_method(aid):
     from lead_app.growth.contracts import TaskSpec, WorkResult, utcnow
     from lead_app.growth.runtime import advance, finish
     from lead_app.growth.store import submit_work
-    _,action,claim,_,_,account=native_work(aid)
+    actor,action,claim,_,_,account=native_work(aid)
     finish(claim,WorkResult(outcome='failed',failure_code='SYNTHETIC_SETUP'))
     set_intent(aid,account['id'],'running',source='owner_command',source_ref='native-member-scope',
         scope={'target_scope':'authenticated_permitted_targets','excluded_targets':[]})
@@ -33,7 +33,8 @@ def observed_method(aid):
         intent=one(c,'SELECT revision FROM lead.account_operating_intents WHERE account_id=%s',(account['id'],))
     observed['producer_scope']={'task_id':str(work['task_id']),'task_generation':work['task_generation'],
         'attempt_token':claim['attempt_token'],'control_version':claim['control_version'],'intent_revision':intent['revision'],
-        'execution_ref':resolve(aid,profile_id=account['profile_id']).model_dump(mode='json')}
+        'execution_ref':resolve(aid,profile_id=account['profile_id']).model_dump(mode='json'),
+        'browser_session_id':str(actor.session),'browser_epoch':actor.epoch}
     return account,observed
 
 
@@ -119,3 +120,34 @@ def test_confirmed_original_receipt_promotes_current_method_only_once(growth_age
         assert not one(c,'SELECT lead.growth_confirm_publication(%s) promoted',(action['id'],))['promoted']
         marker=one(c,'SELECT verified_permissions FROM lead.account_targets WHERE id=%s',(action['target_id'],))['verified_permissions']['browser_verified_operations']['publish']
         assert marker['action_id']==str(action['id']) and marker['method_hash']==method_hash(method)
+
+
+@pytest.mark.parametrize('change',['missing_session','missing_epoch','expired_lease','released_lease','ended_session','new_epoch'])
+def test_actual_browser_producer_epoch_is_required_even_when_route_and_task_are_unchanged(growth_agent,change):
+    from lead_app.db import uid
+    account,observed=observed_method(growth_agent)
+    producer=observed['producer_scope']
+    with tx(growth_agent) as c:
+        original_route=one(c,'SELECT * FROM lead.profile_execution_routes WHERE profile_id=%s',(account['profile_id'],))
+        if change=='missing_session':
+            producer.pop('browser_session_id')
+        elif change=='missing_epoch':
+            producer.pop('browser_epoch')
+        elif change=='expired_lease':
+            c.execute("UPDATE lead.profile_leases SET expires_at=now()-interval '1 second' WHERE profile_id=%s",(account['profile_id'],))
+        elif change=='released_lease':
+            c.execute("UPDATE lead.profile_leases SET state='released' WHERE profile_id=%s",(account['profile_id'],))
+        elif change=='ended_session':
+            c.execute("UPDATE lead.browser_sessions SET state='closed',ended_at=now() WHERE id=%s",(producer['browser_session_id'],))
+        else:
+            c.execute("UPDATE lead.browser_sessions SET state='closed',ended_at=now() WHERE id=%s",(producer['browser_session_id'],))
+            c.execute("UPDATE lead.profile_leases SET epoch=epoch+1 WHERE profile_id=%s",(account['profile_id'],))
+            c.execute("""INSERT INTO lead.browser_sessions(id,tenant_id,agent_id,profile_id,node_id,actor_id,epoch,control_version,state)
+                SELECT %s,lead.ctx_tenant(),%s,%s,'fixture','restarted',%s,control_version,'ready' FROM lead.agents WHERE id=%s""",
+                (uid(),growth_agent,account['profile_id'],producer['browser_epoch']+1,growth_agent))
+    with pytest.raises(ValueError,match='native_method_observation_expired'):
+        derive_target(growth_agent,account,observed)
+    with tx(growth_agent) as c:
+        assert one(c,'SELECT * FROM lead.profile_execution_routes WHERE profile_id=%s',(account['profile_id'],))==original_route
+        assert one(c,'SELECT state FROM lead.tasks WHERE id=%s',(producer['task_id'],))['state']=='running'
+        assert one(c,"SELECT count(*) n FROM lead.account_targets WHERE account_id=%s AND target_type='web'",(account['id'],))['n']==0
