@@ -76,3 +76,16 @@ def test_person_form_is_exact_version_document_body_and_once_only():
     state['current_document']=state['document']
     assert authorize(scope,target,request)=={'kind':'authentication'}
     assert authorize(scope,target,request) is None
+
+
+@pytest.mark.parametrize('control',[{'action':'delete_account'},{'operation':'purchase'},{'role':'admin'},
+    {'data[command]':'grant_admin'},{'mode':'password_reset'}])
+def test_authentication_cannot_carry_a_destructive_billing_or_admin_control_value(control):
+    with pytest.raises(ValueError):
+        check_auth_form('https://identity.test/authorize',{'username':'delete_account','password':'synthetic',
+            'nonce':'admin-is-an-opaque-nonce',**control})
+
+
+def test_only_control_values_are_inspected_and_normal_login_otp_remain_valid():
+    check_auth_form('https://identity.test/authorize',{'username':'administrator','password':'purchase',
+        'nonce':'delete-account-opaque-token','action':'signin','mode':'otp'})

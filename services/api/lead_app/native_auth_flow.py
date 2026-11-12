@@ -14,11 +14,19 @@ from .browser_execution import origin
 from .native_session_facts import reject_dangerous_endpoint
 
 
-def check_auth_form(url,fields):
+def check_auth_form(url,fields,*,controls=None):
     reject_dangerous_endpoint(url)
     if any(re.search(r'delete|destroy|billing|payment|checkout|purchase|subscribe|admin|permission|body|content|amount|currency',name,re.I)
             for name in fields):
         raise ValueError('authentication_form_dangerous_field')
+    for name,value in {**(fields if isinstance(fields,dict) else {}),**(controls or {})}.items():
+        key=next((part.lower() for part in reversed(re.split(r'[\[\].]',name)) if part),'')
+        if key not in ('action','op','operation','mode','command','intent','role','privilege','access','access_level','scope'):
+            continue
+        if (not isinstance(value,str) or len(value)>200 or re.search(
+                r'delet|destr|remov|purchas|pay(?:ment)?|charg|billing|checkout|subscrib|administr|(?:^|[_\W])admin(?:$|[_\W])|'
+                r'super[_-]?user|privileg|grant|reset|change[_\W]*(?:pass|credential)|owner|root|transfer|withdraw|refund|publish|reply|send|删除|支付|充值|续费|管理员|提权',value,re.I)):
+            raise ValueError('authentication_form_dangerous_control')
 
 
 def popup_destination(facts,page_url):

@@ -112,6 +112,9 @@ async def test_observed_popup_owner_identity_and_callback_complete_original_conn
                         for row in data['decisions']]})
                 raise
             assert data['source_count']('POST','/authorize')==1 and site.oracle()['counts']['sso_completions']==1
+            for callback in (popup.url,popup.url+'&unrelated=changed'):
+                denied=await page.evaluate('(url)=>fetch(url).then(()=>false).catch(()=>true)',callback)
+                assert denied and data['source_count']('GET','/session/complete')==1
             await asyncio.sleep(2.1)
             status=await current()
             stale=await owner.post(f'/api/agents/{aid}/connections/{connection}/control',json={'action':'resume','challenge_version':status['challenge_version']-1})

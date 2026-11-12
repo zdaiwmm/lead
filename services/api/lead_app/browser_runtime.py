@@ -557,8 +557,6 @@ class PersistentRuntime:
             if scope.get('auth_flow'):
                 flow=scope['auth_flow']
                 flow['current_document']=self.gate.documents.get(target.get('targetId'))
-                if flow.get('completed') and endpoint in {(origin(url),urlsplit(url).path) for url in flow['urls']}:
-                    return None
             if decision:=authorize_auth_flow(scope,target,request):
                 recorded=urlsplit(request['url'])._replace(query='',fragment='').geturl()
                 if recorded not in scope['authentication_endpoints']:
@@ -567,6 +565,12 @@ class PersistentRuntime:
                         c.execute('UPDATE lead.takeover_sessions SET connection_data=connection_data || %s WHERE id=%s AND state=\'active\'',
                             (j({'authentication_endpoints':scope['authentication_endpoints']}),scope['connection_ref']))
                 return decision
+            flow=scope.get('auth_flow') or {}
+            if endpoint in {(origin(url),urlsplit(url).path) for url in flow.get('urls',[])}:
+                return None
+            current_auth={(origin(url),urlsplit(url).path) for url in scope.get('authentication_endpoints',[])}
+            if endpoint in known_auth and endpoint not in current_auth:
+                return None
             permitted = {origin(url) for url in scope['origins']}
             if origin(request['url']) not in permitted:
                 return None
@@ -582,10 +586,8 @@ class PersistentRuntime:
                     from .connection_control import unseal
                     with tx(self.actor.aid) as c:
                         connection=one(c,'SELECT encrypted_login,control_mode FROM lead.takeover_sessions WHERE id=%s',(scope['connection_ref'],))
-                    if not connection or connection['control_mode']!='automatic':
-                        return {'kind':'authentication'} if connection and connection['control_mode']=='owner' else None
-                    credentials=unseal(self.actor.aid,scope['connection_ref'],connection['encrypted_login'])
-                    fields=scope.get('authentication_fields',{})
+                    if not connection:
+                        return None
                     try:
                         body=json.loads(request.get('postData',''))
                     except ValueError:
@@ -593,7 +595,17 @@ class PersistentRuntime:
                         if any(len(items)!=1 for items in values.values()):
                             return None
                         body={key:items[0] for key,items in values.items()}
-                    if (not credentials or not isinstance(body,dict) or not fields
+                    if not isinstance(body,dict) or not body:
+                        return None
+                    from .native_auth_flow import check_auth_form
+                    check_auth_form(request['url'],body)
+                    if connection['control_mode']=='owner':
+                        return {'kind':'authentication'}
+                    if connection['control_mode']!='automatic':
+                        return None
+                    credentials=unseal(self.actor.aid,scope['connection_ref'],connection['encrypted_login'])
+                    fields=scope.get('authentication_fields',{})
+                    if (not credentials or not fields
                             or 'saved_password' not in fields.values()
                             or any(body.get(key)!=credentials[value.removeprefix('saved_')] for key,value in fields.items())):
                         return None

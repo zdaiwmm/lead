@@ -14,11 +14,14 @@ from .db import j, one, tx
 
 FORM_FACTS = '''function(){const form=this.form || this.closest('form'); if(!form)return null;
 return {tag:this.tagName.toLowerCase(),type:(this.type||this.getAttribute('type')||'text').toLowerCase(),
-name:this.getAttribute('name')||'',autocomplete:this.getAttribute('autocomplete')||'',method:form.method.toUpperCase(),action:form.action,
+name:this.getAttribute('name')||'',autocomplete:this.getAttribute('autocomplete')||'',
+method:(form.getAttribute('method')||'GET').toUpperCase(),action:new URL(form.getAttribute('action')||location.href,form.baseURI).href,
 passwordCount:form.querySelectorAll('input[type="password"]').length,
 newPassword:!!form.querySelector('input[autocomplete="new-password"]'),
 formText:form.innerText,heading:form.closest('main,section')?.querySelector('h1,h2')?.innerText||document.title,
 fields:Array.from(form.elements).filter(node=>node.name&&!node.disabled).map(node=>node.name),
+controls:Object.fromEntries(Array.from(form.elements).filter(node=>node.name&&!node.disabled&&
+    /(?:^|[\\[.])(?:action|op|operation|mode|command|intent|role|privilege|access|access_level|scope)(?:\\])?$/i.test(node.name)).map(node=>[node.name,node.value])),
 hasPassword:!!form.querySelector('input[type="password"]'),hasOtp:!!form.querySelector('input[autocomplete="one-time-code"]')};}'''
 
 
@@ -100,7 +103,7 @@ class NativeConnection:
             const node=args.kind==='click'?document.elementFromPoint(args.x,args.y):document.activeElement;
             const submit=node?.closest('button,input[type=submit]');
             if(args.kind==='click'&&(!submit||submit.type!=='submit'))return null;
-            const form=node?.form||submit?.form;if(!form||form.method.toUpperCase()!=='POST'||
+            const form=node?.form||submit?.form;if(!form||(form.getAttribute('method')||'GET').toUpperCase()!=='POST'||
                 !['','application/x-www-form-urlencoded'].includes(form.enctype))return null;
             if(!/sign[\\s-]*in|log[\\s-]*in|authenticate|verify|登录|登入|验证/i.test(form.innerText+' '+document.title)||
                 /delete|purchase|billing|subscribe|购买|删除|支付/i.test(form.innerText))return null;
@@ -111,7 +114,7 @@ class NativeConnection:
                 if(Object.hasOwn(fields,item.name))return null;fields[item.name]=item.value;
             }
             if(submit?.name)fields[submit.name]=submit.value;
-            return {url:form.action,fields};
+            return {url:new URL(form.getAttribute('action')||location.href,form.baseURI).href,fields};
         }''',{'kind':body.kind,'x':body.x,'y':body.y})
         if not values or len(values['fields'])>40 or origin(values['url'])!=origin(page.url):
             return
@@ -225,9 +228,9 @@ class NativeConnection:
                     if not facts and page is not self.page and not flow.get('callback'):
                         import hashlib
                         import json
-                        markers=await page.locator('form').evaluate_all('''forms=>forms.filter(form=>form.method.toUpperCase()==='POST'&&
+                        markers=await page.locator('form').evaluate_all('''forms=>forms.filter(form=>(form.getAttribute('method')||'GET').toUpperCase()==='POST'&&
                             form.querySelector('input[type=password],input[autocomplete="one-time-code"]')).map(form=>[
-                                form.action,Array.from(form.querySelectorAll('input[type=hidden][name]')).filter(node=>
+                                new URL(form.getAttribute('action')||location.href,form.baseURI).href,Array.from(form.querySelectorAll('input[type=hidden][name]')).filter(node=>
                                     /nonce|csrf|state|token/i.test(node.name)).map(node=>[node.name,node.value])])''')
                         facts={'kind':'identity_sign_in','fingerprint':hashlib.sha256(json.dumps([page.url,markers],sort_keys=True).encode()).hexdigest(),
                             'reason':'请在原身份站点窗口完成登录；本站保存的密码不会发送给该身份站点。'}
@@ -302,7 +305,7 @@ class NativeConnection:
         if not facts['hasPassword'] or facts['method']!='POST' or origin(facts['action']) not in {origin(url) for url in self.lease['origins']}:
             return {'allowed':False,'reason':'This is not the current credential form.'}
         from .native_auth_flow import check_auth_form
-        check_auth_form(facts['action'],facts['fields'])
+        check_auth_form(facts['action'],facts['fields'],controls=facts['controls'])
         if name=='input':
             if not facts['name']:
                 return {'allowed':False,'reason':'The credential form has no verifiable field name.'}
@@ -443,8 +446,8 @@ class NativeConnection:
         if not self.lease:
             return
         page=await self.owner_page()
-        endpoints=await page.locator('form').evaluate_all("""forms=>forms.filter(form=>form.method.toUpperCase()==='POST' &&
-            form.querySelector('input[type="password"],input[autocomplete="one-time-code"]')).map(form=>form.action)""")
+        endpoints=await page.locator('form').evaluate_all("""forms=>forms.filter(form=>(form.getAttribute('method')||'GET').toUpperCase()==='POST' &&
+            form.querySelector('input[type="password"],input[autocomplete="one-time-code"]')).map(form=>new URL(form.getAttribute('action')||location.href,form.baseURI).href)""")
         for endpoint in endpoints:
             if (origin(endpoint) in {origin(url) for url in self.lease['origins']} or page is not self.page
                     and origin(endpoint)==origin(page.url)) and endpoint not in self.lease['authentication_endpoints']:
