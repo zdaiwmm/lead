@@ -318,8 +318,10 @@ class BrowserForwardProxy:
         self.tasks.add(task)
         remote = None
         pipes = []
+        header_received=False
         try:
             header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 15)
+            header_received=True
             lines = header.decode("iso-8859-1").split("\r\n")
             method, target, version = lines[0].split(" ", 2)
             headers = {
@@ -424,7 +426,10 @@ class BrowserForwardProxy:
             await asyncio.gather(*pipes, return_exceptions=True)
         except (Exception, asyncio.CancelledError):
             self.denied += 1
-            if writer.is_closing():
+            if writer.is_closing() or not header_received:
+                # Chromium opens speculative proxy sockets. An idle header
+                # deadline closes that socket, never queues a 502 as the reply
+                # to a future request that the browser has not sent yet.
                 return
             try:
                 writer.write(

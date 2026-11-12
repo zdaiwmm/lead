@@ -268,3 +268,23 @@ async def test_namespace_proof_requires_private_transport_and_matching_nonce():
         assert proxy.boundary is None
     finally:
         await proxy.close()
+
+
+@pytest.mark.asyncio
+async def test_idle_preconnect_closes_without_an_unsolicited_http_error(monkeypatch):
+    # Accelerate the actual header deadline, not the network result or parser.
+    original=asyncio.wait_for
+    async def header_deadline(awaitable,timeout):
+        if timeout==15 and getattr(getattr(awaitable,'cr_code',None),'co_name',None)=='readuntil':
+            timeout=.03
+        return await original(awaitable,timeout)
+    monkeypatch.setattr(asyncio,'wait_for',header_deadline)
+    proxy=await BrowserForwardProxy(uid()).start()
+    reader,writer=await asyncio.open_connection('127.0.0.1',proxy.port)
+    try:
+        assert await asyncio.wait_for(reader.read(),1)==b''
+        assert proxy.connections==0
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await proxy.close()
