@@ -818,6 +818,9 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - `1b2d1c3`修正实际Node APIRequest发送普通HTTP时使用CONNECT:80而原代理只允443导致的502；仍仅允许80/443、当前认证/控制代次和公网IP核对。实际固定Playwright Node请求经原代理向私有假上游只POST一次，加旧80/443隧道、私网/其他端口拒绝及关闭等共11项0.95秒通过。此前默认长state导致的Unix路径失败已单列，短隔离state的旧代码2红6绿才作为产品反例。实际发布动作仍待核心完整链路，不将代理单项通过视作发布通过。
 - C16独立补发现owner resume早于旧worker finish的真实交错：API已返回automatic，但旧结果随后写回10分钟owner Wait。`f4283b2`保留反例，`e074b24`仅对迟到owner Wait重读原ConnectionRef并续原任务；原automatic recheck退避不变。主集成45项2.06秒、独立5项1.17秒通过，finish只新增一次原work，原input/期限/generation/attempts保留，重复wake不新增事件。没有把任何resume事件当身份或资源恢复proof。
 - 0033契约由核心确认稳定后，`93a4fd0`将实际DB函数体hash、5项约束、3项唯一索引、2项清理/控制触发器及auth/runtime权限接入发布回读；12种真实DDL/权限漂移均拒绝，原0031列/控制/未知动作数据的加法迁移与幂等检查保留。本机146项1.90秒、目标Linux同146项1.54秒通过。Linux首轮在27项后因unit fixture发现现机已安装维护工具而等待（run始终mock，未执行生产命令），修fixture TOOLS隔离；次轮115绿31红为现机umask002使合成可信目录775，显式标准umask022后通过，保留两轮失败记录。该结果不代替正式生产克隆/切换演练、CI或独立生产回读，发布文件blob仍UNFROZEN。
+- `1b9a5db`接入原生发布稳定段（源`4d7029a`）：真实Linux原Task→prepare/publish→SDK输入/点击→原代理唯一POST→303→当前DOM作者/正文/URL与baseline唯一新帖→原attempt/action confirmed→growth_receipt_valid及首次promotion→Task succeeded。单例20.03秒，动作阶段3次假模型请求，真实模型/实号均0。根集成直接消费者89项21.17秒通过；合并helper时重复的同值OTP诊断key已去重，未改变实际行为。
+- `d3e459e`接入普通成员reply及receipt关系守卫（源`4bb639f`）：Linux发布/回复两个产品case合42.76秒通过，实际reply POST只有1次，回执包含原parent。该轮整体另有3项DOM fixture错误，未记全绿；便携fixture修正后当地3项1.26秒通过，拒绝错父帖页面中全局导航或其他article的正确parent链接。截图先在内存采集，再核对document/scope与整份receipt，最后写0600证据。主集成上述DOM3项、C17和相关消费者共34项3.34秒通过；浏览器测试沿显式LEAD_BROWSER_TESTS开关，main CI已启用。
+- C17 `e136d9c`（源`a57ea2a`）：原growth未知动作不再永远5分钟轮询，三次有效claim完成原动作回查后转1小时级核对；初始prepared/发送、过期与重复finish不累计。保留ActionRef、原任务/期限、费用及检查次数，pending Wait同样受低频下界约束，暂停仍可回查原事实。冻结时钟反例先红；独立5项及原消费者30项2.26秒通过，主集成相关34项通过。纯本地37单位合成账本校验未产生模型或外部费用；同账号不同意图、其他渠道可实际prepare，原意图不能改名再发。实际native未知断响应仍待核心完整执行例。
 
 ### 22.2 尚未放行与部署约束
 
