@@ -49,6 +49,12 @@ def _wait(row, reason, now, *, producer="growth.runtime", action="recheck", dela
                 episode_root=row["id"], responsibility=owner).model_dump(mode="json")
 
 
+def _receipt_delay(runtime, action):
+    progress = runtime.get('receipt_reconciliation') or {}
+    return 3600 if (action and progress.get('action_id') == str(action['id'])
+                    and progress.get('completed_checks', 0) >= 3) else 300
+
+
 def _browser_resource(c, row, spec):
     profile = row['input'].get('profile_id') or spec.payload.get('profile_id')
     record = one(c, 'SELECT provider FROM lead.browser_profiles WHERE id=%s', (profile,)) if profile else None
@@ -386,7 +392,8 @@ def advance(value, attempt_token=None, *, now=None):
         runtime.update(attempt_token=token, attempts=attempts + 1, wait=None,
                        control_version=agent["control_version"],
                        lease_until=(now + timedelta(minutes=9)).isoformat(),
-                       last_progress_at=now.isoformat(), operation_ref=str(original["id"]) if original else None)
+                       last_progress_at=now.isoformat(), operation_ref=str(original["id"]) if original else None,
+                       reconcile_only_action_id=str(original['id']) if original and original['state'] in ('dispatching','unknown') else None)
         _save(c, row, "running", runtime)
         c.execute("UPDATE lead.tasks SET started_at=coalesce(started_at,now()) WHERE id=%s", (row["id"],))
         claim = {"ref": ref.model_dump(mode="json"), "attempt_token": token,
@@ -433,6 +440,14 @@ def _finish(claim, value):
             return {"accepted_control": False, "evidence_recorded": bool(result.evidence_refs)}
         runtime.update(lease_until=None, attempt_token=None)
         action = one(c, "SELECT id,state FROM lead.actions WHERE task_id=%s ORDER BY created_at DESC LIMIT 1", (row["id"],))
+        # Admission records the original action's state before execution. The
+        # initial send/prepared window isn't a completed receipt check, and a
+        # result/claim payload cannot invent this server-side scope or counter.
+        reconcile_action = runtime.pop('reconcile_only_action_id', None)
+        if action and reconcile_action == str(action['id']):
+            progress = runtime.get('receipt_reconciliation') or {}
+            completed = progress.get('completed_checks', 0) if progress.get('action_id') == reconcile_action else 0
+            runtime['receipt_reconciliation'] = {'action_id': reconcile_action, 'completed_checks': completed + 1}
         valid_receipt = bool(action and action["state"]=="confirmed" and one(c,"SELECT lead.growth_receipt_valid(%s) ok",(action["id"],))["ok"])
         if row["type"] == "growth.channel" and result.outcome == "completed" and not valid_receipt:
             result = WorkResult(outcome="unknown" if action and action["state"] in ("dispatching","unknown") else "failed",
@@ -472,10 +487,18 @@ def _finish(claim, value):
                 or result.output.get("context_available") is True):
                 emit(c, str(ref.agent_id), "growth.wake", {"reason": "evidence_added", "task_id": str(row["id"])})
         elif result.outcome == "unknown":
-            wait = _wait(row, "unknown_receipt", utcnow(), action="reconcile", delay=300)
+            delay = _receipt_delay(runtime, action)
+            wait = _wait(row, "unknown_receipt", utcnow(), action="reconcile", delay=delay,
+                         owner='platform' if action else 'product')
+            if action:
+                wait['scope_ref'] = str(action['id'])
+            if delay == 3600:
+                wait['escalation'] = '原动作结果仍待核对；平台每小时回查，不再次提交相同意图。'
             _save(c, row, "reconciling", {**runtime, "wait": wait}, output, wait["check_at"])
         elif result.outcome == "waiting":
             wait = result.wait.model_dump(mode="json")
+            if action and action['state'] in ('dispatching','unknown') and _receipt_delay(runtime, action) == 3600:
+                wait['check_at'] = max(datetime.fromisoformat(wait['check_at']), utcnow() + timedelta(hours=1)).isoformat()
             state = "waiting_user" if result.wait.recovery_action == "owner" else "planned"
             connection = None
             if (row['type'] == 'growth.account' and result.wait.producer == 'account_connection'
