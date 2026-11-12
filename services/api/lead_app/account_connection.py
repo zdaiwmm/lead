@@ -120,11 +120,18 @@ async def rpc(aid, profile_id, path, body=None, timeout=90):
         return response.json()
 
 
-async def begin(aid, platform, *, account_id=None, new_account=False):
+async def begin(aid, platform, *, account_id=None, new_account=False, site_url=None, login=None):
     from .account_profiles import for_platform
+    from .domain import PLATFORMS
     from .execution_routes import default_transport
     profile = await asyncio.to_thread(for_platform, aid, platform, create=True, account_id=account_id,
-                                      new_binding=new_account)
+                                      new_binding=new_account, site_url=site_url)
+    with tx(aid) as c:
+        pending=one(c,"""SELECT t.* FROM lead.takeover_sessions t JOIN lead.browser_sessions b ON b.id=t.browser_session_id
+            WHERE t.profile_id=%s AND t.purpose='login' AND t.state='active' AND t.expires_at>now()
+            AND b.ended_at IS NULL ORDER BY t.created_at DESC LIMIT 1""",(profile['id'],))
+        if pending:
+            return connection_reply(pending,profile['account_id'],platform)
     try:
         await asyncio.to_thread(resolve, aid, profile_id=profile["id"])
     except ValueError as error:
@@ -139,14 +146,29 @@ async def begin(aid, platform, *, account_id=None, new_account=False):
             raise ValueError("profile_changed")
         c.execute("UPDATE lead.takeover_sessions SET state='expired',ended_at=now() WHERE profile_id=%s AND state IN ('requested','active','ending')", (profile["id"],))
         takeover = one(c, """INSERT INTO lead.takeover_sessions(tenant_id,agent_id,browser_session_id,profile_id,
-            token_hash,control_version,purpose,state,expires_at) VALUES(lead.ctx_tenant(),%s,%s,%s,%s,%s,'login','active',now()+interval '30 minutes') RETURNING id""",
-            (aid, opened["session_id"], profile["id"], hashlib.sha256(secrets.token_bytes(32)).hexdigest(), agent["control_version"]))
+            token_hash,control_version,purpose,state,expires_at,control_mode,connection_data) VALUES(lead.ctx_tenant(),%s,%s,%s,%s,%s,'login','active',now()+interval '30 minutes',%s,%s) RETURNING *""",
+            (aid, opened["session_id"], profile["id"], hashlib.sha256(secrets.token_bytes(32)).hexdigest(), agent["control_version"],
+             'automatic' if profile['provider']=='chromium' else 'owner',
+             j({'site_url':site_url or next((url for name,_,url in PLATFORMS if name==platform),None)})))
+        if login:
+            if profile['provider']!='chromium':
+                raise ValueError('automatic_login_requires_native_profile')
+            from .connection_control import seal
+            c.execute('UPDATE lead.takeover_sessions SET encrypted_login=%s WHERE id=%s',
+                (seal(aid,takeover['id'],login),takeover['id']))
         submit_work(c, aid, TaskSpec(kind="account", purpose="connect", priority="control",
             payload={"takeover_id": str(takeover["id"]), "profile_id": str(profile["id"]),
                      "connection_account_id": str(profile["account_id"])},
             review_at=utcnow()+timedelta(minutes=30), dedupe_key="login:"+str(takeover["id"])))
-    return {"takeover_id": takeover["id"], "account_id": profile["account_id"], "platform": platform,
-            "status": "pending", "automatic_connection": True, "managed_target_start": False, "automation": False}
+    return connection_reply(takeover,profile['account_id'],platform)
+
+
+def connection_reply(row,account_id,platform):
+    return {'takeover_id':row['id'],'account_id':account_id,'platform':platform,
+            'status':'connected' if row.get('completed_account_id') else 'pending',
+            'automatic_connection':row['control_mode']=='automatic','control_mode':row['control_mode'],
+            'challenge_version':row['challenge_version'],'owner_action':row['connection_data'].get('owner_action'),
+            'expires_at':row['expires_at'],'managed_target_start':False,'automation':False}
 
 
 def complete(aid, row, snapshot, observation):

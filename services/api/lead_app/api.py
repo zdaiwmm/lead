@@ -36,6 +36,7 @@ from .auth import router as auth_router
 from .browser_pilot import router as browser_pilot_router
 from .community_growth import GrowthConfig
 from .config import STATE, env, model_config
+from .connection_control import LoginInput
 from .conversions import router as conversion_router
 from .creative_pipeline import router as creative_router
 from .db import all_rows, audit, one, record, require_agent, tx
@@ -503,6 +504,8 @@ class Connection(BaseModel):
     account_id: UUID | None = None
     new_account: bool = False
     start_managed_targets: bool = False
+    site_url: str | None = Field(default=None,max_length=2000)
+    login: LoginInput | None = None
 
 
 class LabPublish(BaseModel):
@@ -511,6 +514,7 @@ class LabPublish(BaseModel):
 
 
 class BrowserInput(BaseModel):
+    challenge_version: int | None = Field(default=None,ge=1)
     takeover: UUID | None = None
     kind: Literal["click", "text", "key", "scroll", "back", "forward", "reload", "composition_start", "composition_end"]
     x: float = 0
@@ -1021,14 +1025,15 @@ def platforms():
 @app.post("/api/agents/{aid}/connect")
 async def connect(aid: UUID, body: Connection):
     aid = str(aid)
-    if body.platform not in [p[0] for p in domain.PLATFORMS] + ["lab"]:
+    if body.platform not in [p[0] for p in domain.PLATFORMS] + ["lab", "web"]:
         raise HTTPException(400, "频道不存在")
     from .growth.store import enabled
     with tx(aid) as c:
         growth = enabled(require_agent(c, aid))
     if growth and body.platform != "lab":
         from .account_connection import begin
-        return await begin(aid, body.platform, account_id=body.account_id, new_account=body.new_account)
+        return await begin(aid, body.platform, account_id=body.account_id, new_account=body.new_account,
+                           site_url=body.site_url,login=body.login)
     from .account_profiles import for_platform
 
     profile = for_platform(
@@ -1163,11 +1168,12 @@ def end_takeover(aid: UUID, takeover: UUID | None = None):
 def connection_status(aid: UUID, takeover: UUID):
     with tx(str(aid)) as c:
         require_agent(c, str(aid))
-        session = one(c, "SELECT state,purpose,completed_account_id FROM lead.takeover_sessions WHERE id=%s", (takeover,))
+        session = one(c, "SELECT state,purpose,completed_account_id,control_mode,challenge_version,expires_at,connection_data->>'owner_action' owner_action FROM lead.takeover_sessions WHERE id=%s", (takeover,))
         if not session:
             raise HTTPException(404)
         return {"status": "connected" if session["completed_account_id"] else session["state"],
-                "account_id": session["completed_account_id"]}
+                "account_id": session["completed_account_id"],
+                **{key:session[key] for key in ("control_mode","challenge_version","owner_action","expires_at")}}
 
 
 @app.get("/api/agents/{aid}/browser/screenshot")
@@ -1280,3 +1286,18 @@ async def lab_submit(aid: str, request: Request):
 
 
 app.add_middleware(TelemetryMiddleware, service="lead-api")
+
+
+class ConnectionControl(BaseModel):
+    challenge_version: int = Field(ge=1)
+    action: Literal["resume", "cancel"]
+
+
+@app.post("/api/agents/{aid}/connections/{connection}/control")
+def connection_control(aid: UUID, connection: UUID, body: ConnectionControl):
+    from .connection_control import transition
+    result=transition(str(aid),connection,body.challenge_version,'automatic',cancel=body.action=='cancel')
+    with tx(str(aid)) as c:
+        from .db import emit
+        emit(c,str(aid),'growth.wake',{'reason':'connection_control_changed','connection_id':str(connection)})
+    return result

@@ -1224,6 +1224,7 @@ class InputRequest(BaseModel):
     x: float = 0
     y: float = 0
     text: str = Field(default="", max_length=4000)
+    challenge_version: int | None = None
 
 
 @app.post("/agents/{aid}/account/observe")
@@ -1823,6 +1824,9 @@ async def open_browser(aid: str, body: OpenRequest):
         aid, body.platform, create=True, account_id=body.account_id
     )
     actor = await gateway.get(aid,profile["id"], allow_challenge=True)
+    if actor.native_runtime:
+        # Navigation begins only after begin() has persisted its ConnectionRef.
+        return {'url':actor.page.url,'session_id':actor.session,'profile_id':str(actor.profile['id'])}
     from .browser_challenges import assert_session, pending
     async with manual_control(actor):
         with tx(aid) as c:
@@ -1904,6 +1908,10 @@ async def page_status(aid: UUID):
 async def input_guard(aid, actor, body):
     require_takeover(aid,actor,body.takeover)
     with tx(aid) as c:
+        if actor.native_runtime:
+            connection=one(c,"SELECT control_mode,challenge_version FROM lead.takeover_sessions WHERE id=%s AND purpose='login'",(body.takeover,))
+            if connection and (connection['control_mode']!='owner' or connection['challenge_version']!=body.challenge_version):
+                raise HTTPException(409,'当前连接控制已改变，请等待自动处理或刷新当前验证')
         changed = one(c,"""UPDATE lead.takeover_sessions SET input_seq=input_seq+1,last_input_at=now(),input_inflight=true,
             composing=CASE WHEN %s='composition_start' THEN true WHEN %s='composition_end' THEN false ELSE composing END
             WHERE (%s::uuid IS NULL OR id=%s) AND profile_id=%s AND state='active' RETURNING id,input_seq""",

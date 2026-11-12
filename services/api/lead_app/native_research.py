@@ -4,7 +4,12 @@ from urllib.parse import urljoin
 
 from .browser_execution import origin
 from .db import one, tx
-from .research import ResearchPage, public_url
+from .research import (
+    ResearchPage,
+    account_read_origins,
+    public_url,
+    task_research_scope,
+)
 
 
 class NativeResearchPage(ResearchPage):
@@ -27,17 +32,23 @@ class NativeResearchPage(ResearchPage):
             scope = {'task_id':str(task['id']), 'control_version':run['control_version'],
                      'task_generation':task['input'].get('task_generation'),
                      'claim':{'attempt_token':runtime.get('attempt_token')}, 'origins':[public_url(url)]}
-            spec = task['input'].get('spec',{})
-            payload = spec.get('payload',{})
+            context=task_research_scope(c,task)
+            payload=context['payload']
+            recovery=context['recovery_scope']
+            if recovery and url != recovery['url']:
+                raise ValueError('recovery_read_url_changed')
             if payload.get('access_mode') == 'account':
                 account_id = payload.get('account_id')
-                if str(spec.get('account_id')) != str(account_id):
+                if str(context['account_id']) != str(account_id):
                     raise ValueError('research_account_scope_missing')
                 intent = one(c,'SELECT desired,revision FROM lead.account_operating_intents WHERE account_id=%s',(account_id,))
                 if not intent or intent['desired'] != 'running':
                     raise ValueError('research_account_paused')
-                scope.update(account_id=account_id,binding_version=task['input'].get('binding_version'),
-                             intent_revision=intent['revision'])
+                origins=account_read_origins(c,account_id,context['binding_version'])
+                if origin(url) not in {origin(value) for value in origins}:
+                    raise ValueError('research_url_outside_account')
+                scope.update(account_id=account_id,binding_version=context['binding_version'],
+                             intent_revision=intent['revision'],origins=origins)
         await self.actor.forward_proxy.validate_url(url)
         self.lease = await self.actor.native_runtime.acquire_page(scope,url)
         self.page = self.actor.native_runtime.pages[self.lease['target_id']]['page']
@@ -108,23 +119,27 @@ class NativeResearchPage(ResearchPage):
             await self.actor.forward_proxy.validate_url(url)
             return {'allowed':origin(url) in {origin(item) for item in scope['origins']}}
         node = args.get('node') or {}
-        if name != 'click' or node.get('target_id') != self.lease['target_id']:
+        if name != 'click' or node.get('target_id') not in scope['targets']:
             return {'allowed':False,'reason':'This research task only reads the assigned page.'}
         # Read current native node facts ourselves; SDK/model-supplied labels
         # cannot grant authority. No arbitrary expression comes from the caller.
-        session = await self.context.new_cdp_session(self.page)
+        gate=self.actor.native_runtime.gate
+        sessions=[session for session,info in gate.targets.items()
+                  if info['targetId']==node['target_id'] and gate.owners.get(session)==self.lease['target_id']]
+        if len(sessions)!=1:
+            return {'allowed':False}
         try:
-            info = await session.send('DOM.describeNode',{'backendNodeId':node['backend_node_id']})
+            info = await gate.send('DOM.describeNode',{'backendNodeId':node['backend_node_id']},sessions[0])
             actual = info['node']
             attrs = actual.get('attributes',[])
             attrs = dict(zip(attrs[::2],attrs[1::2]))
             if actual['nodeName'].lower() != 'a' or 'download' in attrs or attrs.get('target') == '_blank':
                 return {'allowed':False}
-            url = public_url(urljoin(self.page.url,attrs.get('href','')))
+            url = public_url(urljoin(gate.targets[sessions[0]]['url'],attrs.get('href','')))
             await self.actor.forward_proxy.validate_url(url)
             return {'allowed':origin(url) in {origin(item) for item in scope['origins']}}
-        finally:
-            await session.detach()
+        except (KeyError,ValueError):
+            return {'allowed':False}
 
     async def close(self):
         if self.lease:

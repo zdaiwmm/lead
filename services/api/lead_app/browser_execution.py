@@ -179,6 +179,14 @@ def validate_method(method, *, account_id, binding_version, target_url, operatio
             or operation not in ('publish', 'reply') or operation not in value.get('operations', [])
             or not value.get('evidence_refs')):
         raise ValueError('browser_method_scope_changed')
+    if (not isinstance(value.get('request'),dict) or not isinstance(value.get('selectors'),dict)
+            or not isinstance(value.get('platform_permission'),dict)
+            or not isinstance(value.get('operations'),list)
+            or not value['operations'] or set(value['operations'])-{'publish','reply'}):
+        raise ValueError('browser_method_contract_invalid')
+    for refs in (value.get('evidence_refs'),value['platform_permission'].get('evidence_refs')):
+        if not isinstance(refs,list) or not 1 <= len(refs) <= 20 or any(not isinstance(ref,str) or not 1 <= len(ref) <= 500 for ref in refs):
+            raise ValueError('browser_method_evidence_invalid')
     expected_origin = origin(target_url)
     if any(origin(url) != expected_origin for url in (value.get('self_url', ''), value.get('request', {}).get('url', ''))):
         raise ValueError('browser_method_origin_changed')

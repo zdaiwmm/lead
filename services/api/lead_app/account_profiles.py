@@ -1,12 +1,26 @@
 """Resolve a login slot inside the project's tenant scope, never by display name."""
 
+from pathlib import Path
 from uuid import UUID
 
 from .atomic_dispatch import channel_pilot
-from .config import STATE, env
+from .config import ROOT, STATE, env
 from .db import one, require_agent, tx, uid
 from .operating_playbooks import channel_for
 
+
+def native_available():
+    folder = Path(env().get('LEAD_BROWSER_RUNTIME_DIR') or ROOT/'services/browser-runtime')
+    return (folder/'manifest.json').is_file()
+
+
+def connection_origin(site_url):
+    from urllib.parse import urlsplit
+
+    from .browser_execution import origin
+    scheme,host,port=origin(site_url)
+    parsed=urlsplit(site_url)
+    return f"{scheme}://{parsed.netloc.lower()}" if port not in (80,443) else f"{scheme}://{host}"
 
 def isolated_login_platforms(aid):
     settings = env()
@@ -35,7 +49,11 @@ def for_platform(
     account_id=None,
     new_binding=False,
     isolated_login=False,
+    site_url=None,
 ):
+    site_origin = connection_origin(site_url) if site_url else None
+    if platform == 'web' and create and not site_origin and not account_id:
+        raise ValueError('请输入要连接的网站网址')
     with tx(aid) as c:
         agent = require_agent(c, aid, create)
         from .adapters.catalog import SPECS
@@ -45,7 +63,7 @@ def for_platform(
             account_id
             or not create
             or not (growth or channel_pilot(aid))
-            or not (platform in SPECS if growth else channel_for(platform))
+            or not ((platform in SPECS or platform == "web") if growth else channel_for(platform))
         ):
             raise ValueError("此渠道不能创建额外账号环境")
         if not new_binding:
@@ -53,8 +71,9 @@ def for_platform(
                 c,
                 """SELECT p.*,s.id AS account_id FROM lead.social_accounts s JOIN lead.browser_profiles p
                 ON p.id=s.profile_id WHERE s.platform=%s AND (%s::uuid IS NULL OR s.id=%s)
+                AND (%s::text IS NULL OR s.connection_origin=%s)
                 ORDER BY s.created_at DESC LIMIT 1""",
-                (platform, account_id, account_id),
+                (platform, account_id, account_id, site_origin if platform == "web" else None, site_origin),
             )
             if existing:
                 if isolated_login and existing["slot"] == "default":
@@ -67,7 +86,17 @@ def for_platform(
             growth or isolated_login or (channel_pilot(aid) and channel_for(platform))
         ):
             return base
+        native = growth and native_available() and platform != 'lab'
+        if native and not site_origin:
+            from .domain import PLATFORMS
+            site_origin=connection_origin(next(url for name,_,url in PLATFORMS if name==platform))
         slot = platform if not new_binding else platform + "-" + uid()
+        if native:
+            # Different sites may share the complete instance. Another identity
+            # on the same origin gets a separate persistent profile.
+            conflict=one(c,"""SELECT s.id FROM lead.social_accounts s JOIN lead.browser_profiles p ON p.id=s.profile_id
+                WHERE p.slot='native-shared' AND s.connection_origin=%s""",(site_origin,))
+            slot='native-'+uid() if new_binding or conflict else 'native-shared'
         profile = one(c, "SELECT * FROM lead.browser_profiles WHERE slot=%s", (slot,))
         if not profile:
             pid = uid()
@@ -82,9 +111,9 @@ def for_platform(
                     pid,
                     agent["tenant_id"],
                     aid,
-                    base["provider"],
-                    base["engine_version"],
-                    base["sdk_version"],
+                    "chromium" if native else base["provider"],
+                    "pending" if native else base["engine_version"],
+                    "browser-use/0.13.14" if native else base["sdk_version"],
                     str(root / "identity.json"),
                     pid,
                     str(root / "storage"),
@@ -101,9 +130,9 @@ def for_platform(
         if growth or isolated_login or new_binding:
             profile["account_id"] = one(
                 c,
-                """INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,state,automation_enabled)
-                VALUES(%s,%s,%s,%s,'pending',false) RETURNING id""",
-                (agent["tenant_id"], aid, profile["id"], platform),
+                """INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,state,automation_enabled,connection_origin)
+                VALUES(%s,%s,%s,%s,'pending',false,%s) RETURNING id""",
+                (agent["tenant_id"], aid, profile["id"], platform, site_origin),
             )["id"]
         return profile
 

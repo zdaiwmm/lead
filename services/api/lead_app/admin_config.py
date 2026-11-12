@@ -148,7 +148,7 @@ def parse_key(key):
             ("strategy" if parts[0] == "strategies" else "channel_rule"),
             parts[1],
         )
-        if platform not in {p[0] for p in PLATFORMS}:
+        if platform not in {p[0] for p in PLATFORMS} | {"web"}:
             raise ValueError("请选择有效的渠道")
         if len(parts) > 2:
             aid = str(UUID(parts[2]))

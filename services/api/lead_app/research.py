@@ -598,16 +598,16 @@ def begin_run(aid, goal, message_id=None, task_id=None, mode="research"):
     profile = None
     with tx(aid) as c:
         if task_id:
-            task = one(c,'SELECT input FROM lead.tasks WHERE id=%s',(task_id,))
-            spec = (task or {}).get('input',{}).get('spec',{})
-            payload = spec.get('payload',{})
+            task = one(c,'SELECT * FROM lead.tasks WHERE id=%s',(task_id,))
+            context=task_research_scope(c,task) if task else {}
+            payload=context.get('payload',{})
             if payload.get('access_mode') == 'account':
                 account_id = payload.get('account_id')
-                if not account_id or str(spec.get('account_id')) != str(account_id):
+                if not account_id or str(context.get('account_id')) != str(account_id):
                     raise ValueError('research_account_scope_missing')
                 profile = one(c,"""SELECT p.* FROM lead.browser_profiles p JOIN lead.social_accounts s ON s.profile_id=p.id
                     WHERE s.id=%s AND s.state='connected' AND s.binding_version=%s""",
-                    (account_id,task['input'].get('binding_version')))
+                    (account_id,context.get('binding_version')))
                 if not profile or profile['provider'] != 'chromium':
                     raise ValueError('account_browser_capability_gap')
     if profile is None:
@@ -666,3 +666,47 @@ def finish_run(aid, rid, state="succeeded"):
             }
             for s in steps
         ]
+
+
+def task_research_scope(c,task):
+    """A recovery read uses its original failure scope and the recover TaskRef."""
+    from datetime import datetime
+
+    from .growth.contracts import utcnow
+    source=task
+    spec=source['input'].get('spec',{})
+    recovery_scope=None
+    if task['type']=='growth.recover':
+        payload=spec.get('payload',{})
+        source=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(payload.get('episode_root'),))
+        recovery=((source or {}).get('result') or {}).get('runtime',{}).get('recovery',{})
+        if (not source or recovery.get('status')!='blocked'
+                or recovery.get('condition_revision')!=payload.get('condition_revision')
+                or not recovery.get('probe_lease_until')
+                or datetime.fromisoformat(recovery['probe_lease_until'])<=utcnow()):
+            raise ValueError('recovery_read_scope_changed')
+        recovery_scope=recovery.get('failure_scope') or {}
+        if not recovery.get('resource') or not recovery_scope.get('url'):
+            raise ValueError('recovery_read_scope_missing')
+        spec=source['input'].get('spec',{})
+    payload=spec.get('payload',{})
+    if recovery_scope and (recovery_scope.get('access_mode','public')!=payload.get('access_mode','public')
+            or str(recovery_scope.get('account_id'))!=str(payload.get('account_id'))):
+        raise ValueError('recovery_read_scope_changed')
+    return {'payload':payload,'account_id':spec.get('account_id'),
+            'binding_version':source['input'].get('binding_version'),'recovery_scope':recovery_scope}
+
+
+def account_read_origins(c,account_id,binding_version):
+    from .browser_execution import origin
+    account=one(c,"SELECT * FROM lead.social_accounts WHERE id=%s AND state='connected' AND binding_version=%s",(account_id,binding_version))
+    if not account:
+        raise ValueError('research_account_scope_changed')
+    bound=account.get('connection_origin')
+    if not bound:
+        from .domain import PLATFORMS
+        bound=next((url for name,_,url in PLATFORMS if name==account['platform']),None)
+    if not bound:
+        raise ValueError('research_account_origin_missing')
+    origin(bound)
+    return [bound]

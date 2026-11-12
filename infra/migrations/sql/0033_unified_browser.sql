@@ -3,6 +3,24 @@ ALTER TABLE lead.takeover_sessions ADD COLUMN control_mode text NOT NULL DEFAULT
  CHECK(control_mode IN ('automatic','owner'));
 ALTER TABLE lead.takeover_sessions ADD COLUMN challenge_version bigint NOT NULL DEFAULT 1 CHECK(challenge_version>0);
 ALTER TABLE lead.takeover_sessions ADD COLUMN automatic_attempts integer NOT NULL DEFAULT 0 CHECK(automatic_attempts BETWEEN 0 AND 3);
+ALTER TABLE lead.takeover_sessions ADD COLUMN connection_data jsonb NOT NULL DEFAULT '{}';
+ALTER TABLE lead.takeover_sessions ADD COLUMN encrypted_login bytea;
+ALTER TABLE lead.social_accounts ADD COLUMN connection_origin text;
+DROP INDEX lead.one_account_controller;
+CREATE UNIQUE INDEX one_account_controller ON lead.social_accounts
+ (platform,(CASE WHEN platform='web' THEN connection_origin ELSE '' END),external_account_id)
+ WHERE state IN ('connected','needs_auth','restricted') AND external_account_id IS NOT NULL;
+ALTER TABLE lead.social_accounts ADD CONSTRAINT web_connection_origin_required
+ CHECK(platform<>'web' OR connection_origin IS NOT NULL);
+CREATE FUNCTION lead.clear_connection_login() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.state<>'active' OR NEW.expires_at<=now() OR NEW.completed_account_id IS NOT NULL THEN
+  NEW.encrypted_login:=NULL;
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER connection_login_lifetime BEFORE INSERT OR UPDATE ON lead.takeover_sessions
+ FOR EACH ROW EXECUTE FUNCTION lead.clear_connection_login();
 CREATE UNIQUE INDEX browser_request_original_action ON lead.action_attempts
  (tenant_id,agent_id,(observation#>>'{browser_request,profile_id}'),(observation#>>'{browser_request,fingerprint}'))
  WHERE observation#>>'{browser_request,fingerprint}' IS NOT NULL;
