@@ -29,6 +29,13 @@ def _runtime(row):
 
 
 def _save(c, row, state, runtime, output=None, when=None):
+    if state in ("failed", "canceled") and row["state"] not in TERMINAL and not runtime.get("episode_root"):
+        reason = runtime.get("reason") or state
+        notification = digest([state, reason])
+        if runtime.get("terminal_notification") != notification:
+            runtime["terminal_notification"] = notification
+            emit(c, str(row["agent_id"]), "growth.wake", {"reason":reason, "task_id":str(row["id"]),
+                 "transition":notification})
     value = {"runtime": runtime}
     if output is not None:
         value["output"] = output
@@ -50,6 +57,8 @@ def _resource_condition(c, agent, row, spec):
         from .agent import PROMPT_VERSION
         config,reference,_ = task_connection(c,str(agent["id"]),"planning" if spec.kind=="content" else "research")
         return "model:"+reference, digest([version, settings, PROMPT_VERSION, config["key"]])
+    if spec.kind == "research" and _runtime(row).get("failure_scope"):
+        return _current_research_resource(c, _runtime(row)["failure_scope"])
     if spec.account_id or spec.payload.get("profile_id"):
         profile = row["input"].get("profile_id") or spec.payload.get("profile_id")
         route = one(c, "SELECT generation FROM lead.profile_execution_routes WHERE profile_id=%s", (profile,))
@@ -65,8 +74,6 @@ def _resource_condition(c, agent, row, spec):
                 WHERE t.id=%s""",(spec.target_id,))
         return "profile:"+str(profile), digest([account,(route or {}).get("generation"),capability])
     urls = spec.payload.get("urls") or []
-    if spec.kind=="research" and spec.payload.get("queries"):
-        return "research:public_search",digest("https://html.duckduckgo.com/html/")
     if not urls and spec.kind == "research":
         business = one(c, "SELECT product_url FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
         urls = [business["product_url"]] if business and business["product_url"] else []
@@ -80,31 +87,105 @@ def _proposal_key(row):
             for trigger in spec.get("payload",{}).get("triggers",[])],spec.get("evidence_refs",[])])
 
 
-def _episode(c, resource, condition,row,code=None):
+def research_resource(scope):
+    """A resource identifies the attempted capability, not the task or error spelling."""
+    endpoint = scope.get("endpoint") or scope.get("origin") or "unknown"
+    parsed = urlsplit(endpoint)
+    origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else endpoint
+    location = endpoint.split("?", 1)[0] if scope.get("endpoint") else origin
+    key = [scope.get("provider", "unknown"), scope.get("operation", "read"), location,
+           scope.get("access_mode", "public"), str(scope.get("account_id") or "")]
+    return "research:" + digest(key), digest([key, scope.get("condition_revision", "initial")])
+
+
+def _current_research_resource(c, scope):
+    resource, condition = research_resource(scope)
+    if scope.get("account_id"):
+        account = one(c, """SELECT s.binding_version,s.state,i.revision,i.desired,r.generation
+            FROM lead.social_accounts s LEFT JOIN lead.account_operating_intents i ON i.account_id=s.id
+            LEFT JOIN lead.profile_execution_routes r ON r.profile_id=s.profile_id WHERE s.id=%s""", (scope["account_id"],))
+        condition = digest([condition, account])
+    return resource, condition
+
+
+def _recovery_lock(c, aid):
+    # One short project transaction orders episode changes and proof consumption.
+    # Never held during a model, browser or network operation.
+    c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("growth-recovery:"+str(aid),))
+
+
+def _episode(c, resource, condition, row, code=None):
     return one(c, """SELECT id,result#>'{runtime,recovery}' recovery FROM lead.tasks
         WHERE result#>>'{runtime,recovery,resource}'=%s
           AND result#>>'{runtime,recovery,condition_revision}'=%s
-          AND (%s::text IS NULL OR result#>>'{runtime,recovery,error_code}'=%s)
           AND (result#>>'{runtime,recovery,error_code}'<>'invalid_proposal'
             OR result#>>'{runtime,recovery,proposal_key}'=%s)
         ORDER BY (result#>>'{runtime,recovery,status}'='blocked') DESC,created_at,id LIMIT 1""",
-        (resource, condition,code,code,_proposal_key(row)))
+        (resource, condition, _proposal_key(row)))
+
+
+def _blocked_notice(c, aid, root, episode):
+    if episode.get("blocked_notified"):
+        return
+    episode["blocked_notified"] = True
+    c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery}',%s) WHERE id=%s",
+              (j(episode), root))
+    emit(c, str(aid), "growth.wake", {"reason": "resource_blocked", "resource": episode["resource"],
+         "condition_revision": episode["condition_revision"], "transition": digest([episode["fingerprint"], episode.get("transition", 0)])})
+
+
+def _block_on(c, aid, row, runtime, root, episode, now):
+    blocked = list(runtime.get("blocked_resources") or [])
+    dependency = {"episode_root": str(root), "resource": episode["resource"],
+                  "condition_revision": episode["condition_revision"]}
+    if dependency not in blocked:
+        blocked.append(dependency)
+    wait = _wait(row, "resource_blocked", now, producer="growth.runtime.probe_episode", action="probe",
+                 delay=max(1, int((datetime.fromisoformat(episode["next_check_at"])-now).total_seconds())))
+    wait.update(episode_root=str(root), scope_ref=episode["resource"])
+    runtime.update(blocked_resources=blocked, wait=wait)
+    _blocked_notice(c, aid, root, episode)
+    return wait
+
+
+def check_research_resource(aid, task_id, scope):
+    """Call at the actual tool boundary; alternatives remain free to run."""
+    with tx(aid) as c:
+        _recovery_lock(c, aid)
+        row = one(c, "SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE", (task_id,))
+        if not row or row["state"] in TERMINAL:
+            return None
+        resource, condition = _current_research_resource(c, scope)
+        episode = _episode(c, resource, condition, row)
+        if not episode or episode["recovery"]["status"] != "blocked":
+            return None
+        runtime = _runtime(row)
+        wait = _block_on(c, aid, row, runtime, episode["id"], dict(episode["recovery"]), utcnow())
+        # The active invocation finishes its original claim with this Wait. Do not
+        # revoke that claim here: it may still obtain useful alternative evidence.
+        _save(c, row, row["state"], runtime)
+        return Wait.model_validate(wait)
 
 
 def _record_failure(c, row, runtime, code):
     resource, condition = runtime.get("resource_key", row["type"]), runtime.get("condition_revision", "initial")
-    prior = _episode(c, resource, condition,row,code)
-    if not prior and row["type"]=="growth.research" and code=="source_unavailable":
-        prior = _episode(c,resource,condition,row,"gaierror")
+    prior = _episode(c, resource, condition, row, code)
     root = prior["id"] if prior else row["id"]
     episode = dict(prior["recovery"]) if prior else {
-        "fingerprint": digest([resource, condition, code]), "resource": resource,
+        "fingerprint": digest([resource, condition]), "resource": resource,
         "condition_revision": condition, "root_task_id": str(root), "attempts": 0,
-        "repair_attempts": 0, "probes": 0,"proposal_key":_proposal_key(row)}
+        "repair_attempts": 0, "probes": 0, "proposal_key": _proposal_key(row)}
+    was_recovered = episode.get("status") == "recovered"
     episode["attempts"] += 1
+    if was_recovered:
+        episode.update(blocked_notified=False, transition=episode.get("transition", 0)+1)
     episode.update(error_code=code, status="blocked" if episode["attempts"] >= 3 or code in PERMANENT else "recovering",
-                   next_check_at=(utcnow()+timedelta(minutes=min(60, 5*2**episode["probes"]))).isoformat())
+                   next_check_at=(utcnow()+timedelta(minutes=min(60, 5*2**min(episode["probes"], 5)))).isoformat())
+    if runtime.get("failure_scope"):
+        episode["failure_scope"] = runtime["failure_scope"]
     runtime["episode_root"] = str(root)
+    if episode["status"] == "blocked":
+        _blocked_notice(c, row["agent_id"], root, episode)
     if root == row["id"]:
         runtime["recovery"] = episode
     else:
@@ -116,6 +197,7 @@ def advance(value, attempt_token=None, *, now=None):
     ref = _ref(value)
     now = now or utcnow()
     with tx(str(ref.agent_id)) as c:
+        _recovery_lock(c, str(ref.agent_id))
         agent = require_agent(c, str(ref.agent_id))
         row = one(c, "SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE", (ref.task_id,))
         if not row or row["input"].get("task_generation") != ref.task_generation:
@@ -161,19 +243,29 @@ def advance(value, attempt_token=None, *, now=None):
             business = one(c,"SELECT id FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
             if row["input"]["business_profile_id"]!=(str(business["id"]) if business else None):
                 _save(c,row,"canceled",{**runtime,"reason":"product_changed"})
-                emit(c,str(ref.agent_id),"growth.wake",{"reason":"product_changed"})
                 return {"state":"terminal","reason":"product_changed"}
         resource, condition = _resource_condition(c, agent, row, spec)
         runtime.update(resource_key=resource, condition_revision=condition)
         episode = _episode(c, resource, condition,row)
-        if episode and episode["recovery"]["status"] == "blocked" and not reconcile:
-            _save(c, row, "failed", {**runtime, "episode_root": str(episode["id"]), "reason": "recovery_exhausted"})
-            return {"state": "terminal", "reason": "recovery_exhausted"}
+        # Dynamic research chooses capabilities while executing. Only explicit
+        # dependencies already recorded by an actual attempted call block it here.
+        for dependency in runtime.get("blocked_resources") or []:
+            pending = one(c, "SELECT result#>'{runtime,recovery}' recovery FROM lead.tasks WHERE id=%s",
+                          (dependency["episode_root"],))
+            current = (pending or {}).get("recovery") or {}
+            if (current.get("status") == "blocked" and current.get("resource") == dependency["resource"]
+                    and current.get("condition_revision") == dependency["condition_revision"] and not reconcile):
+                wait = _block_on(c, str(ref.agent_id), row, runtime, dependency["episode_root"], current, now)
+                _save(c, row, "planned", runtime, when=wait["check_at"])
+                return {"state": "wait", "wait": wait}
+        if episode and episode["recovery"]["status"] == "blocked" and not reconcile and spec.kind != "research":
+            wait = _block_on(c, str(ref.agent_id), row, runtime, episode["id"], dict(episode["recovery"]), now)
+            _save(c, row, "planned", runtime, when=wait["check_at"])
+            return {"state": "wait", "wait": wait}
         for dependency in spec.required_refs:
             before = one(c, "SELECT state,result FROM lead.tasks WHERE id=%s", (dependency.task_id,))
             if not before or before["state"] in ("failed", "canceled"):
                 _save(c, row, "failed", {**runtime, "reason": "dependency_failed"})
-                emit(c, str(ref.agent_id), "growth.wake", {"reason": "dependency_failed", "task_id": str(row["id"])})
                 return {"state": "terminal", "reason": "dependency_failed"}
             if before["state"] != "succeeded":
                 wait = _wait(row, "dependency_pending", now)
@@ -183,7 +275,6 @@ def advance(value, attempt_token=None, *, now=None):
             if dependency.artifact!="output" and not any(
                 item.get("kind")==dependency.artifact for item in produced.get("artifacts",[])+produced.get("evidence_refs",[])):
                 _save(c,row,"failed",{**runtime,"reason":"dependency_artifact_missing"})
-                emit(c,str(ref.agent_id),"growth.wake",{"reason":"dependency_artifact_missing","task_id":str(row["id"])})
                 return {"state":"terminal","reason":"dependency_artifact_missing"}
         if (spec.account_id or spec.payload.get("profile_id")) and not reconcile:
             account = one(c, """SELECT s.*,i.desired FROM lead.social_accounts s
@@ -228,10 +319,7 @@ def finish(claim, value):
     result = WorkResult.model_validate(value)
     ref = _ref(claim["ref"])
     with tx(str(ref.agent_id)) as c:
-        initial = one(c, "SELECT result FROM lead.tasks WHERE id=%s", (ref.task_id,))
-        if initial and result.outcome == "failed":
-            key = initial["result"].get("runtime", {}).get("resource_key", str(ref.task_id))
-            c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("growth-recovery:"+key,))
+        _recovery_lock(c, str(ref.agent_id))
         row = one(c, "SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE", (ref.task_id,))
         if not row:
             return {"accepted_control": False, "evidence_recorded": False}
@@ -265,6 +353,7 @@ def finish(claim, value):
         if result.outcome == "failed":
             if row["type"]=="growth.research":
                 runtime["failure_stage"]="model" if result.failure_code in MODEL_ERRORS else None
+                runtime["failure_scope"] = result.output.get("failure_scope")
                 resource,condition=_resource_condition(c,require_agent(c,str(ref.agent_id)),
                     {**row,"result":{**row["result"],"runtime":runtime}},TaskSpec.model_validate(row["input"]["spec"]))
                 runtime.update(resource_key=resource,condition_revision=condition)
@@ -295,7 +384,6 @@ def finish(claim, value):
             _save(c, row, state, {**runtime, "wait": wait}, output, wait["check_at"])
         elif result.failure_code in PERMANENT or runtime.get("failure_attempts", 0) >= 3:
             _save(c, row, "failed", {**runtime, "reason": result.failure_code}, output)
-            emit(c, str(ref.agent_id), "growth.wake", {"reason": "work_failed", "task_id": str(row["id"])})
         else:
             wait = _wait(row, result.failure_code or "tool_failed", utcnow(),
                          delay=min(30, 2 ** runtime["attempts"]))
@@ -342,6 +430,7 @@ def recover_due(aid, now=None, cursor=None):
     now = now or utcnow()
     checked = []
     with tx(aid) as c:
+        _recovery_lock(c, aid)
         from .store import experiment_progress, question_costs, submit_work
         for experiment in all_rows(c,"""SELECT * FROM lead.growth_experiments WHERE state IN ('active','observing')
             ORDER BY recovery_checked_at,id LIMIT 20 FOR UPDATE SKIP LOCKED"""):
@@ -399,40 +488,131 @@ def recover_due(aid, now=None, cursor=None):
             "next_run": (now + timedelta(seconds=60)).isoformat()}
 
 
+def _resume_allowed(c, agent, row):
+    spec = TaskSpec.model_validate(row["input"]["spec"])
+    if not enabled(agent) or agent["desired_state"] in ("paused", "archived"):
+        return "project_paused"
+    if spec.review_at <= utcnow():
+        return "work_window_ended"
+    if one(c, "SELECT id FROM lead.actions WHERE task_id=%s AND state IN ('dispatching','unknown','confirmed')", (row["id"],)):
+        return "reconcile_original_action"
+    product_research = spec.kind == "research" and spec.purpose == "product" and not spec.experiment_id
+    if not product_research and row["input"].get("goal_revision") != objective_revision(agent):
+        return "objective_changed"
+    business = one(c, "SELECT id FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
+    if "business_profile_id" in row["input"] and row["input"]["business_profile_id"] != (str(business["id"]) if business else None):
+        return "product_changed"
+    if spec.experiment_id:
+        experiment = one(c, "SELECT state,specification FROM lead.growth_experiments WHERE id=%s", (spec.experiment_id,))
+        if (not experiment or experiment["state"] not in ("active", "observing")
+                or datetime.fromisoformat(experiment["specification"]["review_at"]) <= utcnow()):
+            return "experiment_closed"
+    if spec.account_id:
+        account = one(c, """SELECT s.binding_version,s.state,i.desired,i.scope FROM lead.social_accounts s
+            LEFT JOIN lead.account_operating_intents i ON i.account_id=s.id WHERE s.id=%s""", (spec.account_id,))
+        if not account or account["binding_version"] != row["input"].get("binding_version"):
+            return "account_changed"
+        if account["state"] != "connected" or account["desired"] != "running":
+            return "account_paused"
+    if spec.target_id:
+        target = one(c, """SELECT t.external_target_id FROM lead.account_targets t
+            JOIN lead.authorization_grants g ON g.target_id=t.id AND g.revoked_at IS NULL
+            WHERE t.id=%s AND t.account_id=%s AND t.state='active'""", (spec.target_id, spec.account_id))
+        if not target:
+            return "target_not_permitted"
+        scope = account.get("scope") or {}
+        if target["external_target_id"] in scope.get("excluded_targets", []):
+            return "target_not_permitted"
+        if scope.get("target_scope") == "existing_grants" and target["external_target_id"] not in scope.get("target_ids", []):
+            return "target_not_permitted"
+    return None
+
+
+def _resume_proven(c, aid, agent, row, episode, proof_ref):
+    if row["state"] not in ("failed", "planned", "queued", "waiting_user"):
+        return None
+    runtime = _runtime(row)
+    consumed = list(runtime.get("recovery_proofs") or [])
+    proof_key = digest([episode["resource"], episode["condition_revision"], proof_ref])
+    if proof_key in consumed or _resume_allowed(c, agent, row):
+        return None
+    dependencies = list(runtime.get("blocked_resources") or [])
+    def matches(dep):
+        return dep.get("resource") == episode["resource"] and dep.get("condition_revision") == episode["condition_revision"]
+    if not any(matches(dep) for dep in dependencies) and not (
+            runtime.get("resource_key") == episode["resource"] and runtime.get("condition_revision") == episode["condition_revision"]):
+        return None
+    remaining = [dep for dep in dependencies if not matches(dep)]
+    runtime.update(blocked_resources=remaining, recovery_proofs=[*consumed, proof_key])
+    if remaining:
+        _save(c, row, row["state"], runtime)
+        return None
+    if (runtime.get("recovery") or {}).get("resource") == episode["resource"]:
+        runtime["recovery"] = {**episode, "resumed": True}
+    runtime.update(wait=None, lease_until=None, attempt_token=None, reason="condition_recovered", recovery_permit=1)
+    new_input = {**row["input"], "task_generation": row["input"]["task_generation"]+1}
+    c.execute("UPDATE lead.tasks SET input=%s WHERE id=%s", (j(new_input), row["id"]))
+    _save(c, row, "planned", runtime, when=utcnow())
+    ref = {"agent_id": str(aid), "task_id": str(row["id"]), "task_generation": new_input["task_generation"]}
+    emit(c, aid, "growth.work", ref)
+    return ref
+
+
 def resume_task(aid, task_id, *, proof_ref=None):
-    """Only changed server conditions or a matching successful probe can restart failed work."""
+    """A configuration change permits a new check, never proves an outage resolved."""
     with tx(aid) as c:
-        agent = require_agent(c,aid,True)
-        row = one(c,"SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE",(task_id,))
+        _recovery_lock(c, aid)
+        agent = require_agent(c, aid, True)
+        # Match the existing control order: project, account, then task. These
+        # short shared locks keep a current permission read ordered with revoke.
+        all_rows(c, "SELECT id FROM lead.social_accounts ORDER BY id FOR SHARE")
+        all_rows(c, "SELECT id FROM lead.authorization_grants ORDER BY id FOR SHARE")
+        row = one(c, "SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE", (task_id,))
         if not row or row["state"] != "failed":
             return None
-        if one(c,"SELECT id FROM lead.actions WHERE task_id=%s AND state IN ('dispatching','unknown','confirmed')",(task_id,)):
-            raise ValueError("reconcile_original_action")
         runtime = _runtime(row)
-        spec = TaskSpec.model_validate(row["input"]["spec"])
-        _, condition = _resource_condition(c,agent,row,spec)
         episode = runtime.get("recovery") or {}
-        changed = condition != runtime.get("condition_revision")
-        matching_probe = bool(proof_ref and episode.get("proof_ref")==proof_ref and episode.get("status")=="recovered" and not episode.get("resumed"))
-        if not changed and not matching_probe:
+        if not (proof_ref and episode.get("proof_ref") == proof_ref and episode.get("status") == "recovered"):
             raise ValueError("recovery_condition_unchanged")
-        if changed:
-            runtime["recovery_history"] = [*runtime.get("recovery_history",[]),episode]
-            runtime.update(recovery=None, failure_attempts=0, condition_revision=condition)
-        else:
-            episode["resumed"] = True
-            runtime.update(recovery=episode,recovery_permit=1)
-        runtime.update(wait=None,lease_until=None,attempt_token=None,reason="condition_recovered")
-        new_input = {**row["input"],"task_generation":row["input"]["task_generation"]+1}
-        c.execute("UPDATE lead.tasks SET input=%s WHERE id=%s",(j(new_input),task_id))
-        _save(c,row,"planned",runtime,when=utcnow())
-        ref = {"agent_id":str(aid),"task_id":str(task_id),"task_generation":new_input["task_generation"]}
-        emit(c,aid,"growth.work",ref)
-        return ref
+        if _resume_allowed(c, agent, row) == "reconcile_original_action":
+            raise ValueError("reconcile_original_action")
+        return _resume_proven(c, aid, agent, row, episode, proof_ref)
+
+
+def _consume_recovery(aid, root_id, expected, proof, observed_condition, lease_token):
+    with tx(aid) as c:
+        _recovery_lock(c, aid)
+        agent = require_agent(c, aid, True)
+        all_rows(c, "SELECT id FROM lead.social_accounts ORDER BY id FOR SHARE")
+        all_rows(c, "SELECT id FROM lead.authorization_grants ORDER BY id FOR SHARE")
+        root = one(c, "SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE", (root_id,))
+        if not root:
+            return None
+        episode = dict(_runtime(root).get("recovery") or {})
+        _, current = _resource_condition(c, agent, root, TaskSpec.model_validate(root["input"]["spec"]))
+        if (episode.get("status") != "blocked" or episode.get("resource") != expected["resource"]
+                or episode.get("condition_revision") != expected["condition_revision"]
+                or episode.get("probe_token") != lease_token or current != observed_condition
+                or episode.get("attempts") != expected.get("attempts")):
+            return None
+        episode.update(status="recovered", proof_ref=proof, observed_condition=observed_condition, probe_lease_until=None)
+        c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery}',%s) WHERE id=%s", (j(episode), root_id))
+        rows = all_rows(c, """SELECT * FROM lead.tasks WHERE type LIKE 'growth.%%'
+            AND state IN ('failed','planned','queued','waiting_user')
+            AND ((result#>>'{runtime,resource_key}'=%s AND result#>>'{runtime,condition_revision}'=%s)
+              OR result#>'{runtime,blocked_resources}' @> %s)
+            ORDER BY id FOR UPDATE""", (episode["resource"], episode["condition_revision"],
+            j([{"resource":episode["resource"], "condition_revision":episode["condition_revision"]}])))
+        resumed = [ref for row in rows if (ref := _resume_proven(c, aid, agent, row, episode, proof))]
+        emit(c, aid, "growth.wake", {"reason":"resource_recovered", "resource":episode["resource"],
+             "condition_revision":episode["condition_revision"], "transition":episode["fingerprint"],
+             "proof_ref":proof, "resumed_count":len(resumed)})
+        return resumed
 
 
 async def probe_episode(aid, work, data):
     with tx(aid) as c:
+        _recovery_lock(c, aid)
         agent = require_agent(c,aid)
         root = one(c,"SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE",(data.episode_root,))
         if not root:
@@ -447,25 +627,47 @@ async def probe_episode(aid, work, data):
         changed = actual_condition != episode["condition_revision"]
         if episode.get("paid_probes_stopped") and not changed:
             return WorkResult(outcome="completed",output={"state":"recovery_budget_exhausted","responsibility":"product"})
-        episode.update(probes=episode.get("probes",0)+1,probe_lease_until=(utcnow()+timedelta(minutes=9)).isoformat())
+        lease_token = str(uuid4())
+        episode.update(probe_token=lease_token, probes=episode.get("probes",0)+1,probe_lease_until=(utcnow()+timedelta(minutes=9)).isoformat())
         c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery}',%s) WHERE id=%s",(j(episode),root["id"]))
     proof = None
     try:
-        if changed:
-            resumed = await asyncio.to_thread(resume_task,aid,root["id"])
-            return WorkResult(outcome="completed",output={"state":"configuration_changed","resumed":resumed})
-        if episode.get("error_code") in ("source_unavailable","gaierror") and spec.kind == "research":
+        if spec.kind == "research" and (episode.get("failure_scope") or episode.get("error_code") in ("source_unavailable","gaierror")):
             from ..budget import growth_cost_context
             from .tools import research
             token = growth_cost_context.set({"task_id":str(root["id"]),
                 "experiment_id":str(root["experiment_id"]) if root["experiment_id"] else None,
                 "recovery_root":str(root["id"]),"recovery_limit":70000})
             try:
-                observation = await research(aid,root,spec)
+                if episode.get("failure_scope"):
+                    from .tools import probe_research_resource
+                    observation = await probe_research_resource(aid, root, {
+                        **episode["failure_scope"], "resource": episode["resource"],
+                        "condition_revision": episode["condition_revision"], "observed_condition": actual_condition})
+                else:
+                    observation = await research(aid,root,spec)
             finally:
                 growth_cost_context.reset(token)
-            if observation.outcome == "completed" and observation.evidence_refs:
-                proof = "document:"+str(observation.evidence_refs[0].id)
+            if episode.get("failure_scope"):
+                checks = observation.output.get("recovery_checks") or []
+                match = next((check for check in checks if check.get("resource") == episode["resource"]
+                    and check.get("condition_revision") == episode["condition_revision"]
+                    and check.get("state") == "ready" and check.get("evidence_ref")), None)
+                if observation.outcome == "completed" and match:
+                    proof = match["evidence_ref"]
+            elif observation.outcome == "completed" and observation.evidence_refs:
+                # Legacy episodes lack actual-call scope; evidence must still be
+                # from an original URL, never an unrelated successful fallback.
+                with tx(aid) as c:
+                    urls = spec.payload.get("urls") or []
+                    if not urls:
+                        business = one(c, "SELECT product_url FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
+                        urls = [business["product_url"]] if business and business["product_url"] else []
+                    for evidence in observation.evidence_refs:
+                        document = one(c, "SELECT source_ref FROM lead.knowledge_documents WHERE id=%s AND deleted_at IS NULL", (evidence.id,))
+                        if document and (not urls or document["source_ref"] in urls):
+                            proof = "document:"+str(evidence.id)
+                            break
         elif episode.get("error_code") in ("ModelHTTPError","ModelRateLimitError","APITimeoutError","ConnectError","ReadTimeout","APIConnectionError") and spec.kind in ("decision","content","research"):
             from ..budget import growth_cost_context
             from ..model import run_model
@@ -482,13 +684,14 @@ async def probe_episode(aid, work, data):
             finally:
                 growth_cost_context.reset(token)
         if proof:
-            with tx(aid) as c:
-                episode.update(status="recovered",proof_ref=proof,probe_lease_until=None)
-                c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery}',%s) WHERE id=%s",(j(episode),root["id"]))
-                emit(c,aid,"growth.wake",{"reason":"resource_recovered","fingerprint":episode["fingerprint"],"proof_ref":proof})
-            resumed = await asyncio.to_thread(resume_task,aid,root["id"],proof_ref=proof)
-            return WorkResult(outcome="completed",output={"state":"recovered","resumed":resumed})
+            resumed = await asyncio.to_thread(_consume_recovery, aid, root["id"], episode, proof, actual_condition, lease_token)
+            if resumed is None:
+                return WorkResult(outcome="completed", output={"state":"obsolete_probe"})
+            return WorkResult(outcome="completed",output={"state":"recovered", "resumed":resumed[0] if resumed else None,
+                "resumed_refs":resumed, "resumed_count":len(resumed), "resource":episode["resource"],
+                "condition_revision":episode["condition_revision"], "proof_ref":proof})
         return WorkResult(outcome="completed",output={"state":"still_blocked","responsibility":"product",
+            "resource":episode["resource"], "reason":episode.get("error_code"),
             "condition_revision":episode["condition_revision"],"next_check_at":episode["next_check_at"]})
     except Exception as error:
         from ..budget import BudgetExceeded
@@ -497,11 +700,13 @@ async def probe_episode(aid, work, data):
         episode.update(paid_probes_stopped=True,reason="recovery_budget_exhausted",
                        responsibility="product",recovery_action="configuration")
         with tx(aid) as c:
-            c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery}',%s) WHERE id=%s",(j(episode),root["id"]))
+            c.execute("""UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery}',%s)
+                WHERE id=%s AND result#>>'{runtime,recovery,probe_token}'=%s""", (j(episode),root["id"],lease_token))
         return WorkResult(outcome="completed",output={"state":"recovery_budget_exhausted","responsibility":"product"})
     finally:
         with tx(aid) as c:
-            c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery,probe_lease_until}','null') WHERE id=%s",(root["id"],))
+            c.execute("""UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery,probe_lease_until}','null')
+                WHERE id=%s AND result#>>'{runtime,recovery,probe_token}'=%s""", (root["id"], lease_token))
 
 
 def ensure_decision(aid, triggers=None):
@@ -556,6 +761,8 @@ def consume_triggers(aid, triggers):
 def trigger_key(item):
     # Coalesce a stream by changed business condition, retaining its latest fact.
     # A newer fact with the same key survives consumption of the old snapshot.
+    if item.get("reason") in ("resource_blocked", "resource_recovered"):
+        return digest([item.get("reason"), item.get("resource"), item.get("condition_revision"), item.get("transition")])
     task = item.get("task_id") if item.get("reason") in ("evidence_added","work_failed","dependency_failed","dependency_artifact_missing") else None
     return digest([item.get("reason"),item.get("account_id"),item.get("experiment_id"),item.get("event_name"),task])
 

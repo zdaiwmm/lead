@@ -15,7 +15,9 @@ def test_retry_episode_survives_new_task_name(growth_agent):
     with tx(growth_agent) as c:
         other = submit_work(c, growth_agent, TaskSpec(kind="research", purpose="renamed",
             payload={}, dedupe_key="different name", review_at=utcnow()+timedelta(hours=1)))
-    assert advance(other)["state"] == "terminal"
+    # A renamed dynamic research task may try an independent capability. The
+    # shared failure budget remains on its original resource and episode.
+    assert advance(other)["state"] == "ready"
     with tx(growth_agent) as c:
         root = one(c, "SELECT result FROM lead.tasks WHERE id=%s", (ref["task_id"],))
         assert root["result"]["runtime"]["recovery"]["attempts"] == 3
