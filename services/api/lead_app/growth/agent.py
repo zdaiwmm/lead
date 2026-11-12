@@ -213,7 +213,9 @@ def build_context(aid, trigger_refs=None):
             if len(raw.encode())>1500:
                 item["output"] = {"excerpt":clip(raw,1500),"full_result_ref":str(item["id"])}
     while len(json.dumps(context,default=str,ensure_ascii=False).encode())>MAX_CONTEXT_BYTES:
-        if context["work"] and str(context["work"][-1]["id"]) not in {str(tid) for tid in task_refs}:
+        if context["experiences"]:
+            context["experiences"].pop()
+        elif context["work"] and str(context["work"][-1]["id"]) not in {str(tid) for tid in task_refs}:
             context["work"].pop()
         elif context["documents"]:
             context["documents"].pop()

@@ -12,6 +12,28 @@ from lead_app.growth.contracts import (
 from lead_app.growth.store import accept_commands, create_experiment
 
 
+def test_large_optional_memory_preserves_current_evidence_and_decision(growth_agent):
+    from lead_app.experiences import record_experience, retrieve_experience
+    from lead_app.growth.agent import build_context
+    from lead_app.growth.tools import _remember
+
+    document, _ = _remember(growth_agent, {
+        'url': 'https://example.com/current-observation',
+        'title': 'Current contradictory observation',
+        'text': 'The current distribution has seven impressions and no tracked visitors.',
+    })
+    objective = build_context(growth_agent)['goal']['objective']
+    for index in range(4):
+        record_experience(growth_agent, 'large-optional-memory:' + str(index), kind='business',
+            problem=objective, conclusion='旧' * 6000)
+    assert len(retrieve_experience(growth_agent, {}, objective)) == 4
+
+    context = build_context(growth_agent)
+    assert any(str(item['id']) == str(document.id) for item in context['documents'])
+    assert context['goal']['objective'] == objective
+    assert len(context['experiences']) < 4
+
+
 def test_partial_acceptance(growth_agent):
     with tx(growth_agent) as c:
         spec = ExperimentSpec(question_type="audience",question="Who needs this product?",hypothesis="A concrete audience needs it",
