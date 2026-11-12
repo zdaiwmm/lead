@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import secrets
+from contextlib import nullcontext
 from datetime import timedelta
 
 import httpx
@@ -271,22 +272,24 @@ async def discover(aid, row):
     observed = await rpc(aid, account["profile_id"], "account/discover", {"platform": account["platform"], "account_id": str(account_id),
         'task_id':str(row['id']),
         "target_urls":row["input"]["spec"]["payload"].get("target_urls",[])})
-    targets = []
-    for target in observed.get("targets", [])[:20]:
-        # Each target must contain role evidence from the current acting subject.
-        targets.append(await asyncio.to_thread(derive_target, aid, account, target))
+    targets = await asyncio.to_thread(derive_targets,aid,account,observed.get('targets',[])[:20])
     return WorkResult(outcome="completed", output={"targets": targets, "missing_conditions": observed.get("missing_conditions", []),
                                                   "knowledge_progress": any(value.get('knowledge_progress',True) for value in targets)})
 
 
-def derive_target(aid, account, observed):
+def derive_targets(aid,account,observations):
+    with tx(aid) as c:
+        return [derive_target(aid,account,observed,connection=c) for observed in observations]
+
+
+def derive_target(aid, account, observed,*,connection=None):
     if observed.get('browser_method'):
-        return derive_browser_target(aid,account,observed)
+        return derive_browser_target(aid,account,observed,connection=connection)
     from .adapters.catalog import SPECS
     spec = SPECS[account["platform"]]
     if not observed.get("evidence_refs") or observed.get("acting_subject") != account["external_account_id"]:
         raise ValueError("target_not_permitted")
-    with tx(aid) as c:
+    with nullcontext(connection) if connection is not None else tx(aid) as c:
         current = one(c, "SELECT * FROM lead.social_accounts WHERE id=%s FOR SHARE", (account["id"],))
         intent = one(c, "SELECT * FROM lead.growth_read_intent(%s)", (account["id"],))
         if not current or current["binding_version"] != account["binding_version"] or not intent or intent["desired"] != "running":
@@ -314,7 +317,7 @@ def derive_target(aid, account, observed):
         return {"target_id": str(target["id"]), "grant_id": str(grant["id"])}
 
 
-def derive_browser_target(aid,account,observed):
+def derive_browser_target(aid,account,observed,*,connection=None):
     from .browser_execution import validate_method
     method=observed['browser_method']
     operations=method.get('operations',[]) if isinstance(method,dict) else []
@@ -324,8 +327,8 @@ def derive_browser_target(aid,account,observed):
     operation=operations[0]
     method=validate_method(method,account_id=account['id'],binding_version=account['binding_version'],
         target_url=observed['canonical_url'],operation=operation)
-    with tx(aid) as c:
-        require_agent(c,aid,True)
+    with nullcontext(connection) if connection is not None else tx(aid) as c:
+        agent=require_agent(c,aid,True)
         current=one(c,'SELECT * FROM lead.social_accounts WHERE id=%s FOR SHARE',(account['id'],))
         intent=one(c,'SELECT * FROM lead.growth_read_intent(%s)',(account['id'],))
         if (not current or current['state']!='connected' or current['binding_version']!=account['binding_version']
@@ -334,6 +337,28 @@ def derive_browser_target(aid,account,observed):
                 or observed['external_target_id'] in intent['scope'].get('excluded_targets',[])
                 or intent['scope'].get('target_scope')=='existing_grants' and observed['external_target_id'] not in intent['scope'].get('target_ids',[])):
             raise ValueError('target_not_permitted')
+        producer=observed.get('producer_scope') or {}
+        work=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR SHARE',(producer.get('task_id'),))
+        runtime=(work or {}).get('result',{}).get('runtime',{})
+        from datetime import datetime
+        if (not work or work['state']!='running' or work['type']!='growth.account'
+                or work['input']['spec'].get('purpose')!='discover'
+                or str(work['input']['spec'].get('account_id'))!=str(account['id'])
+                or work['input'].get('binding_version')!=current['binding_version']
+                or work['input'].get('task_generation')!=producer.get('task_generation')
+                or producer.get('control_version')!=agent['control_version']
+                or runtime.get('control_version')!=agent['control_version']
+                or not producer.get('attempt_token') or runtime.get('attempt_token')!=producer['attempt_token']
+                or not runtime.get('lease_until') or datetime.fromisoformat(runtime['lease_until'])<=utcnow()
+                or producer.get('intent_revision')!=intent['revision']):
+            raise ValueError('native_method_observation_expired')
+        from .channel_contracts import ExecutionRef
+        execution=ExecutionRef.model_validate(producer.get('execution_ref'))
+        route=one(c,'SELECT * FROM lead.profile_execution_routes WHERE profile_id=%s',(current['profile_id'],))
+        if not route or execution.profile_id!=current['profile_id'] or any(str(route[key])!=str(getattr(execution,field)) for key,field in
+                (('generation','route_generation'),('executor_ref','executor_ref'),('transport_ref','transport_ref'))):
+            raise ValueError('native_method_observation_expired')
+        endpoint(execution)
         old=one(c,'SELECT * FROM lead.account_targets WHERE account_id=%s AND target_type=%s AND external_target_id=%s FOR UPDATE',
             (account['id'],'web',observed['external_target_id']))
         permissions=old['verified_permissions'] if old else {}

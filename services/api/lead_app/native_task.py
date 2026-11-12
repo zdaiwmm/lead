@@ -179,7 +179,10 @@ class NativeTask:
             validate_method(method,account_id=account['id'],binding_version=account['binding_version'],target_url=target,operation=operation)
             observed={'external_target_id':target,'canonical_url':target,'target_type':'web',
                 'display_name':(await permission_page.title())[:200] or target,'acting_subject':account['external_account_id'],
-                'access_mode':'ordinary_member','evidence_refs':[evidence],'browser_method':method}
+                'access_mode':'ordinary_member','evidence_refs':[evidence],'browser_method':method,
+                'producer_scope':{'task_id':self.task_id,'task_generation':task['input']['task_generation'],
+                    'attempt_token':task['result']['runtime']['attempt_token'],'control_version':task['current_control'],
+                    'intent_revision':intent['revision'],'execution_ref':self.actor.native_runtime.execution_ref}}
             self.observations=[value for value in self.observations if (value['canonical_url'],value['browser_method']['operations'])!=(target,[operation])]
             self.observations.append(observed)
             return {'state':'method_observed','target_url':target,'operation':operation,'role':'ordinary_member','receipt_state':'unobserved'}
