@@ -809,6 +809,9 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - `3ce50c7`冻结完整方法发现producer（源`a78f00e550bc13194ba6211142a2e51498ea39b9`）：Linux两个产品机械例21.02秒，现实际finish后DB succeeded/waiting_user终态均有assert；第二origin兼容账号真实登录、两个原TaskRef持主页时fresh私有self辅助页可并行，过时编辑署名不能掩盖当前私有主体变化。原discover入口经SDK导航/propose_method两次假模型取得实际方法及grant，receipt仍unobserved，未伪造verified marker。新空库方法/回执投影/registry/准入/动作46项2.66秒通过。3片段与180秒等硬上限不等于完整C15；一次定向修正/连续无新状态及各Wait生产者继续补验。
 - 第二布局B在上述producer冻结、释放记录写入后才解封；原独立文件SHA256仍`840b0467e1fd11642a5409f104fd53b188e3773528efec4d564adf4988453b54`，未为产品修改页面。`23d79c8`入库仅按Ruff排序stdlib imports，模块其余AST和imports集合与原版完全一致，仓库文件SHA256为`6badeffc6b75802b31cb8c51f5f0f5ff4c8934ae3d1fecb2514c6d031f731e1a`，5项HTTP自验2.57秒；此不是未见页面实际模型验收。核心负责人为进一步减少动作消费者受布局影响，仍主动不读B，先完成通用发送/回查后才使用。
 
+- 新独立真实Temporal整合`95833ba`（源`e664e38703a87d271d0d6830ac7cb40747fcc578`）2项30.21秒，未调用真实模型/网站：实际DB/outbox→原worker.deliver_workspace→原Workflow/活动→真实research/probe/consume→经营decision；仅最低HTTP HTML与模型输出受控。替代来源文档持久成功，still_blocked probe虽succeeded真实view仍blocked；原source proof真实并发租约仅一次，两个有效依赖续原gen2，另一case过期依赖由Workflow自然终止且不复活；重复outbox不增probe/source/wake，3份Workflow历史replay通过。主线CI使用自己的隔离Compose端点，补严格GitHub-hosted环境核对以实际执行此case；本地仍强制私有manifest，不因CI缺该manifest跳过。
+- 独立原生live fence36项通过：同alias URL热改、Tokyo profile/endpoint/绑定/IP与配置撤回、FB split撤回均拒旧scope，原public空storage与pending→verified合法转换保持。随后真实P1反例确认：原discover RPC回包在pause→resume后给已canceled任务铸造新rev4 grant。`0b70f05`修为服务器producer_scope及原Task/claim/control/意图/route/绑定同事务校验，整批任一stale全部回滚；独立先以完整有效scope在旧码复红，固定新码12项1.30秒通过，原任务canceled、currentintent仍running/rev4、target/grant均0且旧attempt未改，拒绝非缺字段误绿。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2/通用发布回复仍在接线和验证，不能因为基础桥、探针或部分模块通过就开启共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。

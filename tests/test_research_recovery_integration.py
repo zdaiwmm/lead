@@ -15,7 +15,7 @@ import httpx
 import pytest
 from fastapi.encoders import jsonable_encoder
 from lead_app import fetch, worker
-from lead_app.config import STATE, database_kwargs
+from lead_app.config import ROOT, STATE, database_kwargs, env
 from lead_app.db import all_rows, emit, one, tx, uid
 from lead_app.growth import agent, runtime, tools, views
 from lead_app.growth.contracts import (
@@ -69,15 +69,32 @@ def purpose(rows, name):
     return next((row for row in rows if row['input']['spec']['purpose'] == name), None)
 
 
+def isolated_services():
+    db = database_kwargs()
+    address = os.environ['LEAD_TEST_CHANNEL_TEMPORAL']
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        # The official application job owns these disposable Compose services;
+        # local runs continue to require the stricter private-state manifest.
+        assert os.environ.get('GITHUB_REPOSITORY') == 'zdaiwmm/lead'
+        assert os.environ.get('RUNNER_OS') == 'Linux'
+        assert os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted'
+        assert Path(os.environ['GITHUB_WORKSPACE']).resolve() == ROOT
+        assert STATE == ROOT / '.state' and (STATE / 'infra.env').is_file()
+        assert env().get('LEAD_DEPLOYMENT_MODE') != 'production'
+        assert db['host'] == '127.0.0.1' and db['dbname'] == 'lead' and db['port'] == 55432
+        assert address == '127.0.0.1:17233'
+    else:
+        manifest = read_manifest(STATE.parent)
+        assert db['dbname'] == 'lead_growth_test' and db['port'] == manifest['pg_port']
+        assert address == '127.0.0.1:' + str(manifest['temporal_port'])
+    return address
+
+
 @pytest.mark.parametrize('expire_second', [False, True], ids=['both-current', 'one-expired'])
 async def test_original_source_recovery_through_real_outbox_temporal_and_current_dependencies(
         growth_agent, local_model_settings, monkeypatch, expire_second):
     # Catches fake-success recovery, scope borrowing, lost dependencies and duplicate business wakes.
-    manifest = read_manifest(STATE.parent)
-    db = database_kwargs()
-    assert db['dbname'] == 'lead_growth_test' and db['port'] == manifest['pg_port']
-    address = os.environ['LEAD_TEST_CHANNEL_TEMPORAL']
-    assert address == '127.0.0.1:' + str(manifest['temporal_port'])
+    address = isolated_services()
     aid, tenant, queue = growth_agent, current_tenant(), 'research-recovery-' + uid()
     source_ready = False
     probe_entered, release_probe = asyncio.Event(), asyncio.Event()
