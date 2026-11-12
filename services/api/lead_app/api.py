@@ -1309,7 +1309,6 @@ class ConnectionControl(BaseModel):
 def connection_control(aid: UUID, connection: UUID, body: ConnectionControl):
     from .connection_control import transition
     result=transition(str(aid),connection,body.challenge_version,'automatic',cancel=body.action=='cancel')
-    with tx(str(aid)) as c:
-        from .db import emit
-        emit(c,str(aid),'growth.wake',{'reason':'connection_control_changed','connection_id':str(connection)})
+    from .growth.runtime import wake_connection
+    wake_connection(str(aid),connection,result['challenge_version'])
     return result

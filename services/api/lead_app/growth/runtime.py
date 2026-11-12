@@ -69,7 +69,7 @@ def _resource_condition(c, agent, row, spec):
     if spec.account_id or spec.payload.get("profile_id"):
         profile, native, account_id = _browser_resource(c, row, spec)
         route = one(c, "SELECT generation FROM lead.profile_execution_routes WHERE profile_id=%s", (profile,))
-        account = one(c,"""SELECT s.binding_version,s.state,i.revision,i.desired,i.scope FROM lead.social_accounts s
+        account = one(c,"""SELECT s.binding_version,s.state,s.verified_at,i.revision,i.desired,i.scope FROM lead.social_accounts s
             LEFT JOIN lead.account_operating_intents i ON i.account_id=s.id WHERE s.id=%s""",(account_id,)) if account_id else None
         capability = None
         if spec.kind=="channel":
@@ -80,7 +80,9 @@ def _resource_condition(c, agent, row, spec):
                 LEFT JOIN LATERAL (SELECT * FROM lead.authorization_grants WHERE target_id=t.id AND revoked_at IS NULL ORDER BY version DESC LIMIT 1) g ON true
                 WHERE t.id=%s""",(spec.target_id,))
         resource = 'account:' + str(account_id) if native and account_id else 'profile:' + str(profile)
-        return resource, digest([account,(route or {}).get("generation"),capability])
+        connection = one(c, "SELECT id,challenge_version,control_mode,state,expires_at FROM lead.takeover_sessions WHERE id=%s",
+                         (spec.payload['takeover_id'],)) if spec.payload.get('takeover_id') else None
+        return resource, digest([account,(route or {}).get("generation"),capability,connection])
     urls = spec.payload.get("urls") or []
     if not urls and spec.kind == "research":
         business = one(c, "SELECT product_url FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
@@ -117,7 +119,7 @@ def _current_research_resource(c, scope):
         aid = one(c, "SELECT current_setting('app.agent_id',true) aid")["aid"]
         condition = digest([condition, configuration_revision(scope['provider'],scope['operation'],aid,c)])
     if scope.get("account_id"):
-        account = one(c, """SELECT s.binding_version,s.state,i.revision,i.desired,r.generation
+        account = one(c, """SELECT s.binding_version,s.state,s.verified_at,i.revision,i.desired,r.generation
             FROM lead.social_accounts s LEFT JOIN lead.account_operating_intents i ON i.account_id=s.id
             LEFT JOIN lead.profile_execution_routes r ON r.profile_id=s.profile_id WHERE s.id=%s""", (scope["account_id"],))
         condition = digest([condition, account])
@@ -128,6 +130,41 @@ def _recovery_lock(c, aid):
     # One short project transaction orders episode changes and proof consumption.
     # Never held during a model, browser or network operation.
     c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("growth-recovery:"+str(aid),))
+
+
+def wake_connection(aid, connection_id, challenge_version):
+    """A real owner transition wakes its original wait without granting recovery proof."""
+    with tx(aid) as c:
+        _recovery_lock(c, aid)
+        require_agent(c, aid, True)
+        connection = one(c, "SELECT * FROM lead.takeover_sessions WHERE id=%s AND purpose='login'", (connection_id,))
+        if not connection or connection['challenge_version'] != challenge_version:
+            return []
+        now = utcnow()
+        rows = all_rows(c, """SELECT * FROM lead.tasks WHERE type='growth.account'
+            AND input#>>'{spec,payload,takeover_id}'=%s AND state NOT IN ('succeeded','failed','canceled')
+            ORDER BY id FOR UPDATE""", (str(connection_id),))
+        refs = []
+        for row in rows:
+            runtime = _runtime(row)
+            if connection['state'] in ('ended','expired'):
+                runtime.update(attempt_token=None, lease_until=None, wait=None, reason='connection_canceled')
+                _save(c, row, 'canceled', runtime)
+                continue
+            wait = runtime.get('wait') or {}
+            if (connection['state'] != 'active' or connection['control_mode'] != 'automatic'
+                    or connection['expires_at'] <= now or row['state'] == 'running'
+                    or wait.get('producer') != 'account_connection'):
+                continue
+            # Preserve attempts, costs, the original deadline and every blocked
+            # dependency. A changed challenge is permission to recheck, no proof.
+            runtime['wait'] = None
+            _save(c, row, 'planned', runtime, when=now)
+            ref = {'agent_id': str(aid), 'task_id': str(row['id']),
+                   'task_generation': row['input']['task_generation']}
+            emit(c, aid, 'growth.work', ref)
+            refs.append(ref)
+        return refs
 
 
 def _episode(c, resource, condition, row, code=None):
