@@ -39,6 +39,7 @@ async def verify_login(monkeypatch, *, mode="login", owner_hook=None):
             model_calls.append(
                 {
                     "bytes": len(raw),
+                    "synthetic_otp_literal_seen": b"135790" in raw,
                     "fixture_only": True,
                     "username_literal_seen": board.state.username.encode() in raw,
                     "password_literal_seen": board.state.password.encode() in raw,
