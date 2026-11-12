@@ -13,6 +13,9 @@ def hook(monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     h = importlib.import_module("home_systemd_release")
     monkeypatch.setattr(h, "STORE", tmp_path)
+    # A maintenance host may really have these installed. Unit tests select
+    # their own fixture tools instead of discovering the host's live verifier.
+    monkeypatch.setattr(h, "TOOLS", tmp_path / "tools")
     for sha in ("a" * 40, "b" * 40):
         (tmp_path / sha).mkdir()
     h.select("a" * 40)
