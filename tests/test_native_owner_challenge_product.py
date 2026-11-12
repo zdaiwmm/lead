@@ -208,3 +208,93 @@ async def test_owner_otp_original_connection_lifecycle(monkeypatch, exit_path):
     assert result['owner_check']['exit'] == exit_path
     assert result['privacy'] == {'literal_in_model_request': False, 'literal_in_workdir': False}
     assert not result['oracle']['posts']
+
+
+@pytest.mark.asyncio
+async def test_owner_unsubmitted_otp_keeps_person_step_without_another_model_request(monkeypatch):
+    from lead_app import account_profiles, api, browser
+    from lead_app.account_connection import execute_account
+    from lead_app.db import all_rows, one, tx
+    from lead_app.growth.contracts import utcnow
+    from lead_app.growth.runtime import advance, finish, recover_due
+    from lead_app.growth.tools import AccountInput
+    from lead_app.security import internal_token, token
+    from native_connection_product import verify_login
+
+    assert sys.platform == 'linux' and os.environ.get('LEAD_NETWORK_NAMESPACE') == '1'
+    monkeypatch.setattr(account_profiles, 'native_available', lambda: True)
+
+    async def check(context):
+        aid, pending = context['aid'], context['pending']
+        connection_id, task_id = str(pending['takeover_id']), str(context['task']['id'])
+        actor = await browser.gateway.get(aid, context['task']['input']['spec']['payload']['profile_id'], allow_challenge=True)
+        controller = actor.connection_pages[connection_id]
+        page = controller.page
+        with tx(aid) as connection:
+            owner = one(connection, 'SELECT * FROM lead.takeover_sessions WHERE id=%s', (connection_id,))
+            waiting = one(connection, 'SELECT * FROM lead.tasks WHERE id=%s', (task_id,))
+        assert owner['control_mode'] == 'owner' and waiting['state'] == 'waiting_user'
+        assert owner['encrypted_login'] is not None
+        version = owner['challenge_version']
+        async with httpx.AsyncClient(base_url=context['gateway_endpoint'],
+                headers={'Authorization': 'Bearer ' + internal_token()}, timeout=30) as gateway, \
+                httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url='http://127.0.0.1:8088',
+                    cookies={'lead_session': token('owner')},
+                    headers={'Origin': 'http://127.0.0.1:3100', 'X-Lead-Request': '1'}, timeout=30) as owner_api:
+            field = page.get_by_label('One-time code')
+            box = await field.bounding_box()
+            for values in ({'kind': 'click', 'x': box['x']+box['width']/2, 'y': box['y']+box['height']/2},
+                           {'kind': 'text', 'text': '135790'}):
+                response = await gateway.post(f'/agents/{aid}/input', json={
+                    'takeover': connection_id, 'challenge_version': version, **values})
+                assert response.status_code == 200
+            assert await field.input_value() == '135790'
+            assert not any(row['method'] == 'POST' and row['path'] == '/challenge' for row in context['board'].oracle()['requests'])
+            # The owner may mistakenly say the person-only step is complete.
+            # Keep the real input settling interval and original task timer.
+            async with asyncio.timeout(4):
+                while True:
+                    with tx(aid) as connection:
+                        latest = one(connection, 'SELECT last_input_at FROM lead.takeover_sessions WHERE id=%s', (connection_id,))
+                    if latest['last_input_at'] <= utcnow()-timedelta(seconds=2):
+                        break
+                    await asyncio.sleep(.05)
+            response = await owner_api.post(f'/api/agents/{aid}/connections/{connection_id}/control',
+                json={'challenge_version': version, 'action': 'resume'})
+            assert response.status_code == 200, response.text
+        check_at = datetime.fromisoformat(waiting['result']['runtime']['wait']['check_at'])
+        await asyncio.sleep(max(0, (check_at-utcnow()).total_seconds()) + .02)
+        with tx(aid) as connection:
+            before_events = {str(row['id']) for row in all_rows(connection, "SELECT id FROM lead.outbox_events WHERE event_type='growth.work'")}
+        recover_due(aid)
+        with tx(aid) as connection:
+            dispatched = [row for row in all_rows(connection, "SELECT * FROM lead.outbox_events WHERE event_type='growth.work'")
+                          if str(row['id']) not in before_events and row['payload']['task_id'] == task_id]
+        assert dispatched
+        claim = advance(dispatched[0]['payload'])['claim']
+        assert claim['attempt_token'] != context['claim']['attempt_token']
+        with tx(aid) as connection:
+            task = one(connection, 'SELECT * FROM lead.tasks WHERE id=%s', (task_id,))
+        before = len(context['model_calls'])
+        # This fake transport can only inspect/report identity. It never submits
+        # or solves an OTP, so an extra request cannot be blamed on test actions.
+        context['workflow'].update(kind='resume', step=0)
+        result = await execute_account(aid, task, AccountInput.model_validate(task['input']['spec']['payload']))
+        assert finish(claim, result)['accepted_control']
+        calls = context['model_calls'][before:]
+        known = all('synthetic_otp_literal_seen' in row for row in calls)
+        diagnostics = {'new_model_requests': len(calls),
+                       'synthetic_otp_literal_seen': any(row.get('synthetic_otp_literal_seen') for row in calls) if known else None,
+                       'challenge_post_count': sum(row['method'] == 'POST' and row['path'] == '/challenge' for row in context['board'].oracle()['requests']),
+                       'result_outcome': result.outcome}
+        # Only fixed synthetic-literal presence is recorded; never dump request bodies.
+        print('UNSUBMITTED_OTP_DIAGNOSTICS ' + json.dumps(diagnostics, sort_keys=True))
+        assert diagnostics['new_model_requests'] == 0, diagnostics
+        with tx(aid) as connection:
+            final = one(connection, 'SELECT control_mode FROM lead.takeover_sessions WHERE id=%s', (connection_id,))
+            assert one(connection, 'SELECT state FROM lead.tasks WHERE id=%s', (task_id,))['state'] == 'waiting_user'
+        assert final['control_mode'] == 'owner' and result.outcome == 'waiting'
+        assert diagnostics['challenge_post_count'] == 0
+        return diagnostics
+
+    await verify_login(monkeypatch, mode='owner_otp', owner_hook=check)
