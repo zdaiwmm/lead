@@ -112,10 +112,14 @@ def submit_work(c, aid, spec):
             "goal_revision":objective_revision(require_agent(c,aid))}
     if spec.kind=="channel":
         agent = require_agent(c,aid)
+        operation = spec.payload.get('operation','publish')
+        parent = spec.payload.get('parent_url') if operation == 'reply' else None
         prior = one(c,"""SELECT t.id,t.input FROM lead.actions a JOIN lead.tasks t ON t.id=a.task_id
             WHERE a.target_id=%s AND a.state IN ('dispatching','unknown','confirmed')
             AND coalesce(t.input#>>'{spec,payload,content_id}',a.content_id::text)=%s
-            ORDER BY a.created_at LIMIT 1""",(spec.target_id,str(spec.payload.get("content_id"))))
+            AND a.type=%s AND (CASE WHEN a.type='reply' THEN
+                coalesce(a.intent->>'parent_url',t.input#>>'{spec,payload,parent_url}') END) IS NOT DISTINCT FROM %s
+            ORDER BY a.created_at LIMIT 1""",(spec.target_id,str(spec.payload.get("content_id")),operation,parent))
         if prior:
             return TaskRef(agent_id=UUID(str(aid)),task_id=prior["id"],
                 task_generation=prior["input"].get("task_generation",1)).model_dump(mode="json")
@@ -126,6 +130,17 @@ def submit_work(c, aid, spec):
             "goal_revision":objective_revision(agent),"content":spec.payload.get("content_id"),
             "content_hash":spec.payload.get("content_hash"),"original_action_id":spec.payload.get("original_action_id"),
             "binding":binding}
+        if not spec.payload.get('original_action_id'):
+            # Old planned tasks used this hash without a primitive or parent.
+            # Reuse only matching historical intent; never split it on upgrade.
+            legacy = one(c,'SELECT id,input FROM lead.tasks WHERE workflow_id=%s',('growth:'+str(aid)+':'+digest(material),))
+            previous = (legacy or {}).get('input',{}).get('spec',{}).get('payload',{})
+            previous_operation = previous.get('operation','publish')
+            previous_parent = previous.get('parent_url') if previous_operation == 'reply' else None
+            if legacy and (previous_operation,previous_parent) == (operation,parent):
+                return TaskRef(agent_id=UUID(str(aid)),task_id=legacy['id'],
+                    task_generation=legacy['input'].get('task_generation',1)).model_dump(mode='json')
+            material.update(operation=operation,parent_url=parent)
     workflow_id = "growth:" + str(aid) + ":" + digest(material)
     old = one(c, "SELECT id,input FROM lead.tasks WHERE workflow_id=%s", (workflow_id,))
     if old:
