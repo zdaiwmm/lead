@@ -72,3 +72,26 @@ def transition(aid, connection, expected_version, mode, *, reason=None, cancel=F
             connection_data=connection_data || %s WHERE id=%s''',
             (mode,version,j({'owner_action':str(reason)[:500] if reason else None}),connection))
         return {'state':'active','control_mode':mode,'challenge_version':version,'input_seq':row['input_seq']+1}
+
+
+def refresh_owner_challenge(aid,connection,expected_version,input_seq,marker,*,reason=None,force=False):
+    """CAS one observed owner challenge; neither an answer nor a phase command."""
+    from .growth.contracts import utcnow
+    with tx(aid) as c:
+        agent=require_agent(c,aid,True)
+        row=one(c,"SELECT * FROM lead.takeover_sessions WHERE id=%s AND purpose='login' FOR UPDATE",(connection,))
+        if (not row or row['state']!='active' or row['control_mode']!='owner' or row['expires_at']<=utcnow()
+                or row['control_version']!=agent['control_version'] or row['challenge_version']!=expected_version
+                or row['input_seq']!=input_seq or row['input_inflight']):
+            raise ValueError('connection_challenge_observation_expired')
+        previous=row['connection_data'].get('owner_challenge')
+        changed=force or previous is not None and previous!=marker
+        version=row['challenge_version']+int(changed)
+        sequence=row['input_seq']+int(changed)
+        data={'owner_challenge':marker}
+        if changed:
+            data['owner_action']=reason or '本人步骤已改变，请核对原窗口后继续。'
+        c.execute('UPDATE lead.takeover_sessions SET challenge_version=%s,input_seq=%s,composing=CASE WHEN %s THEN false ELSE composing END,connection_data=connection_data || %s WHERE id=%s',
+            (version,sequence,changed,j(data),connection))
+        return {'state':'active','control_mode':'owner','challenge_version':version,'input_seq':sequence,
+            'owner_action':data.get('owner_action',row['connection_data'].get('owner_action'))}

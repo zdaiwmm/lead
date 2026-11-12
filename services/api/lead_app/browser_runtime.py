@@ -202,6 +202,9 @@ class NativeNetworkGate:
                     root=self.owners.get(session)
                     if root in self.roots:
                         self.roots[root]['document_revision']=self.roots[root].get('document_revision',0)+1
+                        frame=event.get('frame',{})
+                        if method=='Page.frameNavigated' and not frame.get('parentId'):
+                            self.roots[root]['document_token']=[frame.get('id'),frame.get('loaderId'),frame.get('url')]
         finally:
             self.ready = False
             for future in list(self.pending.values()):

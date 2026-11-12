@@ -1997,6 +1997,7 @@ async def connection_page(actor,takeover):
     controller=actor.connection_pages.get(str(takeover))
     if not controller or not controller.lease or not controller.page:
         raise HTTPException(409,'当前连接页面尚未就绪')
+    await controller.refresh_challenge()
     await asyncio.to_thread(actor.native_runtime.current_scope,controller.lease)
     return controller.page
 
@@ -2033,6 +2034,10 @@ async def page_status(aid: UUID):
 @asynccontextmanager
 async def input_guard(aid, actor, body):
     require_takeover(aid,actor,body.takeover)
+    if actor.native_runtime and body.takeover:
+        controller=actor.connection_pages.get(str(body.takeover))
+        if controller:
+            await controller.refresh_challenge()
     with tx(aid) as c:
         if actor.native_runtime:
             connection=one(c,"SELECT control_mode,challenge_version FROM lead.takeover_sessions WHERE id=%s AND purpose='login'",(body.takeover,))
@@ -2050,6 +2055,10 @@ async def input_guard(aid, actor, body):
         with tx(aid) as c:
             c.execute("UPDATE lead.takeover_sessions SET input_inflight=false,last_input_at=now() WHERE id=%s AND input_seq=%s",
                       (changed["id"],changed["input_seq"]))
+        if actor.native_runtime and body.takeover:
+            controller=actor.connection_pages.get(str(body.takeover))
+            if controller:
+                await controller.refresh_challenge(force=body.kind in ('reload','back','forward'),settling=True)
 
 
 @app.post("/agents/{aid}/input")

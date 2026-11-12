@@ -215,3 +215,42 @@ def test_native_public_and_social_slots_preserve_original_registered_exit(growth
     assert reddit_login.assign_exit(growth_agent,login)=={'server':reddit_login.SOCKET}
     assert reddit_login.assign_exit(growth_agent,public)=={'server':reddit_login.SOCKET}
     assert login['network_identity_id']==public['network_identity_id'] and login['storage_ref']!=public['storage_ref']
+
+
+def test_live_challenge_observation_rotates_only_changed_marker_and_fences_old_input(growth_agent):
+    from lead_app.connection_control import refresh_owner_challenge
+    sid=account(growth_agent)
+    _,snapshot,_=login_work(growth_agent,sid)
+    version=transition(growth_agent,snapshot['id'],1,'owner')
+    marker={'kind':'qr','fingerprint':'old-fingerprint','document':['frame','loader-1','https://site.test/challenge']}
+    first=refresh_owner_challenge(growth_agent,snapshot['id'],version['challenge_version'],version['input_seq'],marker)
+    same=refresh_owner_challenge(growth_agent,snapshot['id'],first['challenge_version'],first['input_seq'],marker)
+    assert same['challenge_version']==first['challenge_version']
+    second=refresh_owner_challenge(growth_agent,snapshot['id'],first['challenge_version'],first['input_seq'],{**marker,'fingerprint':'new-fingerprint'})
+    assert second['challenge_version']==first['challenge_version']+1 and second['input_seq']==first['input_seq']+1
+    with pytest.raises(ValueError,match='observation_expired'):
+        refresh_owner_challenge(growth_agent,snapshot['id'],first['challenge_version'],first['input_seq'],marker)
+    with pytest.raises(ValueError,match='challenge_changed'):
+        transition(growth_agent,snapshot['id'],first['challenge_version'],'automatic')
+    with tx(growth_agent) as c:
+        c.execute('UPDATE lead.takeover_sessions SET input_inflight=true WHERE id=%s',(snapshot['id'],))
+    with pytest.raises(ValueError,match='observation_expired'):
+        refresh_owner_challenge(growth_agent,snapshot['id'],second['challenge_version'],second['input_seq'],marker)
+
+
+def test_changed_challenge_cancels_only_the_old_composition_generation(growth_agent):
+    from lead_app.connection_control import refresh_owner_challenge
+    sid=account(growth_agent)
+    _,snapshot,_=login_work(growth_agent,sid)
+    owner=transition(growth_agent,snapshot['id'],1,'owner')
+    first={'kind':'otp','fingerprint':'first','document':['frame','loader','url']}
+    refresh_owner_challenge(growth_agent,snapshot['id'],owner['challenge_version'],owner['input_seq'],first)
+    with tx(growth_agent) as c:
+        c.execute('UPDATE lead.takeover_sessions SET composing=true WHERE id=%s',(snapshot['id'],))
+    same=refresh_owner_challenge(growth_agent,snapshot['id'],owner['challenge_version'],owner['input_seq'],first)
+    with pytest.raises(ValueError,match='input_in_progress'):
+        transition(growth_agent,snapshot['id'],same['challenge_version'],'automatic')
+    changed=refresh_owner_challenge(growth_agent,snapshot['id'],same['challenge_version'],same['input_seq'],{**first,'fingerprint':'second'})
+    assert changed['challenge_version']>same['challenge_version']
+    with tx(growth_agent) as c:
+        assert one(c,'SELECT composing FROM lead.takeover_sessions WHERE id=%s',(snapshot['id'],))['composing'] is False

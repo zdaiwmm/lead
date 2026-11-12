@@ -33,6 +33,7 @@ class NativeConnection:
         self.self_entry=None
         self.anonymous_self=[]
         self.operation_lock=asyncio.Lock()
+        self.challenge_lock=asyncio.Lock()
 
     def snapshot(self):
         with tx(self.actor.aid) as c:
@@ -101,6 +102,40 @@ class NativeConnection:
     async def person_only_challenge(self):
         from .native_challenges import person_challenge
         return bool(await person_challenge(self.page))
+
+    async def refresh_challenge(self,*,force=False,settling=False):
+        from .connection_control import refresh_owner_challenge
+        from .native_challenges import person_challenge
+        async with self.challenge_lock:
+            task,connection,_=await asyncio.to_thread(self.snapshot)
+            result={key:connection[key] for key in ('state','control_mode','challenge_version','input_seq')}
+            if (connection['control_mode']!='owner' or connection['state']!='active' or not self.lease
+                    or not self.page or self.page.is_closed() or connection['input_inflight']):
+                return result
+            self.lease.update(control_mode='owner',challenge_version=connection['challenge_version'],input_seq=connection['input_seq'],
+                task_generation=task['input'].get('task_generation'))
+            await asyncio.to_thread(self.actor.native_runtime.current_scope,self.lease)
+            before=self.lease.get('document_token')
+            from playwright.async_api import Error as PlaywrightError
+            try:
+                async with asyncio.timeout(4):
+                    facts=await person_challenge(self.page)
+            except (PlaywrightError,TimeoutError):
+                if settling:
+                    return result
+                raise ValueError('connection_challenge_navigation_pending') from None
+            if before!=self.lease.get('document_token'):
+                if settling:
+                    return result
+                raise ValueError('connection_challenge_document_changed')
+            marker={'kind':facts['kind'] if facts else None,'fingerprint':facts['fingerprint'] if facts else None,'document':before}
+            reason=facts['reason'] if facts else '本人步骤已完成，请交回自动核验当前身份。'
+            result=await asyncio.to_thread(refresh_owner_challenge,self.actor.aid,self.connection_id,
+                connection['challenge_version'],connection['input_seq'],marker,reason=reason,force=force)
+            if result['challenge_version']!=connection['challenge_version']:
+                self.observation=self.proof_scope=self.self_entry=None
+            self.lease.update(challenge_version=result['challenge_version'],input_seq=result['input_seq'])
+            return result
 
     async def descriptor(self):
         scope=await self.actor.native_runtime.scope_view(self.lease['target_id'])
@@ -263,6 +298,8 @@ class NativeConnection:
         return self.remember_observation(self.observation,expected)
 
     async def command(self,operation,args):
+        if operation=='owner_status':
+            return await self.refresh_challenge()
         if operation=='preflight':
             await self.descriptor()
             return {'owner_required':await self.person_only_challenge()}
@@ -292,6 +329,7 @@ class NativeConnection:
         # Keep this original page and its current challenge for the owner; release
         # the SDK execution slot without transferring cookies or page ownership.
         self.lease.update(control_mode='owner',challenge_version=current['challenge_version'],input_seq=current['input_seq'])
+        await self.refresh_challenge()
         await self.actor.native_runtime.yield_page(self.lease['target_id'])
         return current
 
@@ -307,6 +345,7 @@ class NativeConnection:
             self.lease.update(control_mode='owner',challenge_version=connection['challenge_version'],
                 input_seq=connection['input_seq'],task_generation=task['input'].get('task_generation'))
             await self.actor.native_runtime.yield_page(self.lease['target_id'])
+            await self.refresh_challenge()
         return True
 
     async def close(self):

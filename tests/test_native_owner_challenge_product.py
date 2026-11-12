@@ -165,7 +165,9 @@ async def test_owner_otp_original_connection_lifecycle(monkeypatch, exit_path):
             async with asyncio.timeout(4):
                 while state()['last_input_at'] > utcnow()-timedelta(seconds=2):
                     await asyncio.sleep(.05)
-            resumed = await control('resume')
+            observed = await owner_api.get(f'/api/agents/{aid}/connections/{connection_id}')
+            assert observed.status_code == 200 and observed.json()['challenge_version'] > version
+            resumed = await control('resume', challenge=observed.json()['challenge_version'])
             assert resumed.status_code == 200, resumed.text
             assert resumed.json()['challenge_version'] > version
             assert (await owner_input('text', text='late old challenge')).status_code == 409
