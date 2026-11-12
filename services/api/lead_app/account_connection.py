@@ -283,7 +283,18 @@ async def discover(aid, row):
 
 def derive_targets(aid,account,observations):
     with tx(aid) as c:
-        return [derive_target(aid,account,observed,connection=c) for observed in observations]
+        targets=[derive_target(aid,account,observed,connection=c) for observed in observations]
+    # Recovery takes its own recovery->project locks. All observed targets must
+    # commit atomically before publishing any wake, never under this transaction.
+    _wake_browser_methods(aid,targets)
+    return targets
+
+
+def _wake_browser_methods(aid,targets):
+    from .growth.runtime import wake_browser_method
+    for target in targets:
+        if target.get('operation') in ('publish','reply'):
+            wake_browser_method(aid,target['target_id'],target['operation'])
 
 
 def derive_target(aid, account, observed,*,connection=None):
@@ -414,4 +425,7 @@ def derive_browser_target(aid,account,observed,*,connection=None):
             grant=one(c,"""INSERT INTO lead.authorization_grants(tenant_id,agent_id,target_id,version,allowed_actions,limits,granted_by)
                 SELECT lead.ctx_tenant(),%s,%s,coalesce(max(version),0)+1,%s,%s,'account_intent'
                 FROM lead.authorization_grants WHERE target_id=%s RETURNING *""",(aid,target['id'],j(allowed),j(limits),target['id']))
-        return {'target_id':str(target['id']),'grant_id':str(grant['id']),'operation':operation,'knowledge_progress':learned}
+        result={'target_id':str(target['id']),'grant_id':str(grant['id']),'operation':operation,'knowledge_progress':learned}
+    if connection is None:
+        _wake_browser_methods(aid,[result])
+    return result

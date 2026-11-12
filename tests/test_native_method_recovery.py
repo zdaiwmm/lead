@@ -74,9 +74,11 @@ def correct_current_method(aid, account, observed, mode):
     corrected = copy.deepcopy(observed)
     with tx(aid) as c:
         intent = one(c, 'SELECT revision FROM lead.account_operating_intents WHERE account_id=%s', (account['id'],))
+        session = one(c, "SELECT id,epoch FROM lead.browser_sessions WHERE profile_id=%s AND state='ready' AND ended_at IS NULL", (account['profile_id'],))
     corrected['producer_scope'] = {'task_id': str(work['task_id']), 'task_generation': work['task_generation'],
         'attempt_token': claim['attempt_token'], 'control_version': claim['control_version'],
-        'intent_revision': intent['revision'], 'execution_ref': resolve(aid, profile_id=account['profile_id']).model_dump(mode='json')}
+        'intent_revision': intent['revision'], 'execution_ref': resolve(aid, profile_id=account['profile_id']).model_dump(mode='json'),
+        'browser_session_id': str(session['id']), 'browser_epoch': session['epoch']}
     corrected['browser_method']['selectors']['submit'] = '#current-submit-v2'
     corrected['evidence_refs'] = ['fixture:current-corrected-dom']
     current = derive_target(aid, account, corrected)

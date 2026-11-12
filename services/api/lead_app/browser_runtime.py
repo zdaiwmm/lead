@@ -908,6 +908,8 @@ async def launch_native_actor(actor):
             c.execute("UPDATE lead.browser_sessions SET state='ready' WHERE id=%s AND ended_at IS NULL",(actor.session,))
             c.execute("UPDATE lead.browser_profiles SET state='ready',engine_version=%s,sdk_version='browser-use/0.13.14' WHERE id=%s",
                       (version['product'],actor.profile['id']))
+        from .growth.runtime import wake_browser_session
+        await asyncio.to_thread(wake_browser_session,actor.aid,actor.profile['id'],actor.session,actor.epoch)
     except BaseException:
         await runtime.close()
         raise
