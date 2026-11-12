@@ -1138,9 +1138,9 @@ def growth_schema_query():
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_read_route' AND md5(prosrc)='ae42619cd4089f6f2bbfc6f70e9d343d')
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_set_intent' AND md5(prosrc)='5cfb3ef37809d4c947cfbf4a30d856e3')
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_disconnect_intent' AND md5(prosrc)='b568fc706e1f0bfca2e071224facd5a3')
-        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_complete_connection' AND md5(prosrc) IN ('cab9778a5c090dd092b03c2982327ba4','UNFROZEN_UNIFIED_CONNECTION'))
-        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_receipt_valid' AND md5(prosrc) IN ('a4bca05077668d2f9a28a7806ffbecc1','UNFROZEN_UNIFIED_RECEIPT'))
-        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_confirm_publication' AND md5(prosrc) IN ('1be562501250d3092463dadc05414241','UNFROZEN_UNIFIED_CONFIRM'))
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_complete_connection' AND md5(prosrc) IN ('cab9778a5c090dd092b03c2982327ba4','fe6c839637f14db267c2b0dae12b6eef'))
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_receipt_valid' AND md5(prosrc) IN ('a4bca05077668d2f9a28a7806ffbecc1','bb84d7a1b92baccb7714ebd213e5b926'))
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_confirm_publication' AND md5(prosrc) IN ('1be562501250d3092463dadc05414241','3ecfea025258f9ab813abc9e7ddd80fc'))
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_owner_fence' AND md5(prosrc)='5ac78ca4773b17f90ef940d253b885dd')
     """
 
@@ -1210,9 +1210,29 @@ def unified_schema_query():
         AND NOT EXISTS(SELECT FROM pg_proc p,aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE p.oid=to_regprocedure('lead.public_experiences(uuid)') AND a.grantee=0 AND a.privilege_type='EXECUTE')
         AND EXISTS(SELECT FROM pg_trigger WHERE tgrelid='lead.experiences'::regclass
             AND tgname='experience_projection' AND tgenabled='O' AND tgfoid=to_regprocedure('lead.check_experience_projection()'))
-        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.public_experiences(uuid)') AND prosecdef AND md5(prosrc)='UNFROZEN_PUBLIC_EXPERIENCES')
-        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.check_experience_projection()') AND md5(prosrc)='UNFROZEN_PROJECTION_CHECK')
-        AND false /* Core 0033 constraints are not frozen yet; refuse release. */
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.public_experiences(uuid)') AND prosecdef AND md5(prosrc)='bc25a6e8dbac3fcd198153cbc9723b66')
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.check_experience_projection()') AND md5(prosrc)='134fb9fdb3ee79a63ba3fd411c6c8f8c')
+        AND (SELECT count(*)=5 FROM pg_constraint WHERE convalidated AND
+            (conrelid,conname,md5(pg_get_constraintdef(oid))) IN (
+            ('lead.takeover_sessions'::regclass,'connection_scoped_account','0075da41f4dee854c2f4f69d61bd1838'),
+            ('lead.takeover_sessions'::regclass,'takeover_sessions_automatic_attempts_check','bdadc4dcd889555ef5d133595e2c23eb'),
+            ('lead.takeover_sessions'::regclass,'takeover_sessions_challenge_version_check','d4e4efd7f90a999728a087f7df9d272e'),
+            ('lead.takeover_sessions'::regclass,'takeover_sessions_control_mode_check','9090f486dcd4bf6c44e1b59e343edf12'),
+            ('lead.social_accounts'::regclass,'web_connection_origin_required','d046c50b7d4dfff2a1753f8acc18ca8b')))
+        AND (SELECT count(*)=3 FROM pg_index i JOIN pg_class x ON x.oid=i.indexrelid
+            WHERE x.relnamespace='lead'::regnamespace AND i.indisunique AND i.indisvalid AND i.indisready
+            AND (x.relname,md5(pg_get_indexdef(i.indexrelid))) IN (
+            ('browser_request_original_action','eb4fcee9f141150500a90664e355d933'),
+            ('one_account_controller','6ec20aed23f164cfd84f75f917554342'),
+            ('one_live_takeover','7d8070d98dff321128fb72c9adc5cf18')))
+        AND (SELECT count(*)=2 FROM pg_trigger WHERE tgenabled='O' AND
+            (tgrelid,tgname,tgfoid) IN (
+            ('lead.takeover_sessions'::regclass,'connection_login_lifetime',to_regprocedure('lead.clear_connection_login()')),
+            ('lead.agents'::regclass,'expire_login_control',to_regprocedure('lead.expire_login_on_control_change()'))))
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.clear_connection_login()') AND md5(prosrc)='6a9c4c62dd7a1a54c805ed43f8850842')
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.expire_login_on_control_change()') AND md5(prosrc)='fe200520acc3d2ca82f22e36dd616a7c')
+        AND has_function_privilege('lead_auth','lead.growth_complete_connection(uuid,uuid,uuid,bigint,bigint,bigint,jsonb,text,jsonb)','EXECUTE')
+        AND NOT has_function_privilege('lead_runtime','lead.growth_complete_connection(uuid,uuid,uuid,bigint,bigint,bigint,jsonb,text,jsonb)','EXECUTE')
     """
 
 

@@ -52,3 +52,34 @@ def test_additive_upgrade_keeps_original_columns_and_detects_control_mutation(up
         c.execute('UPDATE lead.agents SET control_version=control_version+1 WHERE id=%s',(aid,))
     with pytest.raises(ValueError,match='Original accounts'):
         helper.assert_unchanged(before,helper.data_inventory(connect,target['dbname'],columns))
+
+
+def test_release_schema_readback_checks_actual_unified_permissions_and_guards(upgrade_database):
+    _, target = upgrade_database
+    release = importlib.import_module('home_systemd_release')
+    upgrade(target)
+    query = release.unified_schema_query()
+    mutations = (
+        "ALTER TABLE lead.experiences DISABLE ROW LEVEL SECURITY",
+        "ALTER TABLE lead.takeover_sessions DISABLE TRIGGER connection_login_lifetime",
+        "ALTER TABLE lead.agents DISABLE TRIGGER expire_login_control",
+        "DROP INDEX lead.browser_request_original_action",
+        "DROP INDEX lead.one_live_takeover",
+        "DROP INDEX lead.one_account_controller",
+        "ALTER TABLE lead.takeover_sessions DROP CONSTRAINT connection_scoped_account",
+        "ALTER TABLE lead.takeover_sessions DROP CONSTRAINT takeover_sessions_automatic_attempts_check; "
+        "ALTER TABLE lead.takeover_sessions ADD CONSTRAINT takeover_sessions_automatic_attempts_check CHECK (automatic_attempts>=0)",
+        "ALTER TABLE lead.social_accounts DROP CONSTRAINT web_connection_origin_required",
+        "GRANT EXECUTE ON FUNCTION lead.growth_complete_connection(uuid,uuid,uuid,bigint,bigint,bigint,jsonb,text,jsonb) TO lead_runtime",
+        "REVOKE EXECUTE ON FUNCTION lead.growth_complete_connection(uuid,uuid,uuid,bigint,bigint,bigint,jsonb,text,jsonb) FROM lead_auth",
+        "CREATE OR REPLACE FUNCTION lead.clear_connection_login() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$",
+    )
+    with psycopg.connect(**target) as c:
+        assert c.execute(query).fetchone()[0] is True
+        for statement in mutations:
+            c.execute('SAVEPOINT changed_guard')
+            c.execute(statement)
+            assert c.execute(query).fetchone()[0] is False, statement
+            c.execute('ROLLBACK TO SAVEPOINT changed_guard')
+            c.execute('RELEASE SAVEPOINT changed_guard')
+            assert c.execute(query).fetchone()[0] is True
