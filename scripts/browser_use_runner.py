@@ -189,7 +189,8 @@ async def main(data):
             async def authorize(name, values, node):
                 return await manager('tool_authorize',{'name':name,'values':values,'node':node})
             browser = scoped_session_class()(cdp_url=native_scope['cdp_url'],headers=native_scope['headers'],
-                        keep_alive=True,enable_default_extensions=False)
+                        keep_alive=True,enable_default_extensions=False,
+                        permissions=[],accept_downloads=False,auto_download_pdfs=False)
             await browser.start_scoped(native_scope,live_scope)
             diagnostics('native_scope_bound')
             tools = guarded_tools(browser,authorize,sensitive_data=data.get('sensitive_data'))

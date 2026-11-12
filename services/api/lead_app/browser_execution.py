@@ -24,7 +24,15 @@ def scoped_session_class():
 
     from browser_use import BrowserSession
     from browser_use.browser.session_manager import SessionManager
+    from browser_use.browser.watchdogs.downloads_watchdog import DownloadsWatchdog
     from pydantic import PrivateAttr
+
+    class NoDownloadsWatchdog(DownloadsWatchdog):
+        def attach_to_session(self):
+            # File tools aren't enabled. The SDK's default download listener is
+            # browser-wide, even when accept_downloads is false. Don't register
+            # it or change another task's existing browser download behavior.
+            return None
 
     class OwnedSessionManager(SessionManager):
         """Keep SDK startup/watchdog initialization inside the assigned scope.
@@ -85,6 +93,9 @@ def scoped_session_class():
             if (name == 'session_manager' and isinstance(value, SessionManager)
                     and not isinstance(value, OwnedSessionManager) and getattr(self, '_startup_scope', None)):
                 value = OwnedSessionManager(self)
+            if (name == '_downloads_watchdog' and isinstance(value, DownloadsWatchdog)
+                    and not isinstance(value, NoDownloadsWatchdog)):
+                value = NoDownloadsWatchdog(event_bus=value.event_bus, browser_session=self)
             return super().__setattr__(name, value)
 
         async def refresh_assigned_scope(self):
@@ -99,6 +110,8 @@ def scoped_session_class():
             return scope
 
         async def start_scoped(self, lease, read_scope):
+            self.browser_profile = self.browser_profile.model_copy(update={
+                'permissions': [], 'accept_downloads': False, 'auto_download_pdfs': False})
             self._startup_scope = dict(lease)
             self._scope_reader = read_scope
             await self.refresh_assigned_scope()
