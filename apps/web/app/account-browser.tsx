@@ -452,6 +452,7 @@ export default function AccountBrowser({
       }
     }, 2000);
     return () => {
+      initialDetails.current.login = undefined;
       canceled = true;
       mounted.current = false;
       active.current = false;

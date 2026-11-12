@@ -49,9 +49,9 @@ export default function ConnectionDetails({ target, onClose, onConnect }: {
       {generic && <label>网站地址<input type="url" required maxLength={2000} value={site}
         onChange={event => { setSite(event.target.value); setError(""); }} placeholder="https://example.com" autoComplete="off" /></label>}
       <p className="field-help">可选：提供本次连接使用的登录信息。留空时先检查已有登录状态。</p>
-      <label>账号<input value={username} maxLength={320} onChange={event => { setUsername(event.target.value); setError(""); }}
+      <label>账号<input value={username} maxLength={500} onChange={event => { setUsername(event.target.value); setError(""); }}
         autoComplete="off" autoCapitalize="none" spellCheck={false} /></label>
-      <label>密码<input type="password" value={password} maxLength={4000} onChange={event => { setPassword(event.target.value); setError(""); }}
+      <label>密码<input type="password" value={password} maxLength={2000} onChange={event => { setPassword(event.target.value); setError(""); }}
         autoComplete="off" /></label>
       <p className="field-help">登录信息仅用于本次连接，结束后清除。</p>
       {error && <p className="field-error" role="alert">{error}</p>}
