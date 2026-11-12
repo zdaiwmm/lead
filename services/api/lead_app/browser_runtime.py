@@ -107,6 +107,7 @@ class NativeNetworkGate:
         self.scripts={}
         self.worker_versions={}
         self.worker_versions_by_page={}
+        self.documents={}
         self.authorize = authorize
         self.claim = claim
         self.lost = lost
@@ -174,6 +175,8 @@ class NativeNetworkGate:
                         if current['targetId']==info['targetId']:
                             current.update(info)
                 elif method == 'Target.detachedFromTarget':
+                    target=self.targets.get(event['sessionId'],{}).get('targetId')
+                    self.documents.pop(target,None)
                     root=self.owners.get(event['sessionId'])
                     if root in self.roots:
                         self.roots[root]['document_revision']=self.roots[root].get('document_revision',0)+1
@@ -185,6 +188,10 @@ class NativeNetworkGate:
                     self.changed.set()
                 elif method == 'Network.requestWillBeSent' and session in self.targets:
                     self.network[(event['requestId'], session)] = event
+                    root=self.owners.get(session)
+                    if root in self.roots:
+                        from .native_auth_flow import note_redirect
+                        note_redirect(self.roots[root],self.targets[session],event)
                     # Request correlation is bounded and never persists permission.
                     if len(self.network) > 4096:
                         self.network.pop(next(iter(self.network)))
@@ -221,7 +228,10 @@ class NativeNetworkGate:
                         self.roots[root]['document_revision']=self.roots[root].get('document_revision',0)+1
                         frame=event.get('frame',{})
                         if method=='Page.frameNavigated' and not frame.get('parentId'):
-                            self.roots[root]['document_token']=[frame.get('id'),frame.get('loaderId'),frame.get('url')]
+                            target=self.targets.get(session,{}).get('targetId')
+                            self.documents[target]=[frame.get('id'),frame.get('loaderId'),frame.get('url')]
+                            if target==root:
+                                self.roots[root]['document_token']=self.documents[target]
         finally:
             self.ready = False
             for future in list(self.pending.values()):
@@ -254,6 +264,8 @@ class NativeNetworkGate:
                     root = next((r for r in self.roots if r == info['openerId']), None)
                     if not root or not self.roots[root].get('connection_ref'):
                         raise ValueError('popup_not_reserved')
+                    from .native_auth_flow import attach_popup
+                    attach_popup(self.roots[root],info)
                 if root:
                     self.owners[session] = root
                 await self.send('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': True,
@@ -525,7 +537,7 @@ class PersistentRuntime:
 
     async def authorize_request(self, scope, target, request):
         from .browser_execution import match_request, origin
-        from .db import one, tx
+        from .db import j, one, tx
         if not self.forward_token():
             return None
         if scope and scope.get('kind')=='identity_probe':
@@ -541,6 +553,20 @@ class PersistentRuntime:
             return None
         if scope:
             await asyncio.to_thread(self.current_scope, scope)
+            from .native_auth_flow import authorize as authorize_auth_flow
+            if scope.get('auth_flow'):
+                flow=scope['auth_flow']
+                flow['current_document']=self.gate.documents.get(target.get('targetId'))
+                if flow.get('completed') and endpoint in {(origin(url),urlsplit(url).path) for url in flow['urls']}:
+                    return None
+            if decision:=authorize_auth_flow(scope,target,request):
+                recorded=urlsplit(request['url'])._replace(query='',fragment='').geturl()
+                if recorded not in scope['authentication_endpoints']:
+                    scope['authentication_endpoints'].append(recorded)
+                    with tx(self.actor.aid) as c:
+                        c.execute('UPDATE lead.takeover_sessions SET connection_data=connection_data || %s WHERE id=%s AND state=\'active\'',
+                            (j({'authentication_endpoints':scope['authentication_endpoints']}),scope['connection_ref']))
+                return decision
             permitted = {origin(url) for url in scope['origins']}
             if origin(request['url']) not in permitted:
                 return None
@@ -823,7 +849,7 @@ class PersistentRuntime:
         scope = entry['scope']
         await asyncio.to_thread(self.current_scope,scope)
         targets = {info['targetId']:target for session,info in self.gate.targets.items()
-                   if self.gate.owners.get(session) == target}
+                   if self.gate.owners.get(session) == target and (info['type']!='page' or info['targetId']==target)}
         return {'task_id':scope['task_id'],'generation':scope['generation'],'target_id':target,
                 'origins':scope['origins'],'targets':targets,
                 **{key:scope[key] for key in ('connection_ref','control_mode','challenge_version') if key in scope}}

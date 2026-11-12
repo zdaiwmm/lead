@@ -13,6 +13,7 @@ from .research import account_read_origins
 class NativeTask:
     def __init__(self,actor,task_id):
         self.actor=actor
+        self.runtime=getattr(actor,'native_runtime',None)
         self.task_id=str(task_id)
         self.worker_id=self.task_id
         self.lease=None
@@ -292,7 +293,7 @@ class NativeTask:
         raise ValueError('native_task_operation_unsupported')
 
     async def close(self):
-        if self.lease:
-            await self.actor.native_runtime.release_page(self.lease['target_id'])
-            self.lease=None
+        lease,self.lease=self.lease,None
         self.page=None
+        if lease and self.runtime:
+            await self.runtime.release_page(lease['target_id'])

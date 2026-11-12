@@ -6,6 +6,7 @@ publication ActionRef. Identity evidence is read from the current self surface.
 """
 import asyncio
 import re
+import time
 
 from .browser_execution import origin
 from .connection_control import transition, unseal
@@ -17,12 +18,14 @@ name:this.getAttribute('name')||'',autocomplete:this.getAttribute('autocomplete'
 passwordCount:form.querySelectorAll('input[type="password"]').length,
 newPassword:!!form.querySelector('input[autocomplete="new-password"]'),
 formText:form.innerText,heading:form.closest('main,section')?.querySelector('h1,h2')?.innerText||document.title,
+fields:Array.from(form.elements).filter(node=>node.name&&!node.disabled).map(node=>node.name),
 hasPassword:!!form.querySelector('input[type="password"]'),hasOtp:!!form.querySelector('input[autocomplete="one-time-code"]')};}'''
 
 
 class NativeConnection:
     def __init__(self,actor,task_id,connection_id):
         self.actor=actor
+        self.runtime=getattr(actor,'native_runtime',None)
         self.task_id=str(task_id)
         self.connection_id=str(connection_id)
         self.lease=None
@@ -33,6 +36,95 @@ class NativeConnection:
         self.anonymous_self=[]
         self.operation_lock=asyncio.Lock()
         self.challenge_lock=asyncio.Lock()
+
+    async def owner_page(self):
+        flow=(self.lease or {}).get('auth_flow') or {}
+        if flow and not flow.get('completed'):
+            gate=self.actor.native_runtime.gate
+            until=time.monotonic()+2
+            while time.monotonic()<until:
+                target=flow.get('popup_target')
+                if target and any(info.get('targetId')==target and gate.owners.get(sid)==self.lease['target_id']
+                        for sid,info in gate.targets.items()):
+                    for page in self.actor.context.pages:
+                        if page.is_closed():
+                            continue
+                        session=await self.actor.context.new_cdp_session(page)
+                        try:
+                            info=(await session.send('Target.getTargetInfo'))['targetInfo']
+                        finally:
+                            await session.detach()
+                        if info['targetId']==target:
+                            return page
+                await asyncio.sleep(.02)
+            raise ValueError('connection_auth_popup_missing')
+        return self.page
+
+    async def advance_auth_flow(self):
+        flow=(self.lease or {}).get('auth_flow') or {}
+        if not flow or flow.get('completed') or not flow.get('callback'):
+            return False
+        page=await self.owner_page()
+        if origin(page.url) not in {origin(value) for value in self.lease['origins']} or page.url not in flow['urls']:
+            return False
+        links=await page.locator('a[href]').evaluate_all("nodes=>nodes.filter(node=>/return|continue|back|返回|继续/i.test(node.innerText)).map(node=>node.href)")
+        links=[url for url in links if origin(url) in {origin(value) for value in self.lease['origins']}]
+        if len(set(links))!=1:
+            return False
+        self.lease['authentication_dispatched']=True
+        flow['completed']=True
+        await self.page.goto(links[0],wait_until='domcontentloaded',timeout=30000)
+        await page.close()
+        return True
+
+    async def prepare_owner_input(self,page,body):
+        """Freeze one actually submitted person form before Chrome pauses it."""
+        flow=(self.lease or {}).get('auth_flow') or {}
+        if page is self.page and body.kind=='click' and (not flow or flow.get('completed')):
+            from .native_auth_flow import popup_destination, reserve
+            facts=await page.evaluate('''point=>{const node=document.elementFromPoint(point.x,point.y)?.closest('a,button,input');
+                if(!node)return null;return {tag:node.tagName,text:node.innerText||node.value||'',href:node.href,
+                    target:node.target||'',onclick:node.getAttribute('onclick')||'',form:!!node.form};}''',{'x':body.x,'y':body.y})
+            if destination:=popup_destination(facts,page.url):
+                await self.actor.forward_proxy.validate_url(destination)
+                reserve(self.lease,destination)
+            return
+        if not flow or flow.get('completed') or page is self.page or body.kind not in ('click','key'):
+            return
+        if body.kind=='key' and body.text!='Enter':
+            return
+        from .native_auth_flow import body_hash
+        target=flow.get('popup_target')
+        before=self.actor.native_runtime.gate.documents.get(target)
+        values=await page.evaluate('''args=>{
+            const node=args.kind==='click'?document.elementFromPoint(args.x,args.y):document.activeElement;
+            const submit=node?.closest('button,input[type=submit]');
+            if(args.kind==='click'&&(!submit||submit.type!=='submit'))return null;
+            const form=node?.form||submit?.form;if(!form||form.method.toUpperCase()!=='POST'||
+                !['','application/x-www-form-urlencoded'].includes(form.enctype))return null;
+            if(!/sign[\\s-]*in|log[\\s-]*in|authenticate|verify|登录|登入|验证/i.test(form.innerText+' '+document.title)||
+                /delete|purchase|billing|subscribe|购买|删除|支付/i.test(form.innerText))return null;
+            if(!form.querySelector('input[type=password],input[autocomplete="one-time-code"]'))return null;
+            const fields={};for(const item of form.elements){
+                if(!item.name||item.disabled||['button','reset','submit','file'].includes(item.type))continue;
+                if(item.type==='checkbox'||item.type==='radio')return null;
+                if(Object.hasOwn(fields,item.name))return null;fields[item.name]=item.value;
+            }
+            if(submit?.name)fields[submit.name]=submit.value;
+            return {url:form.action,fields};
+        }''',{'kind':body.kind,'x':body.x,'y':body.y})
+        if not values or len(values['fields'])>40 or origin(values['url'])!=origin(page.url):
+            return
+        from .native_auth_flow import check_auth_form
+        check_auth_form(values['url'],values['fields'])
+        if before!=self.actor.native_runtime.gate.documents.get(target):
+            raise ValueError('connection_auth_document_changed')
+        flow['document']=before
+        flow['owner_form']={'url':values['url'],'body_hash':body_hash(values['fields']),
+            'document':before,'version':self.lease['challenge_version'],'used':False,
+            'expires':time.monotonic()+10}
+        if values['url'] not in flow['urls']:
+            flow['urls'].append(values['url'])
 
     def snapshot(self):
         with tx(self.actor.aid) as c:
@@ -64,6 +156,7 @@ class NativeConnection:
                 self.lease.update(control_mode='automatic',challenge_version=connection['challenge_version'],
                     input_seq=connection['input_seq'],task_generation=task['input'].get('task_generation'),
                     claim={'attempt_token':runtime.get('attempt_token')})
+                await self.advance_auth_flow()
                 return await self.descriptor()
         url=connection['connection_data'].get('site_url')
         if not url or origin(url)!=origin(account['connection_origin']):
@@ -83,9 +176,8 @@ class NativeConnection:
         return await self.descriptor()
 
     async def observe_current(self):
+        await self.advance_auth_flow()
         _,connection,account=await asyncio.to_thread(self.snapshot)
-        if account['platform']!='web':
-            return await self.report_identity({'self_link_selector':'body'})
         if account.get('external_account_id'):
             with tx(self.actor.aid) as c:
                 previous=one(c,"""SELECT connection_data->>'self_selector' selector,connection_data->>'self_url' self_url,
@@ -100,6 +192,9 @@ class NativeConnection:
 
     async def person_only_challenge(self):
         from .native_challenges import person_challenge
+        flow=(self.lease or {}).get('auth_flow') or {}
+        if flow.get('popup_target') and not flow.get('completed'):
+            return True
         return bool(await person_challenge(self.page))
 
     async def refresh_challenge(self,*,force=False,settling=False):
@@ -114,16 +209,33 @@ class NativeConnection:
             self.lease.update(control_mode='owner',challenge_version=connection['challenge_version'],input_seq=connection['input_seq'],
                 task_generation=task['input'].get('task_generation'))
             await asyncio.to_thread(self.actor.native_runtime.current_scope,self.lease)
-            before=self.lease.get('document_token')
+            try:
+                page=await self.owner_page()
+            except ValueError:
+                if settling:
+                    return result
+                raise
+            flow=self.lease.get('auth_flow') or {}
+            target=flow.get('popup_target') if not flow.get('completed') else self.lease['target_id']
+            before=self.actor.native_runtime.gate.documents.get(target) or self.lease.get('document_token')
             from playwright.async_api import Error as PlaywrightError
             try:
                 async with asyncio.timeout(4):
-                    facts=await person_challenge(self.page)
+                    facts=await person_challenge(page)
+                    if not facts and page is not self.page and not flow.get('callback'):
+                        import hashlib
+                        import json
+                        markers=await page.locator('form').evaluate_all('''forms=>forms.filter(form=>form.method.toUpperCase()==='POST'&&
+                            form.querySelector('input[type=password],input[autocomplete="one-time-code"]')).map(form=>[
+                                form.action,Array.from(form.querySelectorAll('input[type=hidden][name]')).filter(node=>
+                                    /nonce|csrf|state|token/i.test(node.name)).map(node=>[node.name,node.value])])''')
+                        facts={'kind':'identity_sign_in','fingerprint':hashlib.sha256(json.dumps([page.url,markers],sort_keys=True).encode()).hexdigest(),
+                            'reason':'请在原身份站点窗口完成登录；本站保存的密码不会发送给该身份站点。'}
             except (PlaywrightError,TimeoutError):
                 if settling:
                     return result
                 raise ValueError('connection_challenge_navigation_pending') from None
-            if before!=self.lease.get('document_token'):
+            if before!=(self.actor.native_runtime.gate.documents.get(target) or self.lease.get('document_token')):
                 if settling:
                     return result
                 raise ValueError('connection_challenge_document_changed')
@@ -172,6 +284,13 @@ class NativeConnection:
             return {'allowed':True}
         if name=='navigate':
             return {'allowed':origin(values.get('url','')) in {origin(url) for url in self.lease['origins']}}
+        if name=='click':
+            from .native_auth_flow import popup_destination, reserve
+            facts=await self.auth_control(node)
+            if destination:=popup_destination(facts,self.page.url):
+                await self.actor.forward_proxy.validate_url(destination)
+                reserve(self.lease,destination)
+                return {'allowed':True,'reason':'The observed sign-in popup stays on this original connection.'}
         facts=await self.node_facts(node)
         if not facts or facts['hasOtp'] or facts['autocomplete']=='one-time-code':
             return {'allowed':False,'reason':'This is a person-only challenge or an unsupported control.'}
@@ -182,6 +301,8 @@ class NativeConnection:
             return {'allowed':False,'reason':'The current form is not a single-password sign-in form.'}
         if not facts['hasPassword'] or facts['method']!='POST' or origin(facts['action']) not in {origin(url) for url in self.lease['origins']}:
             return {'allowed':False,'reason':'This is not the current credential form.'}
+        from .native_auth_flow import check_auth_form
+        check_auth_form(facts['action'],facts['fields'])
         if name=='input':
             if not facts['name']:
                 return {'allowed':False,'reason':'The credential form has no verifiable field name.'}
@@ -203,6 +324,28 @@ class NativeConnection:
                     WHERE id=%s AND state='active' AND control_mode='automatic' AND challenge_version=%s''',
                     (j({'authentication_endpoints':self.lease['authentication_endpoints']}),self.connection_id,self.lease['challenge_version']))
         return {'allowed':True}
+
+    async def auth_control(self,node):
+        await self.descriptor()
+        gate=self.actor.native_runtime.gate
+        sessions=[sid for sid,info in gate.targets.items() if info['targetId']==node.get('target_id')
+            and info['targetId']==self.lease['target_id'] and gate.owners.get(sid)==self.lease['target_id']]
+        if len(sessions)!=1:
+            return None
+        sid=sessions[0]
+        result=await gate.send('DOM.resolveNode',{'backendNodeId':node['backend_node_id']},sid)
+        identifier=result['object'].get('objectId')
+        if not identifier:
+            return None
+        try:
+            value=await gate.send('Runtime.callFunctionOn',{'objectId':identifier,'functionDeclaration':'''function(){
+                const node=this.closest('a,button,input');if(!node)return null;
+                const r=node.getBoundingClientRect();if(!r.width||!r.height)return null;
+                return {tag:node.tagName,text:node.innerText||node.value||'',href:node.href,target:node.target||'',
+                    onclick:node.getAttribute('onclick')||'',form:!!node.form};}''','returnByValue':True},sid)
+            return value.get('result',{}).get('value')
+        finally:
+            await gate.send('Runtime.releaseObject',{'objectId':identifier},sid)
 
     def current_observation(self):
         _,connection,account=self.snapshot()
@@ -238,10 +381,6 @@ class NativeConnection:
         await self.descriptor()
         _,connection,account=await asyncio.to_thread(self.snapshot)
         expected=(connection['challenge_version'],connection['input_seq'],str(self.actor.session),account['binding_version'])
-        if account['platform']!='web':
-            from .account_connection import observe_identity
-            observed=await observe_identity(self.page,account['platform'],self.actor.session)
-            return self.remember_observation(observed.model_dump(mode='json'),expected)
         selector=args.get('subject_selector','')
         if not isinstance(selector,str) or not 1<=len(selector)<=300:
             raise ValueError('self_subject_missing')
@@ -275,7 +414,8 @@ class NativeConnection:
         if not self.lease.get('authentication_dispatched') and subject!=account.get('external_account_id'):
             raise ValueError('self_surface_not_authenticated')
         href=self.self_entry['url']
-        self.observation={'status':'authenticated','operating_subject':{'namespace':'web','external_id':subject,'id_kind':'stable'},
+        kind='handle' if re.search(r'user\s*name|username|handle|用户名',observed['evidence']['label'],re.I) else 'stable'
+        self.observation={'status':'authenticated','operating_subject':{'namespace':account['platform'],'external_id':subject,'id_kind':kind},
             'evidence_refs':['native-self:'+self.connection_id+':'+str(self.lease['challenge_version'])]}
         with tx(self.actor.aid) as c:
             c.execute('UPDATE lead.takeover_sessions SET connection_data=connection_data || %s WHERE id=%s',
@@ -302,12 +442,17 @@ class NativeConnection:
     async def handoff(self,reason):
         if not self.lease:
             return
-        endpoints=await self.page.locator('form').evaluate_all("""forms=>forms.filter(form=>form.method.toUpperCase()==='POST' &&
+        page=await self.owner_page()
+        endpoints=await page.locator('form').evaluate_all("""forms=>forms.filter(form=>form.method.toUpperCase()==='POST' &&
             form.querySelector('input[type="password"],input[autocomplete="one-time-code"]')).map(form=>form.action)""")
         for endpoint in endpoints:
-            if origin(endpoint) in {origin(url) for url in self.lease['origins']} and endpoint not in self.lease['authentication_endpoints']:
+            if (origin(endpoint) in {origin(url) for url in self.lease['origins']} or page is not self.page
+                    and origin(endpoint)==origin(page.url)) and endpoint not in self.lease['authentication_endpoints']:
                 self.lease['authentication_endpoints'].append(endpoint)
         _,connection,_=await asyncio.to_thread(self.snapshot)
+        if self.lease.get('auth_flow'):
+            from .growth.contracts import utcnow
+            self.lease['auth_flow']['expires']=time.monotonic()+max(0,(connection['expires_at']-utcnow()).total_seconds())
         with tx(self.actor.aid) as c:
             c.execute('UPDATE lead.takeover_sessions SET connection_data=connection_data || %s WHERE id=%s AND challenge_version=%s',
                 (j({'authentication_endpoints':self.lease['authentication_endpoints']}),self.connection_id,connection['challenge_version']))
@@ -335,9 +480,17 @@ class NativeConnection:
         return True
 
     async def close(self):
+        if self.lease and (self.lease.get('auth_flow') or {}).get('popup_target') and not self.lease['auth_flow'].get('completed'):
+            try:
+                popup=await self.owner_page()
+                if popup is not self.page:
+                    await popup.close()
+            except ValueError:
+                pass
         if self.lease:
-            await self.actor.native_runtime.release_page(self.lease['target_id'])
-            self.lease=None
+            lease,self.lease=self.lease,None
+            if self.runtime:
+                await self.runtime.release_page(lease['target_id'])
         self.page=None
 
     async def credentials(self):

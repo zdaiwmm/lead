@@ -251,7 +251,8 @@ async def test_connection_session_keeps_sw_cache_and_nonpublication_posts(monkey
 
             if boundary_hook:
                 return await boundary_hook({'context':context,'actor':actor,'controller':controller,'page':page,'site':site,
-                    'source_count':source_count,'decisions':decisions,'post_seen':post_seen})
+                    'source_count':source_count,'decisions':decisions,'post_seen':post_seen,
+                    'pending':pending,'task':task,'claim':claim})
 
             # Normal SW-owned refresh and a normal reading POST keep their real
             # methods and bodies. Neither is converted into an Action publish.
@@ -286,10 +287,11 @@ async def test_connection_session_keeps_sw_cache_and_nonpublication_posts(monkey
                     cookies={'lead_session': token('owner')},
                     headers={'Origin': 'http://127.0.0.1:3100', 'X-Lead-Request': '1'}) as owner:
                 with tx(aid) as connection:
-                    current = one(connection, 'SELECT challenge_version FROM lead.takeover_sessions WHERE id=%s', (pending['takeover_id'],))
-                ended = await owner.post(f"/api/agents/{aid}/connections/{pending['takeover_id']}/control",
-                    json={'challenge_version': current['challenge_version'], 'action': 'cancel'})
-                assert ended.status_code == 200, ended.text
+                    current = one(connection, 'SELECT state,challenge_version FROM lead.takeover_sessions WHERE id=%s', (pending['takeover_id'],))
+                if current['state']=='active':
+                    ended = await owner.post(f"/api/agents/{aid}/connections/{pending['takeover_id']}/control",
+                        json={'challenge_version': current['challenge_version'], 'action': 'cancel'})
+                    assert ended.status_code == 200, ended.text
             await controller.reconcile()
 
         # The ended real connection's recorded authentication endpoint must not

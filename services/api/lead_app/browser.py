@@ -1275,13 +1275,11 @@ async def observe_account(aid: UUID, body: OpenRequest):
             return SessionObservation(status='temporarily_unavailable').model_dump(mode='json')
         if controller.current_observation():
             return controller.current_observation()
-        if body.platform=='web':
-            _,connection,_=controller.snapshot()
-            selector=connection['connection_data'].get('self_selector')
-            if selector and connection['control_mode']=='automatic':
-                return await controller.report_identity({'self_link_selector':selector})
-            return SessionObservation(status='challenge',owner_action='请完成原窗口的本人步骤，然后交回自动核验。').model_dump(mode='json')
-        return (await observe_identity(controller.page,body.platform,actor.session)).model_dump(mode='json')
+        _,connection,_=controller.snapshot()
+        selector=connection['connection_data'].get('self_selector')
+        if selector and connection['control_mode']=='automatic':
+            return await controller.report_identity({'subject_selector':selector})
+        return SessionObservation(status='challenge',owner_action='请完成原窗口的本人步骤，然后交回自动核验。').model_dump(mode='json')
     if not hasattr(actor,"connection_observer_lock"):
         actor.connection_observer_lock = asyncio.Lock()
     async with actor.connection_observer_lock:
@@ -1999,7 +1997,7 @@ async def connection_page(actor,takeover):
         raise HTTPException(409,'当前连接页面尚未就绪')
     await controller.refresh_challenge()
     await asyncio.to_thread(actor.native_runtime.current_scope,controller.lease)
-    return controller.page
+    return await controller.owner_page()
 
 
 @app.get("/agents/{aid}/screenshot")
@@ -2066,6 +2064,10 @@ async def user_input(aid: str, body: InputRequest):
     actor = await gateway.get(aid,account_profiles.takeover_profile(aid,body.takeover) if body.takeover else None, allow_challenge=True)
     async with manual_control(actor), input_guard(aid,actor,body):
         page=await connection_page(actor,body.takeover)
+        if actor.native_runtime and body.takeover:
+            controller=actor.connection_pages.get(str(body.takeover))
+            if controller:
+                await controller.prepare_owner_input(page,body)
         if body.kind in ("composition_start", "composition_end"):
             return {"ok": True}
         if body.kind == "click":
