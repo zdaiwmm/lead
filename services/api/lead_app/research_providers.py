@@ -186,7 +186,13 @@ def normalize(provider, operation, data, request_id=None):
         except (ValueError,TypeError,AttributeError):
             continue
         # Same original URL has the same identity regardless of provider.
-        identity=hashlib.sha256(url.encode()).hexdigest()
+        canonical=url
+        parsed=urlsplit(url)
+        if parsed.hostname in ('reddit.com','www.reddit.com','old.reddit.com'):
+            matched=re.search(r'/comments/([a-z0-9]+)(?:/[^/]+/([a-z0-9]+))?',parsed.path)
+            if matched:
+                canonical='reddit:'+('t1_'+matched[2] if matched[2] else 't3_'+matched[1])
+        identity=hashlib.sha256(canonical.encode()).hexdigest()
         if identity in seen:
             continue
         seen.add(identity)

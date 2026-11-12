@@ -174,3 +174,48 @@ def test_environment_credential_has_one_tenant_owner(monkeypatch):
         assert providers.configuration('tavily','web.search')[1]=='credential_scope_conflict'
     with tenant_scope(other):
         assert providers.configuration('tavily','web.search')[1]=='credential_scope_conflict'
+
+
+async def test_timeout_replay_never_reissues_request(growth_agent,monkeypatch):
+    import httpx
+    setup_config(monkeypatch)
+    tid=task(growth_agent)
+    calls=[]
+    def request(req):
+        calls.append(req)
+        raise httpx.ReadTimeout('fixture missing response',request=req)
+    def transport(**kwargs):
+        assert kwargs=={'retries':0}
+        return httpx.MockTransport(request)
+    monkeypatch.setattr(providers.httpx,'AsyncHTTPTransport',transport)
+    kwargs={'execution_claim':claim(growth_agent,tid)}
+    result=await providers.research_call(growth_agent,tid,'tavily','web.search',{'query':'research'},'timeout:once',**kwargs)
+    replay=await providers.research_call(growth_agent,tid,'tavily','web.search',{'query':'research'},'timeout:once',**kwargs)
+    assert result['reason']=='transport_unknown' and replay['replayed']
+    assert len(calls)==1
+
+
+async def test_success_receipt_units_and_same_call_replay(growth_agent,monkeypatch):
+    import httpx
+    setup_config(monkeypatch)
+    tid=task(growth_agent)
+    calls=[]
+    def request(req):
+        calls.append(req)
+        assert str(req.url)=='https://api.tavily.com/search'
+        return httpx.Response(200,json={'request_id':'fixture-receipt','results':[{'url':'https://example.com/source','content':'excerpt','raw_content':'actual source'}], 'usage':{'credits':1}})
+    monkeypatch.setattr(providers.httpx,'AsyncHTTPTransport',lambda **kwargs:httpx.MockTransport(request))
+    kwargs={'execution_claim':claim(growth_agent,tid)}
+    first=await providers.research_call(growth_agent,tid,'tavily','web.search',{'query':'research'},'success:once',**kwargs)
+    second=await providers.research_call(growth_agent,tid,'tavily','web.search',{'query':'research'},'success:once',**kwargs)
+    assert first['billing_state']=='known' and first['sources'][0]['body']=='actual source'
+    assert second['replayed'] and len(calls)==1
+    with tx(growth_agent) as c:
+        assert one(c,"SELECT sum(units) n FROM lead.usage_events WHERE category='research_provider'")['n']==1000
+
+
+def test_same_reddit_post_deduplicates_across_provider_urls():
+    public=providers.normalize('tavily','web.search',{'results':[{'url':'https://www.reddit.com/r/fixture/comments/abc123/title/','content':'source'}]})
+    social=providers.normalize('tikhub','social.search',{'data':{'children':[{'post':{'id':'t3_abc123','postTitle':'Title','score':0}}]}})
+    assert public['sources'][0]['source_id']==social['sources'][0]['source_id']
+    assert social['sources'][0]['metrics']['score']==0
