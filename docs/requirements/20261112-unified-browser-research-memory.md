@@ -812,6 +812,11 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - 新独立真实Temporal整合`95833ba`（源`e664e38703a87d271d0d6830ac7cb40747fcc578`）2项30.21秒，未调用真实模型/网站：实际DB/outbox→原worker.deliver_workspace→原Workflow/活动→真实research/probe/consume→经营decision；仅最低HTTP HTML与模型输出受控。替代来源文档持久成功，still_blocked probe虽succeeded真实view仍blocked；原source proof真实并发租约仅一次，两个有效依赖续原gen2，另一case过期依赖由Workflow自然终止且不复活；重复outbox不增probe/source/wake，3份Workflow历史replay通过。主线CI使用自己的隔离Compose端点，补严格GitHub-hosted环境核对以实际执行此case；本地仍强制私有manifest，不因CI缺该manifest跳过。
 - 独立原生live fence36项通过：同alias URL热改、Tokyo profile/endpoint/绑定/IP与配置撤回、FB split撤回均拒旧scope，原public空storage与pending→verified合法转换保持。随后真实P1反例确认：原discover RPC回包在pause→resume后给已canceled任务铸造新rev4 grant。`0b70f05`修为服务器producer_scope及原Task/claim/control/意图/route/绑定同事务校验，整批任一stale全部回滚；独立先以完整有效scope在旧码复红，固定新码12项1.30秒通过，原任务canceled、currentintent仍running/rev4、target/grant均0且旧attempt未改，拒绝非缺字段误绿。
 
+- C04真实Linux原生挑战4例39.25秒通过：owner等待释放执行槽，另一兼容origin账号可完成登录；原挑战实际输入/恢复后续原Task并finish成功，取消/过期拒绝迟到操作。新增反例保留：验证码已填但未提交，旧码恢复后产生3次无意义假模型请求；`e000fd7`在导航与每次原生步骤前检查本人挑战，修后新增请求0、继续等待本人。假模型HTTP接收端仅保存验证码literal是否出现，扫描为false。QR、passkey和挑战刷新仍未验收，不以OTP覆盖代替。
+- C25实际账号读取身份漂移反例：浏览器当前私有主体已是B、DB仍绑定A时，旧码会将B正文作为A来源持久化；未调用模型。`7af4c04`在账户读取开始、SDK观察及来源捕获前后核对当前私有自身身份，错误主体仅把运行健康置needs_auth，保留绑定/主体/原意图/授权。`2a99d0a`将两个严格类型错误沿原工具/WorkResult保留账户故障范围。独立真实Linux强化例先红后绿1项7.13秒，确认DTO与文档无B正文、任务不成功、绑定等事实未改，零新增模型请求。
+- C16 `8276936`：原owner恢复/取消API实际改变连接条件并唤醒或终止原Task，沿原generation/outbox/claim执行，不重置累计次数/费用/期限，不将恢复提示当proof。连接版本、模式、期限及真实verified_at进入条件；普通输入不换挑战版本。3项真实DB反例先红，修后原消费者共66项2.08秒通过；各类Wait和有效进展续片仍须核心补齐。
+- `1b2d1c3`修正实际Node APIRequest发送普通HTTP时使用CONNECT:80而原代理只允443导致的502；仍仅允许80/443、当前认证/控制代次和公网IP核对。实际固定Playwright Node请求经原代理向私有假上游只POST一次，加旧80/443隧道、私网/其他端口拒绝及关闭等共11项0.95秒通过。此前默认长state导致的Unix路径失败已单列，短隔离state的旧代码2红6绿才作为产品反例。实际发布动作仍待核心完整链路，不将代理单项通过视作发布通过。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2/通用发布回复仍在接线和验证，不能因为基础桥、探针或部分模块通过就开启共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
