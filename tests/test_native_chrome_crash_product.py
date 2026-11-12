@@ -1,8 +1,8 @@
-"""One real Chrome-main-process fault across two original account task pages.
+"""One real Chrome-main fault, independent public read and original recovery.
 
 Uses synthetic fixture-A logins only. No model semantics, publication, forged
-running claim or account row is involved. Another independent instance is
-explicitly outside this minimal case's evidence.
+running claim or account row is involved. Public research uses its real factory;
+recovered members need fresh private self, never DB connected state alone.
 """
 import asyncio
 import copy
@@ -51,8 +51,9 @@ def parent_chain(pid):
 
 
 @pytest.mark.asyncio
-async def test_real_chrome_main_failure_revokes_two_shared_original_task_pages(monkeypatch):
-    from lead_app import account_profiles
+async def test_real_chrome_fault_isolates_public_and_revalidates_shared_recovery(monkeypatch):
+    from lead_app import account_profiles, browser
+    from lead_app.browser_tools import BrowserTools
     from lead_app.db import all_rows, one, tx, uid
     from lead_app.growth.contracts import TaskSpec, utcnow
     from lead_app.growth.runtime import advance
@@ -94,6 +95,39 @@ async def test_real_chrome_main_failure_revokes_two_shared_original_task_pages(m
         before_model = len(context['model_calls'])
         old_session, old_epoch = str(actor.session), actor.epoch
         storage = str((actor.folder/'storage').resolve())
+        old_exit = (copy.deepcopy(runtime.execution_ref), runtime.transport_endpoint,
+                    runtime.network_stamp, runtime.profile_exit, copy.deepcopy(actor.forward_proxy.upstream))
+        with tx(aid) as connection:
+            public_ref = submit_work(connection, aid, TaskSpec(kind='research', purpose='public-crash-survivor',
+                payload={'urls': [context['board'].origin + '/home'], 'question': 'Read the public board'},
+                review_at=utcnow()+timedelta(hours=1), dedupe_key='public-crash-survivor-' + uid()))
+        assert advance(public_ref)['state'] == 'ready'
+        public = BrowserTools(aid, 'Read the public board independently', task_id=public_ref['task_id'], mode='autonomous')
+        public_before = await public.command('open', {'url': context['board'].origin + '/home'})
+        if public_before.get('error'):
+            print('CHROME_PUBLIC_FACTORY_DIAGNOSTICS ' + json.dumps(public_before, sort_keys=True))
+        assert not public_before.get('error'), public_before
+        with tx(aid) as connection:
+            public_run = one(connection, 'SELECT * FROM lead.browser_runs WHERE id=%s', (public.run_id,))
+        public_actor = await browser.gateway.get(aid, public_run['profile_id'])
+        assert public_actor is not actor and public_actor.profile['slot'] == 'native-public-research'
+        public_page = public_actor.research_pages[public.run_id].page
+        public_epoch, public_session = public_actor.epoch, str(public_actor.session)
+        public_storage = str((public_actor.folder/'storage').resolve())
+        public_processes = []
+        for pid in descendant_processes(os.getpid()):
+            try:
+                argv = command_line(pid)
+            except OSError:
+                continue
+            if (argv and Path(argv[0]).name in ('chrome', 'chromium', 'google-chrome')
+                    and '--user-data-dir=' + public_storage in argv
+                    and any(value.startswith('--remote-debugging-port=') for value in argv)
+                    and not any(value.startswith('--type=') for value in argv)):
+                public_processes.append((pid, argv))
+        assert len(public_processes) == 1
+        public_pid, public_argv = public_processes[0]
+        assert os.getpid() in parent_chain(public_pid)
         candidates = []
         for pid in descendant_processes(os.getpid()):
             try:
@@ -107,6 +141,7 @@ async def test_real_chrome_main_failure_revokes_two_shared_original_task_pages(m
                 candidates.append((pid, argv))
         assert len(candidates) == 1, [(pid, argv[0]) for pid, argv in candidates]
         chrome_pid, chrome_argv = candidates[0]
+        assert chrome_pid != public_pid
         ancestry = parent_chain(chrome_pid)
         assert os.getpid() in ancestry and chrome_pid != os.getpid()
         # Recheck the exact process immediately before the only destructive step.
@@ -152,14 +187,66 @@ async def test_real_chrome_main_failure_revokes_two_shared_original_task_pages(m
             'lease_state': lease['state'], 'lease_epoch': lease['epoch'], 'old_epoch_invalid': epoch_invalid,
             'pages_closed': [page.is_closed() for page in pages], 'scope_errors': scope_errors,
             'authority_errors': authority_errors, 'forward_token_revoked': runtime.forward_token() is None,
-            'new_model_requests': len(context['model_calls'])-before_model,
-            'independent_instance_survives': 'not covered by this minimal shared-instance case'}
+            'new_model_requests': len(context['model_calls'])-before_model}
         print('CHROME_CRASH_DIAGNOSTICS ' + json.dumps(diagnostics, sort_keys=True))
         assert diagnostics['runtime_closed'] and diagnostics['actor_disconnected'], diagnostics
         assert diagnostics['old_session_state'] != 'ready' and diagnostics['old_session_ended'] and epoch_invalid, diagnostics
         assert all(diagnostics['pages_closed']) and all(scope_errors) and all(authority_errors), diagnostics
         assert diagnostics['forward_token_revoked'] and diagnostics['new_model_requests'] == 0, diagnostics
-        return diagnostics
+
+        public_after = await public.command('read')
+        public_diagnostics = {'error': public_after.get('error'),
+            'same_original_page': public_actor.research_pages[public.run_id].page is public_page,
+            'same_epoch': public_actor.epoch == public_epoch, 'same_session': str(public_actor.session) == public_session,
+            'same_process': command_line(public_pid) == public_argv,
+            'forward_token_current': public_actor.native_runtime.forward_token() is not None,
+            'read_nonempty': bool(public_after.get('text')), 'page_closed': public_page.is_closed()}
+        print('CHROME_PUBLIC_SURVIVOR_DIAGNOSTICS ' + json.dumps(public_diagnostics, sort_keys=True))
+        assert not public_diagnostics['error'] and public_diagnostics['read_nonempty'], public_diagnostics
+        assert all(public_diagnostics[key] for key in ('same_original_page', 'same_epoch', 'same_session', 'same_process', 'forward_token_current')), public_diagnostics
+        assert not public_diagnostics['page_closed']
+
+        # This is the ordinary factory recovery entry, with the original profile
+        # and persistent storage. Never write session, epoch, cookie or health.
+        replacement = await browser.gateway.get(aid, actor.profile['id'])
+        recovered = replacement.native_runtime
+        new_exit = (recovered.execution_ref, recovered.transport_endpoint,
+                    recovered.network_stamp, recovered.profile_exit, replacement.forward_proxy.upstream)
+        recovery = {'new_actor': replacement is not actor, 'same_storage': str((replacement.folder/'storage').resolve()) == storage,
+            'same_registered_exit': new_exit == old_exit, 'new_session': str(replacement.session) != old_session,
+            'old_epoch': old_epoch, 'new_epoch': replacement.epoch, 'old_targets_rejected': [], 'private_self': []}
+        for scope in scopes:
+            try:
+                await recovered.scope_view(scope['target_id'])
+                recovery['old_targets_rejected'].append(False)
+            except Exception:
+                recovery['old_targets_rejected'].append(True)
+        restored_controllers = [NativeTask(replacement, ref['task_id']) for ref in (ref_a, ref_b)]
+        try:
+            for controller, site in zip(restored_controllers, (context['board'], context['boards']['93.184.215.15'])):
+                try:
+                    await controller.start(site.origin + '/home')
+                    account = await controller.verify_private_self()
+                    recovery['private_self'].append({'authenticated': True, 'target_id': controller.lease['target_id'],
+                        'generation': controller.lease['generation'], 'health': account['state']})
+                except Exception as error:
+                    with tx(aid) as connection:
+                        health = one(connection, 'SELECT state FROM lead.social_accounts WHERE id=%s',
+                                     (account_a if site is context['board'] else account_b['id'],))['state']
+                    recovery['private_self'].append({'authenticated': False, 'error_type': type(error).__name__,
+                        'reason': str(error)[:250], 'database_health': health})
+        finally:
+            for controller in restored_controllers:
+                await controller.close()
+            await public.finish('succeeded')
+        print('CHROME_RECOVERY_DIAGNOSTICS ' + json.dumps(recovery, sort_keys=True))
+        assert all(recovery[key] for key in ('new_actor', 'same_storage', 'same_registered_exit', 'new_session')), recovery
+        assert replacement.epoch > old_epoch and all(recovery['old_targets_rejected']), recovery
+        assert len(recovery['private_self']) == 2 and all(row['authenticated'] for row in recovery['private_self']), recovery
+        assert all(row['generation'] == replacement.epoch and row['target_id'] not in {scope['target_id'] for scope in scopes}
+                   for row in recovery['private_self']), recovery
+        assert len(context['model_calls']) == before_model
+        return {'death': diagnostics, 'public': public_diagnostics, 'recovery': recovery, 'killed_actual_chrome_main': True}
 
     result = await verify_login(monkeypatch, after_discovery=check)
     assert result['action_check']['killed_actual_chrome_main']
