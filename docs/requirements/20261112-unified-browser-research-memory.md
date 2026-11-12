@@ -805,6 +805,10 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - C07/C10产品准入增量`80f804d`：真实双Task触发旧profile全局排他，独立DB反例4红1过；现同一原生profile最多2个不同账号有效运行claim，同账号继续互斥，连接占用只阻当前账号，等待finish释放名额，旧Firefox/profile任务仍排他。故障resource按原生账号分开、进程/原动作隔离仍由原profile lease负责。修后直接消费者36项通过，补同号有空槽仍互斥后6项专测通过；真实双业务浏览器及内部身份辅助页并发待核心接续，不能用DB claims代替浏览器重叠。
 
+- `8bc586e`补服务器签发ExecutionRef的可选registry内容hash：同名transport热改后新ActionRef及unknown回查不能改向新地址；旧账本无hash不补造历史条件、不重投。16项新增与原消费者78项通过；`80f804d`准入另6项独立真实DB复核通过。原生运行实例/出口即时fence随下一核心增量接入。
+- `3ce50c7`冻结完整方法发现producer（源`a78f00e550bc13194ba6211142a2e51498ea39b9`）：Linux两个产品机械例21.02秒，现实际finish后DB succeeded/waiting_user终态均有assert；第二origin兼容账号真实登录、两个原TaskRef持主页时fresh私有self辅助页可并行，过时编辑署名不能掩盖当前私有主体变化。原discover入口经SDK导航/propose_method两次假模型取得实际方法及grant，receipt仍unobserved，未伪造verified marker。新空库方法/回执投影/registry/准入/动作46项2.66秒通过。3片段与180秒等硬上限不等于完整C15；一次定向修正/连续无新状态及各Wait生产者继续补验。
+- 第二布局B在上述producer冻结、释放记录写入后才解封；原独立文件SHA256仍`840b0467e1fd11642a5409f104fd53b188e3773528efec4d564adf4988453b54`，未为产品修改页面。`23d79c8`入库仅按Ruff排序stdlib imports，模块其余AST和imports集合与原版完全一致，仓库文件SHA256为`6badeffc6b75802b31cb8c51f5f0f5ff4c8934ae3d1fecb2514c6d031f731e1a`，5项HTTP自验2.57秒；此不是未见页面实际模型验收。核心负责人为进一步减少动作消费者受布局影响，仍主动不读B，先完成通用发送/回查后才使用。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2/通用发布回复仍在接线和验证，不能因为基础桥、探针或部分模块通过就开启共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。

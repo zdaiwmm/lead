@@ -2,12 +2,17 @@
 import json
 
 import pytest
-
 from lead_app import execution_routes
 from lead_app.browser_actions import claim_request, prepare_binding
 from lead_app.channel_contracts import ExecutionRef
 from lead_app.db import one, tx
-from lead_app.execution_routes import endpoint, register, request_route, resolve, transports
+from lead_app.execution_routes import (
+    endpoint,
+    register,
+    request_route,
+    resolve,
+    transports,
+)
 from test_browser_action_transactions import native_work
 
 
