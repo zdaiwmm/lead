@@ -479,6 +479,17 @@ def test_preflight_reads_exact_staged_hold_without_reopening_intake(hook,monkeyp
     assert checks==[((old,),{'fenced':pending,'require_idle':not pending})]
 
 
+def test_preflight_rejects_a_hold_journal_for_another_running_revision(hook,monkeypatch):
+    import json
+    sha='b'*40
+    monkeypatch.setattr(hook,'current',lambda:'a'*40)
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda revision:True)
+    monkeypatch.setattr(hook,'executor_host_file',lambda *args,**kwargs:json.dumps({'sha':sha,'old':'c'*40}).encode())
+    monkeypatch.setattr(hook,'verify',lambda *args,**kwargs:pytest.fail('A mismatched hold must never reach verification'))
+    with pytest.raises(hook.Refused,match='revision differs'):
+        hook.release_preflight(sha)
+
+
 def test_interrupted_cutover_resumes_only_after_same_app_revision_is_observed(hook,monkeypatch):
     sha='b'*40
     calls=[]

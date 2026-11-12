@@ -1,11 +1,10 @@
 import asyncio
 import shutil
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
 from lead_app import domain
-from lead_app.config import ROOT, STATE
+from lead_app.config import ROOT
 from lead_app.db import uid
 from lead_app.growth import runtime
 from lead_app.growth.contracts import utcnow
@@ -42,8 +41,10 @@ async def test_real_queue_server_restart_resumes_both_original_projects(tmp_path
         common = __import__("subprocess").check_output(["git","rev-parse","--git-common-dir"],cwd=ROOT,text=True).strip()
         candidate=(ROOT/common).resolve().parent/".state/tools/temporal"
         binary=str(candidate) if candidate.is_file() else None
+    download=tmp_path/'server-cache'
+    download.mkdir()
     kwargs={"dev_server_database_filename":str(tmp_path/"queue.sqlite"),
-        "download_dest_dir":str(Path(STATE).parent/"test-server"),"dev_server_log_level":"error"}
+        "download_dest_dir":str(download),"dev_server_log_level":"error"}
     if binary:
         kwargs["dev_server_existing_path"]=binary
     seen,executed,completed=set(),[],set()
