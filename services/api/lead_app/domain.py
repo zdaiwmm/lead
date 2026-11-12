@@ -344,6 +344,9 @@ def agent_detail(aid, *, chat=False, message_seq=None):
             account["operating_intent"] = one(c,"SELECT desired,revision FROM lead.account_operating_intents WHERE account_id=%s",(account["id"],))
             from .growth.store import enabled as growth_enabled
             if growth_enabled(a):
+                from .browser_capabilities import verified_operations
+                account["verified_operations"] = verified_operations(c,account["id"])
+                account["operational_ready"] = bool(account["operational_ready"] or account["verified_operations"])
                 discovery = one(c,"""SELECT state,result->'output'->'output' output FROM lead.tasks WHERE type='growth.account'
                     AND input#>>'{spec,purpose}'='discover' AND input#>>'{spec,account_id}'=%s
                     ORDER BY created_at DESC,id DESC LIMIT 1""",(str(account["id"]),))

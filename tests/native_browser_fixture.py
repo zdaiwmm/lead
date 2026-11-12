@@ -30,8 +30,9 @@ class BoardState:
 
 
 class NativeBoard:
-    def __init__(self, state=None):
+    def __init__(self, state=None, public_origin=None):
         self.state = state or BoardState()
+        self.public_origin = public_origin
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), self.handler())
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
@@ -184,7 +185,7 @@ class NativeBoard:
 
     @property
     def origin(self):
-        return 'http://'+self.state.host+':'+str(self.server.server_port)
+        return self.public_origin or 'http://'+self.state.host+':'+str(self.server.server_port)
 
     def start(self):
         self.thread.start()
