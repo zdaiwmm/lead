@@ -1,5 +1,6 @@
 """Dedicated person-only sign-in surfaces stop before the next model call."""
 import os
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -51,3 +52,51 @@ async def test_mentioned_hidden_or_optional_person_step_does_not_block_password_
     controller, page = connection_page
     await page.set_content(html)
     assert not await controller.person_only_challenge()
+
+
+@pytest.mark.asyncio
+async def test_challenge_fingerprint_ignores_typed_input_and_countdown_but_changes_for_new_qr(connection_page):
+    from lead_app.native_challenges import person_challenge
+    _, page = connection_page
+    await page.set_content('<main><h1>Scan QR code to sign in</h1><canvas aria-label="Sign-in QR code" width=80 height=80></canvas><label>Note<input name=note></label><span role=timer>30 seconds</span></main>')
+    first = await person_challenge(page)
+    assert first['kind'] == 'qr' and len(first['fingerprint']) == 64
+    await page.locator('input').fill('ordinary typing')
+    await page.locator('[role=timer]').evaluate("node=>node.innerText='29 seconds'")
+    assert (await person_challenge(page))['fingerprint'] == first['fingerprint']
+    await page.locator('canvas').evaluate("node=>{node.getContext('2d').fillStyle='#111';node.getContext('2d').fillRect(0,0,10,10)}")
+    assert (await person_challenge(page))['fingerprint'] != first['fingerprint']
+
+
+@pytest.mark.asyncio
+async def test_otp_value_does_not_change_challenge_but_its_original_nonce_does(connection_page):
+    from lead_app.native_challenges import person_challenge
+    _, page = connection_page
+    await page.set_content('<main><h1>Confirm sign-in</h1><form method=post action=/challenge><input type=hidden name=challenge_id value=first><input autocomplete=one-time-code name=code></form></main>')
+    first = await person_challenge(page)
+    assert first['kind'] == 'otp'
+    await page.locator('input[name=code]').fill('123456')
+    assert (await person_challenge(page))['fingerprint'] == first['fingerprint']
+    await page.locator('input[name=challenge_id]').evaluate("node=>node.value='second'")
+    assert (await person_challenge(page))['fingerprint'] != first['fingerprint']
+
+
+@pytest.mark.asyncio
+async def test_connection_runner_hands_off_before_credentials_or_model_for_a_current_person_step(connection_page, monkeypatch):
+    from lead_app import native_runner
+    controller, page = connection_page
+    await page.set_content('<main><h1>Use your passkey</h1><p>Confirm this sign-in with your device.</p></main>')
+    controller.actor = SimpleNamespace(aid='00000000-0000-0000-0000-000000000001')
+    handoffs = []
+    async def start():
+        return {'challenge_version': 1}
+    async def handoff(reason):
+        handoffs.append(reason)
+        return {'status': 'waiting_owner'}
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError('Current person-only verification must precede credentials and model work')
+    controller.start, controller.handoff = start, handoff
+    controller.observe_current = controller.credentials = forbidden
+    monkeypatch.setenv('LEAD_DEPLOYMENT_MODE', 'development')
+    result = await native_runner.connect(controller, 'http://127.0.0.1:1')
+    assert result == {'status': 'waiting_owner'} and len(handoffs) == 1

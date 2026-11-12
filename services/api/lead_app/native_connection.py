@@ -99,16 +99,8 @@ class NativeConnection:
         return None
 
     async def person_only_challenge(self):
-        from .adapters.core import HumanVerificationRequired, check_challenge
-        fields=self.page.locator('input[autocomplete="one-time-code"]')
-        for index in range(min(await fields.count(),20)):
-            if await fields.nth(index).is_visible():
-                return True
-        try:
-            await check_challenge(self.page)
-        except HumanVerificationRequired:
-            return True
-        return False
+        from .native_challenges import person_challenge
+        return bool(await person_challenge(self.page))
 
     async def descriptor(self):
         scope=await self.actor.native_runtime.scope_view(self.lease['target_id'])
