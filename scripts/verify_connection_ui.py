@@ -52,6 +52,16 @@ async def verify(state):
     process=subprocess.Popen(['node',str(web/'node_modules/next/dist/bin/next'),'dev','--hostname','127.0.0.1','--port',str(port)],cwd=web,env=safe,stdout=log,stderr=subprocess.STDOUT)
     errors,external,connects,controls,inputs,ends=[],[],[],[],[],[]
     read_override=None
+    dependency_override=None
+    dependency_posts=[]
+    release_decision=asyncio.Event()
+    candidates=[{'candidate_id':'public-one','resource_url':'https://public-embed.example/guide',
+        'parent_url':'https://alpha.example/','role':'read_only_frame','expires_at':'2099-01-01T00:00:00Z','state':'pending'},
+        {'candidate_id':'public-long','resource_url':'https://public-embed.example/'+('long-source-'*60)+'?access=synthetic-link-token',
+        'parent_url':'https://alpha.example/','role':'read_only_frame','expires_at':'2099-01-01T00:00:00Z','state':'pending'},
+        {'candidate_id':'other-account','resource_url':'https://other-account.example/private',
+        'parent_url':'https://alpha.example/','role':'read_only_frame','expires_at':'2099-01-01T00:00:00Z',
+        'state':'refused','reason':'account_origin_conflict'}]
     session={'status':'active','control_mode':'automatic','challenge_version':1,'owner_action':None}
     image=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
     try:
@@ -90,6 +100,17 @@ async def verify(state):
                         else:
                             session.update(status='canceled',challenge_version=session['challenge_version']+1)
                         return await request.fulfill(json=session)
+                    if url.endswith('/connections/fixture-connection/read-dependencies'):
+                        if body:
+                            dependency_posts.append(body)
+                            assert body['challenge_version']==session['challenge_version']
+                            await release_decision.wait()
+                            if len(dependency_posts)==1:
+                                return await request.fulfill(status=503,json={'detail':'确认结果尚待核对，请刷新后查看。'})
+                            candidate=next(row for row in candidates if row['candidate_id']==body['candidate_id'])
+                            candidate['state']='approved' if body['decision']=='approve' else 'refused'
+                        return await request.fulfill(json=dependency_override or {'connection_id':'fixture-connection',
+                            'challenge_version':session['challenge_version'],'candidates':candidates})
                     if url.endswith('/connections/fixture-connection'):
                         return await request.fulfill(json=read_override or session)
                     if '/browser/screenshot' in url or '/browser-control/' in url:
@@ -171,13 +192,56 @@ async def verify(state):
                 assert len(ends)==1 and len(controls)==2
                 assert len(connects)==2 and 'login' not in connects[-1]
                 assert not await page.get_by_label('密码',exact=True).count()
+                session.update(status='active',control_mode='owner',challenge_version=7,
+                    owner_action='请核对网页中的嵌入内容',can_review_read_dependencies=True)
+                await page.get_by_role('button',name='连接新网站',exact=True).click()
+                await page.get_by_label('网站地址',exact=True).fill('https://alpha.example/')
+                await page.get_by_role('button',name='开始连接',exact=True).click()
+                panel=page.locator('.connection-read-dependencies')
+                await panel.get_by_role('heading',name='确认嵌入内容来源').wait_for()
+                assert not dependency_posts
+                assert 'synthetic-link-token' not in await panel.inner_text()
+                assert '此来源涉及另一个账号' in await panel.inner_text()
+                for width,label in ((1440,'read-dependencies-desktop'),(390,'read-dependencies-narrow')):
+                    await page.set_viewport_size({'width':width,'height':1000})
+                    await page.screenshot(path=str(report/(label+'.png')),full_page=True)
+                    assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth'),label
+                    assert await panel.evaluate('node=>node.scrollWidth<=node.clientWidth'),label
+                first=panel.get_by_role('group',name='https://public-embed.example/guide',exact=True)
+                await first.get_by_role('button',name='允许读取',exact=True).click()
+                await page.get_by_role('button',name='正在核对…',exact=True).wait_for()
+                assert await page.get_by_role('button',name='本人步骤已完成，继续连接',exact=True).is_disabled()
+                await first.locator('button').last.dispatch_event('click')
+                await page.wait_for_timeout(100)
+                assert len(dependency_posts)==1
+                assert '已允许公开读取' not in await panel.inner_text()
+                release_decision.set()
+                await panel.get_by_role('alert').wait_for()
+                await page.wait_for_timeout(300)
+                assert len(dependency_posts)==1
+                assert await first.get_by_role('button',name='允许读取',exact=True).is_disabled()
+                await panel.get_by_role('button',name='刷新',exact=True).click()
+                await page.wait_for_function("!document.querySelector('.connection-read-actions button:last-child').disabled")
+                await first.get_by_role('button',name='允许读取',exact=True).click()
+                await panel.get_by_text('已允许公开读取',exact=True).wait_for()
+                assert dependency_posts[-1]=={'challenge_version':7,'candidate_id':'public-one','decision':'approve'}
+                await panel.locator('.connection-read-actions').get_by_role('button',name='保持关闭',exact=True).click()
+                await panel.get_by_text('保持关闭',exact=True).wait_for()
+                assert dependency_posts[-1]=={'challenge_version':7,'candidate_id':'public-long','decision':'refuse'}
+                candidates[0]={**candidates[0],'candidate_id':'new-document','state':'pending'}
+                dependency_override={'connection_id':'fixture-connection','challenge_version':6,'candidates':candidates}
+                await panel.get_by_text('连接状态已变化，正在重新核对。',exact=True).wait_for()
+                assert await panel.get_by_role('button',name='允许读取',exact=True).is_disabled()
+                assert len(dependency_posts)==3
+                await page.get_by_role('button',name='取消连接',exact=True).click()
+                await page.locator('.account-browser-overlay').wait_for(state='detached')
                 assert not errors,errors
                 assert not external,external
             finally:
                 await browser.close()
         (report/'report.json').write_text(json.dumps({'ok':True,'fixture':'synthetic-only','external_requests':0,
-            'checks':['generic_site_entry','origin_account_selection','optional_credential_pair_validation','secret_masked_and_cleared','one_connect_request','automatic_input_disabled','owner_version_input','versioned_resume','stale_owner_response_rejected','versioned_cancel','close_keeps_background_observer','1440px','390px_no_overflow'],
-            'connect_requests':len(connects),'control_actions':controls,'input_requests':len(inputs),'page_errors':errors},ensure_ascii=False,indent=2))
+            'checks':['generic_site_entry','origin_account_selection','optional_credential_pair_validation','secret_masked_and_cleared','one_connect_request','automatic_input_disabled','owner_version_input','versioned_resume','stale_owner_response_rejected','versioned_cancel','close_keeps_background_observer','owner_read_dependency_explicit_decision','dependency_duplicate_click_blocked','dependency_failure_preserved_until_readback','dependency_stale_version_blocked','1440px','390px_no_overflow'],
+            'dependency_posts':dependency_posts,'connect_requests':len(connects),'control_actions':controls,'input_requests':len(inputs),'page_errors':errors},ensure_ascii=False,indent=2))
         print(json.dumps({'ok':True,'report':str(report/'report.json')},ensure_ascii=False))
     finally:
         process.terminate()

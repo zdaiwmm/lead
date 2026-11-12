@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import SocialIcon from "./social-icon";
 import type { ConnectionLogin } from "./connection-details";
+import ConnectionReadDependencies from "./connection-read-dependencies";
 import { api, workspaceHeaders } from "./api-client";
 type Row = Record<string, any>;
 export default function AccountBrowser({
@@ -54,6 +55,8 @@ export default function AccountBrowser({
   const challengeVersion = useRef(0);
   const [controlMode, setControlMode] = useState("automatic");
   const [ownerAction, setOwnerAction] = useState("");
+  const [canReviewDependencies, setCanReviewDependencies] = useState(false);
+  const [dependencyBusy, setDependencyBusy] = useState(false);
   function updateControl(session: Row) {
     if (automaticConnection.current && typeof session.challenge_version === "number" &&
       session.challenge_version < challengeVersion.current) return false;
@@ -68,6 +71,7 @@ export default function AccountBrowser({
     challengeVersion.current = session.challenge_version || 0;
     setControlMode(mode);
     setOwnerAction(session.owner_action || "");
+    setCanReviewDependencies(session.can_review_read_dependencies === true);
     return true;
   }
   const [verifying, setVerifying] = useState(false);
@@ -539,7 +543,7 @@ export default function AccountBrowser({
             {platform !== "lab" && (!automatic || controlMode === "owner") && (
               <button
                 className="primary"
-                disabled={state !== "ready" || verifying || closing}
+                disabled={state !== "ready" || verifying || closing || dependencyBusy}
                 onClick={() => close(true)}
               >
                 {verifying ? (
@@ -563,6 +567,10 @@ export default function AccountBrowser({
             </button>
           </div>
         </header>
+        {automatic && controlMode === "owner" && canReviewDependencies && takeover.current &&
+          <ConnectionReadDependencies key={`${takeover.current}:${challengeVersion.current}`}
+            aid={aid} connectionId={takeover.current} challengeVersion={challengeVersion.current}
+            disabled={state !== "ready" || verifying || closing} onBusyChange={setDependencyBusy} />}
         <div className="browser-toolbar">
           <div>
             <button
