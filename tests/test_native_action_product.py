@@ -49,3 +49,63 @@ async def test_native_first_publication_uses_actual_dom_receipt(monkeypatch):
         return {'state':'confirmed','action_id':str(action['id']),'requests':context['workflow']['step']}
     result=await verify_login(monkeypatch,after_discovery=publish)
     assert result['action_check']['state']=='confirmed' and result['action_check']['requests']==3
+
+
+@pytest.mark.asyncio
+async def test_native_reply_uses_independent_method_and_original_parent_receipt(monkeypatch):
+    from lead_app import account_profiles
+    from lead_app.account_connection import discover
+    from lead_app.db import j, one, tx
+    from lead_app.growth.contracts import TaskSpec, utcnow
+    from lead_app.growth.runtime import advance, finish
+    from lead_app.growth.store import digest, submit_work
+    from lead_app.growth.tools import ChannelInput, execute_channel
+    from native_connection_product import verify_login
+    monkeypatch.setattr(account_profiles,'native_available',lambda:True)
+    async def reply(context):
+        aid=context['aid']
+        board=context['board']
+        parent=board.origin+'/posts/1'
+        board.state.posts.append({'id':1,'author':'another-member','body':'Existing member question','parent_url':None})
+        with tx(aid) as c:
+            target_id=context['discovery'].output['targets'][0]['target_id']
+            original=one(c,'SELECT verified_permissions FROM lead.account_targets WHERE id=%s',(target_id,))['verified_permissions']['browser_methods']['publish']
+            work=submit_work(c,aid,TaskSpec(kind='account',purpose='discover',account_id=context['pending']['account_id'],
+                payload={'target_urls':[parent]},review_at=utcnow()+timedelta(hours=1)))
+        claim=advance(work)['claim']
+        with tx(aid) as c:
+            task=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(work['task_id'],))
+        context['workflow'].update(kind='discovery',step=0,operation='reply',editor_url=parent)
+        learned=await discover(aid,task)
+        finish(claim,learned)
+        assert learned.outcome=='completed' and len(learned.output['targets'])==1
+        with tx(aid) as c:
+            methods=one(c,'SELECT verified_permissions FROM lead.account_targets WHERE id=%s',(target_id,))['verified_permissions']['browser_methods']
+            assert methods['publish']==original and methods['reply']['operations']==['reply']
+            assert methods['reply']['request']['url']==board.origin+'/replies'
+            body={'body':'Controlled reply to the original question','title':'','format':'text','media':[]}
+            content=one(c,"""INSERT INTO lead.content_items(tenant_id,agent_id,revision,body,source_refs,validation_result,content_hash)
+                VALUES(lead.ctx_tenant(),%s,1,%s,'[]','{}',%s) RETURNING *""",(aid,j(body),digest(body)))
+            data=ChannelInput(content_id=content['id'],content_hash=content['content_hash'],operation='reply',parent_url=parent)
+            ref=submit_work(c,aid,TaskSpec(kind='channel',purpose='reply',account_id=context['pending']['account_id'],target_id=target_id,
+                payload=data.model_dump(mode='json'),review_at=utcnow()+timedelta(hours=1)))
+        claim=advance(ref)['claim']
+        with tx(aid) as c:
+            task=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(ref['task_id'],))
+        context['workflow'].update(kind='action',step=0,body=body['body'],operation='reply')
+        result=await execute_channel(aid,task,data,claim)
+        finish(claim,result)
+        with tx(aid) as c:
+            action=one(c,'SELECT * FROM lead.actions WHERE task_id=%s',(task['id'],))
+            attempt=one(c,'SELECT * FROM lead.action_attempts WHERE action_id=%s',(action['id'],))
+            assert action['state']=='confirmed' and attempt['outcome']=='confirmed'
+            assert one(c,'SELECT lead.growth_receipt_valid(%s) ok',(action['id'],))['ok']
+            assert one(c,'SELECT state FROM lead.tasks WHERE id=%s',(task['id'],))['state']=='succeeded'
+        receipt=attempt['observation']['browser_receipt']
+        assert receipt['author']==board.state.username and receipt['body']==body['body'] and receipt['parent_url']==parent
+        assert result.outcome=='completed' and result.output['first_format_verified']
+        assert len(board.oracle()['posts'])==2 and board.oracle()['posts'][-1]['parent_url']==parent
+        assert len([row for row in board.oracle()['requests'] if row['method']=='POST' and row['path']=='/replies'])==1
+        return {'state':'confirmed','requests':context['workflow']['step']}
+    result=await verify_login(monkeypatch,after_discovery=reply)
+    assert result['action_check']=={'state':'confirmed','requests':3}

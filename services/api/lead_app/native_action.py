@@ -250,12 +250,26 @@ class NativeAction(NativeTask):
                 parent=page.locator(selectors['parent'])
                 if await parent.count()!=1 or not await parent.is_visible():
                     return None
+                parent_handle=await parent.element_handle()
+                try:
+                    related_parent=await author.evaluate('''(node,parent)=>{
+                        const article=node.closest('article,[role=article]');
+                        if(!article || parent.closest('nav,header,footer,aside,[role=navigation],blockquote')) return false;
+                        const semantics=(parent.getAttribute('aria-label')||'')+' '+parent.innerText+' '+(parent.getAttribute('rel')||'');
+                        if(!/parent|in.reply.to|replying to|original post|父帖|回复原帖/i.test(semantics)) return false;
+                        if(parent.closest('article,[role=article]')===article) return true;
+                        const next=article.nextElementSibling;
+                        return !!next && (next===parent || next.matches('p,dd') && next.contains(parent) && next.querySelectorAll('a').length===1);
+                    }''',parent_handle)
+                finally:
+                    await parent_handle.dispose()
                 receipt['parent_url']=urljoin(page.url,await parent.get_attribute('href') or '')
-                if receipt['parent_url']!=self.action['intent']['parent_url']:
+                if not related_parent or receipt['parent_url']!=self.action['intent']['parent_url']:
                     return None
             if (before!=await self.document(page) or (await author.inner_text()).strip()!=actual_author
                     or (await body.inner_text()).strip()!=actual_body or page.url!=actual_url
-                    or urljoin(page.url,await link.get_attribute('href') or '')!=actual_url):
+                    or urljoin(page.url,await link.get_attribute('href') or '')!=actual_url
+                    or self.action['type']=='reply' and urljoin(page.url,await parent.get_attribute('href') or '')!=receipt['parent_url']):
                 return None
             return receipt
         except (KeyError,ValueError):
@@ -310,7 +324,11 @@ class NativeAction(NativeTask):
         from .db import uid
         path=STATE/'evidence'/self.actor.aid/(uid()+'.png')
         path.parent.mkdir(parents=True,exist_ok=True)
-        await self.page.screenshot(path=str(path))
+        evidence_before=await self.document()
+        image=await self.page.screenshot()
+        if evidence_before!=await self.document() or receipt!=await self.read_receipt(self.page,selectors):
+            raise ValueError('browser_receipt_changed_during_capture')
+        path.write_bytes(image)
         path.chmod(0o600)
         with tx(self.actor.aid) as c:
             action=one(c,'SELECT * FROM lead.actions WHERE id=%s FOR UPDATE',(self.action_id,))
