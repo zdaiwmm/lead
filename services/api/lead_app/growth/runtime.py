@@ -281,7 +281,8 @@ def finish(claim, value):
                     WHERE type='growth.decision' AND state='failed' AND result#>>'{runtime,recovery,error_code}'='invalid_proposal'
                     AND result#>>'{runtime,recovery,status}'='blocked'""")
             if (row["type"] in ("growth.account","growth.channel") or result.output.get("knowledge_progress") is True
-                or result.output.get("business_progress") is True or result.output.get("context_available") is True):
+                or result.output.get("learning_progress") is True or result.output.get("business_progress") is True
+                or result.output.get("context_available") is True):
                 emit(c, str(ref.agent_id), "growth.wake", {"reason": "evidence_added", "task_id": str(row["id"])})
         elif result.outcome == "unknown":
             wait = _wait(row, "unknown_receipt", utcnow(), action="reconcile", delay=300)
@@ -451,9 +452,16 @@ async def probe_episode(aid, work, data):
         if changed:
             resumed = await asyncio.to_thread(resume_task,aid,root["id"])
             return WorkResult(outcome="completed",output={"state":"configuration_changed","resumed":resumed})
-        if episode.get("error_code") == "source_unavailable" and spec.kind == "research":
+        if episode.get("error_code") in ("source_unavailable","gaierror") and spec.kind == "research":
+            from ..budget import growth_cost_context
             from .tools import research
-            observation = await research(aid,root,spec)
+            token = growth_cost_context.set({"task_id":str(root["id"]),
+                "experiment_id":str(root["experiment_id"]) if root["experiment_id"] else None,
+                "recovery_root":str(root["id"]),"recovery_limit":70000})
+            try:
+                observation = await research(aid,root,spec)
+            finally:
+                growth_cost_context.reset(token)
             if observation.outcome == "completed" and observation.evidence_refs:
                 proof = "document:"+str(observation.evidence_refs[0].id)
         elif episode.get("error_code") in ("ModelHTTPError","ModelRateLimitError","APITimeoutError","ConnectError","ReadTimeout","APIConnectionError") and spec.kind in ("decision","content","research"):
