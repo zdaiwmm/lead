@@ -57,7 +57,8 @@ if migrated.returncode:
     print(json.dumps({'phase':'migration','returncode':migrated.returncode}),flush=True)
     sys.exit(migrated.returncode)
 with (state/'run.log').open('w') as log:
-    child=subprocess.Popen([python,'-B','-S','-m','pytest','tests/test_native_manager_death_product.py','-q','--tb=short','--junitxml='+str(state/'manager-death.xml')],
+    cases=['tests/test_native_manager_death_product.py::test_entire_manager_death_after_claim_closes_tunnel_and_only_reconciles['+name+']' for name in payload['cases']]
+    child=subprocess.Popen([python,'-B','-S','-m','pytest',*cases,'-q','--tb=short','--junitxml='+str(state/'manager-death.xml')],
         env=env,cwd=root,stdout=log,stderr=log,start_new_session=True)
     manifest['test_pid']=child.pid
     (state/'runtime.json').write_text(json.dumps(manifest))
@@ -82,6 +83,8 @@ def main():
     parser.add_argument('--remote-user', default='mijiu')
     parser.add_argument('--shared-pg', required=True)
     parser.add_argument('--runtime-base', required=True)
+    parser.add_argument('--case', choices=('after_claim', 'before_claim', 'committed'), action='append',
+                        help='Explicit cut(s); defaults to the original after_claim cut only')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
@@ -99,7 +102,8 @@ def main():
     result = subprocess.run(['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
                              '-F', args.ssh_config, args.host, command],
                             input=json.dumps({'files': files, 'source_sha': source_sha,
-                                              'shared_pg': args.shared_pg, 'runtime_base': args.runtime_base}),
+                                              'shared_pg': args.shared_pg, 'runtime_base': args.runtime_base,
+                                              'cases': args.case or ['after_claim']}),
                             text=True, timeout=250)
     raise SystemExit(result.returncode)
 

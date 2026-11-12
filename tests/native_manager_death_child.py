@@ -56,16 +56,21 @@ def main():
     original_verify = NativeAction.verify_request
 
     async def verify(self, request, decision):
-        allowed = await original_verify(self, request, decision)
-        if allowed and boot['cut_after_claim']:
+        async def hold():
             private_json(boot['cut'], {
                 'pid': os.getpid(), 'nonce': boot['nonce'],
                 'action_id': self.action_id, 'task_id': self.task_id,
                 'epoch': self.actor.epoch,
             })
-            # The original DB CAS has completed. Returning to the root Fetch
-            # handler would start upstream APIRequest; deliberately do not return.
+            # The root Fetch handler is awaiting this call; upstream APIRequest
+            # cannot start until it returns. CAS position is selected below.
             await asyncio.Event().wait()
+        stage = boot.get('cut_stage', 'after_claim' if boot.get('cut_after_claim') else None)
+        if stage == 'before_claim':
+            await hold()
+        allowed = await original_verify(self, request, decision)
+        if allowed and stage == 'after_claim':
+            await hold()
         return allowed
 
     NativeAction.verify_request = verify

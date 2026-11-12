@@ -12,6 +12,7 @@ import signal
 import ssl
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -95,14 +96,16 @@ def tls_contexts(folder):
 
 
 @pytest.mark.asyncio
-async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconciles(monkeypatch):
+@pytest.mark.parametrize('cut_stage', ['after_claim', 'before_claim', 'committed'])
+async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconciles(monkeypatch, cut_stage):
     import uvicorn
     from lead_app import account_profiles, browser, native_runner
     from lead_app.activities import browser_rpc
     from lead_app.config import STATE, env
     from lead_app.db import j, one, tx
-    from lead_app.growth.contracts import TaskSpec, utcnow
+    from lead_app.growth.contracts import TaskSpec, WorkResult, utcnow
     from lead_app.growth.runtime import advance, finish
+    from lead_app.growth.runtime import execute as execute_runtime
     from lead_app.growth.store import digest, submit_work
     from lead_app.growth.tools import ChannelInput, execute_channel
     from native_browser_fixture import NativeBoard
@@ -113,9 +116,20 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
     assert env().get('LEAD_NETWORK_NAMESPACE') == '1'
     monkeypatch.setattr(account_profiles, 'native_available', lambda: True)
     original_handler = NativeBoard.handler
+    committed_ready, response_release = threading.Event(), threading.Event()
 
     def persistent_login_handler(board):
         class Handler(original_handler(board)):
+            def send(self, status, body='', *, location=None, cookie=None):
+                if (cut_stage == 'committed' and self.command == 'POST'
+                        and self.path == '/posts' and status == 303 and location.startswith('/posts/')):
+                    # NativeBoard.do_POST has already appended the real post.
+                    # Hold before writing ANY response bytes to the manager.
+                    committed_ready.set()
+                    if not response_release.wait(timeout=30):
+                        raise TimeoutError('synthetic committed-response cut expired')
+                return super().send(status, body, location=location, cookie=cookie)
+
             def send_header(self, name, value):
                 if name.lower() == 'set-cookie' and value.startswith('board_session='):
                     # Real login still mints and proves this opaque cookie. The
@@ -140,7 +154,9 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
         aid, board = context['aid'], context['board']
         folder = STATE / ('manager-death-' + uuid4().hex[:10])
         folder.mkdir(mode=0o700)
-        report = {'cut': 'after_original_request_cas_before_upstream', 'real_model_requests': 0}
+        expected_posts = int(cut_stage == 'committed')
+        expected_state = 'confirmed' if expected_posts else 'unknown'
+        report = {'cut': cut_stage, 'real_model_requests': 0}
         report['fixture'] = {
             'file_sha256': hashlib.sha256(Path(sys.modules[NativeBoard.__module__].__file__).read_bytes()).hexdigest(),
             'response_header_change': 'Only board_session Set-Cookie adds Max-Age=3600',
@@ -199,7 +215,7 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
             nonce = uuid4().hex
             boot_path = folder / (nonce + '.json')
             boot = {'nonce': nonce, 'endpoint': endpoint, 'model': model,
-                    'destinations': destinations, 'cut_after_claim': cut_enabled,
+                    'destinations': destinations, 'cut_stage': cut_stage if cut_enabled else None,
                     'ready': str(folder / (nonce + '-ready.json')), 'cut': str(folder / (nonce + '-cut.json'))}
             private_json(boot_path, boot)
             log = (folder / (nonce + '.log')).open('w')
@@ -255,8 +271,12 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
             with tx(aid) as c:
                 task = one(c, 'SELECT * FROM lead.tasks WHERE id=%s', (ref['task_id'],))
             context['workflow'].update(kind='action', step=0, body=body['body'], operation='publish')
-            pending = asyncio.create_task(execute_channel(aid, task, data, claim))
-            await until(lambda: Path(boot['cut']).exists() or pending.done(), seconds=50)
+            if cut_stage == 'before_claim':
+                pending = asyncio.create_task(execute_runtime(claim))
+            else:
+                pending = asyncio.create_task(execute_channel(aid, task, data, claim))
+            reached_cut = committed_ready.is_set if cut_stage == 'committed' else lambda: Path(boot['cut']).exists()
+            await until(lambda: reached_cut() or pending.done(), seconds=50)
             if pending.done():
                 try:
                     await pending
@@ -265,16 +285,21 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
                     detail = response.json() if response is not None else type(error).__name__
                     raise AssertionError(f'original product refused before the cut: {detail}') from error
                 raise AssertionError('original product returned before the cut')
-            frozen = json.loads(Path(boot['cut']).read_text())
-            assert frozen['pid'] == active.pid and frozen['nonce'] == boot['nonce']
+            if cut_stage != 'committed':
+                frozen = json.loads(Path(boot['cut']).read_text())
+                assert frozen['pid'] == active.pid and frozen['nonce'] == boot['nonce']
             with tx(aid) as c:
                 action = one(c, 'SELECT * FROM lead.actions WHERE task_id=%s', (task['id'],))
                 attempt = one(c, 'SELECT * FROM lead.action_attempts WHERE action_id=%s', (action['id'],))
-            assert action['state'] == 'dispatching'
-            assert attempt['observation']['browser_request']['claimed'] is True
+            assert action['state'] == ('prepared' if cut_stage == 'before_claim' else 'dispatching')
+            assert attempt['observation']['browser_request']['claimed'] is (cut_stage != 'before_claim')
             assert not attempt['observation'].get('browser_transport')
-            assert not board.oracle()['posts']
-            phase('actual_claim_committed_source_zero')
+            assert not attempt['observation'].get('browser_receipt')
+            assert len(board.oracle()['posts']) == expected_posts
+            report['at_cut'] = {'action_id': str(action['id']), 'state': action['state'],
+                                'attempt_id': str(attempt['id']), 'observation': attempt['observation'],
+                                'source_posts': expected_posts}
+            phase('actual_' + cut_stage + '_source_' + str(expected_posts))
 
             fact = process_fact(active.pid)
             argv = Path(f'/proc/{active.pid}/cmdline').read_bytes().split(b'\0')
@@ -295,13 +320,17 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
             with pytest.raises(OSError):
                 await asyncio.open_connection('127.0.0.1', ready['proxy_port'])
             await asyncio.sleep(0.5)
-            assert received == ['BEFORE'] and not board.oracle()['posts']
+            assert received == ['BEFORE'] and len(board.oracle()['posts']) == expected_posts
+            response_release.set()
             report['tunnel'] = {'tls_before_received': True, 'eof_after_manager_death': True,
                                 'new_connection_refused': True, 'source_lines': received}
-            phase('whole_manager_dead_tunnel_closed_source_zero')
-            result = await asyncio.wait_for(pending, 10)
-            assert result.outcome == 'unknown'
-            finish(claim, result)
+            phase('whole_manager_dead_tunnel_closed_source_' + str(expected_posts))
+            result = WorkResult.model_validate(await asyncio.wait_for(pending, 10))
+            if cut_stage == 'before_claim':
+                assert result.outcome == 'failed'
+            else:
+                assert result.outcome == 'unknown'
+                finish(claim, result)
             # Cleanup only descendants captured while their ancestry led to our
             # verified child. This is after the EOF/source-zero evidence.
             kill_recorded(owned)
@@ -312,6 +341,13 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
             report['restart_manager'] = {key: value for key, value in restarted.items() if key != 'proxy_auth'}
             with tx(aid) as c:
                 assert one(c, 'SELECT state FROM lead.actions WHERE id=%s', (action['id'],))['state'] == 'unknown'
+            if cut_stage == 'before_claim':
+                # The real execute() observed the dead manager before a request
+                # claim. After startup's original mark_untrusted, finish()
+                # derives unknown from the original DB Action, not this test.
+                assert finish(claim, result)['accepted_control']
+                with tx(aid) as c:
+                    assert one(c, 'SELECT state FROM lead.tasks WHERE id=%s', (task['id'],))['state'] == 'reconciling'
             resumed = advance(ref, now=utcnow() + timedelta(minutes=6))
             assert resumed['state'] == 'ready', resumed
             with tx(aid) as c:
@@ -319,26 +355,27 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
             context['workflow'].update(kind='reconcile', step=0, body=body['body'], operation='publish')
             result = await execute_channel(aid, current, data, resumed['claim'])
             finish(resumed['claim'], result)
-            assert result.outcome == 'unknown'
+            assert result.outcome == ('completed' if expected_posts else 'unknown')
             with tx(aid) as c:
                 actions = c.execute('SELECT id,state FROM lead.actions WHERE task_id=%s', (task['id'],)).fetchall()
                 attempts = c.execute('SELECT id,attempt,outcome FROM lead.action_attempts WHERE action_id=%s', (action['id'],)).fetchall()
                 billing = c.execute('SELECT state,units FROM lead.budget_reservations').fetchall()
                 session = one(c, 'SELECT state,ended_at FROM lead.browser_sessions WHERE id=%s', (ready['session'],))
                 assert one(c, 'SELECT 42 AS alive')['alive'] == 42
-            assert actions == [{'id': action['id'], 'state': 'unknown'}]
+            assert actions == [{'id': action['id'], 'state': expected_state}]
             assert len(attempts) == 1 and attempts[0]['id'] == attempt['id'] and attempts[0]['attempt'] == 1
-            assert attempts[0]['outcome'] == 'unknown' and session['ended_at'] is not None
+            assert attempts[0]['outcome'] == expected_state and session['ended_at'] is not None
             oracle = board.oracle()
-            assert not oracle['posts']
-            assert not [item for item in oracle['requests'] if item['method'] == 'POST' and item['path'] == '/posts']
+            assert len(oracle['posts']) == expected_posts
+            assert len([item for item in oracle['requests'] if item['method'] == 'POST' and item['path'] == '/posts']) == expected_posts
             assert any(item['method'] == 'GET' for item in oracle['requests'][before_reads:])
             report.update(actions=actions, attempts=attempts, billing=billing, oracle=oracle,
                           parent_and_database_survived=True, fake_model_requests=len(context['model_calls']))
-            phase('original_unknown_read_only_reconciled_source_zero')
-            private_json(STATE / 'manager-death-report.json', report)
-            return {'state': 'unknown', 'source_posts': 0, 'attempts': 1}
+            phase('original_action_read_only_reconciled_source_' + str(expected_posts))
+            private_json(STATE / ('manager-death-report-' + cut_stage + '.json'), report)
+            return {'state': expected_state, 'source_posts': expected_posts, 'attempts': 1}
         finally:
+            response_release.set()
             private_json(folder / 'source-final.json', board.oracle())
             if pending and not pending.done():
                 pending.cancel()
@@ -365,4 +402,5 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
             })
 
     result = await verify_login(monkeypatch, after_discovery=cut)
-    assert result['action_check'] == {'state': 'unknown', 'source_posts': 0, 'attempts': 1}
+    assert result['action_check'] == {'state': 'confirmed' if cut_stage == 'committed' else 'unknown',
+                                     'source_posts': int(cut_stage == 'committed'), 'attempts': 1}
