@@ -173,9 +173,10 @@ class NativeAction(NativeTask):
         if self.reconcile:
             return False
         proof=self.submit_proof
+        worker=self.worker_submit_source(request)
         if (not proof or proof['claimed'] or proof['expires']<time.monotonic()
                 or proof['revision']!=self.lease.get('document_revision',0)
-                or decision.get('sender_frame') not in (None,proof['frame_id'])):
+                or decision.get('sender_frame') not in (None,proof['frame_id']) and not worker):
             raise ValueError('native_submit_observation_expired')
         proof['claimed']=True
         self.phase('claim_private_identity')
@@ -213,11 +214,44 @@ class NativeAction(NativeTask):
             raise ValueError('action_cookie_changed')
         if proof['expires']<time.monotonic() or proof['revision']!=self.lease.get('document_revision',0):
             raise ValueError('native_submit_observation_expired')
+        if worker and self.worker_submit_source(request)!=worker:
+            raise ValueError('native_submit_worker_changed')
         cookies=await self.actor.context.cookies(request['url'])
         decision['cookie_header']='; '.join(cookie['name']+'='+cookie['value'] for cookie in cookies)
         self.phase('claim_transaction')
         decision['record_transport']=self.record_transport
         return await asyncio.to_thread(claim_request,self.actor,self.action_id,self.claim,self.actor.epoch,request,proof['observed'])
+
+    def worker_submit_source(self,request):
+        """A SW sender remains a SW; prove it currently controls this exact page."""
+        meta=request.get('_native_network') or {}
+        if not meta.get('worker_body_verified'):
+            return None
+        gate=self.actor.native_runtime.gate
+        session=meta.get('session')
+        target=gate.targets.get(session,{})
+        if target.get('type')!='service_worker' or target.get('browserContextId')!=gate.context_id:
+            return None
+        related=[(sid,record) for (identifier,sid),record in gate.network.items()
+            if identifier==meta.get('network_id') and sid in gate.targets]
+        if (len(related)!=1 or related[0][0]!=session or any(related[0][1]['request'].get(key)!=request.get(key)
+                for key in ('url','method'))):
+            return None
+        root=self.lease['target_id']
+        owners=[sid for sid,info in gate.targets.items() if info['targetId']==root and info['type']=='page']
+        if len(owners)!=1:
+            return None
+        versions=[version for version in gate.worker_versions_by_page.get(owners[0],{}).values()
+            if version.get('targetId')==target['targetId'] and version.get('status')=='activated'
+            and version.get('runningStatus')=='running' and root in version.get('controlledClients',[])
+            and gate.worker_versions.get(version['versionId'],{}).get('status')=='activated'
+            and gate.worker_versions.get(version['versionId'],{}).get('runningStatus')=='running']
+        if len(versions)!=1:
+            return None
+        document=gate.documents.get(root)
+        if not document or document[0]!=(self.submit_proof or {}).get('frame_id'):
+            return None
+        return (session,target['targetId'],versions[0]['versionId'],tuple(document))
 
     async def record_transport(self,value):
         with tx(self.actor.aid) as c:
