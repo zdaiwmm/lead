@@ -1333,7 +1333,7 @@ OPERATOR_ONLY_FILES = {
 
 # Local verification sources stay outside tool bundles and application images.
 LOCAL_VERIFICATION_FILES = {"scripts/verify_cadence_ui.py","scripts/verify_growth_runtime.py",
-    "scripts/verify_growth_ui.py","scripts/verify_growth_executor.py","scripts/evaluate_growth_model.py","scripts/render_operating_playbooks.py",
+    "scripts/verify_growth_ui.py","scripts/verify_connection_ui.py","scripts/verify_growth_executor.py","scripts/evaluate_growth_model.py","scripts/render_operating_playbooks.py",
     "scripts/verify_operating_board_model.cjs","scripts/verify_operating_ui.py"}
 
 
