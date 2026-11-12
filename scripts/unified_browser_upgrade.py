@@ -112,22 +112,61 @@ def assert_unchanged(before, after):
         raise ValueError('Original accounts, routes, controls, tasks, actions or costs changed')
 
 
-def finish_cutover(stage,sha,verifier,site,write):
-    if (stage/(PREFIX+'-cutover.pending')).read_text().strip()!=sha:
-        raise ValueError('Unified-browser cutover hold missing')
+def resume_facts(sha,site):
+    counts=json.loads(site['sql']("SELECT json_build_object('held',count(*) FILTER (WHERE "
+        "onboarding_state#>>'{home_release_maintenance,sha}'='"+sha+"'),"
+        "'other',count(*) FILTER (WHERE onboarding_state ? 'home_release_maintenance' AND "
+        "onboarding_state#>>'{home_release_maintenance,sha}' IS DISTINCT FROM '"+sha+"'),"
+        "'running',count(*) FILTER (WHERE desired_state='running')) FROM lead.agents"))
     intake=run('systemctl','show','lead-home-ingress.socket','-p','ActiveState','--value')
-    if intake not in ('active','inactive'):
-        raise ValueError('Cannot reconcile current ingress state')
-    verifier['verify'](sha,fenced=intake=='inactive',require_idle=False)
+    if intake not in ('active','inactive') or counts['other']:
+        raise ValueError('Cannot reconcile maintenance or ingress state')
+    return {**counts,'ingress':intake}
+
+
+def finish_cutover(stage,sha,verifier,site,write):
+    pending=stage/(PREFIX+'-cutover.pending')
+    if pending.read_text().strip()!=sha:
+        raise ValueError('Unified-browser cutover pending marker missing')
+    resume=stage/(PREFIX+'-resumption.json')
+    if resume.exists() and json.loads(resume.read_text()).get('sha')!=sha:
+        raise ValueError('Resumption journal differs')
+    facts=resume_facts(sha,site)
+    if not resume.exists() and (facts['running'] or facts['ingress']!='inactive'):
+        raise ValueError('Initial cutover is not held')
+    verifier['verify'](sha,fenced=facts['ingress']=='inactive',require_idle=False)
     verifier['verify_executors'](sha)
     if site['sql'](verifier['unified_schema_query']())!='t':
         raise ValueError('Final unified-browser schema readback failed')
-    run(TOOLS/'home_live_maintenance.py','restore',sha)
-    run('systemctl','start','lead-home-live.path','lead-home-ingress.socket')
-    run(TOOLS/'home_systemd_release.py','verify',sha)
+    # Independent installed verifier must finish BEFORE scheduling or ingress opens.
+    run(TOOLS/'home_systemd_release.py','verify-cutover',sha)
+    def record(state,observed):
+        write(resume,json.dumps({'sha':sha,'state':state,'observed':observed}).encode())
+    record('resume-started',facts)
+    try:
+        if facts['held']:
+            run(TOOLS/'home_live_maintenance.py','restore',sha)
+        facts=resume_facts(sha,site)
+        if facts['held']:
+            raise ValueError('Scheduling restoration incomplete')
+        record('scheduling-restored',facts)
+        run('systemctl','start','lead-home-live.path','lead-home-ingress.socket')
+        facts=resume_facts(sha,site)
+        if facts['ingress']!='active' or facts['held']:
+            raise ValueError('Ingress restoration incomplete')
+        record('ingress-opened',facts)
+    except Exception:
+        # A timeout may follow a committed restore. Never infer held from pending,
+        # re-pause agents, or roll back actions that may already have run.
+        try:
+            observed=resume_facts(sha,site)
+        except Exception:
+            observed={'state':'unavailable'}
+        record('reconciliation-required',observed)
+        raise
     complete=stage/(PREFIX+'-cutover.complete')
     write(complete,(sha+'\n').encode())
-    (stage/(PREFIX+'-cutover.pending')).unlink()
+    pending.unlink()
 
 
 def main():

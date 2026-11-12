@@ -94,6 +94,7 @@ def test_finish_retains_hold_until_independent_readback(upgrade,tmp_path,monkeyp
             raise ValueError('independent readback unavailable')
         return ''
     monkeypatch.setattr(upgrade,'run',run)
+    monkeypatch.setattr(upgrade,'resume_facts',lambda *a:{'held':1,'other':0,'running':0,'ingress':'inactive'})
     verifier={'verify':lambda *a,**kw:calls.append(('app',)),
         'verify_executors':lambda *a,**kw:calls.append(('executors',)),
         'unified_schema_query':lambda:'schema-query'}
@@ -101,3 +102,47 @@ def test_finish_retains_hold_until_independent_readback(upgrade,tmp_path,monkeyp
         upgrade.finish_cutover(tmp_path,sha,verifier,{'sql':lambda q:'t'},lambda p,d:p.write_bytes(d))
     assert pending.exists() and not (tmp_path/'unified-browser-cutover.complete').exists()
     assert ('app',) in calls and ('executors',) in calls
+
+    assert not any('restore' in call or 'start' in call for call in calls)
+    assert not (tmp_path/'unified-browser-resumption.json').exists()
+
+
+@pytest.mark.parametrize('failure',['restore-response','start'])
+def test_partial_resume_records_truth_and_reconciles_without_rehold(upgrade,tmp_path,monkeypatch,failure):
+    sha='b'*40
+    pending=tmp_path/'unified-browser-cutover.pending'
+    pending.write_text(sha+'\n')
+    facts={'held':1,'other':0,'running':0,'ingress':'inactive'}
+    calls=[]
+    fail=[True]
+    def run(*args,**kwargs):
+        call=tuple(map(str,args))
+        calls.append(call)
+        if 'restore' in call:
+            facts.update(held=0,running=1)
+            if fail[0] and failure=='restore-response':
+                fail[0]=False
+                raise ValueError('lost restore response')
+        if 'start' in call:
+            if fail[0] and failure=='start':
+                fail[0]=False
+                raise ValueError('start failed')
+            facts['ingress']='active'
+        return ''
+    monkeypatch.setattr(upgrade,'run',run)
+    monkeypatch.setattr(upgrade,'resume_facts',lambda *a:dict(facts))
+    verifier={'verify':lambda *a,**kw:None,'verify_executors':lambda *a:None,
+              'unified_schema_query':lambda:'schema'}
+    def write(p,d):
+        return p.write_bytes(d)
+    with pytest.raises(ValueError):
+        upgrade.finish_cutover(tmp_path,sha,verifier,{'sql':lambda q:'t'},write)
+    record=json.loads((tmp_path/'unified-browser-resumption.json').read_text())
+    assert record['state']=='reconciliation-required'
+    assert record['observed']=={'held':0,'other':0,'running':1,'ingress':'inactive'}
+    assert pending.exists()
+    upgrade.finish_cutover(tmp_path,sha,verifier,{'sql':lambda q:'t'},write)
+    assert not pending.exists()
+    assert sum('restore' in c for c in calls)==1
+    assert not any('hold' in c for c in calls)
+    assert calls.index((str(upgrade.TOOLS/'home_systemd_release.py'),'verify-cutover',sha)) < next(i for i,c in enumerate(calls) if 'restore' in c)

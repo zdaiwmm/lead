@@ -1189,7 +1189,10 @@ UNIFIED_BROWSER_FILES = {
     'infra/migrations/sql/0033_unified_browser.sql': 'UNFROZEN',
     'scripts/browser_namespace.py': 'UNFROZEN',
     'scripts/browser_use_runner.py': 'UNFROZEN',
-    'scripts/build_home_image.sh': 'UNFROZEN',
+    'scripts/build_home_image.sh': '45e639192d96135a2f8eaf38077670740a29e0a7',
+    'scripts/build_browser_runtime.py': 'cbc4d3d3521a2fe50c589813cf0d3956289ca94a',
+    'requirements.browser-use.lock.txt': '9105c7748d6aa830f312114e4f9d3e1431e4f911',
+    'requirements.lock.txt': 'dcf3273dc078a66007e8db836ecefa2518834bbf',
 }
 
 
@@ -1229,6 +1232,20 @@ def reviewed_unified_browser(mirror,sha,extra):
     return paths
 
 
+def verify_unified_cutover(sha):
+    require(unified_cutover_pending(sha),'unified-browser cutover pending marker missing')
+    require(current()==sha,'cutover current revision differs')
+    intake=run('systemctl','show','lead-home-ingress.socket','-p','ActiveState','--value')
+    require(intake in ('active','inactive'),'cutover ingress state unavailable')
+    verify(sha,fenced=intake=='inactive',require_idle=False)
+    verify_executors(sha)
+    site=TOOLS/'home_live_maintenance.py'
+    require(site.is_file(),'existing node database verifier required')
+    program=('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(unified_schema_query())+'))')
+    require(run('/usr/bin/python3','-IB','-c',program)=='t','unified-browser schema is not ready')
+    require(current()==sha and unified_cutover_pending(sha),'cutover changed during verification')
+
+
 def complete_unified_cutover(sha):
     require(unified_cutover_pending(sha),'unified-browser cutover hold is missing')
     stage=STORE/('maintenance-'+sha)
@@ -1241,7 +1258,7 @@ def complete_unified_cutover(sha):
     for channel in ('telegram','reddit'):
         provision_executor(sha,EXECUTOR_REGISTRY.parent/(channel+'-provision.json'))
     register_executors(sha)
-    run(EXECUTOR_PYTHON_SOURCE,'-I','-B',helper,'finish','--sha',sha,'--old',journal['old'],timeout=180)
+    run(EXECUTOR_PYTHON_SOURCE,'-I','-B',helper,'finish','--sha',sha,'--old',journal['old'],timeout=360)
     require(not unified_cutover_pending(sha),'unified-browser finalizer did not release its journal')
 
 
@@ -1435,7 +1452,7 @@ def deploy(sha):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("current", "deploy", "verify", "preflight", "finalize-cutover", "executors", "provision-executor", "register-executors"))
+    parser.add_argument("action", choices=("current", "deploy", "verify", "preflight", "finalize-cutover", "verify-cutover", "executors", "provision-executor", "register-executors"))
     parser.add_argument("sha", nargs="?")
     parser.add_argument("plan", nargs="?")
     args = parser.parse_args()
@@ -1452,6 +1469,8 @@ def main():
             print(release_preflight(args.sha))
         elif args.action == 'finalize-cutover':
             finalize_cutover(args.sha)
+        elif args.action == "verify-cutover":
+            verify_unified_cutover(args.sha)
         elif args.action == "verify":
             verify(args.sha)
             # Final release acceptance covers provisioned independent consumers.

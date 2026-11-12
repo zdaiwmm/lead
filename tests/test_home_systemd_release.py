@@ -1457,3 +1457,73 @@ def test_unified_preflight_uses_original_hold_and_revision(hook,monkeypatch):
     monkeypatch.setattr(hook,'verify',lambda *a,**kw:reads.append((a,kw)))
     assert hook.release_preflight(sha)==old
     assert reads==[((old,),{'fenced':True,'require_idle':False})]
+
+
+@pytest.mark.parametrize('failure',[None,'hash','telegram','reddit','finish'])
+def test_unified_finalizer_preserves_hold_until_all_consumers_verify(hook,monkeypatch,failure):
+    import json
+    sha,old='b'*40,'a'*40
+    pending=True
+    calls=[]
+    stage=hook.STORE/('maintenance-'+sha)
+    monkeypatch.setattr(hook,'unified_cutover_pending',lambda revision:pending)
+    monkeypatch.setattr(hook,'UNIFIED_BROWSER_FILES',{'scripts/unified_browser_upgrade.py':'c'*40})
+    def host_file(path,**kwargs):
+        if path.name=='unified-browser-migration.json':
+            return json.dumps({'sha':sha,'old':old}).encode()
+        assert path==stage/'source/scripts/unified_browser_upgrade.py'
+        return b'# reviewed source'
+    monkeypatch.setattr(hook,'executor_host_file',host_file)
+    def provision(revision,path):
+        channel=path.name.removesuffix('-provision.json')
+        calls.append(channel)
+        if failure==channel:
+            raise hook.Refused('executor verification failed')
+    monkeypatch.setattr(hook,'provision_executor',provision)
+    monkeypatch.setattr(hook,'register_executors',lambda revision:calls.append('register'))
+    def run(*args,**kwargs):
+        nonlocal pending
+        if args[0]=='git':
+            return 'd'*40 if failure=='hash' else 'c'*40
+        assert args==(hook.EXECUTOR_PYTHON_SOURCE,'-I','-B',stage/'source/scripts/unified_browser_upgrade.py',
+            'finish','--sha',sha,'--old',old)
+        calls.append('finish')
+        if failure=='finish':
+            raise hook.Refused('readback failed')
+        pending=False
+        return ''
+    monkeypatch.setattr(hook,'run',run)
+    if failure:
+        with pytest.raises(hook.Refused):
+            hook.complete_unified_cutover(sha)
+        assert pending
+    else:
+        hook.complete_unified_cutover(sha)
+        assert not pending
+    assert calls==([] if failure=='hash' else ['telegram'] if failure=='telegram' else
+        ['telegram','reddit'] if failure=='reddit' else ['telegram','reddit','register','finish'])
+
+
+def test_maintenance_window_does_not_release_unified_upgrade_hold(hook,monkeypatch,tmp_path):
+    import json
+    tools=tmp_path/'tools'
+    tools.mkdir()
+    (tools/'home_live_maintenance.py').write_text('# fixture')
+    monkeypatch.setattr(hook,'TOOLS',tools)
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda sha:False)
+    monkeypatch.setattr(hook,'unified_cutover_pending',lambda sha:True)
+    monkeypatch.setattr(hook,'current',lambda:'a'*40)
+    monkeypatch.setattr(hook,'verify',lambda *a,**kw:None)
+    calls=[]
+    def run(*args,**kwargs):
+        calls.append(tuple(map(str,args)))
+        if args[0]==tools/'home_live_maintenance.py':
+            return json.dumps({'active_profiles':0}) if args[1]=='health' else 'idle'
+        if args[:2]==('systemctl','show'):
+            return 'inactive'
+        return ''
+    monkeypatch.setattr(hook,'run',run)
+    with hook.maintenance_window('a'*40,'b'*40):
+        pass
+    assert not any('restore' in call for call in calls)
+    assert not any(call[:2]==('systemctl','start') for call in calls)
