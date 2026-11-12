@@ -2218,13 +2218,19 @@ progress::-moz-progress-bar {
   }
   .account-browser-header {
     padding: 16px;
-    gap: 8px;
+    gap: 12px;
+    flex-wrap: wrap;
   }
   .browser-header-actions {
     gap: 4px;
+    margin-left: auto;
+    justify-content: flex-end;
+    max-width: 100%;
   }
   .browser-title {
     gap: 10px;
+    flex: 1 0 100%;
+    min-width: 0;
   }
   .browser-title h2 {
     font-size: 14px;

@@ -16,7 +16,7 @@ export default function SocialAccounts({ agent, platforms, readOnly, onConnect, 
   const [confirm, setConfirm] = useState(false);
   const [error, setError] = useState("");
   const accounts: Row[] = agent.accounts.filter((a: Row) => a.platform !== "lab" && a.state !== "disconnected");
-  const channels = Object.entries(socialNames).map(([id, name]) => ({ ...platforms.find(p => p.id === id), id, name }));
+  const channels = Object.entries({ ...socialNames, web: "网站" }).map(([id, name]) => ({ ...platforms.find(p => p.id === id), id, name }));
   const status = (a?: Row) => !a ? "未连接" : a.state === "needs_auth" ? "需重新登录" : a.state === "restricted" ? "账号受限"
     : a.operating_intent?.desired === "paused" ? "已暂停" : a.operating_intent?.desired === "revoked" ? "运营已撤销"
     : a.operating_intent?.desired === "running" ? agent.desired_state === "paused" ? "项目已暂停" : "自动推进中" : "连接待核对";
@@ -59,9 +59,9 @@ export default function SocialAccounts({ agent, platforms, readOnly, onConnect, 
             : <div className="social-account-detail">
               {available.length > 1 && <select aria-label={`选择 ${p.name} 账号`} value={account.id} disabled={!!busy || !!challenge}
                 onChange={event => { setChoice({ ...choice, [p.id]: event.target.value }); setConfirm(false); setError(""); }}>
-                {available.map(a => <option key={a.id} value={a.id}>{a.display_name || a.external_account_id || "已连接账号"}</option>)}
+                {available.map(a => <option key={a.id} value={a.id}>{a.display_name || a.external_account_id || a.connection_origin || "已连接账号"}</option>)}
               </select>}
-              <strong>{account.display_name || account.external_account_id || p.name}</strong>
+              <strong>{account.display_name || account.external_account_id || account.connection_origin || p.name}</strong>
               <p>{confirm ? "解除后停止操作此账号，保留历史和原操作回执。其他账号继续运行。" : challenge ? "平台要求本人验证，请打开原窗口完成。" : status(account)}</p>
               {!confirm && account.state === "connected" && <p className="small">{account.operational_ready ? "已有目标与格式的核验记录，提交前仍会核对当前条件。" : account.discovery?.output?.missing_conditions?.length ? "账号已连接，平台尚未核实可执行位置或接入能力。此项由产品继续处理，其他工作可独立推进。" : account.discovery?.state === "failed" ? "可执行位置核对暂未完成，平台正在处理该项能力故障。" : account.discovery?.state === "succeeded" ? "位置核对已完成，首次业务操作前仍需核对格式和当前执行条件。" : "正在核对可执行位置与能力；连接成功不会被当作发布成功。"}</p>}
               {error && <p className="field-error" role="alert">{error}</p>}
@@ -73,7 +73,7 @@ export default function SocialAccounts({ agent, platforms, readOnly, onConnect, 
                   {account.operating_intent?.desired === "running" ? <Pause size={13} /> : <Play size={13} />}
                   {busy === "control" ? "正在更新…" : account.operating_intent?.desired === "running" ? "暂停此账号" : "恢复此账号"}
                 </button>
-                <button className="text-button" disabled={readOnly || !!busy} onClick={() => { setOpen(""); onConnect({ ...p, account_id: account.id }); }}>{challenge ? "打开原窗口验证" : "重新登录"}</button>
+                <button className="text-button" disabled={readOnly || !!busy} onClick={() => { setOpen(""); onConnect({ ...p, account_id: account.id, connection_origin: account.connection_origin }); }}>{challenge ? "打开原窗口验证" : "重新登录"}</button>
                 <button className="text-button danger" disabled={readOnly || !!busy} onClick={() => setConfirm(true)}>解除绑定</button>
               </>}</div>
               {!confirm && <button className="text-button" disabled={readOnly || !!busy} onClick={() => { setOpen(""); onConnect({ ...p, new_account: true }); }}>连接另一个账号</button>}
