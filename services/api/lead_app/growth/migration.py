@@ -65,7 +65,7 @@ def _snapshot(c,aid):
         desired = "revoked" if account["state"]=="disconnected" else "paused" if owner and owner["type"]=="channel.paused" else (
             "running" if account["verified_at"] and account["external_account_id"] else None)
         intent_sources.append({"account_id":str(account["id"]),"desired":desired,"owner_event":owner,
-            "connection_verified_at":account["verified_at"],"excluded_targets":[item["external_target_id"] for item in excluded]})
+            "connection_verified_at":account["verified_at"],"excluded_targets":sorted(item["external_target_id"] for item in excluded)})
     material = {"agent_id":str(aid),"control_version":agent["control_version"],"desired_state":agent["desired_state"],
         "config_revision":agent["config_revision"],"generation":agent["onboarding_state"].get("growth_runtime",{}).get("decision",{}).get("generation",0),
         "accounts":accounts,"grants":grants,"routes":routes,

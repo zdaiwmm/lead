@@ -2,10 +2,66 @@ import psycopg
 import pytest
 from lead_app import domain
 from lead_app.activities import prepare_action
+from lead_app.config import database_kwargs
 from lead_app.db import j, one, tx
 from lead_app.execution_routes import register
+from lead_app.growth import migration
 from lead_app.growth.migration import apply_migration, preview_migration
 from lead_app.scope import service_scope
+
+
+@pytest.fixture
+def revoked_targets_agent(monkeypatch):
+    aid = domain.create_agent(runtime_engine="legacy")
+    domain.connect_lab(aid)
+    with tx(aid) as c:
+        account = one(c,"SELECT id FROM lead.social_accounts WHERE platform='lab'")["id"]
+        for external in ("zeta-revoked", "alpha-revoked"):
+            target = one(c,"""INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,
+                external_target_id,display_name,verified_permissions,state)
+                VALUES(lead.ctx_tenant(),%s,%s,'profile',%s,'Synthetic revoked target','[]','disabled') RETURNING id""",
+                (aid,account,external))["id"]
+            c.execute("""INSERT INTO lead.authorization_grants(tenant_id,agent_id,target_id,version,
+                allowed_actions,granted_by,revoked_at)
+                VALUES(lead.ctx_tenant(),%s,%s,1,'["publish"]','local_owner',now())""",(aid,target))
+    original = migration.all_rows
+
+    def legal_row_orders(c,query,params=()):
+        rows = original(c,query,params)
+        if query.startswith("SELECT t.external_target_id FROM lead.account_targets"):
+            # Keep real database facts and transactions; supply the two legal
+            # row orders observed from runtime and owner query plans.
+            return sorted(rows,key=lambda row:row["external_target_id"],
+                          reverse=c.info.user==database_kwargs(owner=True)["user"])
+        return rows
+
+    monkeypatch.setattr(migration,"all_rows",legal_row_orders)
+    yield aid,account
+    domain.set_control(aid,"archive")
+
+
+def test_migration_accepts_same_revoked_targets_in_different_role_row_orders(revoked_targets_agent):
+    aid,account = revoked_targets_agent
+    report = preview_migration(aid)
+    with service_scope():
+        result = apply_migration(aid,report["report_hash"],report["generation"])
+    assert result["applied"]
+    with tx(aid) as c:
+        intent = one(c,"SELECT scope FROM lead.account_operating_intents WHERE account_id=%s",(account,))
+        assert intent["scope"]["excluded_targets"]==["alpha-revoked","zeta-revoked"]
+
+
+def test_migration_still_rejects_real_grant_change_after_preview(revoked_targets_agent):
+    aid,_ = revoked_targets_agent
+    report = preview_migration(aid)
+    with tx(aid) as c:
+        c.execute("""UPDATE lead.authorization_grants SET revoked_at=NULL WHERE target_id IN
+            (SELECT id FROM lead.account_targets WHERE external_target_id='alpha-revoked')""")
+    with service_scope(),pytest.raises(ValueError,match="migration_snapshot_changed"):
+        apply_migration(aid,report["report_hash"],report["generation"])
+    with tx(aid) as c:
+        assert not one(c,"SELECT account_id FROM lead.account_operating_intents")
+        assert not one(c,"SELECT onboarding_state FROM lead.agents WHERE id=%s",(aid,))["onboarding_state"].get("growth_runtime")
 
 
 def legacy_action(aid,unknown=False):
