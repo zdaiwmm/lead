@@ -3,10 +3,10 @@ import json
 import os
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from lead_app import domain, local_executor
-from lead_app.db import all_rows, one, tx
+from lead_app.db import all_rows, tx
 from lead_app.local_executor_api import router
 
 app = FastAPI()

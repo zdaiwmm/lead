@@ -229,7 +229,10 @@ def test_owner_controls_require_capability_and_transport_requires_bearer(growth_
     with tenant_scope(current_tenant(), {"role": "owner", "subject": "fixture", "issuer": "local"}):
         response = client.post(path)
         assert response.status_code == 200
-        assert response.json()["connect_command"].startswith("lead-executor pair --url ")
+        import shlex
+        command = shlex.split(response.json()["connect_command"])
+        assert command[:5] == ["lead-executor", "pair", "--profile", str(growth_agent), "--url"]
+        assert command[-1] == "--install"
         assert "<Lead地址>" not in response.json()["connect_command"]
     assert client.post("/executor/v1/poll", json={"epoch": 1}).status_code == 401
     assert client.post("/executor/v1/poll", json={"epoch": 1}, headers={"Authorization": "Bearer forged"}).status_code == 401

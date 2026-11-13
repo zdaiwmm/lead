@@ -30,7 +30,10 @@ async def verify():
     original = {name: (web / name).read_bytes() for name in ("tsconfig.json", "next-env.d.ts")}
     report = Path(os.environ.get("LEAD_ONBOARDING_REPORT", "/private/tmp/lead-codex-onboarding-ui-20261114"))
     report.mkdir(parents=True, exist_ok=True)
-    sock = socket.socket();sock.bind(("127.0.0.1", 0));port = sock.getsockname()[1];sock.close()
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
     base = f"http://127.0.0.1:{port}"
     env = {k: v for k, v in os.environ.items() if not k.startswith(("LEAD_", "OPENAI_", "DEEPSEEK_", "ANTHROPIC_"))}
     env.update(LEAD_WEB_DIST_DIR=".next-onboarding-check", LEAD_API_ORIGIN="http://127.0.0.1:1")
@@ -84,7 +87,8 @@ async def verify():
                         return await route.fulfill(json={"id": draft_id})
                     return await route.fulfill(json={})
                 await context.route("**/*", route)
-                page = await context.new_page();page.on("pageerror", lambda error: errors.append(str(error)))
+                page = await context.new_page()
+                page.on("pageerror", lambda error: errors.append(str(error)))
                 await page.goto(base + "/onboarding-check", wait_until="networkidle")
                 await page.get_by_role("button", name="新建项目", exact=True).click()
                 await page.get_by_label("官网网址", exact=True).fill("https://example.test")
@@ -116,7 +120,8 @@ async def verify():
                     await page.screenshot(path=str(report / f"{label}.png"), full_page=True)
                 await page.get_by_role("button", name="根据官网生成", exact=True).click()
                 for _ in range(30):
-                    if analyses: break
+                    if analyses:
+                        break
                     await asyncio.sleep(0.1)
                 assert len(analyses) == 1
                 await page.get_by_role("button", name="关闭新建 Agent", exact=True).click()
@@ -145,11 +150,16 @@ async def verify():
                 await browser.close()
     finally:
         process.terminate()
-        try:process.wait(timeout=10)
-        except subprocess.TimeoutExpired:process.kill();process.wait()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
         log.close()
-        (fixture / "page.tsx").unlink(missing_ok=True);fixture.rmdir()
-        for name, data in original.items():(web / name).write_bytes(data)
+        (fixture / "page.tsx").unlink(missing_ok=True)
+        fixture.rmdir()
+        for name, data in original.items():
+            (web / name).write_bytes(data)
 
 
 if __name__ == "__main__":
