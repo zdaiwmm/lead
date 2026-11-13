@@ -1026,6 +1026,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 独立限定审查确认验收消费者只执行一片，与产品原发现Task合法三片续接不一致；记录 `/private/tmp/vbp30/trial15-continuation-contract-review.json` SHA256 `0082ed20c819a78e6b009e34a1b5abed602ee3c9fb2a22efd2922ed4201e94ea`。现仅evaluator/v4登记允许 canonical growth.account/discover 的同Task/代次、planned、原native_discovery checkpoint及account_connection/bounded_browser_fragment/product/recheck等待，按原check_at再advance，最多共三片；逐片先核验原图/计量/settled/180秒/POST增量，其他waiting/failed/unknown仍首失败停。六个顶层stage保留逐片与总量，技术容量诚实覆盖两站各10片/80请求/200万单位，非用户费用上限。定向测试先1红6绿，现40绿/2专用环境skip；旧R15失败、账本和归档不改写。
 
+- `c3238ac`固定验收续接，`7de5c4b`集成通用跨页发现文案：编辑器与target_url规则页可以分开，观察规则后回到所需编辑器提案，服务端仍另页独立核验；移除必访私有设置页与隐藏兼容hint的模型提示。未加入A/B网址或选择器配方，权限、片段次数与完整视觉配置不变。独立限定审查 evaluator SHA256 `387dbc8e9a6ff9823ec39a11d9a24381e2f7589f73211d8060c647ad62aa12a2`、goal `e208104193e6af000e882fe347808df53f6a8399adeb43cd0c999808c656758d`；runner新blob `7abc6429011cd5087ca5413b1916ab24969116df`，其余10冻结项不变，2项精确兼容检查通过。root定向126通过/3专用环境skip；误纳入的1个未变DB-only operation-map测试在本机因数据库认证不匹配setup-error，原XML保留且不算行为通过，该功能复用前轮真实DB证据，精确main完整CI仍必验。真实模型回复/B尚未通过。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
