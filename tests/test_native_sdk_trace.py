@@ -104,3 +104,34 @@ def test_credential_completeness_feedback_is_a_fixed_safe_code(tmp_path,message,
     trace=SafeStepTrace(tmp_path/'trace.json')
     trace.capture(SimpleNamespace(history=[entry(error=message)]))
     assert trace.steps[0]['outcomes']==[{'status':'denied','code':code}]
+
+
+def test_method_failure_trace_retains_only_validated_field_issue_enums(tmp_path):
+    from lead_app.native_method_errors import method_rpc_feedback
+
+    private='private-selector-or-value'
+    feedback=method_rpc_feedback('record_method',409,{'code':'browser_method_element_ambiguous',
+        'selector_issues':[{'field':'self_subject','issue':'not_found','selector':private},
+            {'field':'submit','issue':'not_unique'},{'field':private,'issue':'not_found'}],
+        'detail':private})
+    trace=SafeStepTrace(tmp_path/'trace.json')
+    trace.capture(SimpleNamespace(history=[entry('propose_method',error='Error executing action propose_method: '+feedback)]))
+    assert trace.steps[0]['outcomes']==[{'status':'error','code':'browser_method_element_ambiguous',
+        'selector_issues':[{'field':'self_subject','issue':'not_found'},{'field':'submit','issue':'not_unique'}]}]
+    assert private not in trace.path.read_text()
+
+
+@pytest.mark.parametrize('suffix',[
+    ' Selector issues: private=not_found.',
+    ' Selector issues: self_subject=private.',
+    ' Selector issues: '+', '.join(['submit=not_found']*7)+'.',
+    ' Selector issues: self_subject=not_found. private',
+])
+def test_method_failure_trace_does_not_copy_arbitrary_suffixes(tmp_path,suffix):
+    from lead_app.native_method_errors import METHOD_ERROR_HINTS
+
+    code='browser_method_element_ambiguous'
+    trace=SafeStepTrace(tmp_path/'trace.json')
+    trace.capture(SimpleNamespace(history=[entry('propose_method',error=code+': '+METHOD_ERROR_HINTS[code]+suffix)]))
+    assert trace.steps[0]['outcomes']==[{'status':'error','code':code}]
+    assert 'private' not in trace.path.read_text()

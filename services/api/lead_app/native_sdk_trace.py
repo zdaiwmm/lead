@@ -4,7 +4,11 @@ import os
 from pathlib import Path
 
 from .native_identity_errors import IDENTITY_ERROR_HINTS
-from .native_method_errors import METHOD_ERROR_HINTS
+from .native_method_errors import (
+    METHOD_ERROR_HINTS,
+    SELECTOR_ERROR_CODES,
+    safe_selector_issues,
+)
 
 _ACTIONS=('guarded_input','guarded_click','guarded_scroll','guarded_navigate','inspect_self',
     'report_connection','propose_method','report_receipt','done','open_public_page',
@@ -36,6 +40,19 @@ def _field(value,name):
     return value.get(name) if isinstance(value,dict) else getattr(value,name,None)
 
 
+def _method_issues(error,code):
+    if code not in SELECTOR_ERROR_CODES:
+        return []
+    prefix=code+': '+METHOD_ERROR_HINTS[code]+' Selector issues: '
+    if not error.startswith(prefix) or not error.endswith('.'):
+        return []
+    tail=error[len(prefix):-1]
+    if len(tail)>512:
+        return []
+    pairs=[value.split('=',1) for value in tail.split(', ')]
+    return safe_selector_issues([{'field':value[0],'issue':value[1]} for value in pairs if len(value)==2])
+
+
 def _outcome(result):
     error=_field(result,'error')
     if error:
@@ -52,7 +69,8 @@ def _outcome(result):
             return {'status':status,'code':code}
         for code in (*_SCOPE_CODES,*IDENTITY_ERROR_HINTS,*METHOD_ERROR_HINTS):
             if error==code or (code in IDENTITY_ERROR_HINTS or code in METHOD_ERROR_HINTS) and error.startswith(code+': '):
-                return {'status':'error','code':code}
+                issues=_method_issues(error,code)
+                return {'status':'error','code':code,**({'selector_issues':issues} if issues else {})}
         for status in (400,401,403,404,409,422,429,500,502,503,504):
             if error.startswith((f"Client error '{status} ",f"Server error '{status} ")):
                 return {'status':'error','code':f'http_{status}'}
