@@ -32,8 +32,24 @@ test ! -e "$stage/services/browser-runtime"
 cp -a "$browser_runtime" "$stage/services/browser-runtime"
 python3 -IB scripts/build_browser_runtime.py "$sha" "$stage/services/browser-runtime" --verify
 test -s "$local_executor"
-tar -tzf "$local_executor" | rg -qx 'package/dist/cli.js'
-[[ $(tar -xOzf "$local_executor" package/REVISION) == "$sha" ]]
+python3 -IB - "$local_executor" "$sha" <<'PY'
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    members = archive.getmembers()
+    required = ("package/dist/cli.js", "package/REVISION")
+    entries = {}
+    for name in required:
+        matches = [member for member in members if member.name == name]
+        if len(matches) != 1 or not matches[0].isfile():
+            raise ValueError("Executor package requires one regular CLI and REVISION")
+        entries[name] = matches[0]
+    expected = (sys.argv[2] + "\n").encode("ascii")
+    revision = entries["package/REVISION"]
+    if revision.size != len(expected) or archive.extractfile(revision).read() != expected:
+        raise ValueError("Executor package belongs to another revision")
+PY
 cp "$local_executor" "$stage/services/local-executor/lead-local-executor.tgz"
 mv "$stage/apps/web" "$stage/web"
 mv "$stage/infra/home-browser-frames" "$stage/home-browser-frames"

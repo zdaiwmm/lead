@@ -1195,7 +1195,7 @@ UNIFIED_BROWSER_FILES = {
     'scripts/browser_namespace.py': '7ecb47f233761b910317126d9d15e8edfb9fe21b',
     'scripts/browser_use_runner.py': '7abc6429011cd5087ca5413b1916ab24969116df',
     'scripts/build_browser_runtime.py': 'cbc4d3d3521a2fe50c589813cf0d3956289ca94a',
-    'scripts/build_home_image.sh': 'e6317873f2e1df290fe780141f352f0a03699278',
+    'scripts/build_home_image.sh': '77023d7fa2a3ab679d3556c25936a278d0641cc8',
     'scripts/unified_browser_upgrade.py': '64ba9808dd6a667338b0af6e09b2f73abb5a3f2a',
     'services/local-executor/.gitignore': '72bdd5d427f474fb9b7835d3226d921ef7a8bd6f',
     'services/local-executor/README.md': 'a14c1164203cadf8aa3ede18c649c536aa73e5f8',

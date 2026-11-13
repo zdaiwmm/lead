@@ -1173,3 +1173,9 @@ Multica官方主线固定为[`773569db3ab53e304f2d08310621f1b15be393f0`](https:/
 - 最后独立seed Task e6968438/Action9dc93240经原受控MCP机械提交一次（0模型），完整上游303后真实丢ACK，Task reconciling/Action unknown、attempt9e14319f/attempt1。随后同Task/generation1/Action/attempt只读Sol请求27b3c0dc自然completed，正式confirmed，原Board7003完整正文/作者与SQL回执独立核验通过；seed代理进入POST1/drop1/blocked0，只读阶段进入POST0/blocked0，没有靠代理防重替产品洗成功。机械seed无原生thread，真实只读请求建立首个native thread；不伪称同旧model turn继续。两份原始JSON及root摘要 `/private/tmp/lead-codex-production-20261114/b-lost-ack-recovery-verified.json`保留。
 - B能力按实际来源分列：本fixture初始化和会话技术刷新为机械；历史独立发布发现511e/nativeb271为真实Codex，其native_method_facts/native_task两组件c541→460字节未变；真实回复发现531c/nativef4a为d048；历史B认证9d9e/nativefbc2有真实thread/turn及completed记录，旧harness未标engine不补写标签。原API/Board保留b09，本轮gateway为460；本机测试daemon来自原checkout，部分ACK/provider/revision/安装代码与候选不同，正常模型/工具业务证据和后续工程回归分别核验，不宣称全组件单SHA、单次不中断或严格盲测。完整校准摘要 `/private/tmp/lead-codex-b-final-acceptance-summary-20261114.json`；旧Case原始5815/POST0历史不用于最终e2链。
 - 42冻结blob/28连接器路径与460精确树全部一致；975 tracked files凭据扫描、全Ruff/diffcheck通过。候选460的全部PR必需检查已通过。精确main完整验证、同轮工具/镜像、正式迁移/切换/独立回读尚未开始；此源码记录在发布前冻结，P3及最终准确SHA/CI/生产回读/owner配对状态由同PR62交付栏持续对账，不为状态文案重建已验证产物。
+
+### 23.8 精确主线打包故障（未触及生产）
+
+PR62在最终72775e9必需快速检查全绿后合入main为055242721d3ee0cb7cc4f6eeb295d31042052e0e。主线完整验证43523539356/attempt1在Linux应用打包阶段失败：build_home_image.sh隐含依赖构建机未安装的rg，且tar列表管道产生写错误；放行门正确失败，backend和tool-bundle未运行。原CI及日志保留，不把前端部分步骤或旧绿当完整应用证明。没有为该SHA安装工具、取件发布、建立hold/DDL或创建生产请求，现场仍7940/0031。
+
+该独立打包故障按原交付授权在最新main055的独立worktree/分支修复：用打包脚本已具备的Python标准库tarfile完整读取目录，核唯一regular CLI和精确REVISION，不新增构建依赖或早退管道；只更新原home_systemd_release.py的该builder冻结blob，不修改旧7079兼容入口或业务执行代码。既有runtime-image/home-helper142项、语法/Ruff/diffcheck通过；无rg且CLI首成员加2048长名条目的真实Linux专项5项先红后绿，实际SquashFS生成并回读原SHA及tgz原字节，错误/重复REVISION、重复或symlink CLI均在生成镜像前拒绝。绿跑builder blob独立核为77023d7fa2a3ab679d3556c25936a278d0641cc8，Mac端5项明确skip，不冒充Linux成功。原C22、协议及业务证据仅按未变代码复用，不追加模型。修复走独立小PR及其合并后精确main完整验证，生产只使用随后成功同SHA/run/attempt的原产物；准确后续版本与发布状态仍在PR交付栏记录。
