@@ -7,14 +7,14 @@ import {
   writeFileSync,
   closeSync,
 } from "node:fs";
-import { homedir, hostname, platform } from "node:os";
+import { hostname, platform } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Store } from "./store.ts";
 import { capabilities } from "./capabilities.ts";
 import { Daemon } from "./daemon.ts";
 import { post, validateUrl } from "./transport.ts";
-import { launchd } from "./launchd.ts";
+import { launchd, profileState } from "./launchd.ts";
 const args = process.argv.slice(2),
   command = args.shift() || "status";
 function option(name: string, fallback?: string) {
@@ -45,7 +45,7 @@ async function main() {
   const folder = resolve(
       option(
         "state",
-        process.env.LEAD_EXECUTOR_HOME || join(homedir(), ".lead", "executor"),
+        process.env.LEAD_EXECUTOR_HOME || profileState(option("profile")),
       )!,
     ),
     store = new Store(folder);
@@ -76,8 +76,9 @@ async function main() {
       epoch: result.epoch,
       name,
     });
+    if (args.includes("--install")) launchd("install", folder, fileURLToPath(import.meta.url));
     console.log(
-      JSON.stringify({ paired: true, name, url, device_id: result.device_id }),
+      JSON.stringify({ paired: true, name, url, device_id: result.device_id, background: args.includes("--install") }),
     );
     return;
   }

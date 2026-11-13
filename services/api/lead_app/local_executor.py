@@ -8,13 +8,14 @@ import hashlib
 import hmac
 import json
 import secrets
+import shlex
 import time
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from .config import CONFIG
-from .db import all_rows, audit, j, one, require_agent, tx
+from .db import all_rows, audit, emit, j, one, require_agent, tx
 from .scope import current_tenant, tenant_scope
 
 MODEL = "gpt-6.1-sol"
@@ -121,7 +122,7 @@ def create_pairing(aid):
             VALUES(%s,%s,%s,%s,%s)""", (device_id, current_tenant(), aid, _digest(code), expires))
         audit(c, aid, "executor.pairing_created", {"device_id": device_id})
     return {"code": code, "expires_at": expires.isoformat(), "device_id": device_id,
-            "connect_command": "lead-executor pair --url "+public_origin()+" --code "+code}
+            "connect_command": "lead-executor pair --profile "+aid+" --url "+shlex.quote(public_origin())+" --code "+code+" --install"}
 
 
 def pair(code, name, platform, capabilities):
@@ -146,6 +147,7 @@ def pair(code, name, platform, capabilities):
             mode='codex',device_id=excluded.device_id,updated_at=now()""",
                   (claims["tenant_id"], claims["agent_id"], device["id"]))
         audit(c, claims["agent_id"], "executor.paired", {"device_id": str(device["id"]), "platform": platform[:80]})
+        _wake_existing(c, claims["agent_id"], "executor_paired")
         return {"device_id": str(device["id"]), "token": bearer, "epoch": device["epoch"],
                 "agent_id": claims["agent_id"], "tenant_id": claims["tenant_id"], "model": MODEL, "effort": EFFORT}
 
@@ -159,7 +161,14 @@ def set_mode(aid, mode):
             ON CONFLICT(tenant_id,agent_id) DO UPDATE SET mode=excluded.mode,updated_at=now()""",
                   (current_tenant(), aid, mode))
         audit(c, str(aid), "executor.mode_changed", {"mode": mode})
+        _wake_existing(c, str(aid), "executor_mode_changed")
     return {"mode": mode}
+
+
+def _wake_existing(c, aid, reason):
+    agent = require_agent(c, aid)
+    if agent["desired_state"] == "running" and one(c, "SELECT id FROM lead.business_profiles LIMIT 1"):
+        emit(c, str(aid), "growth.wake", {"reason": reason})
 
 
 def revoke(aid, device_id):

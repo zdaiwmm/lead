@@ -136,7 +136,7 @@ export default function LocalExecutor({ aid, readOnly }: { aid: string; readOnly
     {(issue || error) && <p className={styles.error} role="alert">{issue || error} <button className="text-button" onClick={refresh}><RefreshCw size={13} />重新读取</button></p>}
     {manage && <div className={styles.manage}>
       <p><a href="/api/executor/download" download>下载本机连接器</a><span className="muted"> · 安装后，在本机完成一次连接。</span></p>
-      <p className={styles.help}>首次下载后，在本机终端安装：<code>npm install -g ~/Downloads/lead-local-executor.tgz</code>。使用已有的 Codex 登录；每台设备分别保留自己的连接状态。</p>
+      <p className={styles.help}>首次下载后，在本机终端安装：<code>npm install -g ~/Downloads/lead-local-executor.tgz</code>。下方连接指令会同时启用后台执行，各项目分别保存连接状态。</p>
       {devices.length > 0 && <ul className={styles.devices}>{devices.map(device => <li key={device.id}>
         <div><strong>{device.name}</strong><span>{device.online ? "在线" : `离线 · 最近上线 ${when(device.last_seen_at)}`}</span></div>
         <button disabled={busy || !canControl} onClick={() => void action(() => api(`/agents/${aid}/executor/devices/${device.id}/revoke`, {}))}>解除连接</button>
@@ -158,7 +158,7 @@ export default function LocalExecutor({ aid, readOnly }: { aid: string; readOnly
         </>}
         <button className="text-button" onClick={() => setInvitation(null)}>收起指令</button>
       </div>}
-      <p className={styles.help}>当前使用 GPT-6.1 Sol，中等推理。设备上的官方 Codex 管理登录和模型使用，原账号与发送记录继续保留。</p>
+      <p className={styles.help}>本机执行使用 GPT-6.1 Sol，中等推理。设备上的官方 Codex 管理登录和模型使用，原账号与发送记录继续保留。</p>
     </div>}
     {active.length > 0 && <div className={styles.work}>
       <div className={styles.workHeading}><strong>本机正在处理</strong><span>{active.length} 项</span></div>

@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { launchAgentPlist } from "../src/launchd.ts";
+import { launchAgentPlist, launchAgentLabel, profileState } from "../src/launchd.ts";
 import { capabilities } from "../src/capabilities.ts";
+test("project profiles keep separate device state and background services", () => {
+  const a = profileState("00000000-0000-4000-8000-000000000001");
+  const b = profileState("00000000-0000-4000-8000-000000000002");
+  assert.notEqual(a, b);
+  assert.notEqual(launchAgentLabel(a), launchAgentLabel(b));
+  assert.throws(() => profileState("../../another-project"));
+});
 test("launchd arguments are XML escaped, include a fixed executable, and do not contain credentials", () => {
   const plist = launchAgentPlist(
     "/private/Lead & Co/state",

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { AppServer } from "./rpc.ts";
 import { MODEL, EFFORT, nativeArgs } from "./runner.ts";
 import type { RpcLike } from "./types.ts";
@@ -41,6 +42,9 @@ export async function capabilities(
       ready: auth === "chatgpt" && !!model && efforts.includes(EFFORT),
       auth_type: auth,
       cli_version: version,
+      connector_revision: existsSync(new URL("../REVISION", import.meta.url))
+        ? readFileSync(new URL("../REVISION", import.meta.url), "utf8").trim()
+        : "development",
       models: model ? [MODEL] : [],
       reasoning_efforts: efforts,
       input_modalities: model?.inputModalities || [],

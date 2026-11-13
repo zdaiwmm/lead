@@ -1,8 +1,17 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-const label = "com.lead.local-executor";
+export function profileState(profile?: string) {
+  if (!profile) return join(homedir(), ".lead", "executor");
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(profile))
+    throw new Error("invalid_project_profile");
+  return join(homedir(), ".lead", "executors", profile.toLowerCase());
+}
+export function launchAgentLabel(state: string) {
+  return "com.lead.local-executor." + createHash("sha256").update(state).digest("hex").slice(0, 16);
+}
 const xml = (s: string) =>
   s
     .replaceAll("&", "&amp;")
@@ -16,6 +25,7 @@ export function launchAgentPlist(
   cli: string,
   path: string,
 ) {
+  const label = launchAgentLabel(state);
   const environment = {
     PATH: path,
     ...(process.env.LEAD_CODEX_BINARY
@@ -38,6 +48,7 @@ export function launchd(
   state: string,
   cli: string,
 ) {
+  const label = launchAgentLabel(state);
   if (process.platform !== "darwin") throw new Error("launchd_requires_macos");
   const folder = join(homedir(), "Library", "LaunchAgents"),
     plist = join(folder, label + ".plist"),
