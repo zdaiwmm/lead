@@ -29,6 +29,8 @@ Each business request has an immutable payload identity and a native session key
 
 The connector persists the request, thread, turn, pending user requests and an event outbox before acknowledging commands. It starts no replacement turn after an ambiguous start. On recovery it reads the original thread's paginated history and matches the stable Lead request marker. Unprovable execution is reported as `execution_unknown`. A previously unknown request can be reconciled against the original thread later; this never starts another turn. Lead's original Action ledger remains authoritative for external sends.
 
+`request/started` carries the primary thread/turn only after a native RPC acknowledgment or exact original-turn history proof. Raw native events remain available separately, including child threads; they cannot replace the business request's primary IDs or usage snapshot. Once a turn ID is known, recovery matches only that ID. Without it, the marker must begin the original user message. Early completion notifications are retained by turn ID until that proof arrives. Offline interruptions remain durable and target only the proven original turn.
+
 Native approval and user-input requests are forwarded as `server/request` events and wait for a matching `respond` command. The connector does not automatically accept them. Mid-turn instructions use `turn/steer` with the original turn ID. Interruptions do not establish that an external action did not occur.
 
 Every run gets a request-bound MCP stdio server; it exposes only that request's declared tools and sends `request_id` to Lead for authorization. Text, structured results and screenshots pass through the official MCP SDK. The connector never receives a CDP URL or browser profile.
