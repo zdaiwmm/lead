@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 from datetime import datetime, timedelta
 
 from temporalio import workflow
@@ -25,9 +27,21 @@ def rotate_pending(polls, args):
             workflow.continue_as_new(args=args)
 
 
+def continuation_enabled(marker, result, identity):
+    # Keep the original marker at the same position for existing histories.
+    if workflow.patched(marker):
+        return True
+    if not isinstance(result, dict) or not result.get("executor_pending"):
+        return False
+    # A long-lived pre-native Run may have cached the original marker False.
+    # Only a newly pending business identity can activate its continuation.
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return workflow.patched(f"{marker}-adopt-{digest}")
+
+
 async def durable_activity(name, args, *, pending_args, **options):
     result = await workflow.execute_activity(name, args, **options)
-    if workflow.patched("local-codex-channel-continuation-v1"):
+    if continuation_enabled("local-codex-channel-continuation-v1", result, [name, args]):
         polls = 0
         while isinstance(result, dict) and result.get("executor_pending"):
             polls += 1
@@ -76,7 +90,7 @@ class GrowthWorkWorkflow:
                 result = {"executor_pending": True} if pending_claim else await workflow.execute_activity("growth_execute", {"agent_id": ref["agent_id"], "claim": claim},
                     task_queue=activity_queue(lane), start_to_close_timeout=timedelta(seconds=500),
                     retry_policy=RetryPolicy(maximum_attempts=1))
-                if workflow.patched("local-codex-activity-continuation-v1"):
+                if continuation_enabled("local-codex-activity-continuation-v1", result, claim):
                     polls = 0
                     while result.get("executor_pending"):
                         polls += 1
@@ -247,7 +261,7 @@ class ChatWorkflow:
                     task_queue=activity_queue("chat"),
                     retry_policy=RETRY,
                 )
-                if workflow.patched("local-codex-chat-continuation-v1"):
+                if continuation_enabled("local-codex-chat-continuation-v1", result, [agent_id, job]):
                     polls = 0
                     while isinstance(result, dict) and result.get("executor_pending"):
                         polls += 1
@@ -431,7 +445,7 @@ class SupervisorWorkflow:
                     heartbeat_timeout=timedelta(minutes=2) if stage_heartbeat else None,
                     retry_policy=RETRY,
                 )
-                if workflow.patched("local-codex-supervisor-continuation-v1"):
+                if continuation_enabled("local-codex-supervisor-continuation-v1", result, [aid, pending_cycle]):
                     polls = 0
                     while result.get("executor_pending"):
                         polls += 1

@@ -432,3 +432,102 @@ async def test_chat_pending_rotation_keeps_current_job_and_signaled_queue():
                 await asyncio.gather(result, return_exceptions=True)
             if handle:
                 await handle.terminate("isolated chat rotation cleanup")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["growth", "channel", "supervisor", "publish", "chat"])
+async def test_old_run_adopts_future_native_pending_without_advancing_identity(kind):
+    from lead_app.workflows import (
+        ChannelDeliveryWorkflow,
+        ChatWorkflow,
+        GrowthWorkWorkflow,
+        PublishWorkflow,
+        SupervisorWorkflow,
+    )
+    from temporalio.testing import WorkflowEnvironment
+
+    assert os.environ.get("LEAD_GROWTH_TEST_ENV") == "1"
+    targets = {"growth": GrowthWorkWorkflow, "channel": ChannelDeliveryWorkflow,
+        "supervisor": SupervisorWorkflow, "publish": PublishWorkflow, "chat": ChatWorkflow}
+    target = targets[kind]
+    ref = {"agent_id": uuid4().hex, "task_id": uuid4().hex, "task_generation": 1}
+    claims = [{"ref": ref, "kind": "research", "attempt_token": uuid4().hex} for _ in range(2)]
+    calls, finishes, applied = [], [], []
+    chat_done = asyncio.Event()
+    v1_markers = {"local-codex-activity-continuation-v1", "local-codex-channel-continuation-v1",
+        "local-codex-chat-continuation-v1", "local-codex-supervisor-continuation-v1"}
+
+    @activity.defn(name="growth_advance")
+    async def advance(args: dict):
+        return {"state": "terminal"} if len(finishes) >= 2 else {"state": "ready", "claim": claims[len(finishes)]}
+
+    @activity.defn(name="growth_finish")
+    async def finish(args: dict):
+        finishes.append(copy.deepcopy(args))
+        return {"accepted_control": True}
+
+    @activity.defn(name="execution_policy")
+    async def policy(args: dict):
+        return {"retry_interval_seconds": 2, "retry_attempts": 3}
+
+    async def execute(args):
+        calls.append(copy.deepcopy(args))
+        if kind == "chat" and args["job_id"] == "third":
+            chat_done.set()
+            return {"completed": True}
+        if len(calls) == 1:
+            # This normal result causes an old Run to cache v1=False before a
+            # later, newly paired native execution first becomes pending.
+            return {"outcome": "deferred", "state": "deferred", "delay": 1, "cadence_version": 1}
+        if len(calls) <= 4:
+            return {"executor_pending": True, "delay": 1, "cadence_version": 1}
+        return {"stop": True, "state": "completed", "outcome": "completed"}
+
+    names = {"growth": "growth_execute", "channel": "channel_delivery_tick",
+        "supervisor": "autonomous_cycle", "publish": "execute_task", "chat": "chat_job"}
+    execute_activity = activity.defn(name=names[kind])(execute)
+    folder = STATE.parent/"test-server"
+    folder.mkdir(exist_ok=True)
+    async with await WorkflowEnvironment.start_time_skipping(download_dest_dir=str(folder)) as env:
+        queue, handle, result_waiter = uuid4().hex, None, None
+        def old_patch(info):
+            applied.append(info.patch_id)
+            return info.patch_id not in v1_markers
+
+        try:
+            async with Worker(env.client, task_queue=queue, workflows=[target],
+                              activities=[advance, finish, policy, execute_activity],
+                              max_concurrent_activities=1, patch_activation_callback=old_patch):
+                if kind == "chat":
+                    handle = await env.client.start_workflow(target.run,
+                        args=[ref["agent_id"], ["first", "second", "third"]], id=uuid4().hex, task_queue=queue)
+                    result_waiter = asyncio.create_task(handle.result())
+                    await asyncio.wait_for(chat_done.wait(), 15)
+                    await eventually(lambda: calls[-1]["job_id"] == "third")
+                else:
+                    arg = ref["agent_id"] if kind == "supervisor" else ref
+                    handle = await env.client.start_workflow(target.run, arg, id=uuid4().hex, task_queue=queue)
+                    await asyncio.wait_for(handle.result(), 15)
+            expected = calls[1:5]
+            assert len(expected) == 4 and all(item == expected[0] for item in expected), (
+                "an old v1=False Run must wait on the same new native claim/job/tick/cycle")
+            assert any(marker in v1_markers for marker in applied)
+            if kind == "growth":
+                assert len(finishes) == 2
+                assert not any(item["result"].get("executor_pending") for item in finishes)
+                assert finishes[1]["claim"] == claims[1]
+            if kind == "chat":
+                assert [item["job_id"] for item in calls] == ["first", "second", "second", "second", "second", "third"]
+            before = len(calls), len(finishes)
+            history = await record_history(handle, f"codex-adoption-{kind}.json")
+            await Replayer(workflows=[target]).replay_workflow(history)
+            assert (len(calls), len(finishes)) == before
+        finally:
+            if result_waiter:
+                result_waiter.cancel()
+                await asyncio.gather(result_waiter, return_exceptions=True)
+            if handle:
+                try:
+                    await handle.terminate("isolated old-run adoption cleanup")
+                except Exception:
+                    pass
