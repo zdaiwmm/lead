@@ -181,6 +181,7 @@ def scoped_session_class():
         _observation: object = PrivateAttr(default=None)
         _screenshot_enabled: bool = PrivateAttr(default=False)
         _image_sink: object = PrivateAttr(default=None)
+        _legacy_image_validation: bool = PrivateAttr(default=True)
 
         def __setattr__(self, name, value):
             # The pinned SDK assigns its manager inside connect(), overriding
@@ -209,8 +210,15 @@ def scoped_session_class():
                     raise ScopeViolation('scope_changed_during_screenshot')
                 if not image:
                     return None
-                from .native_vision import checked_image
-                checked_image(image)
+                if self._legacy_image_validation:
+                    from .native_vision import checked_image
+                    checked_image(image)
+                else:
+                    # Codex accepts the actual screenshot; old provider wire
+                    # budgets do not decide its visual input availability.
+                    import base64
+                    if not base64.b64decode(image,validate=True).startswith(b'\x89PNG\r\n\x1a\n'):
+                        raise ScopeViolation('native_screenshot_invalid')
                 if self._image_sink:
                     self._image_sink(image,before)
                 return image
@@ -228,9 +236,10 @@ def scoped_session_class():
             self._scope = scope
             return scope
 
-        async def start_scoped(self, lease, read_scope, *, enable_screenshots=False,image_sink=None):
+        async def start_scoped(self, lease, read_scope, *, enable_screenshots=False,image_sink=None,legacy_image_validation=True):
             self._screenshot_enabled=enable_screenshots
             self._image_sink=image_sink
+            self._legacy_image_validation=legacy_image_validation
             self.browser_profile = self.browser_profile.model_copy(update={
                 'permissions': [], 'accept_downloads': False, 'auto_download_pdfs': False})
             self._startup_scope = dict(lease)

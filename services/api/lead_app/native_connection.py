@@ -532,6 +532,9 @@ class NativeConnection:
         return True
 
     async def close(self):
+        if getattr(self,'local_executor',False):
+            from .local_executor_browser import close
+            await close(self)
         if self.lease and (self.lease.get('auth_flow') or {}).get('popup_target') and not self.lease['auth_flow'].get('completed'):
             try:
                 popup=await self.owner_page()

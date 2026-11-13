@@ -30,14 +30,23 @@ class NativeTask:
         self.total_corrections=0
         self.fragment_failures=0
         self.deadline=time.monotonic()+180
+        self.local_executor=False
+
+    def progress_exhausted(self):
+        return not getattr(self,'local_executor',False) and (self.steps>20 or self.corrections>=3 or self.total_corrections>=8)
 
     def remaining_seconds(self):
+        if getattr(self,'local_executor',False):
+            # A bound on one browser operation, never the Codex task lifetime.
+            return 45
         remaining=self.deadline-time.monotonic()
         if remaining<=0:
             raise ValueError('native_fragment_deadline')
         return remaining
 
     def start_fragment(self):
+        if getattr(self,'local_executor',False):
+            return
         from .db import j
         with tx(self.actor.aid) as c:
             task=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE',(self.task_id,))
@@ -52,6 +61,8 @@ class NativeTask:
             c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,native_progress}',%s) WHERE id=%s",(j(progress),self.task_id))
 
     def note_correction(self,error=None):
+        if getattr(self,'local_executor',False):
+            return
         from .db import j
         with tx(self.actor.aid) as c:
             task=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE',(self.task_id,))
@@ -105,7 +116,7 @@ class NativeTask:
             # Revisiting an editor/rules page is not sufficient reason to end
             # discovery. Keep the diagnostic without changing error budgets.
             self.corrections=0 if _discovery_task(task) else progress['no_progress']
-            stopped=self.fragment_failures>=2 or self.corrections>=3 or self.total_corrections>=8 or self.steps>=20
+            stopped=not getattr(self,'local_executor',False) and (self.fragment_failures>=2 or self.corrections>=3 or self.total_corrections>=8 or self.steps>=20)
             if stopped:
                 progress['stopped_reason']='one_correction_exhausted' if self.fragment_failures>=2 else 'no_progress' if self.corrections>=3 else 'active_step_limit'
             c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,native_progress}',%s) WHERE id=%s",(j(progress),self.task_id))
@@ -158,7 +169,8 @@ class NativeTask:
         from datetime import timedelta
 
         from .growth.contracts import utcnow
-        scope['fragment_deadline']=(utcnow()+timedelta(seconds=self.remaining_seconds())).isoformat()
+        if not getattr(self,'local_executor',False):
+            scope['fragment_deadline']=(utcnow()+timedelta(seconds=self.remaining_seconds())).isoformat()
         await self.actor.forward_proxy.validate_url(url)
         self.lease=await self.actor.native_runtime.acquire_page(scope,url)
         self.page=self.actor.native_runtime.pages[self.lease['target_id']]['page']
@@ -224,7 +236,7 @@ class NativeTask:
 
     async def authorize(self,args):
         self.steps+=1
-        if self.steps>20 or self.corrections>=3 or self.total_corrections>=8:
+        if not getattr(self,'local_executor',False) and (self.steps>20 or self.corrections>=3 or self.total_corrections>=8):
             raise ValueError('native_task_progress_limit')
         await self.descriptor()
         from .native_frame_roles import readonly_node
@@ -288,7 +300,7 @@ class NativeTask:
     async def command(self,operation,args):
         if operation=='progress':
             return await asyncio.wait_for(self.observe_progress(),self.remaining_seconds())
-        if operation in ('record_method','report_receipt','tool_authorize') and self.fragment_failures>=2:
+        if not getattr(self,'local_executor',False) and operation in ('record_method','report_receipt','tool_authorize') and self.fragment_failures>=2:
             raise ValueError('native_one_correction_exhausted')
         try:
             value=await asyncio.wait_for(self._command(operation,args),self.remaining_seconds())
@@ -308,12 +320,15 @@ class NativeTask:
             return await self.authorize(args)
         if operation=='record_method':
             self.steps+=1
-            if self.steps>20 or self.corrections>=3 or self.total_corrections>=8:
+            if not getattr(self,'local_executor',False) and (self.steps>20 or self.corrections>=3 or self.total_corrections>=8):
                 raise ValueError('native_task_progress_limit')
             return await self.record_method(args)
         raise ValueError('native_task_operation_unsupported')
 
     async def close(self):
+        if getattr(self,'local_executor',False):
+            from .local_executor_browser import close
+            await close(self)
         lease,self.lease=self.lease,None
         self.page=None
         if lease and self.runtime:

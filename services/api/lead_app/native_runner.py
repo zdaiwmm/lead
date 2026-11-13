@@ -23,6 +23,17 @@ async def connect(controller,gateway_endpoint):
             verified=verified_profile(c,controller.actor.profile['id'])
         if not verified and not (await check(controller.actor))['verified']:
             raise ValueError('connection_exit_identity_unverified')
+    if local_executor_enabled(aid):
+        from .local_executor_browser import run
+        result=await run(controller,gateway_endpoint,'connection',
+            'Sign in on the original connection page using saved_username and saved_password placeholders. '
+            'Submit the observed credential form once, then inspect_self and report_connection with the actual private ID value selector. '
+            'Never solve an OTP, CAPTCHA, scan or passkey challenge. Never change account settings or publish.')
+        if result.get('executor_pending'):
+            return result
+        if controller.observation and controller.observation.get('status')=='authenticated':
+            return controller.observation
+        return await controller.handoff('请在原窗口核对平台本人验证；当前自动认证尚未取得可靠身份结果。')
     scope=await controller.start()
     if await controller.person_only_challenge():
         return await controller.handoff('当前仍是平台本人验证，请先在原窗口完成并提交，再交回自动核验。')
@@ -151,6 +162,9 @@ async def run_task(controller,gateway_endpoint,*,kind,goal):
     """One bounded SDK fragment on the current original task and budget ledger."""
     from .admin_settings import for_agent
     aid=controller.actor.aid
+    if local_executor_enabled(aid):
+        from .local_executor_browser import run
+        return await run(controller,gateway_endpoint,kind,goal)
     task,account,intent=await asyncio.to_thread(controller.snapshot)
     scope=await controller.start()
     settings,version=for_agent(aid,'models')
@@ -205,3 +219,11 @@ async def run_task(controller,gateway_endpoint,*,kind,goal):
         if child and child.returncode is None:
             child.kill()
             await asyncio.wait_for(child.communicate(),5)
+
+
+def local_executor_enabled(aid):
+    try:
+        from .local_executor import enabled
+    except ImportError:
+        return False
+    return enabled(aid)
