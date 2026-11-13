@@ -36,7 +36,7 @@ async def test_original_sso_owner_public_frame_and_worker_actions_share_one_inst
     import test_native_sw_action_composition_product as composition
     from lead_app import api, network_namespace
     from lead_app.account_connection import execute_account
-    from lead_app.browser_runtime import PersistentRuntime
+    from lead_app.browser_runtime import NativeNetworkGate, PersistentRuntime
     from lead_app.config import STATE
     from lead_app.db import one, tx
     from lead_app.forward_proxy import BrowserForwardProxy
@@ -46,7 +46,7 @@ async def test_original_sso_owner_public_frame_and_worker_actions_share_one_inst
     from lead_app.native_task import NativeTask
     from lead_app.security import internal_token, token
 
-    requests, visibility, roles, decisions, evidence = [], [], [], [], {}
+    requests, visibility, roles, decisions, auth_events, evidence = [], [], [], [], [], {}
 
     class PublicDocument(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -153,15 +153,43 @@ async def test_original_sso_owner_public_frame_and_worker_actions_share_one_inst
 
     monkeypatch.setattr(NativeTask, 'descriptor', descriptor)
     original_authorize = PersistentRuntime.authorize_request
+    auth_paths = {'/sso/start', '/authorize', '/session/complete'}
 
     async def authorize(runtime, scope, target, request):
-        decision = await original_authorize(runtime, scope, target, request)
+        path = urlsplit(request['url']).path
+        try:
+            decision = await original_authorize(runtime, scope, target, request)
+        except Exception as error:
+            if path in auth_paths:
+                auth_events.append({'stage': 'authorize', 'path': path, 'method': request['method'],
+                    'error_type': type(error).__name__, 'scope_present': bool(scope), 'target_type': target.get('type')})
+            raise
+        if path in auth_paths:
+            auth_events.append({'stage': 'authorize', 'path': path, 'method': request['method'],
+                'allowed': bool(decision), 'kind': (decision or {}).get('kind'), 'target_type': target.get('type')})
         if request['url'] == PUBLIC_URL and decision:
             decisions.append({'method': request['method'], 'runtime': id(runtime),
                 'public_frame': decision.get('public_frame') is True, 'kind': decision.get('kind')})
         return decision
 
     monkeypatch.setattr(PersistentRuntime, 'authorize_request', authorize)
+    original_owner = NativeNetworkGate.resolve_owner
+
+    async def resolve_owner(gate, event):
+        path = urlsplit(event['request']['url']).path
+        try:
+            result = await original_owner(gate, event)
+        except Exception as error:
+            if path in auth_paths:
+                auth_events.append({'stage': 'resolve_owner', 'path': path, 'method': event['request']['method'],
+                    'error_type': type(error).__name__, 'resource_type': event.get('resourceType')})
+            raise
+        if path in auth_paths:
+            auth_events.append({'stage': 'resolve_owner', 'path': path, 'method': event['request']['method'],
+                'target_type': result[1].get('type'), 'resource_type': event.get('resourceType')})
+        return result
+
+    monkeypatch.setattr(NativeNetworkGate, 'resolve_owner', resolve_owner)
 
     async def sso_with_review(patch, owner_entry):
         assert patch is monkeypatch and owner_entry is True
@@ -216,7 +244,25 @@ async def test_original_sso_owner_public_frame_and_worker_actions_share_one_inst
                 async with actor.context.expect_page() as opened:
                     await send('click', x=bounds['x'] + bounds['width']/2, y=bounds['y'] + bounds['height']/2)
                 popup = await opened.value
-                await popup.wait_for_url(site.origin('identity') + '/authorize?*')
+                try:
+                    await popup.wait_for_url(site.origin('identity') + '/authorize?*')
+                except Exception:
+                    flow = controller.lease.get('auth_flow') or {}
+                    gate = actor.native_runtime.gate
+                    popup_target = flow.get('popup_target')
+                    evidence['sso_failure'] = {'popup_path': urlsplit(popup.url).path,
+                        'root_path': urlsplit(page.url).path, 'flow_present': bool(flow),
+                        'popup_reserved': bool(popup_target), 'opener_is_root': flow.get('opener_target') == controller.lease['target_id'],
+                        'callback': bool(flow.get('callback')), 'completed': bool(flow.get('completed')),
+                        'foreign_seen': bool(flow.get('foreign_seen')), 'hops': flow.get('hops'),
+                        'paths': [urlsplit(url).path for url in flow.get('urls', [])],
+                        'popup_document_present': popup_target in gate.documents,
+                        'scope_document_current': controller.lease.get('document_token') == gate.documents.get(controller.lease['target_id']),
+                        'source_start_gets': data['source_count']('GET', '/sso/start'),
+                        'source_idp_gets': data['source_count']('GET', '/authorize'),
+                        'source_idp_posts': data['source_count']('POST', '/authorize'),
+                        'source_callback_gets': data['source_count']('GET', '/session/complete')}
+                    raise
                 assert popup is await controller.owner_page()
                 assert controller.lease['auth_flow']['popup_target'] not in (
                     await actor.native_runtime.scope_view(controller.lease['target_id']))['targets']
@@ -305,7 +351,7 @@ async def test_original_sso_owner_public_frame_and_worker_actions_share_one_inst
         evidence.update(same_instance=True, sdk_public_text_seen=True, all_public_reads_anonymous=True,
             source_gets=len(requests), readonly_task_ids=sorted({row['task_id'] for row in roles}))
     finally:
-        evidence.update(requests=requests, model_visibility=visibility, roles=roles, decisions=decisions,
+        evidence.update(requests=requests, model_visibility=visibility, roles=roles, decisions=decisions, auth_events=auth_events,
             variant_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             static_document_sha256=hashlib.sha256(PUBLIC_DOCUMENT.encode()).hexdigest(),
             original_composition_sha256=hashlib.sha256(Path(composition.__file__).read_bytes()).hexdigest(),
