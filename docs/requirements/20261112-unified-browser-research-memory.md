@@ -996,6 +996,14 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 完整模式固定`9747e03`获独立限定接受，证据 `/private/tmp/vbp30/quality-review-final.json`（SHA256 `95f624f50c36bcdf24ad255a428d915a7b71e8f035dbf39c0887b6ddf6c3dc5a`）；两个SDK压力case的actual source/packaged runner均对齐，代码容量不等于新额度。该精确PR检查`43436621339/1`及镜像`43436621362/1`通过，非main完整放行。另补旧compact专用测试残留的反向字段断言，并在同生产源码真实SDK重验4个batch/逐动作case，4项25.602秒通过：正常登录4假请求+discovery2，导航变化2、owner交还1、DOM替换2均业务/认证POST0且不输入后续密码。数据 `.state/quality-batch-proof.json`，自己的离线DB已删，真实模型调用0；原scope/逐动作实现与前轮相同，未改门禁换取通过。
 
+- 目标合同修复源`86335e6`集成为`0cbab3f`：原AccountInput/DiscoverRequest及Task payload可选desired_operation仅publish/reply；从canonical Task snapshot进入goal/context，record_method重读原Task，不符固定mismatch且不写方法、不is_done，沿原一次纠错计数；缺省/旧无payload保通用发现，target_urls继续导航hint。真实target.propose原consumer既漏复制该字段，又会对web调用不存在的legacy catalog SPECS；后者源`d28d9bc`集成为`0a9371c`，仅web+chromium按绑定connection_origin接受同源有效http(s) hint，其他平台/legacy仍原路，不授予发布权限。
+
+- 新完整视觉与目标链的实际SDK离线联合证据已取得：官方DeepSeek Flash→既有loopback假模型，19项32.262秒通过（目标SDK32.198秒+18个真实caller参数case）。原target.propose→真实Task→AccountInput→DiscoverRequest→canonical goal/context均收到reply；故意错提publish被拒且observations0，一次修正后只落reply方法，原publish方法保持、业务POST0。目标worker4请求/4当前截图、normal/thinking/planning/operation enum齐全、实际输出4000，原meter完整、凭据literal false；这不是实际模型质量或C22通过。root `.state/discovery-operation-joint-raw.json` 中4项产品源hash与当前集成逐一相符。首个真实web入口KeyError红及私有测试bundle漏配置/入口的红均保留，没有以直submit或改fixture平台绕过。
+
+- root新集成153项定向/3专用环境skip、全Ruff及902文件扫描通过。真实SQL事务17项通过；本地误用默认验证DB曾38pass/19项setup认证失败并停止，改为自有Linux隔离DB后事务通过；恢复文件首次因私有bundle漏实际pyproject.toml的asyncio_mode未执行，保留红，只补该配置重跑恢复5项2.052秒通过，没有改产品迎合。自有离线DB已删，0真实模型请求；原17项绿未重复。新完整两站候选尚未付费，旧累计余额12/204850不因候选代码容量自动增加，原合并部署授权继续待C22实测满足。
+
+- 联合视觉目标测试源`ff39a1e`已集成为`c7a580f`（tests-only）。固定core最终证据 `.state/discovery-operation-final.json` SHA256 `93fc1b7e0755aaa027b576c69ac8a7027c04822f97d184fc2e88d4a9ecd4b228`；15项实际执行/测试源hash与root精确一致，生成runtime runner与scripts同hash。独立最终限定接受root`c7a580f`，报告 `/private/tmp/vbp30/discovery-operation-review.json` SHA256 `3bdd9517a995055606a28a24b6f7c046d1ff9087b90ab86ae6598e440e5e1188`；只覆盖A合成模型工程链，不冒称真实C22/B或新增额度。此前质量2/4case的相关生产配置、scope、wire与非目标分支未变，按已核相同输入复用；原paid12/余额12/204850及合并阻断不变。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
