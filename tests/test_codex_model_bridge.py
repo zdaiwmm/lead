@@ -1,3 +1,4 @@
+import json
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,6 +11,65 @@ from pydantic import BaseModel
 
 class Answer(BaseModel):
     text: str
+
+
+def test_native_draft_schema_closes_every_object_and_requires_all_properties():
+    from lead_app.website_brief import Draft
+
+    schema, codec = client.result_transport(Draft)
+    assert codec == "structured"
+
+    def inspect(node):
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                assert node["additionalProperties"] is False
+                assert set(node["required"]) == set(node["properties"])
+            for value in node.values():
+                inspect(value)
+        elif isinstance(node, list):
+            for value in node:
+                inspect(value)
+    inspect(schema)
+
+
+async def test_dynamic_business_payload_round_trips_without_closing_its_keys():
+    from lead_app.growth.contracts import DecisionProposal
+
+    value = {"context_key": "fixture", "rationale": "source-backed decision", "commands": [{
+        "command_key": "next", "group_key": "group", "kind": "task.create", "goal_ref": {"revision": 1},
+        "payload": {"kind": "research", "arbitrary": {"nested": [1, "two", None]}}}]}
+    submissions = []
+    fake = SimpleNamespace(submit=lambda aid, key, payload, **kwargs:
+        submissions.append(payload) or {"id": "request", "payload": payload},
+        request_status=lambda *args: {"state": "completed", "output": {"result_json": json.dumps(value)}})
+    with patch.object(lead_app, "local_executor", fake, create=True), patch.dict(sys.modules, {"lead_app.local_executor": fake}):
+        result = await client.run_model(DecisionProposal, {}, "instructions", agent_id="agent")
+    assert result.commands[0].payload == value["commands"][0]["payload"]
+    assert submissions[0]["result_codec"] == "json_string_v1"
+    assert submissions[0]["output_schema"]["additionalProperties"] is False
+    assert submissions[0]["result_schema"] == DecisionProposal.model_json_schema()
+    assert '"additionalProperties": true' in submissions[0]["instructions"]
+
+
+async def test_json_transport_still_applies_original_business_validation():
+    from lead_app.growth.contracts import DecisionProposal
+    from pydantic import ValidationError
+
+    fake = SimpleNamespace(submit=lambda aid, key, payload, **kwargs: {"id": "request", "payload": payload},
+        request_status=lambda *args: {"state": "completed", "output": {"result_json": '{"commands":[]}'}})
+    with patch.object(lead_app, "local_executor", fake, create=True), patch.dict(sys.modules, {"lead_app.local_executor": fake}):
+        with pytest.raises(ValidationError):
+            await client.run_model(DecisionProposal, {}, "instructions", agent_id="agent")
+
+
+async def test_pre_codec_request_replays_frozen_contract_without_resubmission():
+    original = {"id": "original", "session_key": "model:agent:Answer", "task_id": None,
+        "payload": {"output_schema": Answer.model_json_schema()}}
+    fake = SimpleNamespace(request_by_key=lambda *args: original,
+        request_status=lambda *args: {"state": "completed", "output": {"text": "original result"}})
+    with patch.object(lead_app, "local_executor", fake, create=True), patch.dict(sys.modules, {"lead_app.local_executor": fake}):
+        result = await client.run_model(Answer, {"new_observation": True}, "instructions", agent_id="agent")
+    assert result.text == "original result"
 
 
 def test_retry_keeps_business_request_identity_when_observations_change():
