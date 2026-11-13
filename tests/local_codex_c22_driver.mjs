@@ -36,7 +36,15 @@ const running=daemon.run().catch(error=>{daemonError=error;});
 let previous='';
 try{
   const before=await fixture('c22/status');
-  if(!before.cases[sites[0]])console.log(JSON.stringify(await fixture('c22/start',{site:sites[0]})));
+  if(process.env.LEAD_C22_RESUME_TASK){
+    assert.equal(sites.length,1,'an_original_recovery_must_name_one_site');
+    assert.ok(before.failure,'an_original_recovery_must_retain_its_first_failure');
+    const last=before.cases[sites[0]]?.stages.at(-1);
+    assert.equal(last?.task_id,process.env.LEAD_C22_RESUME_TASK);
+    assert.equal(last?.outcome,'unknown');
+    assert.ok(last.result?.evidence_refs?.some(ref=>ref.kind==='action'&&ref.id===process.env.LEAD_C22_RESUME_ACTION));
+    console.log(JSON.stringify(await fixture('c22/resume',{site:sites[0]})));
+  }else if(!before.cases[sites[0]])console.log(JSON.stringify(await fixture('c22/start',{site:sites[0]})));
   while(true){
     if(daemonError)throw daemonError;
     const state=await fixture('c22/status');
