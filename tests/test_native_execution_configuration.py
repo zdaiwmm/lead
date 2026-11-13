@@ -95,10 +95,11 @@ def test_discovery_sdk_error_capacity_preserves_other_worker_limits(native_scope
 
 def test_method_identity_hints_are_optional_without_relaxing_observed_editor_fields():
     from pydantic import BaseModel, ConfigDict, Field
+    from pydantic.json_schema import SkipJsonSchema
 
     classes=[node for node in runner_tree().body if isinstance(node,ast.ClassDef)
         and node.name in ('PublishMethodSelectors','ReplyMethodSelectors')]
-    scope={'BaseModel':BaseModel,'ConfigDict':ConfigDict,'Field':Field}
+    scope={'BaseModel':BaseModel,'ConfigDict':ConfigDict,'Field':Field,'SkipJsonSchema':SkipJsonSchema}
     exec(compile(ast.Module(body=classes,type_ignores=[]),'<selector-contract>','exec'),scope)
     for name,parent in [('PublishMethodSelectors',False),('ReplyMethodSelectors',True)]:
         cls=scope[name]
@@ -108,6 +109,8 @@ def test_method_identity_hints_are_optional_without_relaxing_observed_editor_fie
         accepted=cls.model_validate(selectors)
         assert accepted.model_dump()=={**selectors,'self_subject':''}
         assert set(cls.model_json_schema()['required'])==set(selectors)
+        assert set(cls.model_json_schema()['properties'])==set(selectors)
+        assert cls.model_validate({**selectors,'self_subject':'legacy-compatible'}).self_subject=='legacy-compatible'
         for invalid in ({**selectors,'unknown':'a'}, {key:value for key,value in selectors.items() if key!='submit'},
                 {**selectors,'self_subject':'x'*301}):
             with pytest.raises(ValidationError):

@@ -16,12 +16,13 @@ import httpx
 from browser_use import ActionResult, Agent, Browser, ChatDeepSeek, ChatOpenAI, Tools
 from lead_app.native_model_meter import ModelBillingUnknown, ModelCallMeter
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
 
 
 class PublishMethodSelectors(BaseModel):
     """Exactly the existing publish selector contract; proposals are not authority."""
     model_config=ConfigDict(extra='forbid')
-    self_subject: str=Field(default='',max_length=300,
+    self_subject: SkipJsonSchema[str]=Field(default='',max_length=300,
         description='Optional compatibility hint only. Leave empty or omit it; the server derives and verifies the unique current acting-account marker, independently of this hint. Never supply an account ID.')
     editor_target: str=Field(min_length=1,max_length=300,
         description='CSS for the actual destination A[href] link in the editor; its resolved href must equal target_url.')
@@ -248,9 +249,9 @@ async def main(data):
                         description='CSS for visible first-party rules on the target_url page, not a post, quotation or editable content.')],
                     permission_quote: Annotated[str,Field(min_length=20,max_length=3000,
                         description='Exact observed rule text in permission_selector establishing ordinary-member permission for this operation and browser automation, without unmet approval conditions.')],
-                    self_subject_prefix: Annotated[str,Field(max_length=150,
+                    self_subject_prefix: Annotated[SkipJsonSchema[str],Field(max_length=150,
                         description='Optional compatibility hint; may be omitted. The server derives the actual complete current-account prefix from unique strong DOM facts, never from this hint.')]='',
-                    self_subject_suffix: Annotated[str,Field(max_length=150,
+                    self_subject_suffix: Annotated[SkipJsonSchema[str],Field(max_length=150,
                         description='Optional compatibility hint; may be omitted. The server derives the actual complete current-account suffix from unique strong DOM facts, never from this hint.')]='',
                 ):
                     await browser.assert_fresh_observation()
