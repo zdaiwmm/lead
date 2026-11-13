@@ -914,6 +914,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - 已建立唯一[PR #62](https://github.com/zdaiwmm/lead/pull/62)。旧精确head`7ab37ef`的PR快速CI`43377774280/1`及镜像源校验`43377774131/1`通过，不能冒充后续源码head或main完整应用证明；新事实/预算增量仍须推送同PR并核精确head。没有合并/生产请求。
 - 用户明确选择“在剩余额度内继续”：把上一新增96/480000批准额度尚余的89请求/461688单位作为本任务累计验证余额，每次失败先停、完成离线修复验证后重新登记，所有尝试累计扣减，不追加额度，直到A/B通过或余额用尽。新增可选execution_allowance从原同aid跨A/B累计账本，在advance之前为完整8请求/40000单位片段留足余量，未知reservation或未计量usage拒；seed前也留回查余量，不把预算hook当fake模型。默认None旧路不变；单run闸门不冒称自动跨库记账，协调者依据原只读账本扣除旧消耗并冻结下一prereg，private prepare同时校对累计debit及上一attempt已对账，不能新建库重置额度。原停止记录保留，新的付费尝试尚未开始。
 
+- `37f99e9`（源`7d921b5`）关闭同一事实合同的手动旁路：真实普通DOM6红2绿证实旧method/prepare在文字恰匹配时可借opacity0旧A而忽略可见B，或忽略第二acting主体。现方法建立无条件核完整/唯一/可见current==fresh私有ID，保存实际selector/affixes并前后重核；点击前prepare同样核完整事实，原savedselector/body/target/parent/dynamic/document检查保留，15秒proof不扩大，verify_request原方法字节完全未改，未向paused sender新增DOM调用。共享private visible补祖先opacity0拒，原1红1绿→3绿；必要DOM/旧method36项25.31秒，实际A SDK正常publish/reply两消费者64.46秒通过、各原Action/attempt1和DOM回执/源POST1成立，独立窄审接受。最后private opacity一行不改变正常opacity1输入，按已核来源复用SDK正例。明确收缩：没有实际关联元数据来源的“Signed in as member-A (Display name)”尾文不再凭任意manual suffix证明完整ID，保留为局部gap而不放宽身份。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
