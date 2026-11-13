@@ -17,7 +17,8 @@ _FIELD_PREFIX = re.compile(r'^(\s*' + _FIELD + r'\s*[:：]\s*)', re.I)
 _SUBJECT = re.compile(r'[@\w][\w.@:+-]{0,199}$', re.UNICODE)
 
 _COMMON = r'''
- const excluded = node => !!node.closest('article,[role=article],blockquote,q,nav,[role=navigation],pre,code,template,[itemprop=author]');
+ const excluded = node => !!node.closest('article,[role=article],blockquote,q,pre,code,template,[itemprop=author]') ||
+   !args.allow_navigation && !!node.closest('nav,[role=navigation]');
  const visible = node => {
    const style=getComputedStyle(node), bounds=node.getBoundingClientRect();
    return node.isConnected && !node.closest('[hidden],[inert]') && bounds.width>0 && bounds.height>0 &&
@@ -39,7 +40,8 @@ _COMMON = r'''
 _ENTRY = r'''(node,args)=>{''' + _COMMON + r'''
  const link=args.link;
  if(!visible(link) || excluded(link)) return null;
- const candidates=all.filter(item=>visible(item)&&!excluded(item)&&acting.test(text(item)));
+ const candidates=Array.from(new Set([...all,...document.querySelectorAll('header,nav,[role=navigation]')]))
+   .filter(item=>visible(item)&&!excluded(item)&&acting.test(text(item)));
  const current=candidates.filter(item=>!candidates.some(other=>other!==item&&item.contains(other)));
  const links=Array.from(document.querySelectorAll('a[rel]')).filter(item=>visible(item)&&!excluded(item)&&
    item.rel.toLowerCase().split(/\s+/).includes('me'));
@@ -84,17 +86,30 @@ _PRIVATE = r'''(node,args)=>{''' + _COMMON + r'''
      item.tagName==='DD'&&item.previousElementSibling?.tagName==='DT'&&!excluded(item.previousElementSibling)&&label.test(text(item.previousElementSibling));
  });
  const current=fields.filter(item=>!fields.some(other=>other!==item&&item.contains(other)));
+ const kind=value=>Object.entries(args.kinds).find(([name,pattern])=>
+   new RegExp('^\\s*'+pattern+'\\s*[:：]?\\s*$','i').test(value))?.[0];
+ const kinds=values=>Array.from(new Set(values.map(kind).filter(Boolean)));
+ const selectedKinds=kinds([...actualLabels,...(value.match(fieldStart)||[])]);
+ const sameFields=current.filter(item=>{
+   const values=labels(item),dd=item.closest('dd');
+   if(dd?.previousElementSibling?.tagName==='DT'&&!excluded(dd.previousElementSibling)) values.push(text(dd.previousElementSibling));
+   values.push(...(text(item).match(fieldStart)||[]));
+   const names=kinds(values);
+   return names.length===1&&selectedKinds.length===1&&names[0]===selectedKinds[0];
+ });
  const leaves=Array.from(block.querySelectorAll('*')).filter(item=>visible(item)&&!excluded(item)&&
    (item.tagName==='INPUT'||!item.children.length&&text(item)&&!label.test(text(item))));
  const marker=new RegExp(args.field+'\\s*[:：]','ig');
  return {source_url:location.href, value, labels:actualLabels.filter(value=>label.test(value)),
    field_markers:Array.from(context.matchAll(marker)).length, leaf_values:leaves.length,
-   unique_field:current.length===1&&(current[0]===node||current[0].contains(node)||node.contains(current[0]))};
+   unique_field:sameFields.length===1&&(sameFields[0]===node||sameFields[0].contains(node)||node.contains(sameFields[0]))};
 }'''
 
 
 def _patterns():
-    return {'field': _FIELD, 'acting': _ACTING}
+    return {'field': _FIELD, 'acting': _ACTING,'kinds':{
+        'account_id':r'(?:account\s*(?:id|identifier)|账号(?:\s*ID|标识)?|帐号(?:\s*ID|标识)?)',
+        'username':r'(?:user\s*name|用户名|用户标识)','handle':r'handle'}}
 
 
 def _selector(value):
@@ -148,7 +163,7 @@ async def inspect_self_entry(page, *, link_selector, subject_selector, subject_p
     link = await _node(page, link_selector)
     handle = await link.element_handle()
     try:
-        args = {**_patterns(), 'link': handle}
+        args = {**_patterns(), 'link': handle, 'allow_navigation': True}
         facts = await node.evaluate(_ENTRY, args)
         if (not facts or facts['source_url'] != page_url or facts['link_tag'] != 'A'
                 or not facts['href'] or not facts['unique_link']

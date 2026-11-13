@@ -9,7 +9,7 @@ import re
 from urllib.parse import urljoin, urlsplit
 from uuid import UUID
 
-from .browser_execution import origin
+from .browser_execution import canonical_numeric_id, origin, safe_parent_field
 
 _IDENTITY_PREFIX = re.compile(r'^(?:(?:signed|logged)\s+in\s+as|posting\s+as|replying\s+as|current\s+account|当前(?:登录)?(?:账号|账户|身份)|发布身份|回复身份)\s*[:：]?\s*$', re.I)
 _DYNAMIC = re.compile(r'^(?:_?csrf(?:[_-]?token|middlewaretoken)?|_?nonce)$', re.I)
@@ -51,14 +51,17 @@ def _permission(context, quote, operation):
         topic=re.search(r'\b(?:automat\w*|bots?|publish\w*|post(?:s|ing)?|repl\w*)\b|自动(?:化|工具)|机器人|发布|发帖|回复',sentence,re.I)
         denied=re.search(r"\b(?:no|not|never|prohibit\w*|forbidden|disallow\w*|disabled|banned|cannot|can't)\b|仅限管理员|禁止|不允许|不得|不能",sentence,re.I)
         privileged=re.search(r'\bonly\s+(?:administrators?|moderators?|owners?)\b',sentence,re.I)
-        if topic and (denied or privileged):
+        conditional=re.search(r'\b(?:if|unless|provided\s+that|subject\s+to|once|after)\b.{0,100}\b(?:approv\w*|authoriz\w*|permission|consent)\b',sentence,re.I)
+        if topic and (denied or privileged or conditional):
             raise ValueError('browser_method_permission_denied')
-    member=re.search(r'\b(?:ordinary|regular)\s+member\b|普通(?:成员|会员)',normalized,re.I)
+    member=re.search(r'\b(?:ordinary|regular)\s+members?\b|普通(?:成员|会员)',normalized,re.I)
     action='(?:publish|post)' if operation=='publish' else '(?:reply|replies|respond)'
     allowed_action=re.search(r'\bmembers?\s+(?:may|can|are\s+allowed\s+to)\b.{0,220}\b'+action+r'\b',normalized,re.I)
     allowed_action=allowed_action or re.search(r'普通(?:成员|会员).{0,50}(?:可以|允许).{0,50}'+('(?:发布|发帖)' if operation=='publish' else '回复'),normalized)
     automated=re.search(r'\b(?:automated(?:\s+browser)?\s+tools?|browser\s+automation|automation|bots?)\s+(?:(?:are|is)\s+)?(?:permitted|allowed)\b',normalized,re.I)
     automated=automated or re.search(r'(?:允许|可以).{0,50}(?:自动工具|自动化)|(?:自动工具|自动化).{0,50}(?:允许|可以)',normalized)
+    automated=automated or re.search(r'\bmembers?\s+(?:may|can)\s+use\s+authorized\s+browser\s+automation\b[^.!?。！？]{0,220}\b'+action+r'\b',normalized,re.I)
+    automated=automated or re.search(r'\bmembers?\s+(?:may|can)\b[^.!?。！？]{0,220}\b'+action+r'\b[^.!?。！？]{0,220}\bincluding\s+through\s+authorized\s+browser\s+automation\b',normalized,re.I)
     if not member or not allowed_action or not automated:
         raise ValueError('browser_method_permission_unestablished')
 
@@ -86,7 +89,7 @@ async def _form_facts(body, submit):
             await handle.dispose()
 
 
-def _request(facts, *, page_url, expected_origin, operation, parent_url, external_account_id):
+def _request(facts, *, page_url, expected_origin, operation, parent_url, external_account_id,parent_identifier=None):
     if (not facts or facts['bodyTag']!='TEXTAREA' or facts['method'].lower()!='post'
             or facts['enctype'].lower()!='application/x-www-form-urlencoded'
             or facts['submitTag'] not in ('BUTTON','INPUT') or facts['submitType']!='submit'
@@ -120,11 +123,16 @@ def _request(facts, *, page_url, expected_origin, operation, parent_url, externa
     if fields.get(content,('',))[0]!='body':
         raise ValueError('browser_method_content_field_missing')
     parent=None
+    parent_binding=None
     if operation=='reply':
-        candidates=[name for name,(kind,value) in fields.items() if kind=='hidden' and value==parent_url]
+        candidates=[name for name,(kind,value) in fields.items() if kind=='hidden'
+            and (value==parent_url or parent_identifier is not None and value==parent_identifier)
+            and safe_parent_field(name)]
         if len(candidates)!=1:
             raise ValueError('browser_method_parent_field_ambiguous')
         parent=candidates[0]
+        if fields[parent][1]!=parent_url:
+            parent_binding={'canonical_url':parent_url,'value':fields[parent][1]}
     fixed={}
     dynamic=[]
     for name,(kind,value) in fields.items():
@@ -146,6 +154,8 @@ def _request(facts, *, page_url, expected_origin, operation, parent_url, externa
             'fixed_fields':fixed,'dynamic_fields':dynamic}
     if parent:
         result['parent_field']=parent
+    if parent_binding:
+        result['parent_binding']=parent_binding
     return result
 
 
@@ -191,6 +201,7 @@ async def inspect_editor(page, proposal, *, account_id, binding_version, externa
         raise ValueError('browser_method_editor_unavailable')
     parent=None
     parent_href=None
+    parent_identifier=None
     if operation=='reply':
         parent_href=await nodes['editor_parent'].get_attribute('href')
         parent=_url(parent_href,page_url)
@@ -199,14 +210,18 @@ async def inspect_editor(page, proposal, *, account_id, binding_version, externa
         if origin(parent)!=expected_origin:
             raise ValueError('browser_method_parent_origin_changed')
         canonicals=page.locator('a[rel~=canonical],link[rel~=canonical]')
-        if await canonicals.count()>1:
+        canonical_count=await canonicals.count()
+        if canonical_count>1:
             raise ValueError('browser_method_parent_ambiguous')
-        canonical=await canonicals.get_attribute('href') if await canonicals.count()==1 else page_url
+        canonical_href=await canonicals.get_attribute('href') if canonical_count==1 else None
+        canonical=canonical_href if canonical_count==1 else page_url
         if parent!=_url(canonical,page_url):
             raise ValueError('browser_method_parent_changed')
+        if canonical_count==1:
+            parent_identifier=canonical_numeric_id(parent)
     facts=await _form_facts(nodes['editor_body'],nodes['submit'])
     request=_request(facts,page_url=page_url,expected_origin=expected_origin,operation=operation,
-                     parent_url=parent,external_account_id=external_account_id)
+                     parent_url=parent,external_account_id=external_account_id,parent_identifier=parent_identifier)
     permission=await _node(permission_page,proposal.get('permission_selector'))
     quote=proposal.get('permission_quote')
     if not isinstance(quote,str) or not 20<=len(quote)<=3000:
@@ -225,6 +240,8 @@ async def inspect_editor(page, proposal, *, account_id, binding_version, externa
             or await _form_facts(nodes['editor_body'],nodes['submit'])!=facts
             or await nodes['editor_target'].get_attribute('href')!=target_href
             or operation=='reply' and await nodes['editor_parent'].get_attribute('href')!=parent_href
+            or operation=='reply' and (await canonicals.count()!=canonical_count
+                or canonical_count==1 and await canonicals.get_attribute('href')!=canonical_href)
             or await permission.inner_text()!=actual
             or await permission.evaluate("node=>(node.closest('section,[role=region],aside,fieldset')||node.parentElement||node).innerText")!=context):
         raise ValueError('browser_method_document_changed')

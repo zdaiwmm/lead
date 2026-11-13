@@ -1,7 +1,8 @@
 """One original browser ActionRef: bounded input, one claim and DOM receipts."""
 import asyncio
+import re
 import time
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin, urlsplit
 
 from .browser_actions import claim_request, execution_action, prepare_binding
 from .browser_execution import match_request, origin
@@ -51,6 +52,13 @@ class NativeAction(NativeTask):
             urls={method['target_url'],account['private_self']['self_url']}
             if self.action['intent'].get('parent_url'):
                 urls.add(self.action['intent']['parent_url'])
+            with tx(self.actor.aid) as c:
+                attempt=one(c,'SELECT observation FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1',(self.action_id,))
+            baseline=(attempt['observation'] or {}).get('browser_baseline',{}) if attempt else {}
+            for index in baseline.get('index_pages',[baseline['url']] if baseline.get('url') else []):
+                if not self.safe_receipt_index(index):
+                    raise ValueError('native_receipt_baseline_ambiguous')
+                urls.add(index)
             scope={'task_id':self.task_id,'task_generation':task['input']['task_generation'],
                 'control_version':task['current_control'],'claim':{'attempt_token':task['result']['runtime']['attempt_token']},
                 'origins':[method['target_url']],'reconcile_action_id':self.action_id,'read_urls':list(urls)}
@@ -79,20 +87,84 @@ class NativeAction(NativeTask):
         with tx(self.actor.aid) as c:
             c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,native_phase}',%s) WHERE id=%s",(j(name),self.task_id))
 
-    async def baseline(self):
-        page,scope=await self.temporary_page(self.action['intent'].get('parent_url') or self.action['intent']['browser_method']['target_url'])
+    def safe_receipt_index(self,url,label='',*,allow_fragment=False):
+        from .native_frame_roles import authentication_resource
+        from .native_session_facts import reject_dangerous_endpoint
         try:
-            urls=await page.locator('a[href]').evaluate_all('nodes=>nodes.map(node=>node.href)')
-            if len(urls)>500:
+            if (not isinstance(url,str) or len(url)>2000 or urlsplit(url).fragment and not allow_fragment
+                    or origin(url)!=origin(self.action['intent']['browser_method']['target_url'])
+                    or authentication_resource(url)):
+                return False
+            reject_dangerous_endpoint(url)
+            words=unquote(urlsplit(url).path+'?'+urlsplit(url).query)+' '+label
+            return not re.search(r'(?:^|[/_.?&=\s-])(?:follow|unfollow|join|leave|invite|remove|ban|like|share|unsubscribe|sign[ _-]?out|log[ _-]?out)(?:$|[/_.?&=\s-])|delete|destroy|purchase|payment|billing|checkout|充值|支付|删除|关注|邀请|退出|登录',words,re.I)
+        except ValueError:
+            return False
+
+    async def receipt_link_snapshot(self,url):
+        """Read only main-document links on one original temporary page lease."""
+        page,scope=await self.temporary_page(url)
+        root=None
+        try:
+            await asyncio.to_thread(self.actor.native_runtime.current_scope,scope)
+            root=await page.evaluate_handle('document.documentElement')
+            facts=await root.evaluate(r'''root=>{if(!root.isConnected||root!==document.documentElement)throw Error('receipt_document_changed');
+                const links=Array.from(document.querySelectorAll('a[href]'));
+                if(links.length>500)return {url:location.href,overflow:true,links:[]};
+                return {url:location.href,links:links.map(node=>{
+                    const r=node.getBoundingClientRect(),s=getComputedStyle(node);
+                    return {url:node.href.slice(0,2001),label:(node.innerText+' '+(node.getAttribute('aria-label')||'')).slice(0,300),
+                        navigation:!node.closest('article,[role=article],blockquote,q,form')&&r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&
+                            !node.hasAttribute('download')&&['','_self'].includes(node.target)&&!node.rel.toLowerCase().split(/\s+/).includes('me')};})}}''')
+            await asyncio.to_thread(self.actor.native_runtime.current_scope,scope)
+            if (facts['url']!=url or page.url!=url or not await root.evaluate('node=>node.isConnected&&node===document.documentElement')):
+                raise ValueError('native_receipt_document_changed')
+            if facts.get('overflow') or len(facts['links'])>500 or any(len(row['url'])>2000 for row in facts['links']):
                 raise ValueError('native_receipt_baseline_ambiguous')
-            urls=sorted(set(urls+[page.url]))
-            with tx(self.actor.aid) as c:
-                attempt=one(c,'SELECT * FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1 FOR UPDATE',(self.action_id,))
-                old=attempt['observation'].get('browser_baseline',{}).get('urls',[])
-                c.execute('UPDATE lead.action_attempts SET observation=observation || %s WHERE id=%s',
-                    (j({'browser_baseline':{'url':page.url,'urls':sorted(set(old+urls)),'bounded':True}}),attempt['id']))
+            return facts['links']
         finally:
+            if root:
+                await root.dispose()
             await self.actor.native_runtime.release_page(scope['target_id'])
+
+    async def receipt_links(self,index_pages=None,*,root_url=None):
+        root=root_url or self.action['intent'].get('parent_url') or self.action['intent']['browser_method']['target_url']
+        pages=list(index_pages) if index_pages is not None else [root]
+        if (not 1<=len(pages)<=3 or len(set(pages))!=len(pages) or pages[0]!=root
+                or any(not self.safe_receipt_index(url) for url in pages)):
+            raise ValueError('native_receipt_baseline_ambiguous')
+        links=await self.receipt_link_snapshot(pages[0])
+        if index_pages is None:
+            private=self.action['intent']['browser_method']['self_url']
+            for link in links:
+                if link['navigation'] and link['url'] not in pages and link['url']!=private and self.safe_receipt_index(link['url'],link['label']):
+                    pages.append(link['url'])
+                    if len(pages)==3:
+                        break
+        rows=list(links)
+        for url in pages[1:]:
+            rows.extend(await self.receipt_link_snapshot(url))
+            if len(rows)>500:
+                raise ValueError('native_receipt_baseline_ambiguous')
+        return pages,sorted(set(pages+[row['url'] for row in rows]))
+
+    async def baseline(self):
+        with tx(self.actor.aid) as c:
+            attempt=one(c,'SELECT * FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1',(self.action_id,))
+        previous=attempt['observation'].get('browser_baseline')
+        root=(previous or {}).get('url') or self.action['intent'].get('parent_url') or self.action['intent']['browser_method']['target_url']
+        frozen=previous.get('index_pages',[root]) if previous is not None else None
+        pages,urls=await self.receipt_links(frozen,root_url=root)
+        with tx(self.actor.aid) as c:
+            current=one(c,'SELECT * FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1 FOR UPDATE',(self.action_id,))
+            if (current['id']!=attempt['id'] or current['observation'].get('browser_baseline')!=previous
+                    or current['observation'].get('browser_request',{}).get('claimed')):
+                raise ValueError('native_receipt_baseline_changed')
+            value={'url':root,'urls':sorted(set((previous or {}).get('urls',[])+urls)),'bounded':True}
+            if previous is None or 'index_pages' in previous:
+                value['index_pages']=pages
+            c.execute('UPDATE lead.action_attempts SET observation=observation || %s WHERE id=%s',
+                (j({'browser_baseline':value}),attempt['id']))
 
     async def authorize(self,args):
         from .native_frame_roles import readonly_node
@@ -100,20 +172,22 @@ class NativeAction(NativeTask):
             return {'allowed':False,'reason':'This approved public frame can only be read.'}
         self.phase('authorize_'+args['name'] if args.get('name') in ('input','click','navigate','scroll') else 'authorize_refused')
         if self.reconcile or args.get('name') in ('navigate','scroll'):
-            decision=await super().authorize(args)
+            decision=await self.receipt_link_decision(args) if args.get('name')=='click' else await super().authorize(args)
             if self.reconcile and decision.get('allowed') and args.get('name')=='click' and decision.get('url'):
                 self.lease['read_urls'].append(decision['url'])
             if self.reconcile and decision.get('allowed') and args.get('name')=='navigate':
                 decision['allowed']=args.get('values',{}).get('url') in self.lease['read_urls']
             return decision
+        with tx(self.actor.aid) as c:
+            state=one(c,'SELECT state FROM lead.actions WHERE id=%s',(self.action_id,))
+        if not state or state['state']!='prepared':
+            if state and state['state'] in ('dispatching','unknown','confirmed') and args.get('name')=='click':
+                return await self.receipt_link_decision(args)
+            return {'allowed':False,'reason':'The original action is read-only after its request claim.'}
         self.steps+=1
         if self.steps>20:
             raise ValueError('native_task_progress_limit')
         await self.descriptor()
-        with tx(self.actor.aid) as c:
-            state=one(c,'SELECT state FROM lead.actions WHERE id=%s',(self.action_id,))
-        if not state or state['state']!='prepared':
-            return {'allowed':False,'reason':'The original action is read-only after its request claim.'}
         node=args.get('node') or {}
         if node.get('target_id') not in (await self.descriptor())['targets']:
             return {'allowed':False}
@@ -144,6 +218,25 @@ class NativeAction(NativeTask):
         if allowed and args.get('name')=='click':
             await self.prepare_submit()
         return {'allowed':bool(allowed),'reason':'Only the current original action body and submit control are authorized.'}
+
+    async def receipt_link_decision(self,args):
+        decision=await super().authorize(args)
+        if not decision.get('allowed') or not self.safe_receipt_index(decision.get('url'),allow_fragment=True):
+            return {'allowed':False}
+        node=args.get('node') or {}
+        gate=self.actor.native_runtime.gate
+        sessions=[sid for sid,info in gate.targets.items() if info['targetId']==node.get('target_id')
+            and gate.owners.get(sid)==self.lease['target_id']]
+        if len(sessions)!=1:
+            return {'allowed':False}
+        actual=(await gate.send('DOM.describeNode',{'backendNodeId':node['backend_node_id']},sessions[0]))['node']
+        values=actual.get('attributes',[])
+        attrs=dict(zip(values[::2],values[1::2]))
+        if (actual['nodeName'].lower()!='a' or not attrs.get('href') or 'download' in attrs
+                or attrs.get('target','') not in ('','_self') or any(name.lower().startswith('on') for name in attrs)
+                or urljoin(gate.targets[sessions[0]]['url'],attrs['href'])!=decision['url']):
+            return {'allowed':False}
+        return decision
 
     async def prepare_submit(self):
         from .native_worker_controller import refresh_page_controller
@@ -286,12 +379,15 @@ class NativeAction(NativeTask):
             body_handle=await body.element_handle()
             link_handle=await link.element_handle()
             try:
-                related=await author.evaluate("""(node,[body,link])=>{
+                related=await author.evaluate(r"""(node,[body,link])=>{
                     const article=node.closest('article,[role=article]');
                     const label=node.getAttribute('aria-label')||(node.closest('p,dd,td,label')?.innerText||'').replace(node.innerText,'');
+                    const address=node.closest('address');
+                    const byline=node.tagName==='A' && address && address.closest('article,[role=article]')===article &&
+                        address.querySelectorAll('a').length===1 && /^\s*by\s+$/i.test(address.innerText.replace(node.innerText,''));
                     return !!article && !node.closest('blockquote') && !body.closest('blockquote') &&
                         body.closest('article,[role=article]')===article && link.closest('article,[role=article]')===article &&
-                        /author|posted by|written by|作者|发布者/i.test(label);
+                        (/author|posted by|written by|作者|发布者/i.test(label)||byline);
                 }""",[body_handle,link_handle])
             finally:
                 await body_handle.dispose()
@@ -309,17 +405,22 @@ class NativeAction(NativeTask):
                     return None
                 parent_handle=await parent.element_handle()
                 try:
-                    related_parent=await author.evaluate('''(node,parent)=>{
+                    body_handle=await body.element_handle()
+                    related_parent=await author.evaluate('''(node,[parent,body])=>{
                         const article=node.closest('article,[role=article]');
                         if(!article || parent.closest('nav,header,footer,aside,[role=navigation],blockquote')) return false;
-                        const semantics=(parent.getAttribute('aria-label')||'')+' '+parent.innerText+' '+(parent.getAttribute('rel')||'');
+                        const block=parent.closest('p,dd');
+                        if(body.contains(parent)||parent.contains(body)||block?.contains(body))return false;
+                        const local=block&&block.querySelectorAll('a').length===1?block.innerText:'';
+                        const semantics=(parent.getAttribute('aria-label')||'')+' '+parent.innerText+' '+(parent.getAttribute('rel')||'')+' '+local;
                         if(!/parent|in.reply.to|replying to|original post|父帖|回复原帖/i.test(semantics)) return false;
                         if(parent.closest('article,[role=article]')===article) return true;
                         const next=article.nextElementSibling;
                         return !!next && (next===parent || next.matches('p,dd') && next.contains(parent) && next.querySelectorAll('a').length===1);
-                    }''',parent_handle)
+                    }''',[parent_handle,body_handle])
                 finally:
                     await parent_handle.dispose()
+                    await body_handle.dispose()
                 receipt['parent_url']=urljoin(page.url,await parent.get_attribute('href') or '')
                 if not related_parent or receipt['parent_url']!=self.action['intent']['parent_url']:
                     return None
@@ -349,19 +450,16 @@ class NativeAction(NativeTask):
             raise ValueError('browser_receipt_preexisting_or_ambiguous')
         # A missing acknowledgement is resolved only against the same target's
         # new links, with every candidate read under this original action scope.
-        target,scope=await self.temporary_page(self.action['intent'].get('parent_url') or self.action['intent']['browser_method']['target_url'])
-        try:
-            urls=await target.locator('a[href]').evaluate_all('nodes=>nodes.map(node=>node.href)')
-            candidates=[]
-            for url in urls:
-                try:
-                    if origin(url)==origin(receipt['url']) and url not in baseline['urls']:
-                        candidates.append(url)
-                except ValueError:
-                    continue
-            candidates=sorted(set(candidates))
-        finally:
-            await self.actor.native_runtime.release_page(scope['target_id'])
+        root=baseline.get('url') or self.action['intent'].get('parent_url') or self.action['intent']['browser_method']['target_url']
+        _,urls=await self.receipt_links(baseline.get('index_pages',[root]),root_url=root)
+        candidates=[]
+        for url in urls:
+            try:
+                if origin(url)==origin(receipt['url']) and url not in baseline['urls']:
+                    candidates.append(url)
+            except ValueError:
+                continue
+        candidates=sorted(set(candidates))
         if receipt['url'] not in candidates or len(candidates)>10:
             raise ValueError('browser_receipt_not_unique')
         matches=[]

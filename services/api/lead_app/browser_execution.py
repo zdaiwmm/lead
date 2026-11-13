@@ -393,6 +393,31 @@ def guarded_tools(session, authorize, *, sensitive_data=None):
 CAPABILITY_VERSION = 'native-browser-v1'
 
 
+def canonical_numeric_id(url):
+    """One literal numeric component of an observed canonical URL, or a gap."""
+    import re
+    from urllib.parse import parse_qsl, unquote
+
+    parsed=urlsplit(url)
+    if parsed.fragment:
+        return None
+    values=[unquote(part) for part in parsed.path.split('/')]
+    values += [value for _,value in parse_qsl(parsed.query,keep_blank_values=True)]
+    numbers=[value for value in values if re.fullmatch(r'[0-9]+',value)]
+    return numbers[0] if len(numbers)==1 else None
+
+
+def safe_parent_field(name):
+    import re
+
+    if not isinstance(name,str) or not 1<=len(name)<=100:
+        return False
+    normalized=re.sub(r'([a-z0-9])([A-Z])',r'\1_\2',name).lower()
+    if re.search(r'password|secret|credential|authorization|session|token|csrf|nonce|api[_-]?key|authenticity|author|user|account|owner|member|profile|identity|subject|payment|billing|charge|amount|price|cost|currency|purchase|subscribe|credit',normalized):
+        return False
+    return not re.search(r'(?:^|\W|_)(?:admin|moderator|role|privilege|permission|grant|delete|remove|destroy|ban|invite|join|follow|like|share|scope|action|op|operation|mode|method|command|cmd|intent|key|sig|signature|access)(?:$|\W|_)',normalized)
+
+
 def validate_method(method, *, account_id, binding_version, target_url, operation):
     """Validate declarative, evidence-backed facts; never execute model code.
 
@@ -444,8 +469,17 @@ def validate_method(method, *, account_id, binding_version, target_url, operatio
     if (request.get('method') not in ('POST', 'PUT') or request.get('body_kind') not in ('json', 'form')
             or not isinstance(request.get('content_field'), str) or not request['content_field']
             or operation == 'reply' and not request.get('parent_field')
-            or set(request)-{'method', 'url', 'body_kind', 'content_field', 'parent_field', 'dynamic_fields','fixed_fields'}):
+            or set(request)-{'method', 'url', 'body_kind', 'content_field', 'parent_field', 'dynamic_fields','fixed_fields','parent_binding'}):
         raise ValueError('browser_request_contract_missing')
+    binding=request.get('parent_binding')
+    if binding is not None and (operation!='reply' or request['body_kind']!='form'
+            or not safe_parent_field(request.get('parent_field'))
+            or not isinstance(binding,dict) or set(binding)!={'canonical_url','value'}
+            or not isinstance(binding.get('canonical_url'),str) or len(binding['canonical_url'])>2000
+            or not isinstance(binding.get('value'),str) or len(binding['value'])>100
+            or origin(binding['canonical_url'])!=expected_origin
+            or canonical_numeric_id(binding['canonical_url'])!=binding['value']):
+        raise ValueError('browser_request_parent_binding_invalid')
     if not isinstance(request.get('dynamic_fields', []), list) or len(request.get('dynamic_fields', [])) > 12:
         raise ValueError('browser_request_contract_missing')
     if not all(isinstance(field, str) and 1 <= len(field) <= 100 for field in request.get('dynamic_fields', [])):
@@ -485,9 +519,16 @@ def match_request(method, request, intent):
     fields = {spec['content_field'], *spec.get('dynamic_fields', []),*spec.get('fixed_fields',{})}
     if spec.get('parent_field'):
         fields.add(spec['parent_field'])
+    parent=intent.get('parent_url')
+    if spec.get('parent_binding') is not None:
+        binding=spec['parent_binding']
+        if (intent.get('operation')!='reply' or binding.get('canonical_url')!=parent
+                or canonical_numeric_id(parent)!=binding.get('value')):
+            raise ValueError('browser_request_parent_binding_changed')
+        parent=binding['value']
     if (not isinstance(values, dict) or set(values)-fields or values.get(spec['content_field']) != intent['body']
             or any(values.get(key)!=item for key,item in spec.get('fixed_fields',{}).items())
-            or intent.get('operation', 'publish') == 'reply' and values.get(spec['parent_field']) != intent.get('parent_url')):
+            or intent.get('operation', 'publish') == 'reply' and values.get(spec['parent_field']) != parent):
         raise ValueError('browser_request_content_changed')
     semantic={key:item for key,item in values.items() if key not in spec.get('dynamic_fields',[])}
     return hashlib.sha256(json.dumps([request['method'],request['url'],semantic],sort_keys=True,separators=(',', ':')).encode()).hexdigest()

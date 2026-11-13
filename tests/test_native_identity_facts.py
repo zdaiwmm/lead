@@ -38,6 +38,7 @@ async def entry(page, **changes):
     ('<p id="acting">Signed in as member-a · ' + ENTRY + '</p>', ' · Your account settings'),
     ('<p id="acting">Signed in as member-a</p>' + ENTRY, ''),
     ('<p><span id="acting">Signed in as member-a</span> · ' + ENTRY + '</p>', ''),
+    ('<nav><p id="acting">Signed in as member-a</p>' + ENTRY + '</nav>', ''),
 ])
 async def test_current_identity_and_self_link_share_one_block_or_adjacent_sibling(page, markup, suffix):
     await page.set_content(markup)
@@ -55,7 +56,7 @@ async def test_posting_as_is_current_identity_semantics(page):
 @pytest.mark.parametrize('markup', [
     '<article><p id="acting">Signed in as member-a</p>' + ENTRY + '</article>',
     '<blockquote><p id="acting">Signed in as member-a</p>' + ENTRY + '</blockquote>',
-    '<nav><p id="acting">Signed in as member-a</p>' + ENTRY + '</nav>',
+    '<nav><p id="acting">member-a</p>' + ENTRY + '</nav>',
     '<p id="acting">Signed in as member-a</p><p>Signed in as member-b</p>' + ENTRY,
     '<p id="acting">Signed in as member-a member-b</p>' + ENTRY,
     '<p id="acting">Signed in as member-a</p>' + ENTRY + '<a rel="me" href="/other-private">Other self</a>',
