@@ -978,6 +978,12 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 最新root集成77项/3专用环境skip、全Ruff/900文件凭据扫描及11正式blob核对通过；runner仍`0856644f…`，本反馈不改runner及原paused sender/进展/计量。当前30/270671余额按累计授权继续，新的付费轮次须完成精确源码冻结、离线证据与新登记，不重发第十次原unknown Action。
 
+- 第十一次`7813347 / 1a2b49da…`：A/login仍4请求/12976 tokens、8.911秒、4图通过；discover_publish 2请求/8868 tokens、11.661秒、2图，两次propose_method均browser_method_element_ambiguous，无可用方法即停，未到发布，故正文匹配反馈尚未真实模型评估。上一次方法1请求成功不能证明稳定。本错误只证明某些候选没有选到唯一可见节点，原具体字段未保留，不从合成反例倒推。原库2笔40000 settled、6请求合21844、period spent21844/reserved0，unknown=false/unmeasured0，业务Action0，进程0/key已清、所有旧报告/unknown保留。累计72已测请求/212150 tokens，第三次另保守8位/40000未知，总扣80位/252150，余额24请求/248827单位；更早80000与生产旧reserved未动。证据`/private/tmp/mrw28/reports/native-c22-trial11-paid-stop-readback.json`。
+
+- 错误定位增量源`e77eecb`已集成为`50420cb`：保原MethodFactError str/code，仅对两类selector错误投影最多6个去重固定field/issue，一次汇总required selectors的已知失败；未知field/issue、selector原文、detail及页面文本不传，其他异常/取消不转成字段事实。middleware只认typed错误，RPC仍仅409+record_method+原code白名单；任一失败仍抛原首code，原唯一/可见/identity/permission/doc门槛、Task/Action/C15/meter/runner不变。实际SDK基线12.64秒红的下一请求无字段，修后同输入1项12.655秒绿：同时得self_subject与submit的not_found，一次纠错后原canonical method/target1落库、无POST。42项/1 SDK环境skip及独立限定接受，未新增付费调用。实施`/Users/zhouding/ss/native-sdk-execution-config/lead agent/.state/method-fields-final.json`（SHA256 `689770791944249457c4edaeedb499ae6e5517c77736374649df3a93a9ddcb1e`），独立`/private/tmp/vbp30/method-fields-review.json`（SHA256 `8f40e407f053ccb2e76545c1f6383c4f72f80561bda6cdcf1f7dcf7591406b39`）。root89项/3环境skip、全Ruff/900扫描、11冻结blob通过，按累计授权继续新登记。
+
+- 额外只读SDK配置核验：供应商thinking与SDK flash是独立层，但当前pinned ChatDeepSeek结构化输出强制named tool_choice，官方thinking模式拒required/named选择；serializer也不保后续要求的reasoning_content。因而不能直接翻provider thinking开关作为本轮修复，当前disabled保持。此为源码/官方文档兼容性结论，不是新的实际故障、模型效果或计量服务边界实测，不新增模型或框架。参考官方Chat API及thinking文档，后续若走该路线须另做离线适配，当前不扩范围。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -1000,7 +1006,7 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | A/B机械链及十次真实尝试；第十登录4请求、方法发现1请求均过，publish4次授权输入后no_progress停止，共9图/9请求/29332 tokens；累计66已测请求/190306 tokens，第三次另保守8位/40000未知；原unknown Action保留，正文匹配反馈离线已验 | C22未通过，源发布POST0、回复/回查/B未运行；余额30请求/270671单位，按累计授权先离线修再新登记，不重试原unknown、不再逐轮确认；B不称严格盲测 |
+| C22 | A/B机械链及十一次真实尝试；第十登录/方法过、发布重复输入停，第十一登录过、方法两次selector未定位唯一可见节点停；累计72已测请求/212150 tokens，第三次另保守8位/40000未知；正文匹配及具体字段反馈均有实际SDK离线证据 | C22未通过，源发布POST0、回复/回查/B未运行；余额24请求/248827单位，按累计授权先离线修再新登记，不重试原unknown、不逐轮确认；B不称严格盲测 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
