@@ -1,0 +1,39 @@
+.section h2 { display: flex; align-items: center; gap: 8px; }
+.summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.summary p { display: flex; align-items: center; gap: 9px; margin: 0; }
+.help { color: var(--text-muted); font-size: 12px; line-height: 1.65; max-width: 75ch; margin: 10px 0 0; }
+.error { color: var(--danger); font-size: 13px; }
+.manage { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line); }
+.manage > p { font-size: 13px; }
+.manage a { color: var(--action); }
+.devices { list-style: none; margin: 14px 0; padding: 0; }
+.devices > li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.devices > li > div:first-child { display: grid; gap: 4px; }
+.devices strong { font-size: 14px; font-weight: 500; }
+.devices span, .devices small { color: var(--text-secondary); font-size: 12px; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.command { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--raised); border: 1px solid var(--line); padding: 12px; border-radius: 8px; font-size: 12px; line-height: 1.6; max-height: 180px; overflow: auto; }
+.pairing { margin-top: 16px; }
+.pairing p, .question p { font-size: 13px; max-width: 75ch; line-height: 1.7; }
+.pairing > button { margin-right: 12px; }
+.work { margin-top: 20px; }
+.workHeading { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.workHeading strong { font-weight: 500; }
+.workHeading span { color: var(--text-muted); }
+.followup { display: grid; gap: 10px; margin-top: 16px; }
+.followup label { font-size: 13px; }
+.followup textarea { width: 100%; resize: vertical; min-height: 72px; padding: 10px; background: var(--raised); border: 1px solid var(--line); border-radius: 8px; color: var(--text); font: inherit; }
+.followup button { justify-self: end; }
+.pending { margin-top: 20px; }
+.pending h3 { font-size: 14px; font-weight: 500; }
+.question { padding: 16px 0; border-top: 1px solid var(--line); }
+.question form { display: flex; align-items: start; gap: 10px; flex-wrap: wrap; }
+.field { display: grid; gap: 8px; flex-basis: 100%; font-size: 13px; }
+.field input, .field select { min-width: 0; width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--raised); font: inherit; }
+.question details { margin-bottom: 12px; }
+.question summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); }
+@media (max-width: 520px) {
+  .devices > li { align-items: start; flex-wrap: wrap; }
+  .devices > li > .actions { flex-basis: 100%; }
+  .summary > button { width: 100%; }
+}

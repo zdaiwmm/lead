@@ -31,6 +31,7 @@ import SocialIcon from "./social-icon";
 import NewAgentDialog from "./website-agent-dialog";
 import WorkflowGuide from "./workflow-guide";
 import NotificationIndicator from "./notification-indicator";
+import LocalExecutor from "./local-executor";
 
 type Row = Record<string, any>;
 type View = "home" | "agent" | "settings";
@@ -813,6 +814,7 @@ export default function Lead() {
                   onComplete={refresh}
                 />
                 </header>
+                <LocalExecutor key={"executor" + current} aid={current!} readOnly={readOnly} />
                 <div className="workspace-overview">
                 <GrowthStatus
                   key={"growth" + current}
