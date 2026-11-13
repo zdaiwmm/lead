@@ -873,6 +873,10 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - C30 `11b4d30`（源`31c9ac7`，含独立`7bf6cef`/`f88347b`反例）已集成原Connection owner API、静态公开frame授权与实际隔离/绑定/新Task读取。两处真实DOM/批准竞态修后，采用原ElementHandle/documentRoot/src/原属性同Renderer校验、await后与CAS后复核、失败撤回来源；completed bound source仍能在新Task新文档安全重导。所有query在此新角色拒绝；no-referrer属性与实际wire去Referer/凭据，不改普通请求。Fetch过滤Set-Cookie时，使用同requestId/manager session的Network.responseReceivedExtraInfo只取status/头存在布尔，原Response暂停期间缺证据最多0.5秒即拒。目标Linux9项37.313秒、主集成权限/竞态23项1.55秒通过；独立审查实际运行5文件SHA256与提交5/5相同，复用同轮9绿接受。Cookie/Referer wire0、响应Cookie前拒正文、opaque隔离与默认B存储保留均留证，仍不称任意嵌套/动态认证支持。
 - C30读取来源继续为原account_read/browser；credentialless只改变技术隔离，不改变ResearchInput访问分类。经验提炼与public_projection仍只接受public_read，独立只读复核确认不会把账户来源洗成公开经验。当前全仓Ruff、865文件凭据扫描通过；上述新测试未调用真实模型/生产平台，B仍未读。
 
+- 连续C30组合使用新增第四个私有静态源及真实两次owner交还，不改原400行组合/冻结夹具/机械模型配方。它复现并修正三处单模块正例未覆盖的衔接：`fe88ccf`将原严格SSO授权置于public-frame外域fallback前（真实IdP此前源0；修后58项通过）；`585c7a4`仅让未完成popup抑制来源预检，已完成SSO返home必须先交回本人，真实consumer64项通过，实际批准前预算预留/SDK目录/模型HTTP均零新增；`4413b79`保留NativeTask的canonical薄claim，完整claim仍供原SQL事务，避免同token不同字典使已准角色误过期，真实DB及原消费者39项通过、旧token/代次仍拒。三次窄审均接受，未扩origin或改SQL。
+- 最新组合已通过SSO、两次ownerWait、原API精确批准、私有身份绑定与SDK公开文本观察（公共源Cookie/Referer均0）；输入及点击也已执行。整体仍红：原Document POST由SW暂停时，scope_view新增的嵌入内容证明在原页page.evaluate等待，停在claim_private_identity，源POST0。此时仅取得等待调用栈，不能将关闭后的TargetClosed当首原因或称私有self失败；正核验内部提交授权与模型DOM观察的依赖。NoAck/回查/C33在这个新foreign组合中仍未到达，已有不含foreign的d444完整证据保留。
+- 集成11b后的普通A域名六原Task再验6项44.660秒通过（5/2/3/2/3/2次受控模型HTTP、故障种子0、原回查无重发）。所选DeepSeekFlash SDK协议另以实际SDK0.13.14向loopback假接口仅1请求核验：结构化结果可解析，thinking disabled/max_tokens1800/max_retries0，原HTTP meter完整计20个合成token且无未计量。SDK对象usage为空但原HTTP usage存在，两者不混用；无非loopback连接/真key读取/真实模型调用。这些准备仍不算C22真实模型能力通过。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链已有机械产品证据，跨站读取权限及后台脚本完整组合尚未闭合，不能因此开启共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
