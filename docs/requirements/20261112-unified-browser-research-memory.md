@@ -881,6 +881,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 已核对升级helper、0032/0033、namespace/runner及固定依赖/打包脚本共11个实际Git blob，部署兼容入口只冻结这批已审源码；174项交付/升级/CI合同1.31秒通过。该冻结只约束未来正式取件，不代表C30/C22、精确main CI或生产迁移通过；尚未安装节点工具、创建生产请求或改变线上服务。当前只读回读应用仍`7940fbe`，实时main仍`d53f32c`。
 
+- `67082b9`（源`2800380`）只在scope_view捕获确定的Playwright导航上下文销毁后重新完整采集，至多3次、确认错误后的重取窗口2秒；权限/来源/CAS/其他协议错误/取消/超时均不吞，root_facts与owner批准原样保留。真实Linux导航原语旧4红2绿→修后6绿，另42项直接消费者通过，独立窄审接受。相同完整组合的实际pytest229.194秒1红（XML SHA256 `5164e6bd11b632840d2fbccac1c084d49e22d17ffd26b5f141a9712d726b74ff`）：正常发布confirmed/attempt1/源POST1，NoAck保持unknown/attempt1/源总POST2，新hold Task上的SW v2及两次缓存重放源0均通过；原unknown只读回查在首个模型请求前超时，保持同Action/attempt，C33未达。子worker未生成transport-status/result，已知等待落在start_scoped返回前，尚无唯一内部awaiter证据；未将候选frame角色归因当结论。外层SSH260秒收尾超时与实际完成的pytest结果分别保留，自有DB/进程已清理；本轮无真实模型调用。当前改用SDK启动原语定位，不重复整轮或更改测试配方。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链已有机械产品证据，跨站读取权限及后台脚本完整组合尚未闭合，不能因此开启共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
