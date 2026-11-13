@@ -113,7 +113,33 @@ def canonical_origin(url):
     return scheme+'://'+host+(':'+str(port) if port != (443 if scheme == 'https' else 80) else '')
 
 
+def _source_scope(c, runtime, scope):
+    if not scope.get('reconcile_action_id'):
+        return scope
+    # A later readonly claim may run after business pause/revocation. Its
+    # dependency identity comes from the original Action, never caller fields
+    # or a new running business intent. Current Task/instance checks stay on
+    # the actual page scope, not this private source-lookup projection.
+    action=one(c,'''SELECT * FROM lead.actions WHERE id=%s AND task_id=%s
+        AND state IN ('unknown','dispatching','confirmed')''',
+        (scope['reconcile_action_id'],scope['task_id']))
+    intent=(action or {}).get('intent') or {}
+    method=intent.get('browser_method') or {}
+    reference=intent.get('execution_ref') or {}
+    if (not action or scope.get('connection_ref') or reference!=runtime.execution_ref
+            or str(reference.get('profile_id'))!=str(runtime.actor.profile['id'])
+            or scope['origins']!=[method.get('target_url')]):
+        raise ValueError('original_frame_action_changed')
+    identity={'account_id':method['account_id'],'binding_version':intent['binding_version'],
+        'intent_revision':intent['intent_revision'],'control_version':action['expected_control_version']}
+    if any(scope.get(key) is not None and str(scope[key])!=str(identity[key])
+            for key in ('account_id','binding_version','intent_revision')):
+        raise ValueError('original_frame_action_changed')
+    return {**scope,**identity}
+
+
 def connection_sources(c, runtime, scope):
+    scope=_source_scope(c,runtime,scope)
     if scope.get('connection_ref'):
         connection = one(c, 'SELECT * FROM lead.takeover_sessions WHERE id=%s', (scope['connection_ref'],))
     else:
@@ -289,7 +315,8 @@ async def prepare(runtime, scope, page):
 
 async def _prepare(runtime, scope, page):
     """Derive short-lived frame roles from current DOM and canonical owner proof."""
-    if not scope.get('account_id') or scope.get('kind') == 'identity_probe' or scope.get('internal_parent'):
+    if (not (scope.get('account_id') or scope.get('reconcile_action_id'))
+            or scope.get('kind') == 'identity_probe' or scope.get('internal_parent')):
         return
     with tx(runtime.actor.aid) as c:
         sources = connection_sources(c, runtime, scope)
@@ -373,6 +400,7 @@ def refuse_source(runtime,scope,role,reason):
         raise ValueError('frame_refusal_reason_invalid')
     with tx(runtime.actor.aid) as c:
         require_agent(c,runtime.actor.aid,True)
+        scope=_source_scope(c,runtime,scope)
         rows=c.execute('''SELECT id,connection_data FROM lead.takeover_sessions WHERE profile_id=%s
             AND (id::text=%s OR completed_account_id::text=%s) AND connection_data ? 'read_dependencies' FOR UPDATE''',
             (runtime.actor.profile['id'],scope.get('connection_ref'),scope.get('account_id'))).fetchall()

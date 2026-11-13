@@ -954,7 +954,7 @@ class PersistentRuntime:
         scope = entry['scope']
         await asyncio.to_thread(self.current_scope,scope)
         from .native_frame_roles import observation
-        origins=await observation(self,scope,entry['page']) if (scope.get('account_id') and not entry.get('internal')
+        origins=await observation(self,scope,entry['page']) if ((scope.get('account_id') or scope.get('reconcile_action_id')) and not entry.get('internal')
             and (scope.get('frame_roles') or len(entry['page'].frames)>1)) else scope['origins']
         targets = {info['targetId']:target for session,info in self.gate.targets.items()
                    if self.gate.owners.get(session) == target and (info['type']!='page' or info['targetId']==target)}
