@@ -61,6 +61,8 @@ async def verify_login(
                     )
             text = "\n".join(parts)
             model_calls[-1]['identity_feedback_code_seen']='identity_element_ambiguous' in text
+            if mode=='method_feedback':
+                model_calls[-1]['method_feedback_code_seen']='browser_method_element_ambiguous' in text
             if mode in ('selector_bookmark','identity_empty_hints'):
                 model_calls[-1]['private_css_id_visible']=bool(__import__('re').search(r'''\bid\s*=\s*["']?subject\b''',text))
             if mode.startswith('identity_inferred'):
@@ -183,13 +185,13 @@ async def verify_login(
                 elif step == 1:
                     action = {"report_connection": {"subject_selector": "#subject"}}
             elif workflow["kind"] == "discovery":
-                if step == 0:
+                if step == 0 and mode!='method_feedback':
                     action = {
                         "guarded_navigate": {
                             "url": workflow.get("editor_url") or board.origin + "/home"
                         }
                     }
-                elif step == 1:
+                elif step == 1 or mode=='method_feedback' and step==0:
                     action = {
                         "propose_method": {
                             "target_url": board.origin + "/home",
@@ -211,6 +213,11 @@ async def verify_login(
                         action["propose_method"]["selectors"]["editor_parent"] = (
                             "#editor-parent"
                         )
+                    if mode=='method_feedback':
+                        if step==0:
+                            action['propose_method']['selectors']['self_subject']='#missing-observed-current-subject'
+                        elif not model_calls[-1]['method_feedback_code_seen']:
+                            action={'done':{'success':False,'text':'Controlled feedback was not available.'}}
             elif step in (0, 1):
                 field = "username" if step == 0 else "password"
                 matches = [

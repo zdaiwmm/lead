@@ -5,6 +5,7 @@ import time
 
 from .browser_execution import origin, validate_method
 from .db import one, tx
+from .native_method_errors import MethodFactError
 from .native_method_facts import inspect_editor
 from .native_research import NativeResearchPage
 from .research import account_read_origins
@@ -234,15 +235,15 @@ class NativeTask:
     async def record_method(self,args):
         task,account,intent=await asyncio.to_thread(self.snapshot)
         if task['type']!='growth.account' or task['input']['spec']['purpose']!='discover':
-            raise ValueError('method_discovery_task_required')
+            raise MethodFactError('method_discovery_task_required')
         await self.verify_private_self()
         target=args['target_url']
         operation=args['operation']
         if operation not in ('publish','reply') or origin(target) not in {origin(url) for url in self.lease['origins']}:
-            raise ValueError('method_discovery_scope_changed')
+            raise MethodFactError('method_discovery_scope_changed')
         excluded=intent['scope'].get('excluded_targets',[])
         if target in excluded or intent['scope'].get('target_scope')=='existing_grants' and target not in intent['scope'].get('target_ids',[]):
-            raise ValueError('target_not_permitted')
+            raise MethodFactError('target_not_permitted')
         proposal={key:value for key,value in args.items() if key!='operation'}
         permission_page,permission_scope=(self.page,None) if self.page.url==target else await self.temporary_page(target)
         try:
@@ -253,7 +254,7 @@ class NativeTask:
                 external_account_id=account['external_account_id'],connection_origin=account['connection_origin'],
                 operation=operation,evidence_ref=evidence,permission_page=permission_page)
             if before!=await self.document() or permission_scope and permission_before!=await self.document(permission_page,permission_scope):
-                raise ValueError('method_document_changed')
+                raise MethodFactError('method_document_changed')
             method['self_url']=account['private_self']['self_url']
             method['platform_permission']['selector']=args['permission_selector']
             validate_method(method,account_id=account['id'],binding_version=account['binding_version'],target_url=target,operation=operation)

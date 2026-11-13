@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from .native_identity_errors import IDENTITY_ERROR_HINTS
+from .native_method_errors import METHOD_ERROR_HINTS
 
 _ACTIONS=('guarded_input','guarded_click','guarded_scroll','guarded_navigate','inspect_self',
     'report_connection','propose_method','report_receipt','done','open_public_page',
@@ -48,8 +49,8 @@ def _outcome(result):
         if error in _MESSAGES:
             status,code=_MESSAGES[error]
             return {'status':status,'code':code}
-        for code in (*_SCOPE_CODES,*IDENTITY_ERROR_HINTS):
-            if error==code or code in IDENTITY_ERROR_HINTS and error.startswith(code+': '):
+        for code in (*_SCOPE_CODES,*IDENTITY_ERROR_HINTS,*METHOD_ERROR_HINTS):
+            if error==code or (code in IDENTITY_ERROR_HINTS or code in METHOD_ERROR_HINTS) and error.startswith(code+': '):
                 return {'status':'error','code':code}
         for status in (400,401,403,404,409,422,429,500,502,503,504):
             if error.startswith((f"Client error '{status} ",f"Server error '{status} ")):

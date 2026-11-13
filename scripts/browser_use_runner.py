@@ -176,11 +176,12 @@ async def main(data):
                           'operation':operation,'args':args or {}})
                 if response.status_code==409:
                     from lead_app.native_identity_errors import identity_rpc_feedback
+                    from lead_app.native_method_errors import method_rpc_feedback
                     try:
                         payload=response.json()
                     except ValueError:
                         payload=None
-                    feedback=identity_rpc_feedback(operation,response.status_code,payload)
+                    feedback=identity_rpc_feedback(operation,response.status_code,payload) or method_rpc_feedback(operation,response.status_code,payload)
                     if feedback:
                         raise ValueError(feedback)
                 response.raise_for_status()
