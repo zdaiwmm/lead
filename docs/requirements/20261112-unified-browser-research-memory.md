@@ -928,6 +928,10 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - `0dfadf3`/`4036d32`/`ffe5b0e`（源`ad233f9`/`d854847`/`ebbbf29`）关闭已复现的原生表单反馈缺口：A-only真实SDK中，bare及secret-tag用户名都正确替换；重复填用户名后缺密码的submit原返回ok但没有POST。现真正submit空密码给固定无值拒绝；required/format校验遵守[HTML提交语义](https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#form-submission-algorithm)，尊重form/submitter的novalidate，普通typebutton继续/显密步骤保留。仅读空值与validity布尔，不触发invalid事件、不选填字段；原request gate/SQL/owner/SSO/授权不变。两实际SDK红→2绿15.211秒，每例7假HTTP、原私有self/connected/双literal false；其后的novalidate/typebutton收窄按未变标准submit输入复用该SDK证据，分别以30项4.755秒和新增显密focused2项1.073秒实测覆盖，先前4红及准备按钮2红保留，不称最后source重跑了SDK全链。主集成91项/2项专用环境skip、最新请求入口16项/11项Linux条件skip、Ruff及886文件扫描通过；runner blob仍16fb499，11项正式冻结均不变。另仅在连接goal显示同一min(8,配置值)请求上限及按当前反馈避免重复输入，未改硬上限/计费/重试。此为离线修复，不能反推第五次究竟漏填哪字段；第六次尚未付费，余额65/378624不变。
 
+- 第六次真实尝试`d8c97ee / ebb1cf2c…`首次完成A/login：5请求/13133 tokens、10.693秒，fresh私有身份核验及原Task succeeded，认证POST1。随后discover_publish 4请求/10211 tokens、15.337秒，提案一次仅见HTTP409，再导航后触发原bounded_progress_stop；worker未宣称成功，产品按无可用方法完成unsupported发现，targets空，C22正确以publish_method_not_learned停止，未发帖/回复/回查/B。安全trace只证明发生过被拒提案，不能还原未保留的selector或具体失败分支。两笔40000预留settled、2条usage合9请求/23344 tokens、period spent23344/reserved0、unknown=false/unmeasured0、业务Action0，原库/nonce/报告与先前失败保留，进程0、仅本测试env模型key移除。native已测40请求/105697 tokens，第三次另保守8位/40000未知，累计扣48位/145697单位；新增授权余额56请求/355280单位，更早80000未知预留未动。正在离线补方法事实的静态安全错误码供一次定向修正，保持验证门槛与进展计数；不能把旧模型结果当新源码通过。精确d8c97ee的快速CI43401334833/1及镜像CI43401334831/1通过，未合并/发布。
+
+- `8c927b2`（源`33130e0`）补方法事实安全反馈，独立窄审接受：32个facts/4个controller显式常量改typed ValueError，原str不变；SDK只在409且record_method返回固定Method/原Identity白名单code+hint，未知code/status/operation、原body/detail/selector均不透。trace仅投影相同固定code。主集成独立归一raise/import后确认facts及整个NativeTask AST与旧版完全相等，门槛、来源/权限、进展及一次修正计数未改。实际A-onlySDK先12.293秒红（http409且下一请求没有反馈），后1项12.799秒绿：错误提案→下一请求确见固定element-ambiguous code→一次正确修正→原target/method落库，corrections1，方法worker2条known假HTTP、字面凭据false；不反推第六次原409分支。39项反馈及24项旧A DOM共63项19.831秒通过；旧DOM原启动缺headless-shell的24环境setup错误留存，后仅在私有测试副本加fullChrome channel一处重跑24，应用/断言不改，不冒称仓库原测试字节已跑；正式CI仍安装默认Chromium并运行原测试。主集成108项/2项Linux skip、184项交付合同、Ruff及889文件扫描通过；正式runner blob仅更新为`d4b33c76…6c6b05`，另10项不变。第七次尚未付费，累计余额56/355280不变。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -950,7 +954,7 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | A/B机械链及五次真实A首登录停止已执行；31请求/82353tokens已结算，第三次至少4请求且40000单位未知，保守另扣8请求位；第五次安全trace留存，B原字节保留 | C22未通过，A后续/B未运行；累计余额65请求/378624单位，先核输入/表单反馈并离线验证再登记，B不称严格盲测，既有经营反例不重复付费 |
+| C22 | A/B机械链及六次真实尝试已执行；第六A登录通过、方法提案HTTP409后无可用方法停止；已测40请求/105697tokens结算，第三次至少4请求且40000单位未知，保守另扣8请求位；B原字节保留 | C22未通过，实际发帖/回复/回查/B未运行；累计余额56请求/355280单位，先补方法安全反馈并离线验证再登记，B不称严格盲测，既有经营反例不重复付费 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
