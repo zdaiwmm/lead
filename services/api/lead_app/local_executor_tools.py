@@ -66,7 +66,8 @@ def _record_public_read(request,context,observed):
         value={**observed,'engine':'codex-web','elements':[],'has_password':False}
         # Real source links retain their labels; these are observations, not grants.
         from .community_links import telegram_link
-        value['community_links']=[item for item in value.get('links',[]) if telegram_link(item.get('url',item.get('href','')))]
+        value['community_links']=[{'href':item,'name':''} for item in value.get('links',[])
+            if isinstance(item,str) and telegram_link(item)]
         value['community_entries']=[]
         c.execute("""INSERT INTO lead.browser_steps(id,tenant_id,agent_id,run_id,seq,command_id,operation,input,state,output,ended_at)
             VALUES(%s,%s,%s,%s,%s,%s,'codex-public-read',%s,'completed',%s,now())""",
