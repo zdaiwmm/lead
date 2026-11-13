@@ -58,6 +58,7 @@ async def verify_login(
                         item.get("text", "") for item in value if isinstance(item, dict)
                     )
             text = "\n".join(parts)
+            model_calls[-1]['identity_feedback_code_seen']='identity_value_missing' in text
             import re
 
             candidates = []
@@ -191,9 +192,18 @@ async def verify_login(
                         "self_link_selector": "a[rel~=me]",
                         "acting_subject_selector": "main > p",
                         "self_subject_prefix": "Signed in as ",
-                        "self_subject_suffix": " · Your account settings",
+                        "self_subject_suffix": " (absent)" if mode=='identity_feedback' else " · Your account settings",
                     }
                 }
+            elif step==4 and mode=='identity_feedback':
+                if model_calls[-1]['identity_feedback_code_seen']:
+                    action={'inspect_self':{'self_link_selector':'a[rel~=me]',
+                        'acting_subject_selector':'main > p','self_subject_prefix':'Signed in as ',
+                        'self_subject_suffix':' · Your account settings'}}
+                else:
+                    action={'done':{'text':'No safe identity feedback was observed.','success':False}}
+            elif step==5 and mode=='identity_feedback':
+                action={'report_connection':{'subject_selector':'#subject'}}
             elif step == 4 and (mode != "owner_otp" or workflow.get("allow_identity")):
                 action = {"report_connection": {"subject_selector": "#subject"}}
             model_calls[-1]["action"] = list(action)[0]

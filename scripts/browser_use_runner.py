@@ -172,6 +172,15 @@ async def main(data):
                     headers={"Authorization":"Bearer "+data['gateway_token']},
                     json={'run_id':data['run_id'],'command_id':str(uuid4()),
                           'operation':operation,'args':args or {}})
+                if response.status_code==409:
+                    from lead_app.native_identity_errors import identity_rpc_feedback
+                    try:
+                        payload=response.json()
+                    except ValueError:
+                        payload=None
+                    feedback=identity_rpc_feedback(operation,response.status_code,payload)
+                    if feedback:
+                        raise ValueError(feedback)
                 response.raise_for_status()
                 return response.json()
             async def live_scope():
