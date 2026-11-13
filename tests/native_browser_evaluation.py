@@ -16,9 +16,9 @@ from native_browser_fixture import BoardState, NativeBoard
 class SiteA:
     case_id = 'a'
 
-    def __init__(self):
-        self.board = NativeBoard(BoardState(host='93.184.215.14', username='member-'+os.urandom(4).hex(),
-            password='secret-'+os.urandom(6).hex()), public_origin='http://93.184.215.14').start()
+    def __init__(self,host='93.184.215.14'):
+        self.board = NativeBoard(BoardState(host=host, username='member-'+os.urandom(4).hex(),
+            password='secret-'+os.urandom(6).hex()), public_origin='http://'+host).start()
         self.origin = self.board.origin
         self.entry_url = self.origin+'/login'
         self.target_url = self.origin+'/home'
@@ -37,8 +37,8 @@ class SiteA:
         self.board.close()
 
 
-def create_a():
-    return SiteA()
+def create_a(host='93.184.215.14'):
+    return SiteA(host)
 
 
 def dry_model(site, calls, destination):

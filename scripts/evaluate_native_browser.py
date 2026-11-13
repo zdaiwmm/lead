@@ -13,6 +13,7 @@ import json
 import os
 import stat
 import time
+from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -31,6 +32,9 @@ def source_manifest(root=ROOT):
     files = [*root.joinpath('services/api/lead_app').rglob('*.py'),
              *root.joinpath('infra/migrations').rglob('*.py'),
              *root.joinpath('infra/migrations/sql').glob('*.sql'),
+             *root.joinpath('tests').glob('native_browser_fixture*.py'),
+             root/'requirements.lock.txt', root/'requirements.browser-use.lock.txt',
+             root/'scripts/browser_namespace.py',
              root/'scripts/browser_use_runner.py', root/'scripts/evaluate_native_browser.py',
              root/'scripts/native_eval_seed.py']
     return {str(path.relative_to(root)): sha(path.read_bytes()) for path in sorted(set(files))}
@@ -40,6 +44,7 @@ def plan(root=ROOT):
     return {'version': 'native-c22-six-tasks-v1', 'state': 'draft',
             'source_hashes': source_manifest(root), 'private_config_sha256': None,
             'runtime_manifest_sha256': None, 'site_adapter_sha256': {}, 'model': None,
+            'provider_credential_sha256': None,
             'stages': list(STAGES), 'fragment': FRAGMENT,
             'per_site': {'fragments': 6, 'requests': 48, 'tokens_and_reserved_units': 240000},
             'two_sites': {'requests': 96, 'tokens_and_reserved_units': 480000},
@@ -93,6 +98,41 @@ def validate_prereg(prereg, private_path, expected_hash):
 
 class AcceptanceStop(ValueError):
     """A preserved first failure; the caller must not continue to another site."""
+
+
+@contextmanager
+def synthetic_site_transport(sites):
+    """Map registered .test hosts to their own loopback source, never the net."""
+    from lead_app.forward_proxy import BrowserForwardProxy
+    hosts, addresses = {}, {}
+    for number, site in enumerate(sites):
+        parsed = urlsplit(site.origin)
+        host = parsed.hostname
+        if (not host or not host.endswith('.test') or host in hosts or parsed.scheme != 'http'
+                or parsed.port not in (None, 80) or parsed.path not in ('', '/')
+                or parsed.query or parsed.fragment or parsed.username or parsed.password):
+            raise ValueError('unique_synthetic_test_domains_required')
+        address = '93.184.215.'+str(140+number)
+        hosts[host] = address
+        addresses[address] = site
+    original = BrowserForwardProxy.resolve, BrowserForwardProxy.connect
+
+    async def resolve(self, host):
+        value = hosts.get(host.lower().rstrip('.'))
+        if value is None:
+            raise ValueError('synthetic_transport_host_refused')
+        return str(self.public_ip(value))
+
+    async def connect(self, ip, port):
+        if ip not in addresses or port != 80:
+            raise ValueError('synthetic_transport_destination_refused')
+        return await asyncio.open_connection('127.0.0.1', addresses[ip].listener_port)
+
+    BrowserForwardProxy.resolve, BrowserForwardProxy.connect = resolve, connect
+    try:
+        yield
+    finally:
+        BrowserForwardProxy.resolve, BrowserForwardProxy.connect = original
 
 
 class NativeCase:
@@ -350,7 +390,6 @@ async def execute_registered(prereg, config, output):
     from lead_app import browser, domain
     from lead_app.config import ROOT, env, model_config
     from lead_app.db import tx
-    from lead_app.forward_proxy import BrowserForwardProxy
 
     values = env()
     if values.get('LEAD_DEPLOYMENT_MODE') == 'production' or values.get('LEAD_DB_HOST') not in ('127.0.0.1', 'localhost'):
@@ -365,24 +404,17 @@ async def execute_registered(prereg, config, output):
     actual = model_config()
     if not actual.get('key') or {key: actual[key] for key in ('provider', 'model', 'base_url')} != config['model']:
         raise ValueError('configured_development_model_mismatch')
+    if sha(actual['key'].encode()) != prereg.get('provider_credential_sha256'):
+        raise ValueError('registered_provider_credential_mismatch')
     sites, aid, server, serving = [], None, None, None
-    original = BrowserForwardProxy.connect
+    transports = ExitStack()
     previous = os.environ.get('LEAD_BROWSER_TRANSPORTS')
     report = {'source_hashes': prereg['source_hashes'], 'cases': [], 'first_failure': None}
     try:
         for spec in config['sites']:
             module, function = spec['adapter'].split(':', 1)
             sites.append(getattr(importlib.import_module(module), function)(**spec['kwargs']))
-        destinations = {urlsplit(site.origin).hostname: site for site in sites}
-        if len(destinations) != len(sites) or any(urlsplit(site.origin).port not in (None, 80) for site in sites):
-            raise ValueError('unique_synthetic_standard_origins_required')
-
-        async def connect(self, ip, port):
-            if ip not in destinations or port != 80:
-                raise ValueError('synthetic_transport_destination_refused')
-            return await asyncio.open_connection('127.0.0.1', destinations[ip].listener_port)
-
-        BrowserForwardProxy.connect = connect
+        transports.enter_context(synthetic_site_transport(sites))
         with socket.socket() as chooser:
             chooser.bind(('127.0.0.1', 0))
             port = chooser.getsockname()[1]
@@ -415,7 +447,7 @@ async def execute_registered(prereg, config, output):
             await serving
         for site in sites:
             site.close()
-        BrowserForwardProxy.connect = original
+        transports.close()
         if previous is None:
             os.environ.pop('LEAD_BROWSER_TRANSPORTS', None)
         else:

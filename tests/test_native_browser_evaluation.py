@@ -20,6 +20,96 @@ def test_default_prereg_is_a_draft_with_exact_bounded_stages(tmp_path):
     assert draft['private_config_sha256'] is None and draft['model'] is None
 
 
+def test_prereg_freezes_namespace_dependencies_and_transitive_site_sources():
+    from scripts.evaluate_native_browser import plan
+    draft = plan()
+    assert {'scripts/browser_namespace.py', 'requirements.lock.txt', 'requirements.browser-use.lock.txt',
+            'tests/native_browser_fixture.py', 'tests/native_browser_fixture_b.py'} <= set(draft['source_hashes'])
+    assert draft['provider_credential_sha256'] is None
+
+
+@pytest.mark.asyncio
+async def test_changed_provider_credential_stops_before_any_task_or_browser(monkeypatch,tmp_path):
+    from lead_app import config, domain
+
+    from scripts.evaluate_native_browser import execute_registered, sha
+
+    runtime=tmp_path/'services/browser-runtime'
+    runtime.mkdir(parents=True)
+    (runtime/'manifest.json').write_text('{"synthetic":true}')
+    monkeypatch.setattr(config,'ROOT',tmp_path)
+    monkeypatch.setattr(config,'env',lambda:{'LEAD_DB_HOST':'127.0.0.1','LEAD_DB_NAME':'native_eval_fixture',
+        'LEAD_NETWORK_NAMESPACE':'1'})
+    metadata={'provider':'deepseek','model':'synthetic-only','base_url':'https://api.deepseek.com'}
+    monkeypatch.setattr(config,'model_config',lambda:{**metadata,'key':'different-synthetic-credential'})
+    def forbidden(*args,**kwargs):
+        raise AssertionError('No task or browser may start with a changed credential')
+    monkeypatch.setattr(domain,'create_agent',forbidden)
+    prereg={'runtime_manifest_sha256':sha((runtime/'manifest.json').read_bytes()),
+        'provider_credential_sha256':sha(b'original-synthetic-credential')}
+    with pytest.raises(ValueError,match='registered_provider_credential_mismatch'):
+        await execute_registered(prereg,{'model':metadata,'sites':[]},tmp_path/'result.json')
+
+
+@pytest.mark.asyncio
+async def test_registered_two_domains_reach_only_their_own_source_through_original_proxy(monkeypatch):
+    import tempfile
+    from pathlib import Path
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from lead_app import forward_proxy
+
+    from scripts.evaluate_native_browser import synthetic_site_transport
+
+    received=[]
+    servers=[]
+    async def source(number,reader,writer):
+        try:
+            header=await reader.readuntil(b'\r\n\r\n')
+            received.append((number,header))
+            writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK')
+            await writer.drain()
+        finally:
+            writer.close()
+    for number in range(2):
+        servers.append(await asyncio.start_server(lambda reader,writer,n=number:source(n,reader,writer),'127.0.0.1',0))
+    sites=[SimpleNamespace(origin='http://'+host,listener_port=server.sockets[0].getsockname()[1])
+        for host,server in zip(('alpha-c22.test','beta-c22.test'),servers,strict=True)]
+    original=forward_proxy.BrowserForwardProxy.resolve,forward_proxy.BrowserForwardProxy.connect
+    try:
+        with tempfile.TemporaryDirectory(prefix='c22-net-',dir='/private/tmp' if os.name!='nt' and os.path.isdir('/private/tmp') else None) as folder:
+            monkeypatch.setattr(forward_proxy,'STATE',Path(folder))
+            with synthetic_site_transport(sites):
+                proxy=await forward_proxy.BrowserForwardProxy(str(uuid4()),forward_guard=lambda:'synthetic-only').start()
+                async def get(host):
+                    reader,writer=await asyncio.open_connection('127.0.0.1',proxy.port)
+                    try:
+                        writer.write((f'GET http://{host}/probe HTTP/1.1\r\nHost: {host}\r\n'
+                            f'Proxy-Authorization: {proxy.auth}\r\nConnection: close\r\n\r\n').encode())
+                        await writer.drain()
+                        return await asyncio.wait_for(reader.read(),2)
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+                try:
+                    for host in ('alpha-c22.test','beta-c22.test'):
+                        assert b'200 OK' in await get(host)
+                    for host in ('outside-c22.test','alpha-c22.test:81','127.0.0.1'):
+                        assert b'200 OK' not in await get(host)
+                finally:
+                    await proxy.close()
+        assert len(received)==2
+        assert received[0][0]==0 and b'Host: alpha-c22.test' in received[0][1]
+        assert received[1][0]==1 and b'Host: beta-c22.test' in received[1][1]
+        assert all(b'proxy-authorization' not in value.lower() for _,value in received)
+        assert (forward_proxy.BrowserForwardProxy.resolve,forward_proxy.BrowserForwardProxy.connect)==original
+    finally:
+        for server in servers:
+            server.close()
+            await server.wait_closed()
+
+
 @pytest.mark.skipif(os.environ.get('LEAD_NATIVE_PRODUCT_TESTS') != '1', reason='Explicit isolated Linux product run required')
 @pytest.mark.asyncio
 async def test_first_failed_result_stops_before_a_later_task(monkeypatch):
