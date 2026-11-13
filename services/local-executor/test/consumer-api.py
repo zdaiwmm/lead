@@ -191,5 +191,5 @@ def status(phase: str):
     with tx(str(agent_id)) as c:
         requests = all_rows(c, "SELECT id,request_key,state,thread_id,turn_id,usage,result,session_key,task_id FROM lead.local_executor_requests ORDER BY created_at,id")
         billing = {"reservations": one(c, "SELECT count(*) n FROM lead.budget_reservations")["n"], "usage_events": one(c, "SELECT count(*) n FROM lead.usage_events")["n"]}
-        methods = all_rows(c, "SELECT request_id,method,params FROM lead.local_executor_events WHERE method IN ('item/started','item/completed','thread/tokenUsage/updated','result') ORDER BY created_at,event_id")
+        methods = all_rows(c, "SELECT request_id,method,params FROM lead.local_executor_events WHERE method IN ('item/started','item/completed','thread/tokenUsage/updated','error','turn/completed','result') ORDER BY created_at,event_id")
     return output({"job": JOBS.get(phase), "requests": requests, "billing": billing, "events": methods, "agent_id": str(agent_id)})

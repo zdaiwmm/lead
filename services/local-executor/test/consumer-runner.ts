@@ -92,7 +92,14 @@ try {
     )
       throw new Error(
         "original_consumer_stopped:" +
-          JSON.stringify({ job: current.job, requests: current.requests }),
+          JSON.stringify({
+            job: current.job,
+            requests: current.requests,
+            native_errors: current.events.filter((event: any) =>
+              event.method === "error" ||
+              (event.method === "turn/completed" && event.params?.turn?.error),
+            ),
+          }),
       );
     await new Promise((r) => setTimeout(r, 1000));
   }
