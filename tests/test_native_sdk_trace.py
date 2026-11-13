@@ -93,3 +93,14 @@ def test_projection_does_not_swallow_cancellation(tmp_path):
             raise asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError):
         trace.capture(Cancelled())
+
+
+@pytest.mark.parametrize('message,code',[
+    ('The observed sign-in form has an empty password field. Fill that field before submitting.','credential_password_missing'),
+    ('The observed sign-in form has an empty required field. Complete that field before submitting.','credential_required_field_missing'),
+    ('The observed sign-in form is invalid. Correct its observed fields before submitting.','credential_form_invalid'),
+])
+def test_credential_completeness_feedback_is_a_fixed_safe_code(tmp_path,message,code):
+    trace=SafeStepTrace(tmp_path/'trace.json')
+    trace.capture(SimpleNamespace(history=[entry(error=message)]))
+    assert trace.steps[0]['outcomes']==[{'status':'denied','code':code}]

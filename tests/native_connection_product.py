@@ -48,7 +48,7 @@ async def verify_login(
                 }
             )
             request = json.loads(raw)
-            if mode=='trace_probe':
+            if mode=='trace_probe' or mode.startswith('credential_form_probe_'):
                 model_calls[-1]['trace_in_model_prompt']=b'safe-step-trace' in raw
             parts = []
             for message in request.get("messages", []):
@@ -85,7 +85,29 @@ async def verify_login(
                     "success": True,
                 }
             }
-            if mode=='trace_probe':
+            if mode.startswith('credential_form_probe_'):
+                controls=[]
+                for line in lines:
+                    marker=re.search(r'\[(\d+)\]',line)
+                    if not marker:
+                        continue
+                    role='password' if '<input' in line.lower() and re.search(r'type=[\"\']?password\b',line,re.I) else 'username' if '<input' in line.lower() and re.search(r'(?:name|autocomplete)=[\"\']?username\b',line,re.I) else 'submit' if '<button' in line.lower() else None
+                    if role:
+                        controls.append({'index':int(marker[1]),'role':role})
+                model_calls[-1]['credential_controls']=controls
+                role='username' if step in (0,1) else 'password' if step==3 else 'submit'
+                chosen=[item['index'] for item in controls if item['role']==role]
+                if step in (0,1,3) and chosen:
+                    tagged=(mode.endswith('_tagged')) != (step==1)
+                    value='saved_'+role
+                    action={'guarded_input':{'index':chosen[-1],'text':'<secret>'+value+'</secret>' if tagged else value,'clear':True}}
+                elif step in (2,4) and chosen:
+                    action={'guarded_click':{'index':chosen[-1]}}
+                elif step==5:
+                    action={'inspect_self':{}}
+                elif step==6:
+                    action={'report_connection':{'subject_selector':'#subject'}}
+            elif mode=='trace_probe':
                 if step==0:
                     action={'guarded_input':{'index':999999,'text':'saved_username','clear':True}}
                 elif step in (1,2,3):

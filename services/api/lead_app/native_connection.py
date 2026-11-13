@@ -18,6 +18,9 @@ name:this.getAttribute('name')||'',autocomplete:this.getAttribute('autocomplete'
 method:(form.getAttribute('method')||'GET').toUpperCase(),action:new URL(form.getAttribute('action')||location.href,form.baseURI).href,
 passwordCount:form.querySelectorAll('input[type="password"]').length,
 newPassword:!!form.querySelector('input[autocomplete="new-password"]'),
+passwordEmpty:Array.from(form.elements).some(node=>node.type==='password'&&!node.disabled&&!node.value.length),
+requiredEmpty:Array.from(form.elements).some(node=>node.willValidate&&node.validity.valueMissing),
+invalidFields:Array.from(form.elements).some(node=>node.willValidate&&!node.validity.valid),
 formText:form.innerText,heading:form.closest('main,section')?.querySelector('h1,h2')?.innerText||document.title,
 fields:Array.from(form.elements).filter(node=>node.name&&!node.disabled).map(node=>node.name),
 controls:Object.fromEntries(Array.from(form.elements).filter(node=>node.name&&!node.disabled&&
@@ -324,6 +327,12 @@ class NativeConnection:
         elif name=='click':
             if facts['tag'] not in ('button','input') or facts['type'] not in ('submit','button'):
                 return {'allowed':False}
+            if facts['passwordEmpty']:
+                return {'allowed':False,'reason':'The observed sign-in form has an empty password field. Fill that field before submitting.'}
+            if facts['requiredEmpty']:
+                return {'allowed':False,'reason':'The observed sign-in form has an empty required field. Complete that field before submitting.'}
+            if facts['invalidFields']:
+                return {'allowed':False,'reason':'The observed sign-in form is invalid. Correct its observed fields before submitting.'}
         else:
             return {'allowed':False}
         if name=='input':
