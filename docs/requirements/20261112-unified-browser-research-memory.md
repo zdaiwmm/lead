@@ -1032,6 +1032,10 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 ### 22.2 尚未放行与部署约束
 
+- 第十六次 `1af38bd / a1682f88…` 已停止并一次性对账：A登录4请求/34303、发布方法2/19520、实际发帖3/24982及独立回执通过；回复发现合法续接三片共24请求/236022，最终targets为空，C22为`reply_method_not_learned`，不是完整回复成功。第三片两次提案均`editor_parent=not_found`，第二/三片各有一次空actions/unclassified_error；旧日志不足以判定具体提案CSS和当前页。共33请求/33图/314827完整结算、进程0且自身key清除；native累计151已测请求/882367tokens，另第三次8位/40000未知，总扣159位/922367。先前80000未知及生产旧reserved均不改写。
+
+- 第十七份登记仅准备了A只读诊断（`ea4ea443…`，无模型调用）；随后用户提出优先考虑Multica式设备本地Codex CLI。已核`execution-started`不存在、worker结果0、进程0，清除该准备目录自身key并封存，未将其计为真实C22尝试或追加消耗。证据 `/private/tmp/mrw28/reports/native-c22-trial17-not-executed.json`。不继续旧诊断，也不据准备成功放行生产。
+
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
 
 本次采用同SHA应用镜像中的`services/browser-runtime/`承载固定SDK依赖、Chromium与由唯一scripts源复制的运行脚本，复用既有current/services只读挂载；不开放宿主/公网CDP，不另装生产框架，不依赖未经核实的旧控制管道。已有工程证据按实际不变输入复用；陌生布局真实模型、正式备份克隆迁移/回退演练及精确PR/main必需CI尚待完成。最终部署须复用同SHA成功run/attempt产物并独立回读，当前没有提交任何生产发布请求。
@@ -1052,7 +1056,7 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | 十五次真实尝试：本轮A登录、方法、发帖/独立回执通过，回复发现8次导航后合法checkpoint，但原验收脚本按首waiting停止。完整视觉、显式目标、强身份派生和可观察模型接口保持；累计118已测/567540tokens，另8位/40000未知 | C22未通过，reply/未知回查/B未完成；正修验收原Task续接及跨页发现提示。本任务费用不限，技术窗口不是用户预算。所有旧失败/账本保留，不重发原confirmed/unknown；B非严格盲测 |
+| C22 | 十六次真实尝试：本轮A登录、方法、发帖/独立回执通过，回复合法三片24请求后仍无方法，最后两提案parent not_found。累计151已测/882367tokens，另8位/40000未知；第17份只准备诊断，0模型后封存 | C22未通过，reply/未知回查/B未完成。用户现优先讨论本地Codex执行层；未启动新付费/生产。所有旧失败/账本保留，不重发原confirmed/unknown；B非严格盲测 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
@@ -1061,3 +1065,17 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C30 | 权限/隔离/响应/竞态独立证据及e1feedc同实例70.758秒完整绿：SSO、owner公开frame批准、opaque读取、SW正常/NoAck、原回查与C33 | 证明受控静态公开frame组合；不推广任意嵌套、动态身份依赖或真实平台准入 |
 | C31–C32 | 原Network/Fetch正文关联、worker当前版本/target替换拒绝、旧认证/错误callback/危险字段源站0 | 正式fresh、版本更新后重放/原回查已取证；C33断控尾段亦已通过，仍不用同URL脚本或全局投影代替当前归属 |
 | C33–C34 | 实际整个管理器三切点SIGKILL、TLS EOF/新连接拒绝、原Action恢复只回查；实际proxy关闭活动CONNECT/未完整header通过 | Chrome与同SW仍活、仅断gate控制的连续组合已通过；生产唯一出口/父链按正式独立回读核验 |
+
+### 22.4 设备本地 Codex CLI 方向（评估中，尚未改造）
+
+用户当前提出参考Multica，使用设备上已安装并登录的Codex CLI，以免另配大模型API key，并询问是否统一替换Agent及改动范围。此为方案评估；没有宣称已切换、C22通过或原PR可部署。旧A诊断已在0调用时封存，不再继续扩展旧Agent配置实验。
+
+本机只读核验：Codex CLI `0.167.0-alpha.4.1`存在，`login status`退出0且认证类型为ChatGPT；仅读取状态，没有读取或打印认证内容，也未启动Codex模型任务。官方[认证文档](https://learn.chatgpt.com/docs/auth)确认本地CLI支持ChatGPT登录，[非交互文档](https://learn.chatgpt.com/docs/non-interactive-mode)说明执行可复用已有CLI登录；实际可用权益仍取决于用户本人账号。模型调用仍由Codex连接模型服务。
+
+Multica官方主线固定为[`773569db3ab53e304f2d08310621f1b15be393f0`](https://github.com/multica-ai/multica/commit/773569db3ab53e304f2d08310621f1b15be393f0)。其[Codex适配器](https://github.com/multica-ai/multica/blob/773569db3ab53e304f2d08310621f1b15be393f0/server/pkg/agent/codex.go)通过本地daemon启动`codex app-server --listen stdio://`，使用线程/轮次RPC和事件流，保存thread与会话存储续接；浏览器依赖另配MCP。借鉴这一架构，不直接复制其自动批准、启动重试、fresh-thread fallback或带额外许可条件的源码。独立只读证据 `/private/tmp/vbp30/multica-local-cli-review.json` SHA256 `326106f3f327902ecfe055449166c9d99dde9f67680d7cca789aabbc0f35330c`。官方[app-server](https://learn.chatgpt.com/docs/app-server)与[MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)为实现接口来源，不依赖已废弃的Codex MCP-server旧路线。
+
+建议目标是统一Agent执行层：规划、记忆、研究、内容生成及浏览器编排由用户设备的Codex负责；Lead保留Task/Action/账号、业务数据、研究与浏览器工具、真实回执及调度。现有browser-use可保留为浏览器工具实现，避免再次自建Agent循环或记忆平台。仅替换浏览器Agent并不能实现整产品免模型API key，因为其他服务端推理调用仍需迁移。外部研究供应商的可选工具凭据与模型登录分别管理。
+
+实际改动分为本地连接器/登录状态检测与设备接入、原Task到Codex thread映射及续接/取消、现有工具通过MCP或官方接口接入、进度/结果/用量回传及配置UI。完整免模型key属于中等偏大的执行架构调整；现有业务系统可继续复用，不能按换一条命令估计。Codex登录留在用户设备，后台接收任务与结果；设备需要保持在线，关闭前端后由本地后台程序继续，休眠/离线则等待同一任务恢复。CLI事件用量与原HTTPX逐请求账本不同，需单独记录来源，历史已知/未知费用保持。
+
+最小验证先覆盖当前Mac上的成熟执行层与原受控浏览器跨页任务，再接原Task/Action并完成两个网站的登录/发布/回复/同一unknown只读回查；最后验证设备离线、重连、关前端和线程续接。独立CLI演示不替代原C22，尚未实施的连接器和全模型调用迁移不计完成。原生产合并/发布仍须精确版本全部验证和既有正式流程。
