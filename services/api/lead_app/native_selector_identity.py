@@ -57,12 +57,12 @@ async def match_control(controller,session,identifier,selector):
             return {'matches':False}
         # A pinned public ElementHandle is needed here specifically to detect
         # replacement between reads; the selector is still resolved in full.
-        handle=await locator.element_handle(timeout=1000)
+        handle=await locator.element_handle()
         if not handle or not await handle.evaluate(_SAME_PATH,original):
             return {'matches':False}
         if await native_identity()!=original or await locator.count()!=1:
             return {'matches':False}
-        if not await locator.evaluate('(node,pinned)=>node===pinned',handle,timeout=1000):
+        if not await locator.evaluate('(node,pinned)=>node===pinned',handle):
             return {'matches':False}
         if not await handle.evaluate(_SAME_PATH,original) or before!=await controller.document():
             return {'matches':False}
