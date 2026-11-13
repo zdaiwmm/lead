@@ -1752,8 +1752,6 @@ progress::-moz-progress-bar {
   padding: 16px 24px;
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
-  max-height: 30dvh;
-  overflow: auto;
 }
 .connection-read-dependencies h3 { font-size: 14px; font-weight: 500; margin-bottom: 4px; }
 .connection-read-dependency {
@@ -1771,6 +1769,7 @@ progress::-moz-progress-bar {
 .connection-read-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .connection-read-error { display: flex; align-items: center; gap: 12px; margin-top: 8px; font-size: 13px; }
 .account-browser-panel:has(.connection-read-dependencies) { overflow-y: auto; }
+.account-browser-panel:has(.connection-read-dependencies) > :not(.account-browser-screen) { flex-shrink: 0; }
 @media (max-width: 650px) {
   .connection-read-dependencies { padding: 12px 16px; }
   .connection-read-dependency { align-items: flex-start; flex-direction: column; gap: 8px; }

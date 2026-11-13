@@ -202,8 +202,8 @@ async def verify(state):
                 assert not dependency_posts
                 assert 'synthetic-link-token' not in await panel.inner_text()
                 assert '此来源涉及另一个账号' in await panel.inner_text()
-                for width,label in ((1440,'read-dependencies-desktop'),(390,'read-dependencies-narrow')):
-                    await page.set_viewport_size({'width':width,'height':1000})
+                for width,height,label in ((1440,1000,'read-dependencies-desktop'),(390,1000,'read-dependencies-narrow'),(320,640,'read-dependencies-small')):
+                    await page.set_viewport_size({'width':width,'height':height})
                     await page.screenshot(path=str(report/(label+'.png')),full_page=True)
                     assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth'),label
                     assert await panel.evaluate('node=>node.scrollWidth<=node.clientWidth'),label
