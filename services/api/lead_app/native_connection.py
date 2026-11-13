@@ -187,20 +187,79 @@ class NativeConnection:
         self.anonymous_self=await self.page.locator('a[rel~="me"]').all_text_contents()
         return await self.descriptor()
 
+    async def authentication_entry(self):
+        """A fresh visible sign-in surface permits the original new auth flow.
+
+        This only chooses between ordinary authentication and an owner handoff;
+        credential fields and the actual request still pass the original gate.
+        """
+        if self.lease.get('authentication_dispatched'):
+            return False
+        _,_,account=await asyncio.to_thread(self.snapshot)
+        try:
+            same_origin=origin(self.page.url)==origin(account['connection_origin'])
+        except ValueError:
+            return False
+        if not same_origin:
+            return False
+        return await self.page.evaluate(r'''()=>{
+            const visible=node=>!!node&&!!node.getClientRects().length&&getComputedStyle(node).visibility!=='hidden';
+            const text=(document.body?.innerText||'').slice(0,12000);
+            if(/access denied|permission denied|do not have permission|not authorized|forbidden|无权|拒绝访问/i.test(text))return false;
+            if(/(?:signed|logged)\s+in\s+as|current\s+account|当前(?:登录)?(?:账号|账户|身份)/i.test(text))return false;
+            const signin=/sign[\s-]*in|log[\s-]*in|authenticate|登录|登入/i;
+            const forbidden=/reset|change\s*password|register|sign[\s-]*up|delete|purchase|重置|注册|删除|支付/i;
+            const forms=Array.from(document.forms).filter(form=>visible(form)&&
+                (form.getAttribute('method')||'GET').toUpperCase()==='POST'&&
+                new URL(form.getAttribute('action')||location.href,form.baseURI).origin===location.origin&&
+                form.querySelectorAll('input[type=password]').length===1&&
+                !form.querySelector('input[autocomplete="new-password"],input[autocomplete="one-time-code"]')&&
+                signin.test(form.innerText+' '+document.title)&&!forbidden.test(form.innerText+' '+document.title));
+            if(forms.length===1)return true;
+            return Array.from(document.querySelectorAll('a[href]')).some(node=>visible(node)&&
+                new URL(node.getAttribute('href'),node.baseURI).origin===location.origin&&
+                signin.test(node.innerText)&&!forbidden.test(node.innerText));
+        }''')
+
     async def observe_current(self):
         await self.advance_auth_flow()
-        _,connection,account=await asyncio.to_thread(self.snapshot)
-        if account.get('external_account_id'):
-            with tx(self.actor.aid) as c:
-                previous=one(c,"""SELECT connection_data->>'self_selector' selector,connection_data->>'self_url' self_url,
-                        connection_data->>'self_link_selector' link_selector FROM lead.takeover_sessions
-                    WHERE completed_account_id=%s AND connection_data ? 'self_selector'
-                    ORDER BY ended_at DESC NULLS LAST LIMIT 1""",(account['id'],))
-            if previous and previous.get('self_url'):
-                self.self_entry={'url':previous['self_url'],'selector':previous.get('link_selector')}
-                await self.page.goto(previous['self_url'],wait_until='domcontentloaded',timeout=30000)
-                return await self.report_identity({'subject_selector':previous['selector']})
-        return None
+        _,_,account=await asyncio.to_thread(self.snapshot)
+        if not account.get('external_account_id'):
+            return None
+        from playwright.async_api import Error as PlaywrightError
+
+        from .native_identity_errors import IdentityFactError
+
+        async def unresolved(*, allow_signin=False):
+            self.self_entry=None
+            if allow_signin and await self.authentication_entry():
+                return None
+            return await self.handoff('请在原窗口核对当前登录身份；已有提交或身份、权限条件不允许自动重试凭据。')
+
+        # Stored selectors are proposals only. A bound account must first show a
+        # fresh current subject and related rel=me link on this actual page.
+        try:
+            current=await self.inspect_self({})
+        except IdentityFactError as error:
+            return await unresolved(allow_signin=error.code=='identity_current_self_unestablished')
+        except PlaywrightError:
+            return await unresolved()
+        if current['acting_subject']!=account['external_account_id']:
+            return await self.handoff('当前页面的登录主体与原绑定不同，请本人核对；不会重新提交凭据或改绑。')
+        with tx(self.actor.aid) as c:
+            previous=one(c,"""SELECT connection_data->>'self_selector' selector FROM lead.takeover_sessions
+                WHERE completed_account_id=%s AND connection_data ? 'self_selector'
+                ORDER BY ended_at DESC NULLS LAST LIMIT 1""",(account['id'],))
+        if not previous or not previous.get('selector'):
+            return await self.handoff('当前登录身份仍需在原私有页面独立核对，请本人继续。')
+        try:
+            return await self.report_identity({'subject_selector':previous['selector']})
+        except (IdentityFactError,PlaywrightError):
+            return await unresolved()
+        except ValueError as error:
+            if str(error) not in ('self_surface_not_opened','self_surface_not_authenticated','private_self_subject_changed'):
+                raise
+            return await unresolved(allow_signin=str(error)=='self_surface_not_opened')
 
     async def person_only_challenge(self):
         from .native_challenges import person_challenge
@@ -425,6 +484,9 @@ class NativeConnection:
             raise ValueError('self_subject_missing')
         if not self.self_entry or self.page.url!=self.self_entry['url']:
             raise ValueError('self_surface_not_opened')
+        if not self.self_entry.get('acting_subject'):
+            from .native_identity_errors import IdentityFactError
+            raise IdentityFactError('identity_current_self_unestablished')
         from .native_identity_facts import inspect_private_subject
         observed=await inspect_private_subject(self.page,subject_selector=selector,
             value_prefix=args.get('value_prefix',''),value_suffix=args.get('value_suffix',''))
@@ -448,7 +510,7 @@ class NativeConnection:
             await self.actor.native_runtime.release_page(fresh_scope['target_id'])
         await self.descriptor()
         subject=observed['subject']
-        if self.self_entry.get('acting_subject') and subject!=self.self_entry['acting_subject']:
+        if subject!=self.self_entry['acting_subject']:
             from .native_identity_errors import IdentityFactError
             raise IdentityFactError('identity_private_current_subject_mismatch')
         if not self.lease.get('authentication_dispatched') and subject!=account.get('external_account_id'):

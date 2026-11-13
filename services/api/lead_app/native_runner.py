@@ -29,7 +29,7 @@ async def connect(controller,gateway_endpoint):
             'Sign in on the original connection page using saved_username and saved_password placeholders. '
             'Submit the observed credential form once, then inspect_self and report_connection with the actual private ID value selector. '
             'Never solve an OTP, CAPTCHA, scan or passkey challenge. Never change account settings or publish.')
-        if result.get('executor_pending'):
+        if result.get('executor_pending') or result.get('control_mode')=='owner':
             return result
         if controller.observation and controller.observation.get('status')=='authenticated':
             return controller.observation
@@ -38,7 +38,7 @@ async def connect(controller,gateway_endpoint):
     if await controller.person_only_challenge():
         return await controller.handoff('当前仍是平台本人验证，请先在原窗口完成并提交，再交回自动核验。')
     observed=await controller.observe_current()
-    if observed and observed.get('status')=='authenticated':
+    if observed:
         return observed
     credentials=await controller.credentials()
     if not credentials and not controller.lease.get('authentication_dispatched'):

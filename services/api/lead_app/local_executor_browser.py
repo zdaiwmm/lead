@@ -122,7 +122,7 @@ async def run(controller, gateway_endpoint, kind, goal):
         if await controller.person_only_challenge():
             return await controller.handoff('请在原窗口完成平台本人验证，再交回自动核验。')
         observed = await controller.observe_current()
-        if observed and observed.get('status') == 'authenticated':
+        if observed:
             return observed
         controller.local_executor_verification_only=bool(controller.lease.get('authentication_dispatched')
             and getattr(controller,'self_entry',None))
