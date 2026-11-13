@@ -1182,13 +1182,13 @@ def complete_growth_cutover(sha):
 # Exact blobs are frozen only after core/schema/runtime packaging has passed its
 # targeted checks. Unfrozen values deliberately cannot admit a release.
 UNIFIED_BROWSER_FILES = {
-    'scripts/unified_browser_upgrade.py': 'UNFROZEN',
-    'infra/migrations/versions/0032_research_memory.py': 'UNFROZEN',
-    'infra/migrations/sql/0032_research_memory.sql': 'UNFROZEN',
-    'infra/migrations/versions/0033_unified_browser.py': 'UNFROZEN',
-    'infra/migrations/sql/0033_unified_browser.sql': 'UNFROZEN',
-    'scripts/browser_namespace.py': 'UNFROZEN',
-    'scripts/browser_use_runner.py': 'UNFROZEN',
+    'scripts/unified_browser_upgrade.py': '634006d550e09babc44d529126bbe5933800431e',
+    'infra/migrations/versions/0032_research_memory.py': '6f1423fefdd2fa3aba498b37d9f7fad9159ced65',
+    'infra/migrations/sql/0032_research_memory.sql': '1cd03ca94dae3bdd3bcd11124c92bd224a9c6e15',
+    'infra/migrations/versions/0033_unified_browser.py': '8f75f097ad91baac8295537e6d5a52b49b503693',
+    'infra/migrations/sql/0033_unified_browser.sql': '2328c5a253438f1b157d24cf71f81b18075485b8',
+    'scripts/browser_namespace.py': '7ecb47f233761b910317126d9d15e8edfb9fe21b',
+    'scripts/browser_use_runner.py': '2f4d3f977e703fa62f6cc98007cc772a7137339c',
     'scripts/build_home_image.sh': '45e639192d96135a2f8eaf38077670740a29e0a7',
     'scripts/build_browser_runtime.py': 'cbc4d3d3521a2fe50c589813cf0d3956289ca94a',
     'requirements.browser-use.lock.txt': '9105c7748d6aa830f312114e4f9d3e1431e4f911',

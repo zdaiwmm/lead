@@ -879,6 +879,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - `d571245`（源`c49ec2b`）修复上述原Document请求暂停与SDK DOM导出的循环等待：内部请求claim改核当前authority，辅助私有self/fresh editor与原SQL claim均保留；SDK观察仍走完整frame证明。真实Chrome因果对照及48项直接消费者通过，独立窄审接受。去除已完成诊断wrapper后的相同组合输入固定为`16e97fb0`，原400行组合和机械模型AST均未变；唯一复验41.801秒仍红，已真实发送正常POST1、原attempt1且claimed=true。首因是后续导航替换renderer时，scope_view→frame observation→root_facts.evaluate抛Execution context destroyed；尚无receipt模型调用，Action/未知费用预留的原状态已归档在该轮证据中，不能当作正常确认或NoAck通过。自有数据库和进程清理完成，原80000真实调用未知预留不变。当前只窄修导航期间的有界fresh观察，不重跑付费验收或更改夹具配方。
 
+- 已核对升级helper、0032/0033、namespace/runner及固定依赖/打包脚本共11个实际Git blob，部署兼容入口只冻结这批已审源码；174项交付/升级/CI合同1.31秒通过。该冻结只约束未来正式取件，不代表C30/C22、精确main CI或生产迁移通过；尚未安装节点工具、创建生产请求或改变线上服务。当前只读回读应用仍`7940fbe`，实时main仍`d53f32c`。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链已有机械产品证据，跨站读取权限及后台脚本完整组合尚未闭合，不能因此开启共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
