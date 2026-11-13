@@ -20,7 +20,7 @@ async def test_native_sdk_no_progress_and_one_directed_correction_are_bounded(mo
     async def bounded(context):
         aid=context['aid']
         checks={}
-        for mode,expected,reason in [('no_progress',3,'no_progress'),('correction',2,'one_correction_exhausted')]:
+        for mode,expected,reason in [('no_progress',8,None),('correction',2,'one_correction_exhausted')]:
             with tx(aid) as c:
                 targets=c.execute('SELECT * FROM lead.account_targets ORDER BY id').fetchall()
                 grants=c.execute('SELECT * FROM lead.authorization_grants ORDER BY id').fetchall()
@@ -34,18 +34,22 @@ async def test_native_sdk_no_progress_and_one_directed_correction_are_bounded(mo
             result=await discover(aid,task)
             finish(claim,result)
             assert len(context['model_calls'])-start==expected
-            assert result.output['targets']==[] and result.output['missing_conditions']
+            assert not result.output.get('targets')
+            if mode=='no_progress':
+                assert result.outcome=='waiting' and result.checkpoint['stage']=='native_discovery'
+            else:
+                assert result.output['missing_conditions']
             with tx(aid) as c:
                 progress=one(c,'SELECT result FROM lead.tasks WHERE id=%s',(ref['task_id'],))['result']['runtime']['native_progress']
-                assert progress['stopped_reason']==reason
+                assert progress.get('stopped_reason')==reason
                 assert c.execute('SELECT * FROM lead.account_targets ORDER BY id').fetchall()==targets
                 assert c.execute('SELECT * FROM lead.authorization_grants ORDER BY id').fetchall()==grants
-            assert progress['no_progress']==3 if mode=='no_progress' else progress['corrections']==2
+            assert progress['no_progress']>=3 if mode=='no_progress' else progress['corrections']==2
             assert len(progress['state_hash'])==64
             checks[mode]=expected
         return checks
     result=await verify_login(monkeypatch,after_discovery=bounded)
-    assert result['action_check']=={'no_progress':3,'correction':2}
+    assert result['action_check']=={'no_progress':8,'correction':2}
 
 
 @pytest.mark.asyncio
@@ -77,7 +81,7 @@ async def test_native_clocks_reload_and_revisited_scroll_do_not_extend_progress(
         monkeypatch.setattr(NativeTask,'start',decorate)
         monkeypatch.setattr(NativeTask,'observe_progress',observe)
         counts={}
-        for mode,expected in [('clock',3),('reload',3),('scroll_cycle',4)]:
+        for mode,expected in [('clock',8),('reload',8),('scroll_cycle',8)]:
             with tx(aid) as c:
                 ref=submit_work(c,aid,TaskSpec(kind='account',purpose='discover',account_id=context['pending']['account_id'],
                     payload={'target_urls':[context['board'].origin+'/home']},review_at=utcnow()+timedelta(hours=1),dedupe_key='native-semantic-'+mode))
@@ -90,13 +94,14 @@ async def test_native_clocks_reload_and_revisited_scroll_do_not_extend_progress(
             finish(claim,result)
             with tx(aid) as c:
                 progress=one(c,'SELECT result FROM lead.tasks WHERE id=%s',(ref['task_id'],))['result']['runtime']['native_progress']
-            assert progress['stopped_reason']=='no_progress' and progress['no_progress']==3
+            assert result.outcome=='waiting' and result.checkpoint['stage']=='native_discovery'
+            assert progress.get('stopped_reason')!='no_progress' and progress['no_progress']>=3
             counts[mode]=len(context['model_calls'])-start
             assert counts[mode]==expected
             assert len(progress['seen_states'])<=2
         return counts
     result=await verify_login(monkeypatch,after_discovery=bounded)
-    assert result['action_check']=={'clock':3,'reload':3,'scroll_cycle':4}
+    assert result['action_check']=={'clock':8,'reload':8,'scroll_cycle':8}
 
 
 @pytest.mark.asyncio

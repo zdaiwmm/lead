@@ -11,6 +11,10 @@ from .native_research import NativeResearchPage
 from .research import account_read_origins
 
 
+def _discovery_task(task):
+    return task.get('type')=='growth.account' and task.get('input',{}).get('spec',{}).get('purpose')=='discover'
+
+
 class NativeTask:
     def __init__(self,actor,task_id):
         self.actor=actor
@@ -38,10 +42,11 @@ class NativeTask:
         with tx(self.actor.aid) as c:
             task=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE',(self.task_id,))
             progress=(task['result'] or {}).get('runtime',{}).get('native_progress',{})
-            if progress.get('fragments',0)>=3 or progress.get('no_progress',0)>=3 or progress.get('corrections',0)>=8:
+            discovery=_discovery_task(task)
+            if progress.get('fragments',0)>=3 or (not discovery and progress.get('no_progress',0)>=3) or progress.get('corrections',0)>=8:
                 raise ValueError('native_task_progress_limit')
             self.fragment_failures=0
-            self.corrections=progress.get('no_progress',0)
+            self.corrections=0 if discovery else progress.get('no_progress',0)
             self.total_corrections=progress.get('corrections',0)
             progress['fragments']=progress.get('fragments',0)+1
             c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,native_progress}',%s) WHERE id=%s",(j(progress),self.task_id))
@@ -94,7 +99,9 @@ class NativeTask:
             progress['no_progress']=progress.get('no_progress',0)+1 if signature in seen else 0
             progress['seen_states']=(seen+[signature])[-32:] if signature not in seen else seen
             progress['state_hash']=signature
-            self.corrections=progress['no_progress']
+            # Revisiting an editor/rules page is not sufficient reason to end
+            # discovery. Keep the diagnostic without changing error budgets.
+            self.corrections=0 if _discovery_task(task) else progress['no_progress']
             stopped=self.fragment_failures>=2 or self.corrections>=3 or self.total_corrections>=8 or self.steps>=20
             if stopped:
                 progress['stopped_reason']='one_correction_exhausted' if self.fragment_failures>=2 else 'no_progress' if self.corrections>=3 else 'active_step_limit'
