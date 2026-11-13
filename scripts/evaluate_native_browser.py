@@ -173,10 +173,12 @@ def synthetic_site_transport(sites):
 class NativeCase:
     """Generic task orchestration. The site oracle is never exposed to the SDK."""
 
-    def __init__(self, aid, site, gateway_endpoint, *, before_stage=None, output, run_allowance=None):
+    def __init__(self, aid, site, gateway_endpoint, *, before_stage=None, output, run_allowance=None,
+                 require_visual=False):
         self.aid, self.site, self.endpoint = aid, site, gateway_endpoint
         validate_run_allowance(run_allowance)
         self.run_allowance = dict(run_allowance) if run_allowance is not None else None
+        self.require_visual = require_visual
         self.before_stage = before_stage
         self.output = Path(output)
         self.report = {'case_id': site.case_id, 'stages': [], 'mechanical_seed': None,
@@ -247,6 +249,11 @@ class NativeCase:
             raise AcceptanceStop('unexpected_source_post_count:' + name)
         if not seed and (not workers or sum(row['usage'].get('total_tokens', 0) for row in workers) > 40000):
             raise AcceptanceStop('missing_or_excess_usage:' + name)
+        if self.require_visual and not seed and any(
+                type(row['usage'].get('sanitized_images_sent')) is not int
+                or not 1 <= row['usage']['sanitized_images_sent'] <= row['usage'].get('request_count', 0)
+                for row in workers):
+            raise AcceptanceStop('visual_image_missing_or_invalid:' + name)
         if sum(row['requests'] for row in self.report['stages']) > 48:
             raise AcceptanceStop('case_request_limit')
         return result
@@ -471,7 +478,8 @@ async def execute_registered(prereg, config, output):
             c.execute("UPDATE lead.agents SET desired_state='running' WHERE id=%s", (aid,))
         for site, spec in zip(sites, config['sites'], strict=True):
             case = NativeCase(aid, site, endpoint, output=Path(output).with_name(site.case_id+'.json'),
-                run_allowance=prereg.get('execution_allowance'))
+                run_allowance=prereg.get('execution_allowance'),
+                require_visual=prereg.get('final_visual_trial') is True)
             try:
                 report['cases'].append(await case.run(spec['content_evidence']))
             except Exception:

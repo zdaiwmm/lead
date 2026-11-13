@@ -138,6 +138,63 @@ async def test_changed_provider_credential_stops_before_any_task_or_browser(monk
         await execute_registered(prereg,{'model':metadata,'sites':[]},tmp_path/'result.json')
 
 
+@pytest.mark.parametrize('images,require_visual,accepted', [
+    (None, True, False), (0, True, False), (True, True, False),
+    (-1, True, False), (2, True, False), (1, True, True),
+    (None, False, True), (0, False, True),
+])
+@pytest.mark.asyncio
+async def test_final_visual_trial_requires_actual_images_before_another_stage(
+        monkeypatch, tmp_path, images, require_visual, accepted):
+    """A successful text-only task cannot stand in for the visual experiment."""
+    from types import SimpleNamespace
+
+    from lead_app import config
+    from lead_app.growth import runtime
+
+    from scripts.evaluate_native_browser import AcceptanceStop, NativeCase
+
+    monkeypatch.setattr(config, 'STATE', tmp_path)
+    completed = []
+
+    class Case(NativeCase):
+        def ledger(self):
+            if not completed:
+                return [], []
+            return ([{'id': 'reservation', 'state': 'settled', 'units': 40000}],
+                [{'reservation_id': 'reservation', 'units': 20, 'details': {'requests': 1}}])
+
+        def row(self, _):
+            return {'state': 'succeeded'}
+
+    async def execute(_):
+        folder = tmp_path/'browser-use-runs'/'visual-worker'
+        folder.mkdir(parents=True)
+        usage = {'request_count': 1, 'entry_count': 1, 'total_tokens': 20,
+            'billing_unknown': False, 'unmeasured_requests': 0}
+        if images is not None:
+            usage['sanitized_images_sent'] = images
+        (folder/'result.json').write_text(json.dumps({'usage': usage}))
+        completed.append('discover_publish')
+        return {'outcome': 'completed'}
+
+    monkeypatch.setattr(runtime, 'advance', lambda *args, **kwargs: {'state': 'ready', 'claim': {}})
+    monkeypatch.setattr(runtime, 'execute', execute)
+    monkeypatch.setattr(runtime, 'finish', lambda *args: None)
+    site = SimpleNamespace(case_id='visual', snapshot=lambda: {'requests': []})
+    case = Case('synthetic', site, 'http://unused', output=tmp_path/'case.json',
+        require_visual=require_visual)
+    ref = {'task_id': 'original-task', 'task_generation': 1}
+    if accepted:
+        await case.perform('discover_publish', ref)
+    else:
+        with pytest.raises(AcceptanceStop, match='visual_image_missing_or_invalid:discover_publish'):
+            for name in ('discover_publish', 'publish'):
+                await case.perform(name, ref)
+    assert completed == ['discover_publish']
+    assert [row['stage'] for row in case.report['stages']] == ['discover_publish']
+
+
 @pytest.mark.asyncio
 async def test_registered_two_domains_reach_only_their_own_source_through_original_proxy(monkeypatch):
     import tempfile
