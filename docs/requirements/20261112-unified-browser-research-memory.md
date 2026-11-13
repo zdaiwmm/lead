@@ -1079,3 +1079,26 @@ Multica官方主线固定为[`773569db3ab53e304f2d08310621f1b15be393f0`](https:/
 实际改动分为本地连接器/登录状态检测与设备接入、原Task到Codex thread映射及续接/取消、现有工具通过MCP或官方接口接入、进度/结果/用量回传及配置UI。完整免模型key属于中等偏大的执行架构调整；现有业务系统可继续复用，不能按换一条命令估计。Codex登录留在用户设备，后台接收任务与结果；设备需要保持在线，关闭前端后由本地后台程序继续，休眠/离线则等待同一任务恢复。CLI事件用量与原HTTPX逐请求账本不同，需单独记录来源，历史已知/未知费用保持。
 
 最小验证先覆盖当前Mac上的成熟执行层与原受控浏览器跨页任务，再接原Task/Action并完成两个网站的登录/发布/回复/同一unknown只读回查；最后验证设备离线、重连、关前端和线程续接。独立CLI演示不替代原C22，尚未实施的连接器和全模型调用迁移不计完成。原生产合并/发布仍须精确版本全部验证和既有正式流程。
+
+### 22.5 Codex 原生能力优先复用清单（设计边界，未计接入完成）
+
+用户进一步明确：能直接使用成熟Agent能力就直接使用，避免重复造轮子。后续按“Codex原生能力 → 现成插件/Skills/MCP → 必要业务适配”选择实现，不再另建通用Agent框架。本轮仅只读核文档/代码/功能标志，没有运行Codex模型任务或部署切换。
+
+| 能力 | 优先复用方式 | Lead保留工作 |
+| --- | --- | --- |
+| 任务拆解、执行、依据工具结果纠错 | 原生Agent执行循环/计划 | 提供业务目标、可用数据和验收条件 |
+| 会话历史、上下文压缩、续接 | 原生thread/resume/compaction | 保存Task与thread对应、核对当前任务状态 |
+| 文件、代码、终端、数据分析 | 原生工作区与执行工具 | 提供任务资料与产物位置 |
+| 公开网页调查 | 原生web search | 业务来源/结果落库，特殊结构化来源仍走已有工具 |
+| 子Agent分工与汇总 | 原生subagents | 业务角色指令及必要的工具范围 |
+| 可重复业务流程 | Skills/AGENTS.md/现成插件 | 品牌规范、研究/内容/复盘流程与模板 |
+| 中断、追问、过程进度、工具事件、token用量 | app-server原生RPC/事件 | 接收、保存、映射到产品界面；不冒称等价原HTTPX逐请求账本 |
+| 通用工具接入 | 原生MCP/插件机制 | 对既有业务接口做少量适配 |
+| 生命周期扩展 | 原生Hooks | 仅编写实际业务需要的回调 |
+| 本地文件/命令权限 | Codex现有执行权限机制 | 账号归属、业务提交与真实回执仍由原业务服务核验 |
+
+浏览器控制需要连接browser-use/Playwright等工具；Codex视觉输入不等于已自带当前账号浏览器。社媒结构化数据、渠道发送、文档/表格/图表及媒体产物优先复用已有工具或现成插件，需核安装、账号权益和运行依赖，不能一概当裸CLI内置。任务内会话记忆与经营经验分开：品牌资料可用工作区/Skills，已验证经营事实、经验来源、撤销与共享记录继续落Lead。定时触发、设备在线/离线、跨用户数据、渠道凭据、成果归因及unknown Action防重复仍是产品业务职责。
+
+本机只读flags：`hooks`、`multi_agent`、`shell_tool`为stable/true；`memories`为stable/false。因此不把独立长期记忆功能写成已经启用；会话续接/压缩已有官方接口。当前CLI版本仍为0.167.0-alpha.4.1；能力存在、配置启用与Lead完整流程通过分别核验。
+
+来源：[CLI能力](https://learn.chatgpt.com/docs/cli)、[app-server](https://learn.chatgpt.com/docs/app-server)、[Skills与插件](https://learn.chatgpt.com/docs/skills-and-plugins)、[子Agent](https://learn.chatgpt.com/docs/agent-configuration/subagents)、[公开搜索](https://learn.chatgpt.com/docs/web-search?surface=cli)、[MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)、[Hooks](https://learn.chatgpt.com/docs/hooks)。具体集成以设备已安装版本的协议为准，尚不据文档可用性宣称C22或本地执行层改造完成。
