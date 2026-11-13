@@ -895,6 +895,11 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - `da95069`修正独立反例暴露的许可边界：允许语句后另句“管理员批准必需”不能视为无条件许可；article、blockquote、可编辑内容及其main祖先不能把用户内容当站点规则。实际可见第一方规则须前后重读，明确无需批准的正例保留。核心相关14项、24项及原24项通过；独立固定源码`f81fcdd5…ef6dbd1`的5项语法、10项真实DOM来源和2项实际B主区域控制均符合预期，证据`/private/tmp/bcmp32`，旧红证据保留。未跑SDK/DB或模型，不以helper绿代替完整六Task。
 - 固定`da95069`的本地静态检查、876个跟踪文件凭据扫描、32项发布契约及前端类型检查通过，实时main仍`d53f32c`。最终冻结尚未恢复；先由独立负责人在原namespace/SDK/DB及六Task/unknown seed入口跑B机械链，专用假模型配方仅在私有before_stage，不进入产品、adapter或付费执行器。
 
+- B六Task机械验收保留两次私有配方失败，真实模型API均0：首轮13.829秒在discover_publish得到空targets后停；Fake只选缺少ordinary-member上下文的aside，产品拒绝符合既有`bcmp32`真实DOM负例，完整main为既有正例。仅改Fake局部选择后，第二轮35.015秒通过login6/discover_publish2/publish3/discover_reply2请求，发帖已有原confirmed与独立DOM/source回执；reply唯一POST已在源站创建，但Fake漏点当前规范bookmark，直接对带query跳转页报回执，原Action保持unknown/attempt1。后一原因由真实303/创建ID记录、冻结handler及实际Fake动作序列对账，未声称已独立采样page.url；既有`bcmp31`实际规范fragment正例/不同query负例复用。两轮失败库、Task/Action/ledger、worker与源站证据均保留，未重投原unknown。下一轮只补私有Fake的实际普通bookmark读取；不改产品、B、adapter或公共harness，也不把机械配方当模型能力。
+- 2026-11-13 12:58–13:06 CST独立只读生产盘点（`/private/tmp/rinv29`）：app/TG/Reddit仍`7940fbe`、schema0031，原工具摘要`fa2d8437…64fb6f`，最新请求7728622792 success，无在途审批/未知动作/维护hold。另3笔历史reserved共51246单位、11月3–5日创建且无usage，原样保留；与本任务80000未知预留分别记账。真实poll timer disabled/inactive，不可在apply前启用抢跑。TG旧provision plan的前态仍指7514、实际selector/current/registry/boot均7940；正式S切换前按本次已有授权备份旧计划，仅刷新新计划的现态预期，保留旧journal。unified finalizer不自动置备渠道：app到S而渠道仍旧时属于持hold的未完成中间态，沿同request.started接续TG/Reddit/register/finalize再独立verify，不重复deploy或误报自动全链成功。
+
+- B机械链第三轮1项50.265秒通过，固定产品`da95069`及未改公共NativeCase、B源`6badeffc…731e1a`、私有协议adapter`88b8e2cb…fb3f7`，只含上述两处私有Fake修正。六原Task的请求数为6/2/3/2/4/3，共20，各片均在8请求/40000单位/180秒内；六预留均settled、凭据literal均false，真实模型API0。原zero-model seed以实际SDK输入/点击造成唯一POST和unknown，随后同Task/Action/attempt1回查confirmed且新增POST0；最终三帖与登录合四POST，三回执均有原SQL有效性、独立source及实际DOM核验。红1/红2原库与unknown保留，成功测试独立库/进程按原约定清理。后续只在全新独立DB/runtime执行真实C22，不带Fake配方；产品与`da95069`间的文档提交不改变任何相关输入。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -910,14 +915,14 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C01–C03 | `test_native_connection_product`、身份DOM及实际Connection/Task/Research消费者：pending认证、原Task终态、私有self及当前acting subject | 不能以公开主页/旧Cookie/保存凭据代替真实身份；陌生布局模型判断待C22 |
 | C04–C05 | OTP原挑战、QR/nonce/文档换版、旧输入409、取消/due、真实Chrome重启与fresh-self/一次原认证恢复 | QR检测和版本控制不代表扫码或硬件passkey协议已实测；Cookie能否恢复受站点持久策略限制 |
 | C06–C10 | 实例/出口cohort与live fence、不同账号实际重叠、同Action重复RPC仅一次执行、认证占用及两槽准入 | 旧Profile不迁移；原作用域和当前控制/绑定/会话代次始终有效，不推广任意跨站权限 |
-| C11–C12 | A完整六原Task机械链路、普通成员规则和catalog通用消费者均已实际运行 | 两个不同域名/布局的真实模型验收未运行，不能称陌生网站迁移能力已通过 |
+| C11–C12 | A/B不同布局完整六原Task机械链路、普通成员规则和catalog通用消费者均已实际运行 | 两个不同域名/布局的真实模型验收未运行，不能称陌生网站迁移能力已通过 |
 | C13 | 原SDK输入自动保存与Enter提前发送均源站0，随后正常submit唯一确认；DOM/父帖/完整正文核对 | 无法事前建立完整请求事实的控件仍为局部能力缺口 |
 | C14 | 原unknown在暂停下只读回查，同作者旧帖拒绝，新原帖确认；effective method SQL投影及首次promotion；同SW更新/重放组合续原Action确认 | 不承诺任意站点外部恰好一次；原intent、grant及attempt1保留，禁止重新发送 |
 | C15–C16 | 无进展/一次修正、时钟/reload/来回滚动反例，8次有效进展后原Task checkpoint→15秒Wait/due→新claim续片；真实方法修正及owner交还竞态 | 不因事件或恢复提示直接视为资源恢复proof，不重置期限、累计费用和失败次数 |
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | 预注册与双域名源站隔离合同、真实SDK消息属性、费用未知停止、六任务机械消费者已验证；冻结后协调者B兼容审阅已暴露确定性缺口 | 旧冻结已撤回且真实模型A/B仍0；先零模型修通用合同，再新冻结/预注册。B不再称严格盲测，首个付费失败即停；既有经营反例不重复付费 |
+| C22 | 预注册与双域名源站隔离合同、真实SDK消息属性、费用未知停止、A/B六任务机械链已验证；通用合同及权限反例已修复，B原字节保留 | 真实模型A/B仍0；重新冻结/预注册后执行，B不再称严格盲测，首个付费失败即停；既有经营反例不重复付费 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
