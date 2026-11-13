@@ -994,6 +994,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 真实SDK0.13.14/Chrome/原manager的loopback假模型普通及每响应8397压力例2项14.767秒通过，均4请求/4当前图、唯一认证POST/fresh私有身份成功；实际normal/thinking/planning字段齐全、输出4000、provider thinking disabled。压力非图字节32268/32482/32992/32816，保守包围37292/45903/54810/63031<100000，说明旧40000会在第二次拒绝，此候选不需要再压回flash。合成33588不是新付费用量，也不证明8次或两站必成功；原逐HTTP上界仍生效。自有离线DB已删，0真实模型请求，证据root `.state/quality-sdk-proof.json`；旧完整模式/精简模式及失败证据仍保留。接下来统一核验明确操作目标，不在这两个候选之间反复付费试错。
 
+- 完整模式固定`9747e03`获独立限定接受，证据 `/private/tmp/vbp30/quality-review-final.json`（SHA256 `95f624f50c36bcdf24ad255a428d915a7b71e8f035dbf39c0887b6ddf6c3dc5a`）；两个SDK压力case的actual source/packaged runner均对齐，代码容量不等于新额度。该精确PR检查`43436621339/1`及镜像`43436621362/1`通过，非main完整放行。另补旧compact专用测试残留的反向字段断言，并在同生产源码真实SDK重验4个batch/逐动作case，4项25.602秒通过：正常登录4假请求+discovery2，导航变化2、owner交还1、DOM替换2均业务/认证POST0且不输入后续密码。数据 `.state/quality-batch-proof.json`，自己的离线DB已删，真实模型调用0；原scope/逐动作实现与前轮相同，未改门禁换取通过。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
