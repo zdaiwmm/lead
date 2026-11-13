@@ -22,7 +22,7 @@ LOGIN = {'username': 'synthetic-login-user', 'password': 'synthetic-login-passwo
 def caller(monkeypatch, tmp_path):
     from lead_app import admin_settings, native_runner
 
-    events, launches, inputs, settlements = [], [], [], []
+    events, launches, inputs, settlements, reserves = [], [], [], [], []
     settings = {'default_model': 'openai:synthetic', 'max_model_requests': 8, 'max_output_tokens': 1800}
     model = {'provider': 'openai', 'model': 'synthetic', 'base_url': 'https://api.openai.com/v1', 'key': MODEL_KEY}
     values = {'LEAD_DEPLOYMENT_MODE': 'development'}
@@ -53,6 +53,7 @@ def caller(monkeypatch, tmp_path):
         yield Connection()
 
     def reserve(*args):
+        reserves.append(args[2])
         events.append('reserve')
         return 'synthetic-reservation'
 
@@ -130,7 +131,7 @@ def caller(monkeypatch, tmp_path):
         return await native_runner.run_task(controller, 'http://127.0.0.1:1', kind='discovery', goal='Synthetic only')
 
     return SimpleNamespace(invoke=invoke, values=values, route_key=route_key, events=events,
-        launches=launches, inputs=inputs, settlements=settlements, root=tmp_path)
+        launches=launches, inputs=inputs, settlements=settlements, reserves=reserves, settings=settings, root=tmp_path)
 
 
 @pytest.mark.asyncio
@@ -153,7 +154,7 @@ async def test_evaluation_tail_budget_reaches_actual_worker_payload_and_restores
         assert admin_settings.for_agent(AID, 'brand')[0] is settings
         await caller.invoke(kind)
     assert caller.inputs[0]['max_requests'] == min(3, configured_ceiling)
-    assert caller.inputs[0]['max_total_tokens'] == 40000
+    assert caller.inputs[0]['max_total_tokens'] == 100000
     assert caller.inputs[0]['model']['key'] == MODEL_KEY
     assert admin_settings.for_agent is original
     with stage_model_request_ceiling(AID, None) as ceiling:
@@ -167,7 +168,9 @@ async def test_evaluation_tail_budget_reaches_actual_worker_payload_and_restores
 @pytest.mark.asyncio
 @pytest.mark.parametrize('kind', ['connect', 'run_task'])
 @pytest.mark.parametrize('configured', [False, True])
-async def test_actual_native_caller_passes_explicit_route_selection_only_on_stdin(caller, configured, kind, capsys, caplog):
+@pytest.mark.parametrize('output_limit', [4000, 8000])
+async def test_actual_native_caller_passes_explicit_route_selection_only_on_stdin(caller, configured, kind, output_limit, capsys, caplog):
+    caller.settings['max_output_tokens'] = output_limit
     route = str(caller.root / 'synthetic-model.sock') if configured else None
     if configured:
         caller.values[caller.route_key] = route
@@ -176,6 +179,8 @@ async def test_actual_native_caller_passes_explicit_route_selection_only_on_stdi
     payload = caller.inputs[0]
     assert 'model_socket' in payload and payload['model_socket'] == route
     assert payload['agent_id'] == AID and payload['model']['key'] == MODEL_KEY
+    assert payload['max_output_tokens'] == output_limit
+    assert caller.reserves == [payload['max_total_tokens']] == [100000]
     assert caller.events.count('reserve') == caller.events.count('settle') == 1
     assert caller.events.count('attempt_update') == (1 if kind == 'connect' else 0)
     assert caller.events.count('fragment') == (1 if kind == 'run_task' else 0)

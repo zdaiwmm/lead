@@ -49,7 +49,7 @@ runpy.run_path(path,run_name='__main__')
         'authentication_posts':sum(row['method']=='POST' and row['path']=='/session' for row in result['oracle']['requests']),
         'declared_response_tokens':response_tokens,
         'projections':[{'nonimage_bytes':row['nonimage_bytes'],'units':row['projection_units'],
-            'envelope':index*response_tokens+row['projection_units']+1800}
+            'envelope':index*response_tokens+row['projection_units']+4000}
             for index,row in enumerate(result['synthetic_model_diagnostics'])],
         'sdk_contracts':[row['sdk_contract'] for row in result['synthetic_model_diagnostics']],
         'bootstrap_sha256':hashlib.sha256(bootstrap.read_bytes()).hexdigest(),
@@ -59,8 +59,8 @@ runpy.run_path(path,run_name='__main__')
     assert safe['usage']['request_count']==4 and safe['usage']['billing_unknown'] is False
     assert 1<=safe['usage']['vision_images_sent']<=4
     assert sum(safe['request_image_counts'])==safe['usage']['vision_images_sent']
-    assert all(row['envelope']<=40000 for row in safe['projections'])
-    assert all(not row['thinking_field'] and not row['planning_fields'] and not row['normal_required']
-        and row['provider_thinking_disabled'] and row['output_limit']==1800 for row in safe['sdk_contracts'])
+    assert all(row['envelope']<=100000 for row in safe['projections'])
+    assert all(row['thinking_field'] and row['planning_fields'] and row['normal_required']
+        and row['provider_thinking_disabled'] and row['output_limit']==4000 for row in safe['sdk_contracts'])
     assert safe['usage']['total_tokens']==4*response_tokens
     assert result['privacy']=={'literal_in_model_request':False,'literal_in_workdir':False}

@@ -395,7 +395,7 @@ SourceResult/WorkResult补实际attempt的access_mode、failure_scope/condition�
 | C19 | 同文件 `test_shared_quota_and_unknown_billing` | 两项目争最后一份额度、同 call_key 重放、超时可能已计费、周期恢复；不超花、不重复结算或自动充值，另一工具继续 |
 | C20 | `test_experience_reuse.py::test_applicability_and_counterevidence` | 同标签不同受众、适用旧结论、过期规则/新反例；最多4条、允许新渠道，经验缺失/提炼失败不阻塞，旧权/旧成果不继承 |
 | C21 | 同文件 `test_owner_projection_and_revocation` | 同owner允许共享的公开经验可检索，私有原文/凭据/其他tenant拒绝；撤销/删除失效，重复提炼不冒充新学习 |
-| C22 | 增量模型验收报告 | 模型真实理解陌生页面、挑战/错误身份/未知回执与旧经验反例；每例预先定义预期、预算和停止，不能只测结构化假输出 |
+| C22 | A/B机械链及十二次真实尝试；第十二次A登录/发布方法/首次实际发帖与独立回执通过，reply发现却合法返回publish，已确认原任务目标与harness期望不一致；累计84已测请求/256127 tokens，另保守8位/40000未知 | C22未通过；reply/回查/B未运行，余额12请求/204850单位。先修明确操作目标并核验质量配置，不重发原confirmed/unknown、不逐轮确认；B不称严格盲测 |
 | C23 | 现有受影响回归 + 新增 SQL/RLS 集成 | TaskSpec、状态、权限、通用目标、费用、前端和现有 Telegram/Reddit 直接消费者实际一致；新动作未绕过同项目/目标约束 |
 | C24 | 正常业务试点与成本报告 | 精确账号/位置、可见原帖/回复、触达或响应、到站及可信核心结果分别记录；比较耗时/用户步骤/资源/token/接口费，缺成果不称成功 |
 | C25 | `test_research_recovery.py::test_actual_failure_scope_and_account_read` | 关联账号读取进入正确Profile/出口；匿名研究不自动借账号；Reddit拦截保留原因、可选择论坛来源；query存在也不扩大成search全局故障；Tavily/TikHub与浏览器实际失败资源分开 |
@@ -984,6 +984,16 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 额外只读SDK配置核验：供应商thinking与SDK flash是独立层，但当前pinned ChatDeepSeek结构化输出强制named tool_choice，官方thinking模式拒required/named选择；serializer也不保后续要求的reasoning_content。因而不能直接翻provider thinking开关作为本轮修复，当前disabled保持。此为源码/官方文档兼容性结论，不是新的实际故障、模型效果或计量服务边界实测，不新增模型或框架。参考官方Chat API及thinking文档，后续若走该路线须另做离线适配，当前不扩范围。
 
+- 第十二次真实视觉 `0e258ca / b71b6ce8…` 已按首失败停止：A/login 4请求/12996、discover_publish 2/8862、publish 3/9083均通过，发布原Action/attempt1 confirmed，源站唯一业务POST、原SQL/source与独立DOM回执一致。discover_reply 3请求/13036本身Task/worker成功，却返回同一publish方法，C22以reply_method_not_learned拒绝；没有执行reply、unknown回查或B。12请求均有当前截图，合43977 tokens，4笔预留settled、原period spent43977/reserved0、计量完整，进程0/仅自身模型key清除，原库及所有旧unknown保留。native累计84已测请求/256127 tokens，另第三次保守8位/40000未知，总扣92位/296127，新增授权余额12请求/204850单位。证据 `/private/tmp/mrw28/reports/native-c22-trial12-paid-stop-readback.json` 与 `native-c22-trial12-discovery-readback.json`。
+
+- 第十二次直接根因已由原Task/DB/安全trace和独立源码核验交叉确认：harness期望reply，但原discover payload仅给parent起始URL，服务端goal却允许publishing or reply，工具任一合法方法即done、后端也允许两者。模型按通用目标重新学习publish是产品允许的结果，不能据此断言模型不会回复、图片不清或费用不足。正在沿原Task补可选desired_operation并传到goal/context及record_method核对，缺省保通用discover，导航hint不提升为授权或canonical target。修复不重发原已确认发帖。
+
+- 用户再次明确“先把流程跑通，以后再优化成本”。后续以任务正确性和完整决策质量优先；精简的是SDK决策/规划而非取消当前截图，不能把flash关掉等同图像质量提升，也不能把此前完整模式的本地token envelope拒绝归为模型能力失败。完整SDK配置与相应预留需一并离线核验后再固定候选，不继续盲目精简重试；供应商thinking现有SDK协议不兼容仍不得只翻开关。原累计余额不因优先级调整自动增加，当前没有付费执行。
+
+- 质量优先候选已离线核验：仅native_scope恢复SDK flash_mode=False/use_thinking=True/enable_planning=True，保当前真实截图/两动作、原8请求/20步/180秒及所有身份/范围/一次纠错边界；legacy配置保持。NativeRunner取消1800经济夹紧，直接沿原ModelSettings输出默认4000/上限8000，两个入口预留和worker token包围同步为100000；HTTP前原计量/unknown拒绝照常。C22 v2片上界100000、输出上界8000、两站总容量96/120万，仅为可登记容量，不是新额度授权，私有总账仍12/204850且paid关闭。正式runner blob为`96843665500cd02523b53de41662a0b6bbc8066f`，其余10项不变。
+
+- 真实SDK0.13.14/Chrome/原manager的loopback假模型普通及每响应8397压力例2项14.767秒通过，均4请求/4当前图、唯一认证POST/fresh私有身份成功；实际normal/thinking/planning字段齐全、输出4000、provider thinking disabled。压力非图字节32268/32482/32992/32816，保守包围37292/45903/54810/63031<100000，说明旧40000会在第二次拒绝，此候选不需要再压回flash。合成33588不是新付费用量，也不证明8次或两站必成功；原逐HTTP上界仍生效。自有离线DB已删，0真实模型请求，证据root `.state/quality-sdk-proof.json`；旧完整模式/精简模式及失败证据仍保留。接下来统一核验明确操作目标，不在这两个候选之间反复付费试错。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -999,7 +1009,7 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C01–C03 | `test_native_connection_product`、身份DOM及实际Connection/Task/Research消费者：pending认证、原Task终态、私有self及当前acting subject | 不能以公开主页/旧Cookie/保存凭据代替真实身份；陌生布局模型判断待C22 |
 | C04–C05 | OTP原挑战、QR/nonce/文档换版、旧输入409、取消/due、真实Chrome重启与fresh-self/一次原认证恢复 | QR检测和版本控制不代表扫码或硬件passkey协议已实测；Cookie能否恢复受站点持久策略限制 |
 | C06–C10 | 实例/出口cohort与live fence、不同账号实际重叠、同Action重复RPC仅一次执行、认证占用及两槽准入 | 旧Profile不迁移；原作用域和当前控制/绑定/会话代次始终有效，不推广任意跨站权限 |
-| C11–C12 | A/B不同布局完整六原Task机械链路、普通成员规则和catalog通用消费者均已实际运行；真实模型第六、七次A登录完成fresh私有身份验证 | 真实模型方法发现未通过，发帖/回复/回查/B未运行，不能称陌生网站迁移能力已通过 |
+| C11–C12 | A/B不同布局完整六原Task机械链路、普通成员规则和catalog通用消费者均已实际运行；第十二次真实模型A登录、发布方法及原首次发帖/回执通过 | 回复方法目标传递缺口待修，回复/unknown回查/B尚未真实模型通过，不能称陌生网站迁移能力已通过 |
 | C13 | 原SDK输入自动保存与Enter提前发送均源站0，随后正常submit唯一确认；DOM/父帖/完整正文核对 | 无法事前建立完整请求事实的控件仍为局部能力缺口 |
 | C14 | 原unknown在暂停下只读回查，同作者旧帖拒绝，新原帖确认；effective method SQL投影及首次promotion；同SW更新/重放组合续原Action确认 | 不承诺任意站点外部恰好一次；原intent、grant及attempt1保留，禁止重新发送 |
 | C15–C16 | 无进展/一次修正、时钟/reload/来回滚动反例，8次有效进展后原Task checkpoint→15秒Wait/due→新claim续片；真实方法修正及owner交还竞态 | 不因事件或恢复提示直接视为资源恢复proof，不重置期限、累计费用和失败次数 |

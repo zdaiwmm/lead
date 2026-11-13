@@ -15,13 +15,13 @@ def runner_tree():
 
 
 @pytest.mark.parametrize('image_model',(None,'deepseek-flash'))
-def test_native_agent_uses_flash_with_optional_vision_and_two_action_batches(image_model):
+def test_native_agent_uses_full_decisions_with_optional_vision_and_two_action_batches(image_model):
     call=next(node for node in ast.walk(runner_tree()) if isinstance(node,ast.Call)
         and isinstance(node.func,ast.Name) and node.func.id=='Agent')
     values={arg.arg:eval(compile(ast.Expression(arg.value),'<config>','eval'),
         {'native_scope':{'target_id':'owned'},'image_model':image_model}) for arg in call.keywords
         if arg.arg in ('flash_mode','use_thinking','enable_planning','max_actions_per_step','use_vision')}
-    assert values=={'flash_mode':True,'use_thinking':False,'enable_planning':False,
+    assert values=={'flash_mode':False,'use_thinking':True,'enable_planning':True,
         'max_actions_per_step':2,'use_vision':bool(image_model)}
 
 
