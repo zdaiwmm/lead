@@ -50,6 +50,7 @@ def plan(root=ROOT):
             'two_sites': {'requests': 96, 'tokens_and_reserved_units': 480000},
             'optional_business': {'requests': 1, 'tokens_and_reserved_units': 40000,
                                   'repair': False, 'business_execution': False},
+            'execution_allowance': None,
             'total_new_ceiling': {'requests': 97, 'tokens_and_reserved_units': 520000},
             'prior_unknown_units': 80000,
             'stop': 'First failed/waiting/unknown paid stage or unmeasured request stops all later stages and sites; no retries or paid continuation.',
@@ -83,6 +84,7 @@ def validate_prereg(prereg, private_path, expected_hash):
         raise ValueError('private_config_hash_mismatch')
     if data['stages'] != list(STAGES) or data['fragment'] != FRAGMENT:
         raise ValueError('fragment_contract_changed')
+    validate_run_allowance(data.get('execution_allowance'))
     config = json.loads(private_path.read_text())
     if not 1 <= len(config['sites']) <= 2:
         raise ValueError('exactly_one_or_two_registered_sites_required')
@@ -98,6 +100,39 @@ def validate_prereg(prereg, private_path, expected_hash):
 
 class AcceptanceStop(ValueError):
     """A preserved first failure; the caller must not continue to another site."""
+
+
+def validate_run_allowance(allowance):
+    if allowance is None:
+        return
+    if (not isinstance(allowance, dict) or set(allowance) != {'requests', 'tokens_and_reserved_units'}
+            or type(allowance['requests']) is not int or not 0 <= allowance['requests'] <= 96
+            or type(allowance['tokens_and_reserved_units']) is not int
+            or not 0 <= allowance['tokens_and_reserved_units'] <= 480000):
+        raise ValueError('invalid_aggregate_native_allowance')
+
+
+def require_run_allowance(allowance, reservations, usage):
+    """Reserve room for one full fragment using the original cumulative ledger."""
+    validate_run_allowance(allowance)
+    if allowance is None:
+        return
+    if any(row.get('state') not in ('settled', 'released') for row in reservations):
+        raise AcceptanceStop('unresolved_prior_reservation')
+    requests = units = 0
+    for row in usage:
+        details = row.get('details')
+        count = details.get('requests') if isinstance(details, dict) else None
+        if type(count) is not int or count < 0:
+            raise AcceptanceStop('unmeasured_prior_requests')
+        if type(row.get('units')) is not int or row['units'] < 0:
+            raise AcceptanceStop('unmeasured_prior_token_units')
+        requests += count
+        units += row['units']
+    if requests + FRAGMENT['requests'] > allowance['requests']:
+        raise AcceptanceStop('aggregate_request_allowance')
+    if units + FRAGMENT['tokens_and_reserved_units'] > allowance['tokens_and_reserved_units']:
+        raise AcceptanceStop('aggregate_token_allowance')
 
 
 @contextmanager
@@ -138,8 +173,10 @@ def synthetic_site_transport(sites):
 class NativeCase:
     """Generic task orchestration. The site oracle is never exposed to the SDK."""
 
-    def __init__(self, aid, site, gateway_endpoint, *, before_stage=None, output):
+    def __init__(self, aid, site, gateway_endpoint, *, before_stage=None, output, run_allowance=None):
         self.aid, self.site, self.endpoint = aid, site, gateway_endpoint
+        validate_run_allowance(run_allowance)
+        self.run_allowance = dict(run_allowance) if run_allowance is not None else None
         self.before_stage = before_stage
         self.output = Path(output)
         self.report = {'case_id': site.case_id, 'stages': [], 'mechanical_seed': None,
@@ -163,7 +200,9 @@ class NativeCase:
     async def perform(self, name, ref, *, expected='completed', seed=False, now=None):
         from lead_app.config import STATE
         from lead_app.growth.runtime import advance, execute, finish
-        before, _ = self.ledger()
+        before, prior_usage = self.ledger()
+        if not seed:
+            require_run_allowance(self.run_allowance, before, prior_usage)
         paths = set((STATE/'browser-use-runs').glob('*/result.json'))
         if self.before_stage:
             await self.before_stage(name, self)
@@ -284,6 +323,8 @@ class NativeCase:
         from lead_app import native_runner
         from lead_app.config import ROOT, env
         from lead_app.security import internal_token
+        if self.run_allowance is not None:
+            require_run_allowance(self.run_allowance, *self.ledger())
         self.site.arm_drop_ack()
         ref = self.content(text)
         original = native_runner.run_task
@@ -429,7 +470,8 @@ async def execute_registered(prereg, config, output):
         with tx(aid) as c:
             c.execute("UPDATE lead.agents SET desired_state='running' WHERE id=%s", (aid,))
         for site, spec in zip(sites, config['sites'], strict=True):
-            case = NativeCase(aid, site, endpoint, output=Path(output).with_name(site.case_id+'.json'))
+            case = NativeCase(aid, site, endpoint, output=Path(output).with_name(site.case_id+'.json'),
+                run_allowance=prereg.get('execution_allowance'))
             try:
                 report['cases'].append(await case.run(spec['content_evidence']))
             except Exception:

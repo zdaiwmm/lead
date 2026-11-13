@@ -58,6 +58,63 @@ def test_prereg_validation_in_fresh_no_site_python(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_aggregate_allowance_counts_completed_stages_across_both_sites():
+    from scripts import evaluate_native_browser as evaluation
+    usage = [{'units': 1200, 'details': {'requests': 6}},
+             {'units': 1800, 'details': {'requests': 5}}]
+    with pytest.raises(evaluation.AcceptanceStop, match='aggregate_request_allowance'):
+        evaluation.require_run_allowance({'requests': 18, 'tokens_and_reserved_units': 480000}, [], usage)
+    evaluation.require_run_allowance({'requests': 19, 'tokens_and_reserved_units': 43000}, [], usage)
+
+
+@pytest.mark.parametrize('reservations,usage,limit,reason', [
+    ([], [{'units': 1, 'details': {'requests': 0}}], 40000, 'aggregate_token_allowance'),
+    ([{'state': 'unknown'}], [], 480000, 'unresolved_prior_reservation'),
+    ([{'state': 'reserved'}], [], 480000, 'unresolved_prior_reservation'),
+    ([], [{'units': 0, 'details': {}}], 480000, 'unmeasured_prior_requests'),
+    ([], [{'units': 0, 'details': {'requests': True}}], 480000, 'unmeasured_prior_requests'),
+    ([], [{'units': 0, 'details': ['private-value']}], 480000, 'unmeasured_prior_requests'),
+    ([], [{'units': '20', 'details': {'requests': 1}}], 480000, 'unmeasured_prior_token_units'),
+])
+def test_aggregate_allowance_stops_unmeasured_or_insufficient_budget(reservations, usage, limit, reason):
+    from scripts import evaluate_native_browser as evaluation
+    with pytest.raises(evaluation.AcceptanceStop, match=reason):
+        evaluation.require_run_allowance({'requests': 96, 'tokens_and_reserved_units': limit}, reservations, usage)
+
+
+@pytest.mark.parametrize('allowance', [
+    {'requests': 97, 'tokens_and_reserved_units': 480000},
+    {'requests': 96, 'tokens_and_reserved_units': 480001},
+    {'requests': True, 'tokens_and_reserved_units': 480000},
+])
+def test_aggregate_allowance_cannot_expand_the_registered_native_ceiling(allowance):
+    from scripts.evaluate_native_browser import validate_run_allowance
+    with pytest.raises(ValueError, match='invalid_aggregate_native_allowance'):
+        validate_run_allowance(allowance)
+
+
+@pytest.mark.asyncio
+async def test_aggregate_allowance_stops_before_task_admission(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from lead_app.growth import runtime
+
+    from scripts.evaluate_native_browser import AcceptanceStop, NativeCase
+
+    class Case(NativeCase):
+        def ledger(self):
+            return [], [{'units': 20, 'details': {'requests': 1}}]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('No task admission or model call is allowed after the aggregate limit')
+
+    monkeypatch.setattr(runtime, 'advance', forbidden)
+    case = Case('synthetic', SimpleNamespace(case_id='budget'), 'http://unused',
+        output=tmp_path/'case.json', run_allowance={'requests': 8, 'tokens_and_reserved_units': 480000})
+    with pytest.raises(AcceptanceStop, match='aggregate_request_allowance'):
+        await case.perform('login', {'task_id': 'original', 'task_generation': 1})
+
+
 @pytest.mark.asyncio
 async def test_changed_provider_credential_stops_before_any_task_or_browser(monkeypatch,tmp_path):
     from lead_app import config, domain

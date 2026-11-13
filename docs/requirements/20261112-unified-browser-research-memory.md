@@ -909,6 +909,11 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - `c6adc9b`（源`b3aae40`）完成离线修复：原身份parser的完整AST在仅还原异常类型/移除新import后与前版相等；固定14种无值code/hint只供409且inspect_self/report_connection，未知/畸形code、其它操作/status及任意response detail/body不透传。11项unit及原43项身份DOM通过；实际SDK0.13.14的A-only fake 1项8.060秒，故意坏suffix→下一实际请求含identity_value_missing→修正→私有self/report→原Task succeeded/connected，6假HTTP、认证POST1/posts0、凭据双literal false，6执行源码hash与主集成一致。独立窄审接受，只证明错误反馈链可用，不改原8paid失败或保证模型下轮通过。runner新blob`bb4a76b6…a8495b`已按精确字节刷新11项部署冻结中的唯一对应项，另10项不变；主集成201项反馈/发布契约/升级/运行包回归、全静态及879文件凭据扫描通过。
 - 用户随后明确回答“允许新一轮限额验证”：新增仅A/B测试页、最多96次模型请求/480000 token及保守预留单位、首失败仍停，真实社媒/C24及经营反例不执行；原8次/20977 tokens及旧80000未知预留均保留，总账不归零。原合并部署授权继续有效。新源码需另冻结/另prereg/新空库及运行目录，保留首次paid原库/nonce/失败结果，不重用原连接任务或清除停止证据。
 
+- 第二付费轮`7ab37ef / af5ec510…`仍按约首阶段停止：A/login 7请求、18312 tokens（17007输入/1305输出，11776缓存为输入子集），一笔40000预留settled，usage/period spent18312、reserved0、unmeasured0/unknown=false；认证POST1、业务Action0，Task waiting_user。模型真实收到两次identity_value_missing及一次current_self_unestablished，拒伪造未见的私有身份；A后续/B均未运行。两次native付费合15请求/39289 reported tokens，原库/nonce/报告留存、进程0、仅各自测试env的模型key移除，旧80000未知预留仍原样。独立真实SDK假模型7.52秒红例直接证实：观察是分段/遮罩的身份文字与分列rel=me，而完整元素innerText还含链接标签，精确模型affix与实际元素不匹配；不是以猜测原selector代替证据。
+- `20d4428`/`2021952`（源`68ed651`/`51659ca`）修事实合同：服务器从当前root里唯一强身份节点及其自身局部唯一同源rel=me提取完整单ID、实际selector/affixes，拒UGC/editable/hidden、遥远链接、额外未知文字、双主体/双链接及换文档；不读取保存用户名作identity。连接仅在四类可修proposal错误重新完整采集，origin/doc/selector歧义/ID切分仍拒，最终仍fresh私有self exact；方法消费者复用并exact等于已核私有ID，表单/权限/claim不变。自动值复用300/150长度合同，长ID退同元素有界CSSpath，空/缺失/空白raw href拒，raw href进入双读。原新旧87项DOM、最终受影响64项身份、10项边界真实Chrome检查通过；actualSDK A-only三例覆盖正常auto、明确selector错误反馈及错误私有主体不绑定，最终正例5假HTTP/8.363秒、认证POST1/privateSelf/Task succeeded且凭据双false。边界补丁未改变该正例的短selector/affixes与非空/account输入，复用该SDK证据；runner仍bb4，未跑B/真实key/第三paid。
+- 已建立唯一[PR #62](https://github.com/zdaiwmm/lead/pull/62)。旧精确head`7ab37ef`的PR快速CI`43377774280/1`及镜像源校验`43377774131/1`通过，不能冒充后续源码head或main完整应用证明；新事实/预算增量仍须推送同PR并核精确head。没有合并/生产请求。
+- 用户明确选择“在剩余额度内继续”：把上一新增96/480000批准额度尚余的89请求/461688单位作为本任务累计验证余额，每次失败先停、完成离线修复验证后重新登记，所有尝试累计扣减，不追加额度，直到A/B通过或余额用尽。新增可选execution_allowance从原同aid跨A/B累计账本，在advance之前为完整8请求/40000单位片段留足余量，未知reservation或未计量usage拒；seed前也留回查余量，不把预算hook当fake模型。默认None旧路不变；单run闸门不冒称自动跨库记账，协调者依据原只读账本扣除旧消耗并冻结下一prereg，private prepare同时校对累计debit及上一attempt已对账，不能新建库重置额度。原停止记录保留，新的付费尝试尚未开始。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -931,7 +936,7 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | A/B机械链、冻结/实际Linux预检与首付费失败停止均已执行；真实A login8请求/20977tokens后waiting_user，账本已结算且未伪造身份，B原字节保留 | C22未通过，A后续/B未运行；先完成安全错误反馈离线修复，再取得新轮限额授权；B不称严格盲测，既有经营反例不重复付费 |
+| C22 | A/B机械链与两次真实A首登录停止均已执行，共15请求/39289tokens已结算、未伪造身份；分段观察/实际元素合同已离线修复，B原字节保留 | C22仍未通过，A后续/B未运行；用户已允许在累计余量89/461688内修复验证后重新登记，B不称严格盲测，既有经营反例不重复付费 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
