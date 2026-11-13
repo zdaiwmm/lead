@@ -22,6 +22,11 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.skipif(os.environ.get("LEAD_BROWS
     ("unreadable", "shared"),
     ("other_body", "shared"),
     ("other_author", "shared"),
+    ("other_parent", "shared"),
+    ("missing_parent", "shared"),
+    ("different_body_missing_parent", "shared"),
+    ("empty_body", "shared"),
+    ("unstable_body", "shared"),
 ])
 async def test_current_receipt_selector_cannot_silently_exclude_an_unread_candidate(
         common_page, monkeypatch, tmp_path, candidate, selector_style):
@@ -33,6 +38,21 @@ async def test_current_receipt_selector_cannot_silently_exclude_an_unread_candid
     context = common_page[1]
     first, second = ORIGIN+"/records/55", ORIGIN+"/records/56"
     network = []
+    reply = candidate in {"other_parent", "missing_parent", "different_body_missing_parent"}
+    if reply:
+        controller.action["type"] = "reply"
+        controller.action["intent"]["parent_url"] = ORIGIN+"/records/42"
+        root = controller.action["intent"]["parent_url"]
+    reads = {}
+    document = controller.document
+    async def changing_document(current=None, scope=None):
+        result = await document(current, scope)
+        if current is not None and current.url == second and candidate == "unstable_body":
+            reads[current] = reads.get(current, 0)+1
+            if reads[current] == 2:
+                await current.locator("article .text").evaluate("node=>node.textContent='Changed during observation'")
+        return result
+    controller.document = changing_document
 
     async def route(current):
         network.append((current.request.method, current.request.url))
@@ -48,10 +68,18 @@ async def test_current_receipt_selector_cannot_silently_exclude_an_unread_candid
         elif url in (first, second):
             identifier = "note-7001" if url == first else "note-7002"
             author = "member-B" if url == second and candidate == "other_author" else "member-A"
-            body = "A different answer" if url == second and candidate == "other_body" else "New answer"
+            body = "New answer"
+            if url == second and candidate in {"other_body", "different_body_missing_parent", "unstable_body"}:
+                body = "A different answer"
+            if url == second and candidate == "empty_body":
+                body = ""
             label = "Member" if url == second and candidate == "unreadable" else "Author"
             html = (f'<article id="{identifier}"><p>{label}: <span class="by">{author}</span></p>'
-                f'<div class="text">{body}</div><a class="canonical" rel="canonical" href="{url}">Entry URL</a></article>')
+                f'<div class="text">{body}</div><a class="canonical" rel="canonical" href="{url}">Entry URL</a>')
+            if reply and not (url == second and candidate in {"missing_parent", "different_body_missing_parent"}):
+                parent = "/records/43" if url == second and candidate == "other_parent" else "/records/42"
+                html += f'<p>In reply to <a class="parent" href="{parent}">Original post</a></p>'
+            html += '</article>'
         else:
             html = '<main>Previous entry</main>'
         await current.fulfill(body=html, content_type="text/html")
@@ -66,6 +94,8 @@ async def test_current_receipt_selector_cannot_silently_exclude_an_unread_candid
     await page.goto(first)
     controller.page, controller.reconcile = page, True
     shared = {"author": "article .by", "body": "article .text", "url": "article a.canonical"}
+    if reply:
+        shared["parent"] = "article .parent"
     selectors = dict(shared)
     if selector_style == "fixed_id":
         selectors = {name: "#note-7001 "+value.removeprefix("article ") for name, value in shared.items()}
@@ -82,7 +112,7 @@ async def test_current_receipt_selector_cannot_silently_exclude_an_unread_candid
             assert value and value["url"] == second and value["body"] == controller.action["intent"]["body"]
             if selector_style != "shared":
                 assert await controller.read_receipt(observed, selectors) is None
-        elif candidate in {"other_body", "other_author"}:
+        elif candidate in {"other_body", "other_author", "other_parent"}:
             assert await observed.locator("article .by").inner_text() == (
                 "member-B" if candidate == "other_author" else "member-A")
             assert await observed.locator("article .text").inner_text() == (
@@ -94,7 +124,7 @@ async def test_current_receipt_selector_cannot_silently_exclude_an_unread_candid
         await observed.close()
 
     visited.clear()
-    if candidate in {"duplicate", "unreadable"}:
+    if candidate in {"duplicate", "unreadable", "missing_parent", "different_body_missing_parent", "empty_body", "unstable_body"}:
         with pytest.raises(ValueError, match="browser_receipt_(not_unique|unproved|candidate_unproved)"):
             await controller.report_receipt({"selectors": selectors})
         assert state["action_state"] == "unknown" and attempt["outcome"] is None
@@ -106,3 +136,5 @@ async def test_current_receipt_selector_cannot_silently_exclude_an_unread_candid
     assert first in visited and second in visited
     assert attempt["observation"]["browser_baseline"] == baseline
     assert all(method == "GET" for method, _ in network)
+    if candidate == "unstable_body":
+        assert sum(count == 2 for count in reads.values()) == 2

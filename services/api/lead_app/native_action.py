@@ -372,7 +372,8 @@ class NativeAction(NativeTask):
             c.execute("UPDATE lead.action_attempts SET observation=observation || %s WHERE action_id=%s AND epoch=%s AND browser_session_id=%s",
                 (j({'browser_transport':value}),self.action_id,self.actor.epoch,self.actor.session))
 
-    async def read_receipt(self,page,selectors):
+    async def read_receipt(self,page,selectors,*,candidate=False):
+        """None never proves exclusion; candidate mode classifies complete facts."""
         try:
             before=await self.document(page)
             author=page.locator(selectors['author'])
@@ -382,7 +383,10 @@ class NativeAction(NativeTask):
                 return None
             actual_author=(await author.inner_text()).strip()
             actual_body=(await body.inner_text()).strip()
-            actual_url=urljoin(page.url,await link.get_attribute('href') or '')
+            href=await link.get_attribute('href')
+            if not href or not actual_author or not actual_body:
+                return None
+            actual_url=urljoin(page.url,href)
             block=await author.evaluate("node=>(node.closest('article,[role=article]')?.innerText||'')")
             body_handle=await body.element_handle()
             link_handle=await link.element_handle()
@@ -406,8 +410,6 @@ class NativeAction(NativeTask):
                     or not related or origin(actual_url)!=origin(self.action['intent']['browser_method']['target_url'])):
                 return None
             _,account,_=await asyncio.to_thread(self.snapshot)
-            if actual_author!=account['external_account_id'] or actual_body!=self.action['intent']['body']:
-                return None
             receipt={'author':actual_author,'body':actual_body,'url':actual_url,'selectors':selectors}
             if self.action['type']=='reply':
                 parent=page.locator(selectors['parent'])
@@ -431,15 +433,20 @@ class NativeAction(NativeTask):
                 finally:
                     await parent_handle.dispose()
                     await body_handle.dispose()
-                receipt['parent_url']=urljoin(page.url,await parent.get_attribute('href') or '')
-                if not related_parent or receipt['parent_url']!=self.action['intent']['parent_url']:
+                parent_href=await parent.get_attribute('href')
+                if not related_parent or not parent_href:
                     return None
+                receipt['parent_url']=urljoin(page.url,parent_href)
             if (before!=await self.document(page) or (await author.inner_text()).strip()!=actual_author
                     or (await body.inner_text()).strip()!=actual_body or page.url!=actual_url
                     or urljoin(page.url,await link.get_attribute('href') or '')!=actual_url
                     or self.action['type']=='reply' and urljoin(page.url,await parent.get_attribute('href') or '')!=receipt['parent_url']):
                 return None
-            return receipt
+            matches=(actual_author==account['external_account_id'] and actual_body==self.action['intent']['body']
+                and (self.action['type']!='reply' or receipt['parent_url']==self.action['intent']['parent_url']))
+            if candidate:
+                return {'matches':matches,'receipt':receipt}
+            return receipt if matches else None
         except (KeyError,ValueError):
             return None
 
@@ -478,9 +485,11 @@ class NativeAction(NativeTask):
                 self.lease['read_urls'].append(url)
             page,scope=await self.temporary_page(url)
             try:
-                value=await self.read_receipt(page,selectors)
-                if value:
-                    matches.append(value)
+                value=await self.read_receipt(page,selectors,candidate=True)
+                if value is None:
+                    raise ValueError('browser_receipt_candidate_unproved')
+                if value['matches']:
+                    matches.append(value['receipt'])
             finally:
                 await self.actor.native_runtime.release_page(scope['target_id'])
         if len(matches)!=1 or matches[0]['url']!=receipt['url']:
