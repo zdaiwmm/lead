@@ -613,9 +613,6 @@ class PersistentRuntime:
             return None
         if scope:
             await asyncio.to_thread(self.current_scope, scope)
-            if origin(request['url']) not in {origin(value) for value in scope['origins']}:
-                from .native_frame_roles import request as frame_request
-                return await frame_request(self,scope,target,request)
             from .native_auth_flow import authorize as authorize_auth_flow
             if scope.get('auth_flow'):
                 flow=scope['auth_flow']
@@ -628,6 +625,9 @@ class PersistentRuntime:
                         c.execute('UPDATE lead.takeover_sessions SET connection_data=connection_data || %s WHERE id=%s AND state=\'active\'',
                             (j({'authentication_endpoints':scope['authentication_endpoints']}),scope['connection_ref']))
                 return decision
+            if origin(request['url']) not in {origin(value) for value in scope['origins']}:
+                from .native_frame_roles import request as frame_request
+                return await frame_request(self,scope,target,request)
             flow=scope.get('auth_flow') or {}
             if endpoint in {(origin(url),urlsplit(url).path) for url in flow.get('urls',[])}:
                 return None
