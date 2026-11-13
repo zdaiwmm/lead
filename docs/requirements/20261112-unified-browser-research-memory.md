@@ -966,6 +966,18 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - root补充唯一一处prefix说明字面量，明示原允许的current-identity提示语族与尾部空白/冒号边界；独立AST核除这句description外与651相同，schema形状及执行未变，复用上述证据，不重复Linux全矩阵。最终限定接受`/private/tmp/vbp30/method-review-final.json`（SHA256 `b87f6a51ce7ae81e4142d3ccac31ab2cbe953a8c838380ac28f79ea52d35c5af`），实施证据`/Users/zhouding/ss/native-sdk-execution-config/lead agent/.state/method-tool-final.json`（SHA256 `ca8a36b7c7aadfea3c4cf8576f883fbe1aa7ea7595c17ce8e72a1b8145e22f15`）。正式runner blob更新为`0856644fede8685787f1b183f1a43946d65cf9e6`，其余10项未变。此为完整可审查离线修复，真实模型方法发现/发布仍未通过；未登记或启动第十次付费尝试，余额仍39请求/300003单位。
 
+- 用户明确恢复累计余额方式：“在现有累计余额内继续，按上述规则完成验证”，即39请求/300003单位内，失败先停、离线修复核验后新登记继续，直到两站通过或余额不足，不追加且不再逐轮确认。原96/480000总账及前序扣减不重置；新continuation授权只记录此时余额，不另发额度。
+
+- 第十次`7025338 / 4f54c971…`真实视觉：A/login 4请求/12964 tokens、9.326秒、4图无错；discover_publish仅1请求/4209 tokens、6.293秒、1图，首次propose_method成功，工具合同修复已有实际效果。publish 4请求/12159 tokens、16.231秒、4图，连续四次guarded_input均ok，未click submit，原no_progress=3停止，C22为bounded_stage_failed:publish，后续/B未运行。授权器只允许原learned textarea且text等于不可变body，不能据此称填错正文；也不能仅凭四次ok认定实际DOM或模型判断原因。原源站业务POST0，Action unknown/attempt1/browser_request.claimed=false保持，不算NoAck故障种子或已发布。原Task growth.channel planned，两growth.account succeeded。
+
+- 第十次原库对账：3笔40000预留settled、9请求合29332 tokens、period spent29332/reserved0，账单unknown=false/unmeasured0，进程0、仅自身test.env模型key移除；原DB/nonce/报告/Action保留，无重试。native累计66已测请求/190306 tokens，第三次另保守8位/40000未知，总扣74位/230306，新增授权余30请求/270671单位。总直接视觉尝试3、此phase已停，更早80000未知及生产reserved未动。精确7025338的PR43423685488/1及镜像43423685479/1通过；未合并/部署。证据`/private/tmp/mrw28/reports/native-c22-trial10-paid-stop-readback.json`。
+
+- 正文反馈增量源`7a9d929`集成为`d9f409a`：实际SDK基线33.46秒红已证填后textarea.value==immutable body=true，下一模型DOM无当前值、原工具无匹配确认，但截图有新增文字；不能说模型完全看不见，也不能据此断言第十次原因。现只由原NativeAction已allowed的正文输入附固定role，native工具成功后，在同owned backend textarea及live_scope前后只读比较value===已授权text，只返回body_matches_authorized布尔与固定提示，不读/回其他字段。无第二authorize、steps/纠错/C15/SQL/claim或费用变化，凭据不走此role。25定向检查及同输入真实SDK1项33.596秒通过：下一请求确见匹配true，仍3假HTTP/3图、源POST1、原回执有效/attempt1。独立接受`/private/tmp/vbp30/tail-body-review.json`（SHA256 `0b66b3197d1e91c731c5cd726ad8bee3a8397c1588b2eb696f1078d95498d625`），实施`/Users/zhouding/ss/native-sdk-execution-config/lead agent/.state/body-input-final.json`（SHA256 `ed818ac3c61442690849ad90b84d0ec1816adad800b35af606ed93977077a393`）。未新增真实调用，不保证后续模型会提交。
+
+- C22-only预算尾段源`60ac65b`移除固定“剩余至少8请求才准入”的多余空位：原账本先拒unknown/未计量且仍留足40000单位；单片请求上限取min(原模型配置,8,累计剩余)，通过临时当前aid/models读取包装自然进入原NativeRunner payload，原model/key/version和其他aid/kind不变，finally还原，不写DB设置、不改生产模块或模型响应。stage记录实际cap并严格核requests<=cap，结束按真实累计requests/units<=原授权，最终用完不再要求预留下一片。默认allowance=None/原机械路不patch；只用于当前单aid顺序隔离验收。真实caller参数3红后43项/2skip通过，异常还原及超限/unknown边界均覆盖；独立接受，不增加额度。
+
+- 最新root集成77项/3专用环境skip、全Ruff/900文件凭据扫描及11正式blob核对通过；runner仍`0856644f…`，本反馈不改runner及原paused sender/进展/计量。当前30/270671余额按累计授权继续，新的付费轮次须完成精确源码冻结、离线证据与新登记，不重发第十次原unknown Action。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -988,7 +1000,7 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | A/B机械链及九次真实尝试；第九精简视觉登录4步无错、发现方法两次selector合同拒绝后停止，共6图/6请求/20043 tokens；累计已测57请求/160974 tokens，第三次另保守8位/40000未知；字段合同现已真实SDK离线修复，B原字节保留 | C22未通过，发帖/回复/回查/B未运行；余额39请求/300003单位，付费关闭，无第十次。不能以接入缺口判模型无效；B不称严格盲测 |
+| C22 | A/B机械链及十次真实尝试；第十登录4请求、方法发现1请求均过，publish4次授权输入后no_progress停止，共9图/9请求/29332 tokens；累计66已测请求/190306 tokens，第三次另保守8位/40000未知；原unknown Action保留，正文匹配反馈离线已验 | C22未通过，源发布POST0、回复/回查/B未运行；余额30请求/270671单位，按累计授权先离线修再新登记，不重试原unknown、不再逐轮确认；B不称严格盲测 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
