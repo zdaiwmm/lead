@@ -877,6 +877,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - 最新组合已通过SSO、两次ownerWait、原API精确批准、私有身份绑定与SDK公开文本观察（公共源Cookie/Referer均0）；输入及点击也已执行。整体仍红：原Document POST由SW暂停时，scope_view新增的嵌入内容证明在原页page.evaluate等待，停在claim_private_identity，源POST0。此时仅取得等待调用栈，不能将关闭后的TargetClosed当首原因或称私有self失败；正核验内部提交授权与模型DOM观察的依赖。NoAck/回查/C33在这个新foreign组合中仍未到达，已有不含foreign的d444完整证据保留。
 - 集成11b后的普通A域名六原Task再验6项44.660秒通过（5/2/3/2/3/2次受控模型HTTP、故障种子0、原回查无重发）。所选DeepSeekFlash SDK协议另以实际SDK0.13.14向loopback假接口仅1请求核验：结构化结果可解析，thinking disabled/max_tokens1800/max_retries0，原HTTP meter完整计20个合成token且无未计量。SDK对象usage为空但原HTTP usage存在，两者不混用；无非loopback连接/真key读取/真实模型调用。这些准备仍不算C22真实模型能力通过。
 
+- `d571245`（源`c49ec2b`）修复上述原Document请求暂停与SDK DOM导出的循环等待：内部请求claim改核当前authority，辅助私有self/fresh editor与原SQL claim均保留；SDK观察仍走完整frame证明。真实Chrome因果对照及48项直接消费者通过，独立窄审接受。去除已完成诊断wrapper后的相同组合输入固定为`16e97fb0`，原400行组合和机械模型AST均未变；唯一复验41.801秒仍红，已真实发送正常POST1、原attempt1且claimed=true。首因是后续导航替换renderer时，scope_view→frame observation→root_facts.evaluate抛Execution context destroyed；尚无receipt模型调用，Action/未知费用预留的原状态已归档在该轮证据中，不能当作正常确认或NoAck通过。自有数据库和进程清理完成，原80000真实调用未知预留不变。当前只窄修导航期间的有界fresh观察，不重跑付费验收或更改夹具配方。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链已有机械产品证据，跨站读取权限及后台脚本完整组合尚未闭合，不能因此开启共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
