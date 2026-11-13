@@ -63,7 +63,7 @@ async def test_unmeasured_response_stops_original_sdk_and_retains_original_reser
     assert result['usage']['request_count'] == requests and result['usage']['entry_count'] == entries
     assert result['usage']['unmeasured_requests'] == 1
     assert result['usage']['billing_unknown'] is True
-    assert result['billing'] == [{'state': 'unknown', 'units': 100000}]
+    assert result['billing'] == [{'state': 'unknown', 'units': 200000}]
     assert result['task_state'] == 'waiting_user'
     assert result['account'] == {'state': 'pending', 'external_account_id': None}
     assert not [row for row in result['oracle']['requests'] if row['method'] == 'POST']

@@ -12,8 +12,8 @@ def test_default_prereg_is_a_draft_with_exact_bounded_stages(tmp_path):
     from scripts.evaluate_native_browser import FRAGMENT, STAGES, plan, private_write
     draft = plan()
     assert draft['state'] == 'draft' and draft['stages'] == list(STAGES)
-    assert FRAGMENT == {'requests': 8, 'tokens_and_reserved_units': 100000, 'active_steps': 20, 'seconds': 180, 'output_tokens': 8000}
-    assert draft['total_new_ceiling'] == {'requests': 97, 'tokens_and_reserved_units': 1240000}
+    assert FRAGMENT == {'requests': 8, 'tokens_and_reserved_units': 200000, 'active_steps': 20, 'seconds': 180, 'output_tokens': 8000}
+    assert draft['total_new_ceiling'] == {'requests': 97, 'tokens_and_reserved_units': 2440000}
     path = tmp_path/'draft.json'
     private_write(path, draft)
     assert path.stat().st_mode & 0o077 == 0
@@ -63,7 +63,7 @@ def test_aggregate_allowance_counts_completed_stages_across_both_sites():
     usage = [{'units': 1200, 'details': {'requests': 6}},
              {'units': 1800, 'details': {'requests': 5}}]
     assert evaluation.require_run_allowance({'requests': 18, 'tokens_and_reserved_units': 480000}, [], usage) == 7
-    assert evaluation.require_run_allowance({'requests': 19, 'tokens_and_reserved_units': 103000}, [], usage) == 8
+    assert evaluation.require_run_allowance({'requests': 19, 'tokens_and_reserved_units': 203000}, [], usage) == 8
     with pytest.raises(evaluation.AcceptanceStop, match='aggregate_request_allowance'):
         evaluation.require_run_allowance({'requests': 11, 'tokens_and_reserved_units': 480000}, [], usage)
 
@@ -85,7 +85,7 @@ def test_aggregate_allowance_stops_unmeasured_or_insufficient_budget(reservation
 
 @pytest.mark.parametrize('allowance', [
     {'requests': 97, 'tokens_and_reserved_units': 480000},
-    {'requests': 96, 'tokens_and_reserved_units': 1200001},
+    {'requests': 96, 'tokens_and_reserved_units': 2400001},
     {'requests': True, 'tokens_and_reserved_units': 480000},
 ])
 def test_aggregate_allowance_cannot_expand_the_registered_native_ceiling(allowance):

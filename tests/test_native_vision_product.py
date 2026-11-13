@@ -59,7 +59,7 @@ runpy.run_path(path,run_name='__main__')
     assert safe['usage']['request_count']==4 and safe['usage']['billing_unknown'] is False
     assert 1<=safe['usage']['vision_images_sent']<=4
     assert sum(safe['request_image_counts'])==safe['usage']['vision_images_sent']
-    assert all(row['envelope']<=100000 for row in safe['projections'])
+    assert all(row['envelope']<=200000 for row in safe['projections'])
     assert all(row['thinking_field'] and row['planning_fields'] and row['normal_required']
         and row['provider_thinking_disabled'] and row['output_limit']==4000 for row in safe['sdk_contracts'])
     assert safe['usage']['total_tokens']==4*response_tokens

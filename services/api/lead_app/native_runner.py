@@ -47,7 +47,7 @@ async def connect(controller,gateway_endpoint):
     task,_,_=controller.snapshot()
     context=growth_cost_context.set({'task_id':controller.task_id,'experiment_id':str(task['experiment_id']) if task['experiment_id'] else None})
     try:
-        reservation=reserve(aid,uid(),100000,model_reference(connection),connection['provider'])
+        reservation=reserve(aid,uid(),200000,model_reference(connection),connection['provider'])
     finally:
         growth_cost_context.reset(context)
     child=None
@@ -72,7 +72,7 @@ async def connect(controller,gateway_endpoint):
         'command_path':'native/command','gateway_endpoint':gateway_endpoint,'gateway_token':internal_token(),
         'model':connection,'model_socket':model_socket,'sensitive_data':{'saved_'+key:value for key,value in credentials.items()},
         'max_steps':20,'max_requests':min(8,settings['max_model_requests']),
-        'max_total_tokens':100000,'max_output_tokens':settings['max_output_tokens'],'workdir':str(folder)}
+        'max_total_tokens':200000,'max_output_tokens':settings['max_output_tokens'],'workdir':str(folder)}
     try:
         child=await asyncio.create_subprocess_exec(env().get('LEAD_BROWSER_RUNTIME_PYTHON') or sys.executable,
             '-B','-S',str(script),stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,
@@ -161,7 +161,7 @@ async def run_task(controller,gateway_endpoint,*,kind,goal):
     await asyncio.to_thread(controller.start_fragment)
     context=growth_cost_context.set({'task_id':controller.task_id,'experiment_id':str(task['experiment_id']) if task['experiment_id'] else None})
     try:
-        reservation=reserve(aid,uid(),100000,model_reference(model),model['provider'])
+        reservation=reserve(aid,uid(),200000,model_reference(model),model['provider'])
     finally:
         growth_cost_context.reset(context)
     packaged=ROOT/'services/browser-runtime'
@@ -176,7 +176,7 @@ async def run_task(controller,gateway_endpoint,*,kind,goal):
         'sensitive_data':{'bound_account_subject':account['external_account_id']},
         'url':controller.page.url,'goal':goal,'command_path':'native/task-command','gateway_endpoint':gateway_endpoint,
         'gateway_token':internal_token(),'model':model,'model_socket':model_socket,'max_steps':20,'max_requests':min(8,settings['max_model_requests']),
-        'max_total_tokens':100000,'max_output_tokens':settings['max_output_tokens'],'workdir':str(folder)}
+        'max_total_tokens':200000,'max_output_tokens':settings['max_output_tokens'],'workdir':str(folder)}
     child=None
     settled=False
     try:

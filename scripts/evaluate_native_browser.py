@@ -20,7 +20,7 @@ from urllib.parse import urljoin, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGES = ('login', 'discover_publish', 'publish', 'discover_reply', 'reply', 'reconcile')
-FRAGMENT = {'requests': 8, 'tokens_and_reserved_units': 100000, 'active_steps': 20,
+FRAGMENT = {'requests': 8, 'tokens_and_reserved_units': 200000, 'active_steps': 20,
             'seconds': 180, 'output_tokens': 8000}
 
 
@@ -41,17 +41,17 @@ def source_manifest(root=ROOT):
 
 
 def plan(root=ROOT):
-    return {'version': 'native-c22-six-tasks-v2', 'state': 'draft',
+    return {'version': 'native-c22-six-tasks-v3', 'state': 'draft',
             'source_hashes': source_manifest(root), 'private_config_sha256': None,
             'runtime_manifest_sha256': None, 'site_adapter_sha256': {}, 'model': None,
             'provider_credential_sha256': None,
             'stages': list(STAGES), 'fragment': FRAGMENT,
-            'per_site': {'fragments': 6, 'requests': 48, 'tokens_and_reserved_units': 600000},
-            'two_sites': {'requests': 96, 'tokens_and_reserved_units': 1200000},
+            'per_site': {'fragments': 6, 'requests': 48, 'tokens_and_reserved_units': 1200000},
+            'two_sites': {'requests': 96, 'tokens_and_reserved_units': 2400000},
             'optional_business': {'requests': 1, 'tokens_and_reserved_units': 40000,
                                   'repair': False, 'business_execution': False},
             'execution_allowance': None,
-            'total_new_ceiling': {'requests': 97, 'tokens_and_reserved_units': 1240000},
+            'total_new_ceiling': {'requests': 97, 'tokens_and_reserved_units': 2440000},
             'prior_unknown_units': 80000,
             'stop': 'First failed/waiting/unknown paid stage or unmeasured request stops all later stages and sites; no retries or paid continuation.',
             'seed': 'Separate zero-model SDK input/click of the server-learned publish method; lose its acknowledgement once. Never manufacture unknown in SQL.',
@@ -108,7 +108,7 @@ def validate_run_allowance(allowance):
     if (not isinstance(allowance, dict) or set(allowance) != {'requests', 'tokens_and_reserved_units'}
             or type(allowance['requests']) is not int or not 0 <= allowance['requests'] <= 96
             or type(allowance['tokens_and_reserved_units']) is not int
-            or not 0 <= allowance['tokens_and_reserved_units'] <= 1200000):
+            or not 0 <= allowance['tokens_and_reserved_units'] <= 2400000):
         raise ValueError('invalid_aggregate_native_allowance')
 
 

@@ -154,7 +154,7 @@ async def test_evaluation_tail_budget_reaches_actual_worker_payload_and_restores
         assert admin_settings.for_agent(AID, 'brand')[0] is settings
         await caller.invoke(kind)
     assert caller.inputs[0]['max_requests'] == min(3, configured_ceiling)
-    assert caller.inputs[0]['max_total_tokens'] == 100000
+    assert caller.inputs[0]['max_total_tokens'] == 200000
     assert caller.inputs[0]['model']['key'] == MODEL_KEY
     assert admin_settings.for_agent is original
     with stage_model_request_ceiling(AID, None) as ceiling:
@@ -180,7 +180,7 @@ async def test_actual_native_caller_passes_explicit_route_selection_only_on_stdi
     assert 'model_socket' in payload and payload['model_socket'] == route
     assert payload['agent_id'] == AID and payload['model']['key'] == MODEL_KEY
     assert payload['max_output_tokens'] == output_limit
-    assert caller.reserves == [payload['max_total_tokens']] == [100000]
+    assert caller.reserves == [payload['max_total_tokens']] == [200000]
     assert caller.events.count('reserve') == caller.events.count('settle') == 1
     assert caller.events.count('attempt_update') == (1 if kind == 'connect' else 0)
     assert caller.events.count('fragment') == (1 if kind == 'run_task' else 0)
