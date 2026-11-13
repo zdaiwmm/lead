@@ -4,17 +4,20 @@ from datetime import timedelta
 from uuid import uuid4
 
 import pytest
-from pydantic import BaseModel
-
 from lead_app import local_executor
-from lead_app.budget import growth_cost_context, reserve, settle
 from lead_app.browser_tools import BrowserTools
-from lead_app.db import all_rows, j, one, tx
+from lead_app.budget import growth_cost_context, reserve, settle
+from lead_app.db import all_rows, one, tx
 from lead_app.growth.contracts import ExperimentSpec, TaskSpec, utcnow
 from lead_app.growth.runtime import recover_due
 from lead_app.growth.store import create_experiment, question_costs, submit_work
-from lead_app.local_executor_client import execution_context, request_identity, run_model
+from lead_app.local_executor_client import (
+    execution_context,
+    request_identity,
+    run_model,
+)
 from lead_app.research import finish_run
+from pydantic import BaseModel
 
 CAPABILITIES = {"ready": True, "auth_type": "chatgpt", "models": ["gpt-6.1-sol"], "reasoning_efforts": ["medium"]}
 SOURCE = {"url": "https://source.example/document", "title": "Observed public source", "text": "A complete source observation retained by the actual Lead evidence writer.", "links": []}
@@ -160,3 +163,31 @@ async def test_same_job_replays_frozen_payload_without_second_native_command(gro
             assert one(connection, "SELECT count(*) n FROM lead.local_executor_commands WHERE kind='run'")["n"] == 1
     finally:
         execution_context.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_basic_native_source_read_keeps_public_web_without_advanced_research(growth_agent, monkeypatch):
+    """Adding evidence persistence must not turn a basic read into an advanced tool."""
+    from lead_app.admin_config import read, write
+    from lead_app.admin_settings import for_agent
+
+    aid = str(growth_agent)
+    device = connect(aid)
+    settings, _ = for_agent(aid, "models")
+    settings["tools"]["public_web"] = True
+    settings["tools"]["advanced_research"] = False
+    with tx(aid) as connection:
+        key = "models/" + aid
+        write(connection, key, settings, read(connection, key)["version"])
+    calls = []
+    async def fetch(url, **kwargs):
+        calls.append(url)
+        return dict(SOURCE)
+    monkeypatch.setattr("lead_app.fetch.fetch_product", fetch)
+    browser = BrowserTools(aid, "Read one public page")
+    tools = browser.tools()
+    request = local_executor.submit(aid, "basic-public-read", {"input": "Read one page", "instructions": "Read a public source", "tool_context": {"kind": "model", **tools.local_executor_context}, "tools": [{"name": "lead_public_read", "description": "read", "inputSchema": {"type": "object"}}]}, session_key="basic-public-read")
+    result = await local_executor.call_tool(device["token"], device["epoch"], request["id"], "lead_public_read", {"url": SOURCE["url"]})
+    assert result["structuredContent"]["url"] == SOURCE["url"]
+    assert calls == [SOURCE["url"]]
+    assert finish_run(aid, browser.run_id)[0]["url"] == SOURCE["url"]
