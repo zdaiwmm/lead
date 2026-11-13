@@ -266,7 +266,7 @@ T06/T07的单次click三次POST，已在T11由DOM/CDP/netlog定位为该Chromium
 
 复用现有 Wait、episode 和 recover_due，不新增监督进程。每个非终态要么持有有效短执行租约，要么有 producer、check_at、recovery_action 和终止/升级出口。定时器只做状态核对与原任务续接，不重开经营任务。
 
-工程初值：每个浏览器片段最多 8 次模型调用、20 个主动步骤、180 秒；最多一次定向修正，纳入同片段预算。canonical growth.account/discover 需要核对规则和编辑器，重复 DOM 只保留诊断，不单独构成结束发现的充分条件；仍受上述主动步、期限、调用片段及原三片段上限约束。其他阶段连续 3 次步骤没有新页面状态、有效来源或操作进展则结束本片段。平台给出的冷却/期限优先。任务总投入仍取项目/问题和既有恢复上限中更严格者，不能切片重置。
+工程初值：每个浏览器片段最多 8 次模型调用、20 个主动步骤、180 秒。canonical方法发现的纯选择器定位错误可在原总纠错8次内修正；权限、身份、范围、授权拒绝与其他阶段仍最多一次定向修正，两错后停，真实计数保留。canonical growth.account/discover 需要核对规则和编辑器，重复 DOM 只保留诊断，不单独构成结束发现的充分条件；仍受上述主动步、期限、调用片段及原三片段上限约束。其他阶段连续 3 次步骤没有新页面状态、有效来源或操作进展则结束本片段。平台给出的冷却/期限优先。任务总投入仍取项目/问题和既有恢复上限中更严格者，不能切片重置。
 
 片段耗尽不直接认定业务失败，也不立即无限续片段：已有与任务相关的有效进展、总预算及连接/任务期限仍允许时，保存原页面/检查点，释放执行槽，以页面就绪、挑战输入/交还事件或明确 check_at（无更合适事件时 15 秒后）返回原 Wait；事件或 due 入口只能再次投递同一任务，服务端重验条件后续接。累计费用、步骤与同失败链的修正次数保留。动画、时间戳、转圈和重复观察不算有效进展；无进展已达阈值则等待真实新事实，不因到点自动重开。总预算/期限到达时明确停止或转为必要本人事项并通知依赖。
 
@@ -388,14 +388,14 @@ SourceResult/WorkResult补实际attempt的access_mode、failure_scope/condition�
 | C12 | 同文件 `test_first_member_action_without_catalog` | 未在 SPECS/PLATFORMS 登记的站点与普通成员，有限建立方法、目标和允许动作并首次执行；明确排除目标拒绝，不能自动扩成管理员权限 |
 | C13 | 同文件 `test_actual_editor_matches_intent` | 旧草稿、隐含引用、错父帖、署名切换、私有草稿自动保存、回车/输入直接发送、附件错序/内容版本变化；潜在发送前先门禁/dispatching，无法预核完整内容的控件不试填，最终比对不符不提交 |
 | C14 | 同文件 `test_receipt_unknown_never_resubmits` | 网络前持久claim、限定请求零重试；落账后断响应、POST页reload、旧dispatching/unknown重载只回查；同一ActionRef确认，错原帖作者/内容/目标不确认。未知站需适用请求/幂等条件，不承诺全网exactly-once |
-| C15 | `test_browser_liveness.py::test_step_and_repair_bounds` | 8 调用/20 步/180 秒、一次修正；发现阶段重复DOM仅诊断，其他阶段3次无新状态后停。原Task最多三片段且不重置纠错/期限；动画不算新进展，技术片段耗尽只续原任务，不无限due重开 |
+| C15 | `test_native_discovery_progress_policy.py`、`test_native_progress_product.py`、`test_native_discovery_selector_budget_product.py` | 8 调用/20 步/180 秒；发现纯selector错误最多总8次，其余错误仍一次修正；发现阶段重复DOM仅诊断，其他阶段3次无新状态后停。原Task最多三片段且不重置纠错/期限；动画不算新进展，技术片段耗尽只续原任务，不无限due重开 |
 | C16 | 同文件 `test_wait_producer_and_deadline` | 冻结时钟验证每类 Wait 的生产者、check_at 和停止出口；挑战答复/控制交还/会话换代/方法修正实际更新条件并唤醒原任务，旧/伪事件不解锁；无配置变化不重登/付费探测，前端关闭 due 仍工作 |
 | C17 | 同文件 `test_unknown_receipt_does_not_block_independent_work` | 三次主动回查后低频观察原 action；同账号其他独立意图和其他渠道继续，重复同意图被拒绝；暂停不阻止事实回查 |
 | C18 | `test_research_providers.py::test_sources_usage_and_error_classes` | Tavily/TikHub 固定响应、分页/抽样/缺失/删除/权限/空结果，摘要与正文不同及相同原帖跨工具；去重且不把缺失当零/无需求 |
 | C19 | 同文件 `test_shared_quota_and_unknown_billing` | 两项目争最后一份额度、同 call_key 重放、超时可能已计费、周期恢复；不超花、不重复结算或自动充值，另一工具继续 |
 | C20 | `test_experience_reuse.py::test_applicability_and_counterevidence` | 同标签不同受众、适用旧结论、过期规则/新反例；最多4条、允许新渠道，经验缺失/提炼失败不阻塞，旧权/旧成果不继承 |
 | C21 | 同文件 `test_owner_projection_and_revocation` | 同owner允许共享的公开经验可检索，私有原文/凭据/其他tenant拒绝；撤销/删除失效，重复提炼不冒充新学习 |
-| C22 | A/B机械链及十二次真实尝试；第十二次A登录/发布方法/首次实际发帖与独立回执通过，reply发现却合法返回publish，已确认原任务目标与harness期望不一致；累计84已测请求/256127 tokens，另保守8位/40000未知 | C22未通过；reply/回查/B未运行，余额12请求/204850单位。先修明确操作目标并核验质量配置，不重发原confirmed/unknown、不逐轮确认；B不称严格盲测 |
+| C22 | `scripts/evaluate_native_browser.py` + 原 Task/Action 全链 | 真实模型在两个合成站完成登录、发布/回复方法发现、实际发帖与回复、同一未知Action只读回查；精确源码预登记、完整计量和独立源/DOM回执，不注入Fake模型配方，不以离线机械绿代替模型通过 |
 | C23 | 现有受影响回归 + 新增 SQL/RLS 集成 | TaskSpec、状态、权限、通用目标、费用、前端和现有 Telegram/Reddit 直接消费者实际一致；新动作未绕过同项目/目标约束 |
 | C24 | 正常业务试点与成本报告 | 精确账号/位置、可见原帖/回复、触达或响应、到站及可信核心结果分别记录；比较耗时/用户步骤/资源/token/接口费，缺成果不称成功 |
 | C25 | `test_research_recovery.py::test_actual_failure_scope_and_account_read` | 关联账号读取进入正确Profile/出口；匿名研究不自动借账号；Reddit拦截保留原因、可选择论坛来源；query存在也不扩大成search全局故障；Tavily/TikHub与浏览器实际失败资源分开 |
@@ -1016,6 +1016,12 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 实际SDK相同往返输入旧码4请求/4图、NP3/seen2时在提案前结束（34.776秒红保留）；新码5请求/5图记录reply成功且NP3/seen2诊断仍在，循环对照8请求/8图在技术片段边界waiting/checkpoint、NP7、无方法/POST或虚报成功。两项78.997秒和10边界unit通过，root163项/3专用环境skip通过；未重整旧clock/reload/scroll产品矩阵，只同步策略断言并复用未变权限/计量/DOM源。官方Flash/完整决策规划/输出4000/200000包围，自己的离线DB已删、真实模型调用0，不还原trial13点击意图。最终core证据SHA256 441be4620f1e980b09bc5af1fadef9039926336b2f457988bd4bcaad6f8e6e5e，10项tracked执行/测试hash与root一致；独立最终接受报告 /private/tmp/vbp30/discovery-np3-review.json SHA256 c51199ec3c2225d67130d4fd7e17ce2da087cf16a0b57fe4c97a0c471e1b723f。下一真实登记仍不等于C22/B已通过。
 
+- 第十四次 f577d0c/bcfc5476…：登录4请求/34181通过，方法两次element_ambiguous后停，未发布；6请求/6图/55123完整结算、进程0/key清除。累计103已测请求/429563 tokens，另第三次8位/40000未知，总扣111位/469563；技术窗口90/2344877不是用户费用上限，原库/失败/未知均保留。旧trace未存字段，不能倒推本轮具体错误项。
+
+- 新修复移除模型不可观察、后续又被覆盖的身份hint前置门槛，继续使用原独立强current/private exact/唯一可见/非UGC/root/document双读。官方SkipJsonSchema从模型wire隐藏纯兼容hint，实际模型仅5实参与发布3/回复4编辑字段，旧7参数仍兼容；实际Pydantic2.13.5，Context7邻patch2.13.4官方文档，无升级或共享SDK改动。仅canonical发现typed selector错误使用原总8纠错余量，每错照计；权限/身份/scope/授权拒绝和其他阶段仍两错停。SDK discovery失败余量同步8、其他3，避免第三次错误后被强制done-only；所有实际facts检查保持。
+
+- 最终源03af/4a65879/8b79424/b33，测试baf0ae0均已集成。实际SDK3例62.096秒：三次坏submit后第四提案存方法、八次坏selector停、权限两错停，共14假请求14图/POST0；6真DOM4.872秒仍拒错误主体/仅UGC/多个current；真实Registry新5/旧7四例兼容。原四轮红全部留证，不改XML。最终core证据SHA256 af0e15b57d0ad72924b124754772be19f0f35a355340b3afe1271bbb69cc0ad0，15执行hash与root一致；独立报告 /private/tmp/vbp30/discovery-selector-review.json SHA256 cedfb060ab381f1f3b659f06aa58529489db11aa1250fe5a4b5721e1a816ab26。196定向/3环境skip、全Ruff/906扫描通过；SafeTrace仅存固定field/issue，不存selector/URL/值。runner冻结blob07cb6edacf56be6d8c62c64ef6d11ca6515e86ef，其余10不变。新实际C22/B尚未通过，下一登记不再问额度。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -1034,11 +1040,11 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C11–C12 | A/B不同布局完整六原Task机械链路、普通成员规则和catalog通用消费者均已实际运行；第十二次真实模型A登录、发布方法及原首次发帖/回执通过 | 回复方法目标传递缺口待修，回复/unknown回查/B尚未真实模型通过，不能称陌生网站迁移能力已通过 |
 | C13 | 原SDK输入自动保存与Enter提前发送均源站0，随后正常submit唯一确认；DOM/父帖/完整正文核对 | 无法事前建立完整请求事实的控件仍为局部能力缺口 |
 | C14 | 原unknown在暂停下只读回查，同作者旧帖拒绝，新原帖确认；effective method SQL投影及首次promotion；同SW更新/重放组合续原Action确认 | 不承诺任意站点外部恰好一次；原intent、grant及attempt1保留，禁止重新发送 |
-| C15–C16 | 发现阶段保留重复DOM诊断而不早停，其他阶段仍3次无进展停；一次修正、时钟/reload/来回滚动、主动步/期限/三片段上限及原Task续接；真实方法修正/owner交还 | 不把动画或model计划算新进展，不因due无限重开，不重置期限/次数/旧费用；新SDK往返/循环两case及10边界unit已通过，实际模型全链待重新登记 |
+| C15–C16 | 发现阶段保留重复DOM诊断而不早停，其他阶段仍3次无进展停；发现纯selector总8/其余一次修正、时钟/reload/来回滚动、主动步/期限/三片段上限及原Task续接；真实方法修正/owner交还 | 不把动画或model计划算新进展，不因due无限重开，不重置期限/次数/旧费用；新SDK往返/循环两case及10边界unit已通过，实际模型全链待重新登记 |
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | A/B机械链及十一次真实尝试；第十登录/方法过、发布重复输入停，第十一登录过、方法两次selector未定位唯一可见节点停；累计72已测请求/212150 tokens，第三次另保守8位/40000未知；正文匹配及具体字段反馈均有实际SDK离线证据 | C22未通过，源发布POST0、回复/回查/B未运行；余额24请求/248827单位，按累计授权先离线修再新登记，不重试原unknown、不逐轮确认；B不称严格盲测 |
+| C22 | 十四次真实尝试：第十二/十三次A登录、方法、发帖/回执通过；第十四次登录过、方法两次selector错误停。现完整视觉、显式目标、原强身份派生和可观察模型接口已修，SDK selector4/8/permission2及6DOM有实际证据；累计103已测/429563tokens，另8位/40000未知 | C22未通过，reply/未知回查/B未完成；本任务费用不限，技术窗口可续且不当用户预算。所有旧失败/账本保留，不重发原confirmed/unknown，下一真实登记待核验；B非严格盲测 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
