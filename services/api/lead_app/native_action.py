@@ -498,7 +498,8 @@ class NativeAction(NativeTask):
             try:
                 value=await self.read_receipt(page,selectors,candidate=True)
                 if value is None:
-                    raise ValueError('browser_receipt_candidate_unproved')
+                    from .native_receipt_errors import ReceiptFactError
+                    raise ReceiptFactError('browser_receipt_candidate_unproved')
                 if value['matches']:
                     matches.append(value['receipt'])
             finally:

@@ -58,7 +58,7 @@ def browser_tools(kind):
         }, ('target_url','operation','selectors','permission_selector','permission_quote')))
     elif kind == 'action':
         from .native_receipt_errors import SELECTOR_DESCRIPTIONS
-        tools.append(_tool('report_receipt', 'Report CSS value selectors of the actual resulting receipt. Original identity, body, parent and uniqueness are independently checked.', {
+        tools.append(_tool('report_receipt', 'Report structural CSS value selectors of the actual resulting receipt, readable across other candidate receipt pages. A selector tied only to this post ID, URL or expected text cannot prove another candidate is different. Original identity, body, parent and uniqueness are independently checked.', {
             'selectors':{'type':'object','properties':{name:{**string,'minLength':1,'maxLength':300,'description':description} for name,description in SELECTOR_DESCRIPTIONS.items()},
                 'required':['author','body','url'],'additionalProperties':False}}, ('selectors',)))
     elif kind != 'research':

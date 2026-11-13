@@ -39,7 +39,7 @@ def receipt_rpc_feedback(operation,status,payload):
 
 def receipt_protocol_instructions():
     """The same content-free field contract may be sent by standard owner steer."""
-    return 'Receipt value selector protocol: '+ ' '.join(name+': '+description for name,description in SELECTOR_DESCRIPTIONS.items())+' These are proposals only; the original server must verify identity, current document, uniqueness and independent receipt evidence. Never resubmit the original Action.'
+    return 'Receipt value selector protocol: '+ ' '.join(name+': '+description for name,description in SELECTOR_DESCRIPTIONS.items())+' Use structural value selectors that remain readable across candidate receipt pages. A selector tied only to one post ID, URL or expected text cannot safely exclude a different candidate. These are proposals only; the original server must verify identity, current document, uniqueness and independent receipt evidence. Never resubmit the original Action.'
 
 
 async def diagnose_receipt_selectors(page,selectors,*,body,author,parent=None):

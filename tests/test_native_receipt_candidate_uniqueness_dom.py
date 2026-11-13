@@ -125,8 +125,10 @@ async def test_current_receipt_selector_cannot_silently_exclude_an_unread_candid
 
     visited.clear()
     if candidate in {"duplicate", "unreadable", "missing_parent", "different_body_missing_parent", "empty_body", "unstable_body"}:
-        with pytest.raises(ValueError, match="browser_receipt_(not_unique|unproved|candidate_unproved)"):
+        with pytest.raises(ValueError, match="browser_receipt_(not_unique|unproved|candidate_unproved)") as failure:
             await controller.report_receipt({"selectors": selectors})
+        if candidate != "duplicate" or selector_style != "shared":
+            assert getattr(failure.value, "code", None) == "browser_receipt_candidate_unproved"
         assert state["action_state"] == "unknown" and attempt["outcome"] is None
     else:
         # A second candidate proven to have another body/author may be excluded;
