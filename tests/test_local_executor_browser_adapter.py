@@ -19,6 +19,36 @@ def test_tool_shapes_are_operation_specific_and_never_expose_browser_transport()
         assert all(tool['inputSchema'].get('additionalProperties') is False for tool in tools.values())
 
 
+def test_discovery_schema_explains_each_observed_selector_in_the_native_contract():
+    proposal=next(item for item in adapter.browser_tools('discovery') if item['name']=='propose_method')
+    properties=proposal['inputSchema']['properties']
+    selectors=properties['selectors']['properties']
+    assert 'A[href]' in selectors['editor_target'].get('description','')
+    assert 'target_url' in selectors['editor_target']['description']
+    assert 'TEXTAREA' in selectors['editor_body'].get('description','')
+    assert 'same' in selectors['submit'].get('description','')
+    assert 'canonical' in selectors['editor_parent'].get('description','')
+    assert 'target_url' in properties['permission_selector'].get('description','')
+    assert 'exact' in properties['permission_quote'].get('description','').lower()
+    assert 'Playwright' in proposal['description']
+
+
+def test_actual_discovery_goal_does_not_require_one_fixture_destination_label():
+    import ast
+    from pathlib import Path
+
+    tree=ast.parse((Path(__file__).parents[1]/'services/api/lead_app/browser.py').read_text())
+    endpoint=next(node for node in ast.walk(tree) if isinstance(node,ast.AsyncFunctionDef)
+        and node.name=='discover_account_targets')
+    call=next(node for node in ast.walk(endpoint) if isinstance(node,ast.Call)
+        and isinstance(node.func,ast.Name) and node.func.id=='run_task')
+    expression=next(value.value for value in call.keywords if value.arg=='goal')
+    goal=eval(compile(ast.Expression(expression),'<actual-discovery-goal>','eval'),{'desired':'publish'})
+    assert 'Posting to' not in goal
+    assert 'A[href]' in goal
+    assert 'independently' in goal and 'permission' in goal
+
+
 def test_request_binding_cannot_cross_device_agent_or_task():
     request = {'id':'r', 'agent_id':'a', 'tenant_id':'t', 'device_id':'d',
         'payload': {'tool_context': {'kind':'discovery','agent_id':'a','task_id':'k','run_id':'k',

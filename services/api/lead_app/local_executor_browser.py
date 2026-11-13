@@ -36,11 +36,24 @@ def browser_tools(kind):
                 {'subject_selector':string}, ('subject_selector',)),
         ])
     elif kind == 'discovery':
-        tools.append(_tool('propose_method', 'Propose the observed ordinary-member editor and exact first-party automation permission. Use CSS selectors, never numbered DOM indexes. Reply requires editor_parent. Read rules on target_url then return to the editor before proposing. This does not submit.', {
-            'target_url':string, 'operation':{'type':'string','enum':['publish','reply']},
-            'selectors': {'type':'object', 'properties': {name:string for name in ('editor_target','editor_body','submit','editor_parent')},
+        tools.append(_tool('propose_method', 'Propose the observed ordinary-member editor and exact first-party automation permission. Selectors use Playwright CSS, which supports open shadow roots; a native TEXTAREA shadow marker does not invalidate its own observed id/name selector. Never use numbered DOM indexes. Reply requires editor_parent. Read rules on target_url then return to the editor before proposing. The server independently checks all facts; this does not submit.', {
+            'target_url':{**string,'minLength':1,'maxLength':2000,'description':
+                'Actual destination URL from editor_target on the original account origin, without a fragment. Its page supplies the permission rules; it may differ from the editor or starting URL.'},
+            'operation':{'type':'string','enum':['publish','reply']},
+            'selectors': {'type':'object', 'properties': {
+                'editor_target':{**string,'minLength':1,'maxLength':300,'description':
+                    'CSS for the observed destination A[href] link on the editor page; its resolved href must equal target_url. Link labels vary by site.'},
+                'editor_body':{**string,'minLength':1,'maxLength':300,'description':
+                    'CSS for the actual editable TEXTAREA body in the observed ordinary-member POST form, using its observed attributes.'},
+                'submit':{**string,'minLength':1,'maxLength':300,'description':
+                    'CSS for the enabled submit control belonging to the same editor form.'},
+                'editor_parent':{**string,'minLength':1,'maxLength':300,'description':
+                    'CSS for the actual canonical parent A[href] link on this reply page; never supply a hidden parent ID.'}},
                 'required':['editor_target','editor_body','submit'], 'additionalProperties':False},
-            'permission_selector':string, 'permission_quote':string,
+            'permission_selector':{**string,'minLength':1,'maxLength':300,'description':
+                'CSS for visible first-party rules on the target_url page, outside user posts, quotations and editable content.'},
+            'permission_quote':{**string,'minLength':20,'maxLength':3000,'description':
+                'Exact observed rule text establishing ordinary-member permission for this operation and browser automation, without unmet approval conditions.'},
         }, ('target_url','operation','selectors','permission_selector','permission_quote')))
     elif kind == 'action':
         tools.append(_tool('report_receipt', 'Report CSS value selectors of the actual resulting receipt. Original identity, body, parent and uniqueness are independently checked.', {

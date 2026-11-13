@@ -1366,7 +1366,7 @@ async def discover_account_targets(aid: UUID, body: DiscoverRequest):
                     'Call propose_method with observed DOM selectors editor_target/editor_body/submit '
                     '(plus editor_parent for a reply), the rules selector and literal rule quote. '
                     'The server independently verifies the current acting identity; no separate visit to account settings is required for identity verification. '
-                    'The target URL must be the actual Posting to destination and the permission page. Each method proves only one operation. '
+                    'The target URL must equal the resolved href of the actual observed destination A[href] link and supply the permission evidence. Link labels vary by site; no fixed wording is required. Each method proves only one operation. '
                     'The editor page and rules page may differ. Observe the target_url rules through actual links, retain their selector and exact quote, then return to the required editor page before calling propose_method. '
                     'The server independently opens target_url to recheck its rules; the rules need not appear on the editor page. '
                     'If the observed editor and rules pages do not establish sufficient identity, membership or automation permission evidence, stop and report the local gap. '
