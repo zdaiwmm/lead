@@ -19,17 +19,23 @@ async def page():
             await browser.close()
 
 
-@pytest.mark.parametrize('fields,allowed,reason',[
-    ('<input required value="member"><input type=password required>',False,'empty password'),
-    ('<input required><input type=password required value="synthetic">',False,'empty required'),
-    ('<input type=email required value="invalid"><input type=password value="synthetic">',False,'form is invalid'),
-    ('<input><input type=password value="synthetic">',True,None),
-    ('<input required value="member"><input type=password required value="synthetic">',True,None),
-    ('<input><input type=password>',False,'empty password'),
+@pytest.mark.parametrize('fields,allowed,reason,form_attrs,button_attrs',[
+    ('<input required value="member"><input type=password required>',False,'empty password','',''),
+    ('<input required><input type=password required value="synthetic">',False,'empty required','',''),
+    ('<input type=email required value="invalid"><input type=password value="synthetic">',False,'form is invalid','',''),
+    ('<input><input type=password value="synthetic">',True,None,'',''),
+    ('<input required value="member"><input type=password required value="synthetic">',True,None,'',''),
+    ('<input><input type=password>',False,'empty password','',''),
+    ('<input type=email required value="member"><input type=password value="synthetic">',True,None,'novalidate',''),
+    ('<input type=email required value="member"><input type=password value="synthetic">',True,None,'','formnovalidate'),
+    ('<input type=email required value="member"><input type=password value="synthetic">',True,None,'','type=button'),
+    ('<input required><input type=password value="synthetic">',True,None,'novalidate',''),
+    ('<input required value="member"><input type=password>',False,'empty password','novalidate',''),
+    ('<input required value="member"><input type=password>',False,'empty password','','type=button'),
 ])
 @pytest.mark.asyncio
-async def test_only_actual_missing_or_invalid_credential_form_prevents_submit(page,fields,allowed,reason):
-    await page.set_content('<h1>Sign in</h1><form method=post action=/session>'+fields+'<button>Sign in</button></form>')
+async def test_only_actual_missing_or_invalid_credential_form_prevents_submit(page,fields,allowed,reason,form_attrs,button_attrs):
+    await page.set_content('<h1>Sign in</h1><form method=post action=/session '+form_attrs+'>'+fields+'<button '+button_attrs+'>Sign in</button></form>')
     await page.evaluate('''()=>{window.invalidEvents=0;document.addEventListener('invalid',()=>window.invalidEvents++,true)}''')
     facts=await page.locator('button').evaluate('node=>('+FORM_FACTS+').call(node)')
     assert not any('value' in key.lower() for key in facts)

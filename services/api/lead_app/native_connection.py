@@ -19,6 +19,7 @@ method:(form.getAttribute('method')||'GET').toUpperCase(),action:new URL(form.ge
 passwordCount:form.querySelectorAll('input[type="password"]').length,
 newPassword:!!form.querySelector('input[autocomplete="new-password"]'),
 passwordEmpty:Array.from(form.elements).some(node=>node.type==='password'&&!node.disabled&&!node.value.length),
+validatesOnSubmit:this.type==='submit'&&!form.noValidate&&!this.formNoValidate,
 requiredEmpty:Array.from(form.elements).some(node=>node.willValidate&&node.validity.valueMissing),
 invalidFields:Array.from(form.elements).some(node=>node.willValidate&&!node.validity.valid),
 formText:form.innerText,heading:form.closest('main,section')?.querySelector('h1,h2')?.innerText||document.title,
@@ -329,9 +330,9 @@ class NativeConnection:
                 return {'allowed':False}
             if facts['passwordEmpty']:
                 return {'allowed':False,'reason':'The observed sign-in form has an empty password field. Fill that field before submitting.'}
-            if facts['requiredEmpty']:
+            if facts['validatesOnSubmit'] and facts['requiredEmpty']:
                 return {'allowed':False,'reason':'The observed sign-in form has an empty required field. Complete that field before submitting.'}
-            if facts['invalidFields']:
+            if facts['validatesOnSubmit'] and facts['invalidFields']:
                 return {'allowed':False,'reason':'The observed sign-in form is invalid. Correct its observed fields before submitting.'}
         else:
             return {'allowed':False}
