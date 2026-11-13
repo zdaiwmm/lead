@@ -54,7 +54,8 @@ async def test_actual_sdk_method_feedback_allows_one_bounded_correction(monkeypa
         (STATE/'method-feedback-product.json').write_text(json.dumps(safe,indent=2))
         assert safe['feedback_seen']==[False,True]
         assert safe['requests']==2 and safe['corrections']==1
-        assert trace['steps'][0]['outcomes']==[{'status':'error','code':'browser_method_element_ambiguous'}]
+        assert trace['steps'][0]['outcomes']==[{'status':'error','code':'browser_method_element_ambiguous',
+            'selector_issues':[{'field':'self_subject','issue':'not_found'},{'field':'submit','issue':'not_found'}]}]
         assert safe['method_stored'] and safe['worker_success'] and safe['state']=='succeeded'
         assert safe['target_count']==1 and not secret_seen
         assert safe['feedback_fields_seen']==[[],['self_subject','submit']]
