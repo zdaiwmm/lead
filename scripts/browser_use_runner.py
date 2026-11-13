@@ -194,8 +194,8 @@ async def main(data):
             diagnostics('native_scope_bound')
             tools = guarded_tools(browser,authorize,sensitive_data=data.get('sensitive_data'))
             if data.get('native_kind')=='connection':
-                @tools.action('Open the freshly observed current self account settings link, identified by rel=me. The manager checks this actual link before navigating.')
-                async def inspect_self(self_link_selector: str,acting_subject_selector: str,self_subject_prefix: str,self_subject_suffix: str):
+                @tools.action('Open the current self account settings link. CSS hints may be omitted: the manager independently requires one strong current identity and its local rel=me link. SDK [n] references are not CSS selectors; never guess a selector or account ID.')
+                async def inspect_self(self_link_selector: str='',acting_subject_selector: str='',self_subject_prefix: str='',self_subject_suffix: str=''):
                     await browser.assert_fresh_observation()
                     return ActionResult(extracted_content=json.dumps(await manager('inspect_self',{
                         'self_link_selector':self_link_selector,'acting_subject_selector':acting_subject_selector,
@@ -273,6 +273,7 @@ async def main(data):
             if native_scope and data.get('native_kind') in ('discovery','action') and len(provider_requests)>=int(data.get('max_requests',8)):
                 raise FragmentBudgetStop()
         history=None
+        failure_code=None
         try:
             history = await agent.run(max_steps=max(1, min(20 if data.get("native_kind") in ('connection','discovery','action') else 6, int(data.get("max_steps", 6)))),on_step_start=before_step)
             if native_scope and data.get('native_kind') not in ('connection','discovery','action'):
@@ -286,13 +287,24 @@ async def main(data):
         except FragmentBudgetStop:
             fragment_exhausted=True
             diagnostics('fragment_request_limit')
+        except TimeoutError:
+            failure_code='native_agent_timeout'
+        except Exception:
+            # A tool/SDK failure must not discard already measured model usage.
+            # Exception text can contain page content or credentials.
+            failure_code='native_agent_failed'
         finally:
             if native_scope:
-                await browser.stop()
+                try:
+                    browser._intentional_stop=True
+                    await asyncio.wait_for(browser.stop(),2)
+                except Exception:
+                    failure_code=failure_code or 'native_cleanup_failed'
         return {
-            "success": bool(history and history.is_successful()),
+            "success": bool(not failure_code and history and history.is_successful()),
+            "failure_code": failure_code,
             "fragment_exhausted": fragment_exhausted,
-            "text": (history.final_result() or "") if history else 'The current bounded fragment stopped before another model call.',
+            "text": (history.final_result() or "") if history and not failure_code else 'The current bounded fragment stopped before another model call.',
             "usage": {
                 "total_prompt_tokens": sum(u["prompt_tokens"] for u in provider_usage),
                 "total_completion_tokens": sum(
@@ -318,7 +330,7 @@ async def main(data):
                     for u in provider_usage
                 ),
             },
-            "errors": [error for error in history.errors() if error][-3:] if history else [],
+            "errors": [failure_code] if failure_code else [error for error in history.errors() if error][-3:] if history else [],
             "steps": len(history.history) if history else len(provider_requests),
         }
 
