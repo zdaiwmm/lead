@@ -1,8 +1,8 @@
 """Refresh one owned page's actual SW observer; never infer permission from URL.
 
-Chromium can retain a page-local ServiceWorker.enable snapshot from about:blank
-after navigation. Re-subscribing that exact manager session yields a new client
-projection; it does not stop the website worker or clear browser storage.
+The page-local client projection can omit the actual controlling page.
+Re-subscribing that exact manager session yields a fresh client projection;
+it does not stop the website worker or clear browser storage.
 """
 import asyncio
 import copy

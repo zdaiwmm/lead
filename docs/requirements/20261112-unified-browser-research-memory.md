@@ -865,6 +865,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - C22网络准备继续按真实消费者验证：原A完整机械链路改用`alpha-c22.test`及与注册执行器相同的域名映射，6项46.524秒通过，六阶段仍5/2/3/2/3/2次受控模型HTTP，三个独立DOM回执均为该域名，unknown回查无重发；此前双域名原代理测试分别达到两个独立源站并拒绝未登记域名/端口。实际SDK的105项依赖均与锁一致；Playwright/greenlet/pyee由分离的管理端环境提供固定1.62.0/3.5.6/13.0.1。此为开发隔离环境，不能冒充同轮CI生产运行时产物（`mrw28/reports/c22-sdk-domains-*`）。
 
+- C28/C31正式fresh订阅`2af4856`（源`f0e40d8`）在原Task.start/Action.prepare_submit接当前页session刷新，前后核对原lease/document/element，实际新per-page事件须在1秒内证明当前root/version/worker，global退役/替换target继续拒绝；无controller只清本页旧投影，15秒提交proof期限不扩大。12项主集成检查0.14秒；真实原组合不带测试侧fresh已完成正常confirmed、NoAck unknown、持页Task取得当前投影、worker v1→v2、v2从原Cache并发重放2次源0、原unknown Task同Action/attempt1 confirmed。源POST/帖总2，原grant/intent不变，11次假模型HTTP且凭据literal0。整体首轮仍红62.67秒，停在可选C33第一个TLS CONNECT收到502、尚未断控；已定位为测试resolver未登记其本地TLS目标，不算产品断控反例。修测试接线后才可继续完整C33，原失败保留。helper关于投影缺失只陈述观察，不将其归因于尚未证实的about:blank/导航机制。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链已有机械产品证据，跨站读取权限及后台脚本完整组合尚未闭合，不能因此开启共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -891,8 +893,8 @@ D1/D2主要执行链已有机械产品证据，跨站读取权限及后台脚本
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
-| C28 | 现有SW脚本/HttpOnly维护、POST读取及当前controller更新已取证；测试侧fresh订阅后正常/NoAck各唯一发送 | 正式自动订阅修正、SW重启并发重放及原unknown完整回查尚未闭合，测试侧fresh不是产品修复 |
+| C28 | 现有SW脚本/HttpOnly维护、POST读取及当前controller更新已取证；测试侧fresh订阅后正常/NoAck各唯一发送 | 正式订阅、SW版本更新后并发重放及原unknown回查已有产品证据；C33尾段尚未完成，先前测试侧fresh仍不计产品修复 |
 | C29 | 实际一层/嵌套/晚到OOPIF观察点击、撤权在SDK采集前拒绝，另一页继续，恢复后fresh重新附着 | 显式服务端范围工程证据；产品跨站来源批准仍待C30，不能从iframe.src自行授信 |
-| C30 | 两种SSO入口、实际opener/callback、同实例代理；新owner公开frame批准→opaque隔离→resume/freshself→新Task SDK读取正例 | 响应Set-Cookie仍approved、批准await期间文档/src变化仍保存旧批准两个真实缺口待修；权限/隔离独立审查进行中 |
-| C31–C32 | 原Network/Fetch正文关联、worker当前版本/target替换拒绝、旧认证/错误callback/危险字段源站0 | 后台脚本动作的正式fresh订阅及连续重启/重放组合待验，不用同URL脚本或全局投影代替当前归属 |
+| C30 | 两种SSO入口、实际opener/callback、同实例代理；新owner公开frame批准→opaque隔离→resume/freshself→新Task SDK读取正例 | 响应Set-Cookie反例已取得修后单例通过，待固定集成；批准期间文档/src变化的两类真实反例仍在修复与独立核验 |
+| C31–C32 | 原Network/Fetch正文关联、worker当前版本/target替换拒绝、旧认证/错误callback/危险字段源站0 | 正式fresh、版本更新后重放/原回查已取证；C33断控尾段待完成，仍不用同URL脚本或全局投影代替当前归属 |
 | C33–C34 | 实际整个管理器三切点SIGKILL、TLS EOF/新连接拒绝、原Action恢复只回查；实际proxy关闭活动CONNECT/未完整header通过 | Chrome仍活时只断控制连接与SW重放的连续组合尚未到达；生产唯一出口/父链按正式独立回读核验 |
