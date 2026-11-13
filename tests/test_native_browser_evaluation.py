@@ -156,22 +156,15 @@ async def test_a_six_tasks_and_zero_model_unknown_seed(monkeypatch):
     from lead_app import browser, domain, native_runner
     from lead_app.config import STATE
     from lead_app.db import tx
-    from lead_app.forward_proxy import BrowserForwardProxy
     from native_browser_evaluation import create_a, dry_model
 
-    from scripts.evaluate_native_browser import NativeCase
+    from scripts.evaluate_native_browser import NativeCase, synthetic_site_transport
 
-    site = create_a()
+    site = create_a('alpha-c22.test')
     calls = []
     model_server, state, model = dry_model(site, calls, STATE/'c22-dry-model.json')
     monkeypatch.setattr(native_runner, 'resolve_model', lambda _: model)
 
-    async def connect(self, ip, port):
-        if ip != '93.184.215.14' or port != 80:
-            raise ValueError('a_dry_destination_refused')
-        return await asyncio.open_connection('127.0.0.1', site.listener_port)
-
-    monkeypatch.setattr(BrowserForwardProxy, 'connect', connect)
     with socket.socket() as chooser:
         chooser.bind(('127.0.0.1', 0))
         port = chooser.getsockname()[1]
@@ -198,7 +191,8 @@ async def test_a_six_tasks_and_zero_model_unknown_seed(monkeypatch):
         with tx(aid) as c:
             c.execute("UPDATE lead.agents SET desired_state='running' WHERE id=%s", (aid,))
         case = NativeCase(aid, site, endpoint, before_stage=before, output=STATE/'c22-dry-a.json')
-        report = await case.run(evidence)
+        with synthetic_site_transport([site]):
+            report = await case.run(evidence)
         assert report['completed'] and report['first_failure'] is None
         assert [row['requests'] for row in report['stages']] == [5, 2, 3, 2, 3, 2]
         assert len(calls) == 17 and not any(row['username_literal_seen'] or row['password_literal_seen'] for row in calls)
