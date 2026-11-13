@@ -927,6 +927,27 @@ class PersistentRuntime:
             await session.detach()
 
     async def scope_view(self, target):
+        from playwright.async_api import Error as PlaywrightError
+
+        # A successful Document submission can destroy a renderer while an
+        # SDK scope read is pending. Only that known navigation error permits
+        # a new, bounded observation; authority/source errors still propagate.
+        deadline=None
+        for attempt in range(3):
+            try:
+                if deadline is None:
+                    return await self._scope_view_once(target)
+                async with asyncio.timeout(max(.001,deadline-asyncio.get_running_loop().time())):
+                    return await self._scope_view_once(target)
+            except PlaywrightError as error:
+                if ('Execution context was destroyed, most likely because of a navigation' not in str(error)
+                        or attempt==2):
+                    raise
+                if deadline is None:
+                    deadline=asyncio.get_running_loop().time()+2
+                await asyncio.sleep(.02)
+
+    async def _scope_view_once(self, target):
         entry = self.pages.get(target)
         if not entry or not self.forward_token():
             raise ValueError('page_lease_missing')
