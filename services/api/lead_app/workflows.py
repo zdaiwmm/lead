@@ -15,10 +15,23 @@ RETRY = RetryPolicy(
 LEGACY_CYCLE_GAP_SECONDS = 480
 
 
-async def durable_activity(name, args, **options):
+def rotate_pending(polls, args):
+    # Old histories retain their Activity/timer sequence. New runs retain the
+    # original business identity while bounding otherwise unending poll history.
+    if polls >= 100 or workflow.info().is_continue_as_new_suggested():
+        # The SDK memoizes False while replaying. A deterministic poll suffix
+        # lets an already-pending old run activate on its next live observation.
+        if workflow.patched(f"local-codex-pending-history-v1-{polls}"):
+            workflow.continue_as_new(args=args)
+
+
+async def durable_activity(name, args, *, pending_args, **options):
     result = await workflow.execute_activity(name, args, **options)
     if workflow.patched("local-codex-channel-continuation-v1"):
+        polls = 0
         while isinstance(result, dict) and result.get("executor_pending"):
+            polls += 1
+            rotate_pending(polls, pending_args)
             await workflow.sleep(2)
             result = await workflow.execute_activity(name, args, **options)
     return result
@@ -42,10 +55,10 @@ class GrowthWorkWorkflow:
         self.wakes += 1
 
     @workflow.run
-    async def run(self, ref: dict):
+    async def run(self, ref: dict, pending_claim: dict | None = None):
         for _ in range(100):
             seen = self.wakes
-            step = await workflow.execute_activity("growth_advance", ref,
+            step = {"state": "ready", "claim": pending_claim} if pending_claim else await workflow.execute_activity("growth_advance", ref,
                 start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)
             if step["state"] == "terminal":
                 return step
@@ -60,11 +73,14 @@ class GrowthWorkWorkflow:
             kind = claim.get("kind")
             lane = "growth-model" if kind == "decision" else "growth-work" if kind in ("research", "content") else "growth-receipts"
             try:
-                result = await workflow.execute_activity("growth_execute", {"agent_id": ref["agent_id"], "claim": claim},
+                result = {"executor_pending": True} if pending_claim else await workflow.execute_activity("growth_execute", {"agent_id": ref["agent_id"], "claim": claim},
                     task_queue=activity_queue(lane), start_to_close_timeout=timedelta(seconds=500),
                     retry_policy=RetryPolicy(maximum_attempts=1))
                 if workflow.patched("local-codex-activity-continuation-v1"):
+                    polls = 0
                     while result.get("executor_pending"):
+                        polls += 1
+                        rotate_pending(polls, [ref, claim])
                         await workflow.sleep(2)
                         result = await workflow.execute_activity("growth_execute", {"agent_id": ref["agent_id"], "claim": claim},
                             task_queue=activity_queue(lane), start_to_close_timeout=timedelta(seconds=30),
@@ -72,6 +88,7 @@ class GrowthWorkWorkflow:
             except ActivityError:
                 # A lost worker may have crossed an external barrier. Re-read the original ledger.
                 result = {"outcome": "failed", "failure_code": "execution_lost"}
+            pending_claim = None
             await workflow.execute_activity("growth_finish", {"agent_id": ref["agent_id"], "claim": claim, "result": result},
                 start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)
         workflow.continue_as_new(ref)
@@ -157,6 +174,7 @@ class ChannelDeliveryWorkflow:
             try:
                 result = await durable_activity(
                     "channel_research_tick" if args.get("lane")=="research" else "channel_delivery_tick", {**args, "tick": pending_tick},
+                    pending_args=[args, pending_tick],
                     start_to_close_timeout=timedelta(minutes=8), retry_policy=RETRY,
                 )
                 if result.get("stop"):
@@ -230,7 +248,10 @@ class ChatWorkflow:
                     retry_policy=RETRY,
                 )
                 if workflow.patched("local-codex-chat-continuation-v1"):
+                    polls = 0
                     while isinstance(result, dict) and result.get("executor_pending"):
+                        polls += 1
+                        rotate_pending(polls, [agent_id, [job, *self.queue]])
                         await workflow.sleep(2)
                         result = await workflow.execute_activity("chat_job", {"agent_id": agent_id, "job_id": job},
                             start_to_close_timeout=timedelta(seconds=30), task_queue=activity_queue("chat"), retry_policy=RETRY)
@@ -247,9 +268,11 @@ class ChatWorkflow:
 @workflow.defn
 class PublishWorkflow:
     @workflow.run
-    async def run(self, args: dict):
-        if "agent_id" in args and workflow.patched("admin-bounded-runtime-v1"):
-            settings = await workflow.execute_activity(
+    async def run(self, args: dict, pending: dict | None = None):
+        pending = pending or {}
+        reconciling = pending.get("phase") == "reconcile"
+        if "settings" in pending or ("agent_id" in args and workflow.patched("admin-bounded-runtime-v1")):
+            settings = pending.get("settings") or await workflow.execute_activity(
                 "execution_policy",
                 args,
                 start_to_close_timeout=timedelta(seconds=30),
@@ -270,45 +293,54 @@ class PublishWorkflow:
                     "PermissionError",
                 ],
             )
-            for _ in range(100):
-                try:
-                    result = await durable_activity(
-                        "execute_task",
-                        args,
-                        start_to_close_timeout=timedelta(minutes=4),
-                        task_queue=activity_queue("publish"),
-                        retry_policy=policy,
-                    )
-                except ActivityError:
-                    stopped = await workflow.execute_activity(
-                        "mark_task_failed",
-                        args,
-                        start_to_close_timeout=timedelta(seconds=30),
-                        task_queue=activity_queue("publish"),
-                        retry_policy=RETRY,
-                    )
-                    if stopped and stopped.get("state") == "unknown":
-                        result = stopped
+            result = {"state": "unknown"}
+            if not reconciling:
+                for index in range(pending.get("defer_index", 0), 100):
+                    try:
+                        result = await durable_activity(
+                            "execute_task",
+                            args,
+                            pending_args=[args, {"settings": settings, "defer_index": index}],
+                            start_to_close_timeout=timedelta(minutes=4),
+                            task_queue=activity_queue("publish"),
+                            retry_policy=policy,
+                        )
+                    except ActivityError:
+                        stopped = await workflow.execute_activity(
+                            "mark_task_failed",
+                            args,
+                            start_to_close_timeout=timedelta(seconds=30),
+                            task_queue=activity_queue("publish"),
+                            retry_policy=RETRY,
+                        )
+                        if stopped and stopped.get("state") == "unknown":
+                            result = stopped
+                            break
+                        return {"state": "failed"}
+                    if result.get("state") != "deferred":
                         break
-                    return {"state": "failed"}
-                if result.get("state") != "deferred":
-                    break
-                await workflow.sleep(result["delay"])
-            else:
-                workflow.continue_as_new(args)
-            for delay in (5, 30, 120, 300, 900, 1800, 3600):
+                    await workflow.sleep(result["delay"])
+                else:
+                    workflow.continue_as_new(args)
+            for index, delay in enumerate((5, 30, 120, 300, 900, 1800, 3600)):
+                if index < pending.get("reconcile_index", 0):
+                    continue
                 if result.get("state") != "unknown":
                     break
-                await workflow.sleep(delay)
+                # The observation timer already fired before a pending poll
+                # caused rotation; resume that observation, not a new window.
+                if not (reconciling and index == pending["reconcile_index"]):
+                    await workflow.sleep(delay)
                 result = await durable_activity(
                     "execute_task",
                     args,
+                    pending_args=[args, {"settings": settings, "phase": "reconcile", "reconcile_index": index}],
                     start_to_close_timeout=timedelta(minutes=4),
                     task_queue=activity_queue("publish"),
                     retry_policy=policy,
                 )
             return result
-        resilient = workflow.patched("publish-transient-retry-v1")
+        resilient = pending["resilient"] if "resilient" in pending else workflow.patched("publish-transient-retry-v1")
         policy = (
             RetryPolicy(
                 initial_interval=timedelta(seconds=2),
@@ -325,42 +357,45 @@ class PublishWorkflow:
             if resilient
             else RETRY
         )
-        try:
-            result = await durable_activity(
-                "execute_task",
-                args,
-                start_to_close_timeout=timedelta(minutes=4),
-                task_queue=activity_queue("publish"),
-                retry_policy=policy,
-                schedule_to_close_timeout=timedelta(days=1) if resilient else None,
-            )
-        except ActivityError:
-            await workflow.execute_activity(
-                "mark_task_failed",
-                args,
-                start_to_close_timeout=timedelta(seconds=30),
-                task_queue=activity_queue("publish"),
-                retry_policy=RETRY,
-            )
-            return {"state": "failed"}
-        if workflow.patched("durable-publish-reconciliation-v1"):
-            for delay in (5, 30, 120, 300, 900, 1800, 3600):
-                if result.get("state") != "unknown":
-                    break
-                await workflow.sleep(delay)
+        result = {"state": "unknown"}
+        if not reconciling:
+            try:
                 result = await durable_activity(
                     "execute_task",
                     args,
+                    pending_args=[args, {"resilient": resilient}],
                     start_to_close_timeout=timedelta(minutes=4),
                     task_queue=activity_queue("publish"),
                     retry_policy=policy,
                     schedule_to_close_timeout=timedelta(days=1) if resilient else None,
                 )
-        elif result.get("state") == "unknown":
-            await workflow.sleep(5)
+            except ActivityError:
+                await workflow.execute_activity(
+                    "mark_task_failed",
+                    args,
+                    start_to_close_timeout=timedelta(seconds=30),
+                    task_queue=activity_queue("publish"),
+                    retry_policy=RETRY,
+                )
+                return {"state": "failed"}
+        if reconciling:
+            delays = pending["delays"]
+        elif workflow.patched("durable-publish-reconciliation-v1"):
+            delays = (5, 30, 120, 300, 900, 1800, 3600)
+        else:
+            delays = (5,)
+        for index, delay in enumerate(delays):
+            if index < pending.get("reconcile_index", 0):
+                continue
+            if result.get("state") != "unknown":
+                break
+            if not (reconciling and index == pending["reconcile_index"]):
+                await workflow.sleep(delay)
             result = await durable_activity(
                 "execute_task",
                 args,
+                pending_args=[args, {"resilient": resilient, "phase": "reconcile",
+                    "reconcile_index": index, "delays": delays}],
                 start_to_close_timeout=timedelta(minutes=4),
                 task_queue=activity_queue("publish"),
                 retry_policy=policy,
@@ -397,7 +432,10 @@ class SupervisorWorkflow:
                     retry_policy=RETRY,
                 )
                 if workflow.patched("local-codex-supervisor-continuation-v1"):
+                    polls = 0
                     while result.get("executor_pending"):
+                        polls += 1
+                        rotate_pending(polls, [aid, pending_cycle])
                         await workflow.sleep(2)
                         result = await workflow.execute_activity("autonomous_cycle", {"agent_id": aid, "cycle_id": pending_cycle},
                             start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)

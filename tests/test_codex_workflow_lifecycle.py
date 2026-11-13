@@ -282,3 +282,153 @@ async def test_chat_continuation_keeps_original_job_and_then_processes_next(monk
                 await handle.terminate("isolated lifecycle test cleanup")
             except Exception:
                 pass
+
+
+async def chain_histories(temporal, handle):
+    histories, run_id = [], handle.first_execution_run_id
+    while run_id:
+        history = await temporal.get_workflow_handle(handle.id, run_id=run_id).fetch_history()
+        histories.append(history)
+        continued = [event.workflow_execution_continued_as_new_event_attributes.new_execution_run_id
+            for event in history.events if event.HasField("workflow_execution_continued_as_new_event_attributes")]
+        run_id = continued[0] if continued else None
+    return histories
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["growth", "growth_existing_history", "channel", "supervisor", "publish", "publish_reconcile", "legacy_reconcile"])
+async def test_long_native_pending_rotates_history_without_new_business_attempt(kind):
+    from lead_app.workflows import (
+        ChannelDeliveryWorkflow,
+        GrowthWorkWorkflow,
+        PublishWorkflow,
+        SupervisorWorkflow,
+    )
+    from temporalio.testing import WorkflowEnvironment
+
+    assert os.environ.get("LEAD_GROWTH_TEST_ENV") == "1"
+    workflows = {"growth": GrowthWorkWorkflow, "growth_existing_history": GrowthWorkWorkflow, "channel": ChannelDeliveryWorkflow,
+        "supervisor": SupervisorWorkflow, "publish": PublishWorkflow,
+        "publish_reconcile": PublishWorkflow, "legacy_reconcile": PublishWorkflow}
+    target = workflows[kind]
+    ref = {"agent_id": uuid4().hex, "task_id": uuid4().hex, "task_generation": 1}
+    claim = {"ref": ref, "kind": "research", "attempt_token": uuid4().hex}
+    executions, advances, finishes, policies = [], [], [], []
+
+    @activity.defn(name="growth_advance")
+    async def advance(args: dict):
+        advances.append(copy.deepcopy(args))
+        return {"state": "terminal"} if finishes else {"state": "ready", "claim": claim}
+
+    @activity.defn(name="growth_finish")
+    async def finish(args: dict):
+        finishes.append(copy.deepcopy(args))
+        return {"accepted_control": True}
+
+    @activity.defn(name="execution_policy")
+    async def policy(args: dict):
+        policies.append(copy.deepcopy(args))
+        return {"retry_interval_seconds": 2, "retry_attempts": 3}
+
+    async def body(args):
+        executions.append(copy.deepcopy(args))
+        if kind.endswith("reconcile"):
+            # The initial call observes unknown. The first reconciliation then
+            # waits for 105 native polls, spanning a new Workflow execution.
+            if len(executions) == 1 or len(executions) > 106:
+                return {"state": "unknown"}
+        if len(executions) <= (106 if kind.endswith("reconcile") else 105):
+            return {"executor_pending": True}
+        return {"stop": True, "state": "completed", "outcome": "completed"}
+
+    names = {"growth": "growth_execute", "growth_existing_history": "growth_execute", "channel": "channel_delivery_tick", "supervisor": "autonomous_cycle"}
+    execute = activity.defn(name=names.get(kind, "execute_task"))(body)
+    activities = [advance, finish, policy, execute]
+    folder = STATE.parent/"test-server"
+    folder.mkdir(exist_ok=True)
+    async with await WorkflowEnvironment.start_time_skipping(download_dest_dir=str(folder)) as env:
+        queue = uuid4().hex
+        def admit_patch(info):
+            # Model an existing history whose first 102 pending results have no
+            # new marker. A memoized False must not disable rotation forever.
+            return not (kind == "growth_existing_history"
+                and info.patch_id.startswith("local-codex-pending-history-v1") and len(executions) < 103)
+
+        async with Worker(env.client, task_queue=queue, workflows=[target], activities=activities,
+                          max_concurrent_activities=1, patch_activation_callback=admit_patch):
+            args = ref if kind != "legacy_reconcile" else {"task_id": ref["task_id"]}
+            if kind == "supervisor":
+                args = ref["agent_id"]
+            handle = await env.client.start_workflow(target.run, args, id=uuid4().hex, task_queue=queue)
+            result = await asyncio.wait_for(handle.result(), 25)
+        histories = await chain_histories(env.client, handle)
+        assert len(histories) == 2, "a long native wait must rotate before unbounded history accumulates"
+        assert executions and all(item == executions[0] for item in executions)
+        if kind.startswith("growth"):
+            assert len(advances) == 2, "resume the original claim without acquiring another attempt"
+            assert len(finishes) == 1 and finishes[0]["claim"] == claim
+        if kind.startswith("publish"):
+            assert len(policies) == 1, "the original admitted retry policy survives rotation"
+        if kind.endswith("reconcile"):
+            assert result == {"state": "unknown"}
+            timers = [event.timer_started_event_attributes.start_to_fire_timeout.seconds
+                for history in histories for event in history.events
+                if event.HasField("timer_started_event_attributes")]
+            assert [delay for delay in timers if delay != 2] == [5, 30, 120, 300, 900, 1800, 3600]
+        before = len(executions), len(advances), len(finishes), len(policies)
+        for index, history in enumerate(histories):
+            (STATE/f"codex-rollover-{kind}-{index}.json").write_text(history.to_json())
+            await Replayer(workflows=[target]).replay_workflow(history)
+        assert (len(executions), len(advances), len(finishes), len(policies)) == before
+
+
+@pytest.mark.asyncio
+async def test_chat_pending_rotation_keeps_current_job_and_signaled_queue():
+    from lead_app.workflows import ChatWorkflow
+    from temporalio.testing import WorkflowEnvironment
+
+    assert os.environ.get("LEAD_GROWTH_TEST_ENV") == "1"
+    polls, completed = [], []
+    second_done = asyncio.Event()
+
+    @activity.defn(name="chat_job")
+    async def chat(args: dict):
+        polls.append(copy.deepcopy(args))
+        if args["job_id"] == "first" and len(polls) <= 105:
+            return {"executor_pending": True}
+        completed.append(args["job_id"])
+        if args["job_id"] == "second":
+            second_done.set()
+        return {"completed": True}
+
+    folder = STATE.parent/"test-server"
+    folder.mkdir(exist_ok=True)
+    async with await WorkflowEnvironment.start_time_skipping(download_dest_dir=str(folder)) as env:
+        queue, aid = uuid4().hex, uuid4().hex
+        result = None
+        handle = None
+        try:
+            async with Worker(env.client, task_queue=queue, workflows=[ChatWorkflow], activities=[chat],
+                              max_concurrent_activities=1):
+                handle = await env.client.start_workflow(ChatWorkflow.run, args=[aid, ["first"]],
+                    id=uuid4().hex, task_queue=queue)
+                await eventually(lambda: len(polls) >= 1)
+                await handle.signal("enqueue", "second")
+                result = asyncio.create_task(handle.result())  # Enable real server time skipping.
+                await asyncio.wait_for(second_done.wait(), 25)
+                await eventually(lambda: len(polls) == 107)
+            histories = await chain_histories(env.client, handle)
+            assert len(histories) == 2
+            assert completed == ["first", "second"]
+            assert all(item == {"agent_id": aid, "job_id": "first"} for item in polls[:-1])
+            before = len(polls)
+            for index, history in enumerate(histories):
+                (STATE/f"codex-rollover-chat-{index}.json").write_text(history.to_json())
+                await Replayer(workflows=[ChatWorkflow]).replay_workflow(history)
+            assert len(polls) == before
+        finally:
+            if result:
+                result.cancel()
+                await asyncio.gather(result, return_exceptions=True)
+            if handle:
+                await handle.terminate("isolated chat rotation cleanup")
