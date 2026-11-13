@@ -69,6 +69,42 @@ async def test_broad_manual_proposal_cannot_borrow_a_distant_self_link(common_pa
             subject_suffix=text[len('Signed in as member-alpha'):],connection_origin=ORIGIN)
 
 
+@pytest.mark.parametrize('kind',['long_subject_id','long_link_id','long_css_path','long_prefix','long_suffix','empty_href','missing_href','optional_empty_href','no_link','normal'])
+async def test_inferred_contract_obeys_original_selector_affix_and_href_bounds(common_page,kind):
+    page,_,_=common_page
+    html='<p id=current>Signed in as member-alpha · <a id=self rel=me href=/private-self>Settings</a></p>'
+    await page.set_content(html)
+    if kind in ('long_subject_id','long_link_id'):
+        await page.locator('#current' if kind=='long_subject_id' else '#self').evaluate("node=>node.id='x'.repeat(500)")
+    elif kind=='long_css_path':
+        await page.locator('#current').evaluate("node=>{node.removeAttribute('id');for(let i=0;i<12;i++){const parent=document.createElement('long-custom-element-tag-name');node.before(parent);parent.append(node);node=parent;}}")
+    elif kind=='long_suffix':
+        await page.locator('#self').evaluate("node=>node.innerText='Settings'.repeat(30)")
+    elif kind=='long_prefix':
+        await page.locator('#current').evaluate("node=>{node.style.whiteSpace='pre';node.firstChild.textContent='Signed in as'+' '.repeat(200)+'member-alpha · '}")
+    elif kind in ('empty_href','optional_empty_href'):
+        await page.locator('#self').evaluate("node=>node.setAttribute('href','')")
+    elif kind=='missing_href':
+        await page.locator('#self').evaluate("node=>node.removeAttribute('href')")
+    elif kind=='no_link':
+        await page.locator('#self').evaluate('node=>node.remove()')
+    kwargs={'connection_origin':ORIGIN,'require_self_link':kind not in ('optional_empty_href','no_link')}
+    if kind in ('long_css_path','long_prefix','long_suffix','empty_href','missing_href','optional_empty_href'):
+        with pytest.raises(ValueError):
+            await inspect_current_identity(page,**kwargs)
+    else:
+        facts=await inspect_current_identity(page,**kwargs)
+        assert facts['acting_subject']=='member-alpha'
+        assert len(facts['acting_subject_selector'])<=300
+        assert await page.locator(facts['acting_subject_selector']).count()==1
+        if kind=='no_link':
+            assert facts['self_link_selector'] is None
+        else:
+            assert len(facts['self_link_selector'])<=300
+            assert await page.locator(facts['self_link_selector']).count()==1
+        assert len(facts['self_subject_prefix'])<=150 and len(facts['self_subject_suffix'])<=150
+
+
 async def test_current_identity_facts_do_not_survive_same_url_document_replacement(common_page,monkeypatch):
     page,_,_=common_page
     html='<p>Signed in as member-alpha · <a rel=me href=/private-self>Settings</a></p>'

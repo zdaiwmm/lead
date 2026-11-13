@@ -237,11 +237,12 @@ _CURRENT_IDENTITY = r'''
    };
    if(link&&!(node.contains(link)||block&&block===link.closest('p,li,dd,td,label')||adjacent(node,link)||adjacent(link,node)))return null;
    const selector=node=>{
-     if(node.id&&document.querySelectorAll('#'+CSS.escape(node.id)).length===1)return '#'+CSS.escape(node.id);
+     const id=node.id?'#'+CSS.escape(node.id):null;
+     if(id&&id.length<=300&&document.querySelectorAll(id).length===1)return id;
      const path=[];let item=node;
      while(item&&path.length<24){const tag=item.tagName.toLowerCase();let n=1;for(let p=item.previousElementSibling;p;p=p.previousElementSibling)if(p.tagName===item.tagName)n++;
        path.unshift(tag+':nth-of-type('+n+')');item=item.parentElement;}
-     const css=path.join(' > ');return !item&&document.querySelectorAll(css).length===1&&document.querySelector(css)===node?css:null;
+     const css=path.join(' > ');return !item&&css.length<=300&&document.querySelectorAll(css).length===1&&document.querySelector(css)===node?css:null;
    };
    const full=text(node);let identity=full;
    if(link&&node.contains(link)){
@@ -252,7 +253,7 @@ _CURRENT_IDENTITY = r'''
    const subjectSelector=selector(node),linkSelector=link?selector(link):null;
    if(!subjectSelector||link&&!linkSelector)return null;
    return {node,link,facts:{url:location.href,text:full,identity_text:identity,subject_selector:subjectSelector,
-     link_selector:linkSelector,link_url:link?link.href:null}};
+     link_selector:linkSelector,link_url:link?link.href:null,link_href:link?link.getAttribute('href'):null}};
  };
 '''
 
@@ -269,6 +270,11 @@ async def inspect_current_identity(page, *, connection_origin, require_self_link
         facts=await proof.evaluate('proof=>proof.facts')
         if not facts or facts['url']!=page_url:
             raise IdentityFactError('identity_current_self_unestablished')
+        _selector(facts['subject_selector'])
+        if facts['link_selector'] is not None:
+            _selector(facts['link_selector'])
+            if not isinstance(facts['link_href'],str) or not facts['link_href'].strip():
+                raise IdentityFactError('identity_current_self_unestablished')
         if facts['link_url'] and (origin(facts['link_url'])!=origin(connection_origin) or urlsplit(facts['link_url']).fragment):
             raise IdentityFactError('identity_self_origin_changed')
         prefix=re.match(_ACTING,facts['identity_text'],re.I)
@@ -278,6 +284,7 @@ async def inspect_current_identity(page, *, connection_origin, require_self_link
         subject=_subject(value.group(1))
         prefix=prefix.group()
         suffix=facts['text'][len(prefix)+len(subject):]
+        _affixes(prefix,suffix)
         fresh=await proof.evaluate('(proof,args)=>{'+_CURRENT_IDENTITY+
             'if(proof.root!==document.documentElement)return null;const current=inspect(args);'
             'return current&&current.node===proof.node&&current.link===proof.link?current.facts:null;}',args)
