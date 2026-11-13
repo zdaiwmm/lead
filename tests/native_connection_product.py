@@ -81,7 +81,7 @@ async def verify_login(
                 approved=checked_image(images[0].removeprefix('data:image/png;base64,'))[0] if images else None
                 units,count,_=request_projection(raw,image_model=IMAGE_MODEL,approved_image=approved)
                 model_calls[-1].update(projection_units=units,nonimage_bytes=units-count*IMAGE_TOKENS)
-            if mode.startswith(('batch_','vision_')):
+            if mode.startswith(('batch_','vision_')) or mode=='operation_feedback':
                 parameters=request.get('tools',[{}])[0].get('function',{}).get('parameters',{})
                 properties=parameters.get('properties',{})
                 def operation_enum(node):
@@ -112,6 +112,9 @@ async def verify_login(
                 model_calls[-1]['discovery_context_seen']=all(key in text for key in ('starting_urls','account_origin','intent_scope'))
             model_calls[-1]['identity_feedback_code_seen']='identity_element_ambiguous' in text
             if mode=='operation_feedback':
+                model_calls[-1]['image_parts']=sum(1 for message in request.get('messages',[]) for part in
+                    (message.get('content') if isinstance(message.get('content'),list) else [])
+                    if isinstance(part,dict) and part.get('type')=='image_url')
                 model_calls[-1]['desired_reply_context_seen']='"desired_operation": "reply"' in text
                 model_calls[-1]['desired_reply_goal_seen']='Desired discovery operation: reply.' in text
                 model_calls[-1]['operation_feedback_seen']='method_discovery_operation_mismatch' in text
@@ -385,7 +388,7 @@ async def verify_login(
                 'next_goal':'Complete the assigned bounded task.','current_plan_item':0,
                 'plan_update':['Complete the controlled assigned task.'] if step==0 else None,
                 'action':actions}
-            if mode.startswith(('batch_','vision_')):
+            if mode.startswith(('batch_','vision_')) or mode=='operation_feedback':
                 output={key:value for key,value in output.items() if key in properties}
             content = json.dumps(output)
             tool = request.get("tools", [{"function": {"name": "AgentOutput"}}])[0][
