@@ -302,7 +302,8 @@ class NativeCase:
                     'PYTHONPATH': str(runtime/'site-packages')+os.pathsep+str(ROOT/'services/api'),
                     'ANONYMIZED_TELEMETRY': 'false', 'BROWSER_USE_CLOUD_SYNC': 'false',
                     'BROWSER_USE_VERSION_CHECK': 'false', 'BROWSER_USE_SETUP_LOGGING': 'false'}.items()
-                    if key in ('PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'PYTHONPATH') or key.startswith(('ANONYMIZED_', 'BROWSER_USE_'))})
+                    if key != 'BROWSER_USE_API_KEY' and
+                    (key in ('PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'PYTHONPATH') or key.startswith(('ANONYMIZED_', 'BROWSER_USE_')))})
             try:
                 stdout, _ = await asyncio.wait_for(child.communicate(json.dumps(data).encode()), 90)
                 if child.returncode or json.loads(stdout).get('model_requests') != 0:
