@@ -14,6 +14,8 @@ OBSERVED='Members may use an authorized browser assistant or browser automation 
     'Members can use an authorized browser automation to publish notes and reply.',
     'Members may use authorized browser automation to publish notes and reply.',
     'Automated browser tools are permitted for member publishing and replies.',
+    'Members may use an authorized browser assistant to publish notes and reply; members may also publish notes and reply manually.',
+    'Members may use an authorized browser assistant to publish notes and reply, or may perform these actions manually.',
 ])
 def test_explicit_authorized_member_assistance_covers_the_actual_operation(operation,grant):
     context=MEMBER+' '+grant
@@ -33,6 +35,9 @@ def test_explicit_authorized_member_assistance_covers_the_actual_operation(opera
     'Members may use an authorized browser assistant or browser automation to read pages. Members can publish and reply manually.',
     'Members may use an unauthorized browser assistant to publish notes and reply.',
     'Members may use a browser assistant to publish notes and reply.',
+    'Members may use an authorized browser assistant to read pages about how to publish notes and reply.',
+    'Members may use an authorized browser assistant only to read pages, publish notes and reply by hand.',
+    'Members may use an authorized browser assistant to read pages but publish notes and reply manually.',
 ])
 def test_assistance_wording_keeps_denial_conditions_and_read_only_limits(operation,grant):
     with pytest.raises(MethodFactError):

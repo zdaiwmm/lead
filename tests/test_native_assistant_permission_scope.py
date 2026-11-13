@@ -1,9 +1,7 @@
 """An assistant's reading grant never authorizes an explicitly manual write."""
 import pytest
-
 from lead_app.native_method_errors import MethodFactError
 from lead_app.native_method_facts import _permission
-
 
 MEMBER = (
     "A regular member may publish community notes and reply to existing topics "

@@ -63,6 +63,24 @@ async def _nodes(page,selectors,names):
     return nodes
 
 
+def _member_assistant_action(context,operation):
+    """Bind a supported infinitive action list to this explicit assistant grant.
+
+    A later clause about manual work, or instructions about publishing, cannot
+    extend a reading grant. Ambiguous prose remains an unestablished method.
+    """
+    grant=r'\bmembers?\s+(?:may|can)\s+use\s+(?:an?\s+)?authorized\s+browser\s+(?:automation|assistant(?:\s+or\s+browser\s+automation)?)\b\s+to\s+([^.!?。！？;]{1,220})'
+    verb=r'(?:publish|post)' if operation=='publish' else r'(?:reply|respond)'
+    for match in re.finditer(grant,context,re.I):
+        purpose=re.split(r'\b(?:but|while|whereas|however|although|except|yet|(?:or|and)\s+(?:members?\s+)?(?:may|can))\b',match[1],maxsplit=1,flags=re.I)[0]
+        if re.search(r'\b(?:manual(?:ly)?|by\s+hand|read[ -]?only|about|regarding|how\s+to)\b',purpose,re.I):
+            continue
+        if any(re.match(r'\s*(?:also\s+)?(?:to\s+)?'+verb+r'\b',part,re.I)
+                for part in re.split(r',|\b(?:and|or)\b',purpose)):
+            return True
+    return False
+
+
 def _permission(context, quote, operation):
     """Conservative supported rule language, rather than model-asserted approval."""
     normalized=_text(context)
@@ -89,7 +107,7 @@ def _permission(context, quote, operation):
     allowed_action=allowed_action or re.search(r'普通(?:成员|会员).{0,50}(?:可以|允许).{0,50}'+('(?:发布|发帖)' if operation=='publish' else '回复'),normalized)
     automated=re.search(r'\b(?:automated(?:\s+browser)?\s+tools?|browser\s+automation|automation|bots?)\s+(?:(?:are|is)\s+)?(?:permitted|allowed)\b',normalized,re.I)
     automated=automated or re.search(r'(?:允许|可以).{0,50}(?:自动工具|自动化)|(?:自动工具|自动化).{0,50}(?:允许|可以)',normalized)
-    automated=automated or re.search(r'\bmembers?\s+(?:may|can)\s+use\s+(?:an?\s+)?authorized\s+browser\s+(?:automation|assistant(?:\s+or\s+browser\s+automation)?)\b[^.!?。！？]{0,220}\b'+action+r'\b',normalized,re.I)
+    automated=automated or _member_assistant_action(normalized,operation)
     automated=automated or re.search(r'\bmembers?\s+(?:may|can)\b[^.!?。！？]{0,220}\b'+action+r'\b[^.!?。！？]{0,220}\bincluding\s+through\s+authorized\s+browser\s+automation\b',normalized,re.I)
     if not member or not allowed_action or not automated:
         raise MethodFactError('browser_method_permission_unestablished')
