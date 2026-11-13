@@ -188,7 +188,11 @@ class NativeAction(NativeTask):
             raise ValueError('native_submit_observation_expired')
         proof['claimed']=True
         self.phase('claim_private_identity')
-        await self.descriptor()
+        # The original Document request is paused. A descriptor exports fresh
+        # DOM to the SDK and may wait for that navigation's renderer; this
+        # internal claim only checks current authority before its auxiliary
+        # private-self/editor reads and original SQL claim below.
+        await asyncio.to_thread(self.actor.native_runtime.current_scope,self.lease)
         method=self.action['intent']['browser_method']
         match_request(method,request,self.action['intent'])
         import json

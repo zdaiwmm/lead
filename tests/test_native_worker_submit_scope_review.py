@@ -32,7 +32,8 @@ def worker_action(monkeypatch, change=None):
 
     controller = native_action.NativeAction.__new__(native_action.NativeAction)
     controller.actor = SimpleNamespace(aid='00000000-0000-0000-0000-000000000001', epoch=7,
-        context=SimpleNamespace(cookies=cookies), native_runtime=SimpleNamespace(gate=gate, release_page=release))
+        context=SimpleNamespace(cookies=cookies), native_runtime=SimpleNamespace(gate=gate, release_page=release,
+            current_scope=lambda scope: None))
     controller.lease = {'target_id': 'page', 'document_revision': 3}
     controller.reconcile = False
     controller.action_id = '00000000-0000-0000-0000-000000000002'
@@ -48,6 +49,9 @@ def worker_action(monkeypatch, change=None):
     controller.phase = lambda name: None
 
     async def descriptor():
+        return {}
+
+    async def identity():
         # A later page's ServiceWorker.workerVersionUpdated can arrive during
         # the verifier's awaited current-identity/editor reads. No navigation,
         # TaskRef, nonce, ActionRef or document revision changes in this cut.
@@ -55,9 +59,6 @@ def worker_action(monkeypatch, change=None):
             gate.worker_versions['v1'].pop('controlledClients', None)
         elif change == 'worker_target':
             gate.worker_versions['v1']['targetId'] = 'replacement-worker'
-        return {}
-
-    async def identity():
         return {'id': 'account', 'binding_version': 1, 'external_account_id': 'member'}
 
     async def temporary(*args):
