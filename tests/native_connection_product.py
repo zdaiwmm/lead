@@ -51,12 +51,16 @@ async def verify_login(
             request = json.loads(raw)
             if mode=='method_feedback':
                 shapes=[]
+                parameters=[]
                 def selector_shapes(node):
                     if isinstance(node,dict):
                         keys=set(node.get('properties',{}))
-                        base={'self_subject','editor_target','editor_body','submit'}
+                        base={'editor_target','editor_body','submit'}
                         if keys in (base,base|{'editor_parent'}):
-                            shapes.append({'required':sorted(node.get('required',[])),
+                            shapes.append({'properties':sorted(keys),'required':sorted(node.get('required',[])),
+                                'extra_forbidden':node.get('additionalProperties') is False})
+                        if {'target_url','operation','selectors'}<=keys:
+                            parameters.append({'properties':sorted(keys),'required':sorted(node.get('required',[])),
                                 'extra_forbidden':node.get('additionalProperties') is False})
                         for value in node.values():
                             selector_shapes(value)
@@ -65,6 +69,7 @@ async def verify_login(
                             selector_shapes(value)
                 selector_shapes(request.get('tools',[]))
                 model_calls[-1]['method_selector_schemas']=shapes
+                model_calls[-1]['method_parameter_schemas']=parameters
             if mode.startswith('vision_'):
                 model_calls[-1]['image_parts']=sum(1 for message in request.get('messages',[]) for part in
                     (message.get('content') if isinstance(message.get('content'),list) else [])
@@ -81,7 +86,7 @@ async def verify_login(
                 approved=checked_image(images[0].removeprefix('data:image/png;base64,'))[0] if images else None
                 units,count,_=request_projection(raw,image_model=IMAGE_MODEL,approved_image=approved)
                 model_calls[-1].update(projection_units=units,nonimage_bytes=units-count*IMAGE_TOKENS)
-            if mode.startswith(('batch_','vision_')) or mode in ('operation_feedback','navigation_progress'):
+            if mode.startswith(('batch_','vision_')) or mode in ('operation_feedback','navigation_progress','method_feedback'):
                 parameters=request.get('tools',[{}])[0].get('function',{}).get('parameters',{})
                 properties=parameters.get('properties',{})
                 def operation_enum(node):
@@ -111,7 +116,7 @@ async def verify_login(
             if mode.startswith('batch_'):
                 model_calls[-1]['discovery_context_seen']=all(key in text for key in ('starting_urls','account_origin','intent_scope'))
             model_calls[-1]['identity_feedback_code_seen']='identity_element_ambiguous' in text
-            if mode in ('operation_feedback','navigation_progress'):
+            if mode in ('operation_feedback','navigation_progress','method_feedback'):
                 model_calls[-1]['image_parts']=sum(1 for message in request.get('messages',[]) for part in
                     (message.get('content') if isinstance(message.get('content'),list) else [])
                     if isinstance(part,dict) and part.get('type')=='image_url')
@@ -119,6 +124,14 @@ async def verify_login(
                 model_calls[-1]['desired_reply_goal_seen']='Desired discovery operation: reply.' in text
                 model_calls[-1]['operation_feedback_seen']='method_discovery_operation_mismatch' in text
             if mode=='method_feedback':
+                current=[]
+                for pos,line in enumerate(text.splitlines()):
+                    if 'Signed in as' in line:
+                        current.extend(text.splitlines()[max(0,pos-1):pos+3])
+                def scrub(line):
+                    return line.replace(board.state.username,'saved_username').replace(board.state.password,'saved_password')[:500]
+                model_calls[-1]['current_subject_observation']=[scrub(line) for line in current[-6:]]
+                model_calls[-1]['submit_observation']=[scrub(line) for line in text.splitlines() if '<button' in line.lower()][-3:]
                 model_calls[-1]['method_feedback_code_seen']='browser_method_element_ambiguous' in text
                 model_calls[-1]['method_feedback_fields_seen']=[name for name in
                     ('self_subject','editor_target','editor_body','submit','editor_parent','permission_selector')
@@ -267,6 +280,7 @@ async def verify_login(
             elif workflow["kind"] == "discovery":
                 operation_probe=mode=='operation_feedback' and workflow.get('desired_operation')=='reply'
                 navigation_probe=mode=='navigation_progress' and workflow.get('desired_operation')=='reply'
+                method_probe=mode=='method_feedback'
                 if navigation_probe and (step<4 or workflow.get('navigation_variant')=='loop'):
                     action={'guarded_navigate':{'url':board.origin+'/home' if step%2==0 else workflow['editor_url']}}
                 elif step == 0 and mode!='method_feedback':
@@ -277,7 +291,7 @@ async def verify_login(
                     }
                 elif operation_probe and step==2:
                     action={'guarded_navigate':{'url':workflow['editor_url']}}
-                elif step == 1 or mode=='method_feedback' and step==0 or operation_probe and step==3 or navigation_probe and step==4:
+                elif step == 1 or method_probe or operation_probe and step==3 or navigation_probe and step==4:
                     proposed_operation='publish' if operation_probe and step==1 else workflow.get('operation','publish')
                     action = {
                         "propose_method": {
@@ -301,11 +315,16 @@ async def verify_login(
                             "#editor-parent"
                         )
                     if mode=='method_feedback':
-                        if step==0:
-                            action['propose_method']['selectors']['self_subject']='#missing-observed-current-subject'
+                        if step<workflow.get('selector_errors',1):
                             action['propose_method']['selectors']['submit']='#missing-observed-submit'
+                        elif workflow.get('permission_errors'):
+                            action['propose_method']['permission_quote']='Unproved model assertion with no actual platform permission.'
                         elif not model_calls[-1]['method_feedback_code_seen']:
                             action={'done':{'success':False,'text':'Controlled feedback was not available.'}}
+                        if workflow.get('omit_identity_hints') and 'propose_method' in action:
+                            action['propose_method']['selectors'].pop('self_subject',None)
+                            action['propose_method'].pop('self_subject_prefix',None)
+                            action['propose_method'].pop('self_subject_suffix',None)
             elif step in (0, 1):
                 field = "username" if step == 0 else "password"
                 matches = [
@@ -391,7 +410,7 @@ async def verify_login(
                 'next_goal':'Complete the assigned bounded task.','current_plan_item':0,
                 'plan_update':['Complete the controlled assigned task.'] if step==0 else None,
                 'action':actions}
-            if mode.startswith(('batch_','vision_')) or mode in ('operation_feedback','navigation_progress'):
+            if mode.startswith(('batch_','vision_')) or mode in ('operation_feedback','navigation_progress','method_feedback'):
                 output={key:value for key,value in output.items() if key in properties}
             content = json.dumps(output)
             tool = request.get("tools", [{"function": {"name": "AgentOutput"}}])[0][

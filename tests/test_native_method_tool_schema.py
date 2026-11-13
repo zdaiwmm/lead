@@ -1,10 +1,12 @@
 """The model sees the same explicit method proposal contract as the manager."""
 import ast
+import inspect
 from pathlib import Path
 from typing import Annotated, Literal, get_type_hints
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic.json_schema import SkipJsonSchema
 
 ROOT=Path(__file__).resolve().parents[1]
 PUBLISH={'self_subject','editor_target','editor_body','submit'}
@@ -17,16 +19,16 @@ def proposal_tool(**namespace):
     node.decorator_list=[]
     classes=[n for n in tree.body if isinstance(n,ast.ClassDef)
         and n.name in ('PublishMethodSelectors','ReplyMethodSelectors')]
-    scope={'Annotated':Annotated,'Literal':Literal,'BaseModel':BaseModel,'ConfigDict':ConfigDict,'Field':Field,**namespace}
+    scope={'Annotated':Annotated,'Literal':Literal,'BaseModel':BaseModel,'ConfigDict':ConfigDict,'Field':Field,'SkipJsonSchema':SkipJsonSchema,**namespace}
     exec(compile(ast.fix_missing_locations(ast.Module(body=classes+[node],type_ignores=[])),'<actual-runner-tool>','exec'),scope)
     return scope['propose_method'],description
 
 
-def test_actual_tool_annotation_exposes_strict_four_or_five_selector_fields():
+def test_actual_tool_annotation_exposes_only_required_observed_editor_fields():
     function,_=proposal_tool()
-    schema=TypeAdapter(get_type_hints(function)['selectors']).json_schema()
+    schema=TypeAdapter(get_type_hints(function,include_extras=True)['selectors']).json_schema()
     models=[schema['$defs'][branch['$ref'].rsplit('/',1)[-1]] for branch in schema['anyOf']]
-    assert {frozenset(model['required']) for model in models}=={frozenset(PUBLISH),frozenset(PUBLISH|{'editor_parent'})}
+    assert {frozenset(model['required']) for model in models}=={frozenset(PUBLISH-{'self_subject'}),frozenset((PUBLISH-{'self_subject'})|{'editor_parent'})}
     for model in models:
         assert model['additionalProperties'] is False
         assert set(model['properties'])==set(model['required'])
@@ -37,7 +39,7 @@ def test_actual_tool_annotation_exposes_strict_four_or_five_selector_fields():
 def test_complete_selector_dto_keeps_exact_fields(reply):
     function,_=proposal_tool()
     values={key:'observed-css' for key in PUBLISH|({'editor_parent'} if reply else set())}
-    parsed=TypeAdapter(get_type_hints(function)['selectors']).validate_python(values)
+    parsed=TypeAdapter(get_type_hints(function,include_extras=True)['selectors']).validate_python(values)
     assert parsed.model_dump()==values
 
 
@@ -51,7 +53,7 @@ def test_missing_or_unknown_selector_fields_are_not_silently_accepted(reply,chan
     else:
         values['guessed_field']='observed-css'
     with pytest.raises(ValueError):
-        TypeAdapter(get_type_hints(function)['selectors']).validate_python(values)
+        TypeAdapter(get_type_hints(function,include_extras=True)['selectors']).validate_python(values)
 
 
 def test_fixed_contract_hint_lists_exact_keys_without_private_data():
@@ -61,19 +63,23 @@ def test_fixed_contract_hint_lists_exact_keys_without_private_data():
     assert 'publish' in hint and 'reply' in hint and 'not-for-model' not in hint
 
 
-def test_all_original_parameters_have_explicit_descriptions_and_bounds():
+def test_only_observable_parameters_are_shown_and_legacy_bounds_remain_runtime_checked():
     from pydantic import create_model
     function,description=proposal_tool()
     fields=get_type_hints(function,include_extras=True)
-    model=create_model('ObservedMethodProposal',**{key:(value,...) for key,value in fields.items()})
+    signature=inspect.signature(function)
+    model=create_model('ObservedMethodProposal',**{key:(value,... if signature.parameters[key].default is inspect.Parameter.empty
+        else signature.parameters[key].default) for key,value in fields.items()})
     schema=model.model_json_schema()
-    assert set(schema['required'])=={'target_url','operation','selectors','self_subject_prefix',
-        'self_subject_suffix','permission_selector','permission_quote'}
+    assert set(schema['required'])=={'target_url','operation','selectors','permission_selector','permission_quote'}
+    assert set(schema['properties'])==set(schema['required'])
     properties=schema['properties']
     assert properties['target_url']['maxLength']==2000
     assert 'destination' in properties['target_url']['description']
-    assert properties['self_subject_prefix']['minLength']==1 and properties['self_subject_prefix']['maxLength']==150
-    assert properties['self_subject_suffix']['maxLength']==150
+    for name in ('self_subject_prefix','self_subject_suffix'):
+        assert TypeAdapter(fields[name]).validate_python('')==''
+        with pytest.raises(ValueError):
+            TypeAdapter(fields[name]).validate_python('x'*151)
     assert 'target_url page' in properties['permission_selector']['description']
     assert (properties['permission_quote']['minLength'],properties['permission_quote']['maxLength'])==(20,3000)
     assert all(key in description for key in PUBLISH|{'editor_parent'})
