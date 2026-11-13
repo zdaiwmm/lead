@@ -126,8 +126,13 @@ def test_concurrent_exact_requests_cannot_forward_or_drop_twice(rig):
         threading.Event().wait(.08)
         gate.set()
         results = [future.result(timeout=5) for future in futures]
-    assert results.count("dropped") == 1 and results.count(409) == 7
-    assert len(seen) == 1 and sum(event["outcome"] == "dropped" for event in events) == 1
+    observed = {"client_results": results, "upstream_posts": len(seen),
+        "proxy_dropped": sum(event["outcome"] == "dropped" for event in events),
+        "proxy_blocked": sum(event["outcome"] == "blocked" for event in events),
+        "proxy_errors": sum(event["outcome"] == "handler_error" for event in events)}
+    assert observed["upstream_posts"] == observed["proxy_dropped"] == 1, observed
+    assert observed["proxy_blocked"] == 7, observed
+    assert results.count("dropped") == 1 and results.count(409) == 7, observed
 
 
 def test_store_restart_preserves_inflight_and_consumed_guard(rig):

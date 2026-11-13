@@ -273,6 +273,11 @@ def make_server(store, *, listen_port=0, emit=None):
         do_GET = do_POST = do_HEAD = proxy
 
     class Server(ThreadingHTTPServer):
+        # TCPServer defaults to five queued connects. A legitimate eight-way
+        # claim race must reach the handler and receive seven explicit 409s,
+        # rather than produce extra transport failures at the listen queue.
+        request_queue_size = 64
+
         def handle_error(self, request, client_address):
             # Never print a request traceback or header/body-derived error text.
             record("UNKNOWN", "/<other>", 500, "handler_error")
