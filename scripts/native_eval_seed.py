@@ -41,9 +41,12 @@ async def main(data):
         await browser.start_scoped(lease, scope)
         try:
             tools = guarded_tools(browser, authorize)
+            last_state=None
 
-            async def index_for(selector):
+            async def index_for(selector,*,optional=False):
+                nonlocal last_state
                 state = await browser.get_browser_state_summary(include_screenshot=False, cached=False)
+                last_state=state
                 found = []
                 for index, node in state.dom_state.selector_map.items():
                     session = await browser.cdp_client_for_node(node)
@@ -63,11 +66,49 @@ async def main(data):
                     finally:
                         await session.cdp_client.send.Runtime.releaseObject(
                             params={'objectId': identifier}, session_id=session.session_id)
+                if not found and optional:
+                    return None
                 if len(found) != 1:
                     raise ValueError('seed_current_method_element_ambiguous')
                 return found[0]
 
-            field = await index_for(data['method']['selectors']['editor_body'])
+            field = await index_for(data['method']['selectors']['editor_body'],optional=True)
+            if field is None:
+                # Acceptance-only preparation: a learned permission target may
+                # be separate from the editor. Follow only real observed safe
+                # links until the original validated body selector is present.
+                from urllib.parse import urljoin, urlsplit
+
+                from lead_app.browser_execution import origin
+                from lead_app.native_session_facts import reject_dangerous_endpoint
+
+                pending=[]
+                visited={last_state.url}
+                while field is None and len(visited)<8:
+                    for node in last_state.dom_state.selector_map.values():
+                        href=(node.attributes or {}).get('href') if node.tag_name.lower()=='a' and node.is_visible else None
+                        if not href:
+                            continue
+                        url=urljoin(last_state.url,href)
+                        try:
+                            if (url in visited or url in pending or url==data['method']['self_url']
+                                    or origin(url)!=origin(data['method']['target_url'])
+                                    or urlsplit(url).query or urlsplit(url).fragment):
+                                continue
+                            reject_dangerous_endpoint(url)
+                        except ValueError:
+                            continue
+                        pending.append(url)
+                    if not pending:
+                        break
+                    url=pending.pop(0)
+                    result=await tools.registry.execute_action('guarded_navigate',{'url':url},browser_session=browser)
+                    if result.error:
+                        raise ValueError('seed_observed_editor_navigation_refused')
+                    visited.add(url)
+                    field=await index_for(data['method']['selectors']['editor_body'],optional=True)
+                if field is None:
+                    raise ValueError('seed_observed_editor_not_found')
             result = await tools.registry.execute_action('guarded_input',
                 {'index': field, 'text': data['body'], 'clear': True}, browser_session=browser)
             if result.error:

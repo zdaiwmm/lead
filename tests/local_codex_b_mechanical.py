@@ -87,23 +87,30 @@ def main():
                 operation='reply' if 'Desired discovery operation: reply' in payload['input'] else 'publish'
                 origin=re.search(r'"account_origin":\s*"([^"]+)"',payload['input'])[1]
                 initial=observed['url']
-                quote='Members can publish notes and reply to existing topics, including through authorized browser automation.'
-                if operation=='reply':
-                    tool(reference,'browser_navigate',{'url':origin+'/desk'})
-                    assert quote in observe(reference)['dom']
-                    tool(reference,'browser_navigate',{'url':origin+'/commons'})
-                    observe(reference)
-                    tool(reference,'browser_navigate',{'url':initial})
-                    observe(reference)
+                separate_rules=os.environ.get('LEAD_C22_RULES_TARGET')=='1'
+                target=origin+('/house-rules' if separate_rules else '/desk')
+                quote=('A regular member may publish community notes and reply to existing topics using their own signed-in account. Both actions are available to ordinary members. '
+                    'Members may use an authorized browser assistant or browser automation to sign in, read pages, publish notes, and reply on their behalf. Automation has the same member permissions as the person who authorizes it.') if separate_rules else 'Members can publish notes and reply to existing topics, including through authorized browser automation.'
+                if operation=='reply' or separate_rules:
+                    tool(reference,'browser_navigate',{'url':target})
+                    assert quote in ' '.join(observe(reference)['dom'].split())
+                    if operation=='publish':
+                        tool(reference,'browser_navigate',{'url':initial})
+                        observe(reference)
+                    else:
+                        tool(reference,'browser_navigate',{'url':origin+'/commons'})
+                        observe(reference)
+                        tool(reference,'browser_navigate',{'url':initial})
+                        observe(reference)
                 else:
                     assert quote in observed['dom']
-                selectors={'editor_target':f'nav a[href="{origin}/desk"]',
+                selectors={'editor_target':f'nav a[href="{target}"]',
                     'editor_body':'#reply-words' if operation=='reply' else '#community-words',
                     'submit':'form button[type=submit]'}
                 if operation=='reply':
                     selectors['editor_parent']='main > article[id^="note-"] a[rel~=bookmark]'
-                proposal={'target_url':origin+'/desk','operation':operation,'selectors':selectors,
-                    'permission_selector':'main','permission_quote':quote}
+                proposal={'target_url':target,'operation':operation,'selectors':selectors,
+                    'permission_selector':'section:has-text("For regular members")' if separate_rules else 'main','permission_quote':quote}
                 wrong=raw(reference,'propose_method',{**proposal,'selectors':{**selectors,'editor_target':'a[rel~=me]'}})
                 assert wrong.get('isError') and 'browser_method_target_changed' in wrong['content'][0]['text'],wrong
                 rejected_targets+=1
@@ -117,6 +124,13 @@ def main():
                     dom=observe(reference)['dom']
                     tool(reference,'browser_click',{'index':index(dom,r'Permanent URL',first=True)})
                 else:
+                    if '<textarea' not in dom:
+                        from urllib.parse import urlsplit
+                        parsed=urlsplit(observed['url'])
+                        editor=parsed.scheme+'://'+parsed.netloc+'/desk'
+                        assert editor in dom
+                        tool(reference,'browser_navigate',{'url':editor})
+                        dom=observe(reference)['dom']
                     body=re.search(r'Authorized body: (.*?)\n',payload['input'],re.S)[1]
                     tool(reference,'browser_input',{'index':index(dom,r'<textarea'),'text':body,'clear':True})
                     dom=observe(reference)['dom']

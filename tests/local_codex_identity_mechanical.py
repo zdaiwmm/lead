@@ -75,6 +75,16 @@ def main():
     proof={'model_requests':0,'real_model':False,'private_namespace_mismatch_rejected':True,
         'fixed_feedback_reached_mcp':True,'matching_private_subject_fresh_verified':True,
         'source_credential_posts':1,'original_request_id':reference,'source_sha':status['cases']['b']['source_sha']}
+    if binding_path:=os.environ.get('LEAD_C22_BINDING_STATE'):
+        target=Path(binding_path)
+        assert not target.exists(),'existing_connector_binding_must_not_be_replaced'
+        target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        from local_codex_c22_mechanical import url
+        target.write_text(json.dumps({'version':1,'requests':{},'sessions':{},'events':[],'controls':[],
+            'binding':{'url':url,'token':bearer,'epoch':epoch,'device_id':device['device_id'],
+                'name':'Original synthetic identity setup, handed to official daemon'}}))
+        target.chmod(0o600)
+        proof['original_device_binding_saved']=True
     report=Path(os.environ['LEAD_C22_MECHANICAL_REPORT'])
     report.write_text(json.dumps(proof,indent=2))
     report.chmod(0o600)

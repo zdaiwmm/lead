@@ -86,6 +86,7 @@ class CodexCase(NativeCase):
         after=self.site.snapshot()
         stage.update(outcome=result['outcome'],result=result,failure_code=result.get('failure_code'),terminal=self.row(ref)['state'],
             seconds=time.monotonic()-stage['started_at_monotonic'],requests=requests,
+            executor_mode='codex' if requests and all(row.get('thread_id') for row in requests) else 'mechanical-tools',
             source_post_delta=sum(row['method']=='POST' for row in after['requests'])-sum(row['method']=='POST' for row in before['requests']))
         if seed:
             self.report['mechanical_seed']=stage
