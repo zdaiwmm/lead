@@ -284,9 +284,20 @@ async def test_original_sso_owner_public_frame_and_worker_actions_share_one_inst
                 assert first['state'] == 'ready', first
                 with tx(aid) as c:
                     task = one(c, 'SELECT * FROM lead.tasks WHERE id=%s', (task['id'],))
+                    reservations_before = {str(row['id']) for row in c.execute('SELECT id FROM lead.budget_reservations').fetchall()}
+                connection_workdir = STATE/'browser-use-runs'/('connection-' + connection)
+                workdir_before = connection_workdir.exists()
                 # This is the real native preflight, not a test-induced handoff.
                 review_wait = await execute_account(aid, task, AccountInput.model_validate(task['input']['spec']['payload']))
+                with tx(aid) as c:
+                    reservations_after = {str(row['id']) for row in c.execute('SELECT id FROM lead.budget_reservations').fetchall()}
+                evidence['before_approval'] = {'task_id': str(task['id']), 'connection_id': connection,
+                    'reservation_ids_before': sorted(reservations_before), 'reservation_ids_after': sorted(reservations_after),
+                    'workdir_before': workdir_before, 'workdir_after': connection_workdir.exists(),
+                    'sdk_absence_evidence': 'native_runner.connect reserves before create_subprocess_exec; no reservation or workdir added'}
                 assert review_wait.outcome == 'waiting' and review_wait.wait.responsibility == 'owner', review_wait
+                assert reservations_after == reservations_before
+                assert not workdir_before and not connection_workdir.exists()
                 finish(first['claim'], review_wait)
                 assert controller.page is page and popup.is_closed() and page.url == site.origin() + '/home'
                 assert len(data['context']['model_calls']) == initial_calls and not requests
