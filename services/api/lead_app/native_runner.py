@@ -136,7 +136,7 @@ def discovery_task_context(task,account,intent):
                 continue
         return result
     scope_kind=scope.get('target_scope')
-    return {'starting_urls':urls(task['input']['spec']['payload'].get('target_urls',[])),
+    return {'starting_urls':urls(task.get('input',{}).get('spec',{}).get('payload',{}).get('target_urls',[])),
         'account_origin':next(iter(urls([account.get('connection_origin')])),'') ,'intent_scope':{
             'target_scope':scope_kind if scope_kind in ('authenticated_permitted_targets','existing_grants') else None,
             'target_ids':urls(scope.get('target_ids',[])),'excluded_targets':urls(scope.get('excluded_targets',[]))}}
