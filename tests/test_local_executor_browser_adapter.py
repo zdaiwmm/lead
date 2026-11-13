@@ -19,6 +19,13 @@ def test_tool_shapes_are_operation_specific_and_never_expose_browser_transport()
         assert all(tool['inputSchema'].get('additionalProperties') is False for tool in tools.values())
 
 
+def test_action_click_contract_distinguishes_observed_navigation_from_submission():
+    tools={item['name']:item for item in adapter.browser_tools('action')}
+    assert 'browser_navigate' in tools['browser_click']['description']
+    assert 'submit' in tools['browser_click']['description']
+    assert 'href' in tools['browser_navigate']['description']
+
+
 def test_discovery_schema_explains_each_observed_selector_in_the_native_contract():
     proposal=next(item for item in adapter.browser_tools('discovery') if item['name']=='propose_method')
     properties=proposal['inputSchema']['properties']
@@ -102,6 +109,9 @@ async def test_browser_request_uses_original_lease_control_not_observation_proje
     assert result['executor_pending']
     assert recorded[0]['tool_context']['control_version']==7
     assert recorded[0]['tool_context']['task_generation']==2
+    assert 'browser_observe before' in recorded[0]['instructions']
+    assert 'editor may differ' in recorded[0]['instructions']
+    assert 'browser_navigate' in recorded[0]['instructions']
 
 
 @pytest.mark.parametrize('context,tools',[
