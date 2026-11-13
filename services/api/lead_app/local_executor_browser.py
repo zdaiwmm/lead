@@ -177,7 +177,11 @@ class BrowserToolWorker:
     async def command(self,name,args):
         async with self.lock:
             if self.process is None:
-                await self.start()
+                try:
+                    await asyncio.wait_for(self.start(),45)
+                except BaseException:
+                    await self.close()
+                    raise
             return await asyncio.wait_for(self._rpc(name,args),45)
 
     async def close(self):

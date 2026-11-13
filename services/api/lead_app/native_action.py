@@ -541,6 +541,9 @@ async def _execute_native_locked(actor,action_id,claim):
     if action['state']=='confirmed' and not controller:
         return {'state':'confirmed','external_id':action['external_id'],'external_url':action['external_url']}
     if action['state'] in ('canceled','not_applied'):
+        if controller:
+            await controller.close()
+            actor.task_pages.pop(controller.task_id,None)
         return {'state':action['state']}
     if not claim:
         raise ValueError('native_action_current_claim_required')
