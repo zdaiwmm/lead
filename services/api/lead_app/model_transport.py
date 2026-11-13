@@ -4,10 +4,9 @@ from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 from uuid import UUID
 
-import httpx2
 
-
-def model_http_client(agent_id, config, timeout, values):
+def validated_socket_path(agent_id, config, values):
+    """Select the original operator-owned route without importing a client SDK."""
     if agent_id is None:
         return None
     provider = config["provider"]
@@ -39,6 +38,15 @@ def model_http_client(agent_id, config, timeout, values):
         or endpoint.fragment
     ):
         raise ValueError("模型专用通道只允许对应服务的官方 HTTPS 地址")
+    return path
+
+
+def model_http_client(agent_id, config, timeout, values):
+    path = validated_socket_path(agent_id, config, values)
+    if path is None:
+        return None
+    import httpx2
+
     transport = httpx2.AsyncHTTPTransport(uds=path, trust_env=False, retries=0)
     return httpx2.AsyncClient(
         transport=transport, timeout=timeout, trust_env=False, follow_redirects=False

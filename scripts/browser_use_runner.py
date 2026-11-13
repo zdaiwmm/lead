@@ -62,6 +62,24 @@ def research_llm(data, model_timeout, provider_http):
     )
 
 
+def provider_http_client(data, model_timeout, meter):
+    from uuid import UUID
+
+    from lead_app.model_transport import validated_socket_path
+
+    # The trusted parent always selects a route (None means unconfigured).
+    # A missing selection is a protocol gap, never permission to dial directly.
+    selected = data['model_socket']
+    path = None
+    if selected is not None:
+        config = data['model']
+        key = f"LEAD_MODEL_SOCKET_{UUID(str(data['agent_id'])).hex.upper()}_{config['provider'].upper()}"
+        path = validated_socket_path(data['agent_id'], config, {key: selected})
+    transport = httpx.AsyncHTTPTransport(uds=path, trust_env=False, retries=0)
+    return httpx.AsyncClient(transport=transport, timeout=model_timeout, trust_env=False, follow_redirects=False,
+        event_hooks={'request': [meter.measure_request], 'response': [meter.measure_response]})
+
+
 async def main(data):
     logging.disable(logging.CRITICAL)
     folder = Path(data["workdir"])
@@ -91,11 +109,7 @@ async def main(data):
 
     async with (
         httpx.AsyncClient(timeout=45, trust_env=False) as client,
-        httpx.AsyncClient(
-            timeout=model_timeout,
-            trust_env=False,
-            event_hooks={"request": [meter.measure_request], "response": [meter.measure_response]},
-        ) as provider_http,
+        provider_http_client(data, model_timeout, meter) as provider_http,
     ):
 
         async def command(operation, args=None):

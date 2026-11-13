@@ -16,6 +16,7 @@ from .config import ROOT, STATE, env
 from .db import uid
 from .execution_routes import research_endpoint
 from .model_reasoning import selected_effort
+from .model_transport import validated_socket_path
 from .research import ResearchPage, begin_run, finish_run, public_url
 from .security import internal_token
 
@@ -99,6 +100,7 @@ async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=N
     )
     if not connection["key"]:
         raise ValueError("研究模型尚未配置服务端凭据")
+    model_socket = validated_socket_path(aid, connection, env())
     url = public_url(url)
     reservation = reserve(aid, uid(), 100000, model_reference(connection), connection["provider"])
     rid = begin_run(aid, goal, message_id=message_id, task_id=task_id, mode=mode)
@@ -123,6 +125,7 @@ async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=N
                 "gateway_token": internal_token(),
                 "gateway_endpoint": gateway_endpoint,
                 "model": connection,
+                "model_socket": model_socket,
                 "reasoning_effort": selected_effort(settings, "research"),
                 "max_steps": min(
                     6, settings["max_tool_calls"], settings["max_model_requests"]
@@ -141,14 +144,15 @@ async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=N
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                env={
+                env={key:value for key,value in {
                     **os.environ,
                     **({'PYTHONPATH':str(packaged/'site-packages')+os.pathsep+str(ROOT/'services/api')} if native else {}),
                     "ANONYMIZED_TELEMETRY": "false",
                     "BROWSER_USE_CLOUD_SYNC": "false",
                     "BROWSER_USE_VERSION_CHECK": "false",
                     "BROWSER_USE_SETUP_LOGGING": "false",
-                },
+                }.items() if key != 'BROWSER_USE_API_KEY' and (key in ('PATH','HOME','LANG','LC_ALL','TZ','PYTHONPATH')
+                    or key.startswith(('ANONYMIZED_','BROWSER_USE_')))},
             )
             stdout, _ = await asyncio.wait_for(
                 child.communicate(json.dumps(payload).encode()), timeout=100
