@@ -25,7 +25,8 @@ from native_browser_fixture import BoardState, NativeBoard
 
 
 async def verify_login(
-    monkeypatch, *, mode="login", owner_hook=None, after_discovery=None, model_transport=None
+    monkeypatch, *, mode="login", owner_hook=None, after_discovery=None, model_transport=None,
+    model_usage=None
 ):
     from lead_app import native_runner
 
@@ -52,7 +53,19 @@ async def verify_login(
                 model_calls[-1]['image_parts']=sum(1 for message in request.get('messages',[]) for part in
                     (message.get('content') if isinstance(message.get('content'),list) else [])
                     if isinstance(part,dict) and part.get('type')=='image_url')
-            if mode.startswith('batch_'):
+                from lead_app.native_vision import (
+                    IMAGE_MODEL,
+                    IMAGE_TOKENS,
+                    checked_image,
+                    request_projection,
+                )
+                images=[part['image_url']['url'] for message in request['messages'] for part in
+                    (message.get('content') if isinstance(message.get('content'),list) else [])
+                    if part.get('type')=='image_url']
+                approved=checked_image(images[0].removeprefix('data:image/png;base64,'))[0] if images else None
+                units,count,_=request_projection(raw,image_model=IMAGE_MODEL,approved_image=approved)
+                model_calls[-1].update(projection_units=units,nonimage_bytes=units-count*IMAGE_TOKENS)
+            if mode.startswith(('batch_','vision_')):
                 parameters=request.get('tools',[{}])[0].get('function',{}).get('parameters',{})
                 properties=parameters.get('properties',{})
                 def operation_enum(node):
@@ -319,11 +332,14 @@ async def verify_login(
                 }
                 for index, line in candidates
             ]
-            content = json.dumps({'thinking':'Use only the assigned page and authorized tools.',
+            output = {'thinking':'Use only the assigned page and authorized tools.',
                 'evaluation_previous_goal':'Controlled offline step.','memory':'Controlled fixture state.',
                 'next_goal':'Complete the assigned bounded task.','current_plan_item':0,
                 'plan_update':['Complete the controlled assigned task.'] if step==0 else None,
-                'action':actions})
+                'action':actions}
+            if mode.startswith(('batch_','vision_')):
+                output={key:value for key,value in output.items() if key in properties}
+            content = json.dumps(output)
             tool = request.get("tools", [{"function": {"name": "AgentOutput"}}])[0][
                 "function"
             ]["name"]
@@ -352,7 +368,7 @@ async def verify_login(
                             "finish_reason": "tool_calls",
                         }
                     ],
-                    "usage": {
+                    "usage": model_usage if model_usage is not None else {
                         "prompt_tokens": 0,
                         "completion_tokens": 0,
                         "total_tokens": 0,

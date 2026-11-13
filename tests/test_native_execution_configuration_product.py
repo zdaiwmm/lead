@@ -81,7 +81,7 @@ async def test_actual_sdk_two_action_batch_and_boundaries(monkeypatch,mode):
         'privacy':result['privacy'],'sdk_contracts':[r['sdk_contract'] for r in result['synthetic_model_diagnostics']],
         'discovery_context_seen':[r['discovery_context_seen'] for r in result['synthetic_model_diagnostics']]}
     (STATE/('execution-config-'+mode+'.json')).write_text(json.dumps(safe,indent=2))
-    assert all(r['thinking_field'] and r['planning_fields'] and r['normal_required'] and r['provider_thinking_disabled']
+    assert all(not r['thinking_field'] and not r['planning_fields'] and not r['normal_required'] and r['provider_thinking_disabled']
         and r['output_limit']==1800 for r in safe['sdk_contracts'])
     assert result['privacy']=={'literal_in_model_request':False,'literal_in_workdir':False}
     if mode=='batch_login':
