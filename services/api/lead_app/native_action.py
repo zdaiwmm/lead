@@ -111,9 +111,30 @@ class NativeAction(NativeTask):
             facts=await root.evaluate(r'''root=>{if(!root.isConnected||root!==document.documentElement)throw Error('receipt_document_changed');
                 const links=Array.from(document.querySelectorAll('a[href]'));
                 if(links.length>500)return {url:location.href,overflow:true,links:[]};
+                const visible=node=>{const r=node.getBoundingClientRect(),s=getComputedStyle(node);
+                    return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';};
+                const authorSubject=node=>{
+                    const article=node.closest('article,[role=article]'),address=node.closest('address');
+                    if(!article||!address||address.parentElement!==article||!visible(node)||
+                        node.closest('blockquote,q,pre,code,template,form,[contenteditable]:not([contenteditable=false])')||
+                        address.querySelectorAll('a').length!==1||article.querySelectorAll('address').length!==1)return null;
+                    for(let prior=address.previousElementSibling;prior;prior=prior.previousElementSibling)
+                        if(!/^H[1-6]$/.test(prior.tagName))return null;
+                    const before=document.createRange();before.selectNodeContents(address);before.setEndBefore(node);
+                    if(!/^\s*by\s+$/i.test(before.toString())||!node.innerText.trim())return null;
+                    const semantic=(node.getAttribute('rel')||'')+' '+(node.getAttribute('aria-label')||'')+' '+(node.getAttribute('title')||'');
+                    if(/bookmark|canonical|perma(?:nent|link)|post\s*link|reply\s*link|帖子链接|回复链接/i.test(semantic))return null;
+                    const canonical=Array.from(article.querySelectorAll('a[rel~=bookmark],a[rel~=canonical]'));
+                    if(canonical.length!==1||!visible(canonical[0])||canonical[0]===node||
+                        canonical[0].closest('article,[role=article]')!==article||
+                        canonical[0].closest('blockquote,q,pre,code,template,form,[contenteditable]:not([contenteditable=false])')||
+                        canonical[0].href===node.href||new URL(canonical[0].href).origin!==location.origin)return null;
+                    return node.innerText.trim();
+                };
                 return {url:location.href,links:links.map(node=>{
                     const r=node.getBoundingClientRect(),s=getComputedStyle(node);
                     return {url:node.href.slice(0,2001),label:(node.innerText+' '+(node.getAttribute('aria-label')||'')).slice(0,300),
+                        author_subject:authorSubject(node),
                         navigation:!node.closest('article,[role=article],blockquote,q,form')&&r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&
                             !node.hasAttribute('download')&&['','_self'].includes(node.target)&&!node.rel.toLowerCase().split(/\s+/).includes('me')};})}}''')
             await asyncio.to_thread(self.actor.native_runtime.current_scope,scope)
@@ -127,7 +148,7 @@ class NativeAction(NativeTask):
                 await root.dispose()
             await self.actor.native_runtime.release_page(scope['target_id'])
 
-    async def receipt_links(self,index_pages=None,*,root_url=None):
+    async def receipt_links(self,index_pages=None,*,root_url=None,include_provenance=False):
         root=root_url or self.action['intent'].get('parent_url') or self.action['intent']['browser_method']['target_url']
         pages=list(index_pages) if index_pages is not None else [root]
         if (not 1<=len(pages)<=3 or len(set(pages))!=len(pages) or pages[0]!=root
@@ -146,7 +167,43 @@ class NativeAction(NativeTask):
             rows.extend(await self.receipt_link_snapshot(url))
             if len(rows)>500:
                 raise ValueError('native_receipt_baseline_ambiguous')
-        return pages,sorted(set(pages+[row['url'] for row in rows]))
+        urls=sorted(set(pages+[row['url'] for row in rows]))
+        if include_provenance:
+            # Keep every URL in the baseline. A role is only a proposal for an
+            # independent destination read, never permission to skip a receipt.
+            subjects={}
+            for row in rows:
+                subjects.setdefault(row['url'],set()).add(row.get('author_subject'))
+            authors={url:next(iter(values)) for url,values in subjects.items()
+                if url not in pages and len(values)==1 and None not in values}
+            return pages,urls,authors
+        return pages,urls
+
+    async def author_profile(self,page,subject,expected_url):
+        """Positive fresh identity facts may exclude an author-only profile URL."""
+        if page.url!=expected_url:
+            return False
+        before=await self.document(page)
+        probe=r'''({subject,body})=>{
+            const visible=node=>{const r=node.getBoundingClientRect(),s=getComputedStyle(node);
+                return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';};
+            const roots=Array.from(document.querySelectorAll('main,[role=main]')).filter(visible);
+            if(roots.length!==1||!/(?:\bprofile\b|个人资料|用户资料|成员资料)/i.test(document.title)||
+                document.querySelector('article,[role=article],[itemprop=articleBody],a[rel~=bookmark],a[rel~=canonical]'))return null;
+            const main=roots[0];
+            if(!body||main.textContent.includes(body))return null;
+            const labels=Array.from(main.querySelectorAll('p,dd,span')).filter(node=>visible(node)&&
+                !node.closest('blockquote,q,pre,code,template,form,[contenteditable]:not([contenteditable=false])'))
+                .map(node=>node.innerText.trim()).filter(text=>{
+                    const match=text.match(/^(?:community\s+member|member|username|user|account|用户名|成员|用户)\s*[:：·]\s*(.+)$/i);
+                    return match&&match[1].trim()===subject;});
+            if(labels.length!==1)return null;
+            return {url:location.href,title:document.title,label:labels[0]};
+        }'''
+        args={'subject':subject,'body':self.action['intent']['body']}
+        first=await page.evaluate(probe,args)
+        return bool(first and first['url']==page.url==expected_url and before==await self.document(page)
+            and first==await page.evaluate(probe,args))
 
     async def baseline(self):
         with tx(self.actor.aid) as c:
@@ -479,7 +536,7 @@ class NativeAction(NativeTask):
         # A missing acknowledgement is resolved only against the same target's
         # new links, with every candidate read under this original action scope.
         root=baseline.get('url') or self.action['intent'].get('parent_url') or self.action['intent']['browser_method']['target_url']
-        _,urls=await self.receipt_links(baseline.get('index_pages',[root]),root_url=root)
+        _,urls,authors=await self.receipt_links(baseline.get('index_pages',[root]),root_url=root,include_provenance=True)
         candidates=[]
         for url in urls:
             try:
@@ -498,6 +555,8 @@ class NativeAction(NativeTask):
             try:
                 value=await self.read_receipt(page,selectors,candidate=True)
                 if value is None:
+                    if url in authors and await self.author_profile(page,authors[url],url):
+                        continue
                     from .native_receipt_errors import ReceiptFactError
                     raise ReceiptFactError('browser_receipt_candidate_unproved')
                 if value['matches']:
