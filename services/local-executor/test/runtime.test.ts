@@ -131,6 +131,69 @@ test("known-turn cancellation ignores a newer turn quoting the original request 
   assert.equal(restored.request("known-turn")?.state, "completed");
   assert.deepEqual(restored.request("known-turn")?.output, { ok: true });
 });
+test("resuming a known turn ignores a different turn-start notification before reconciliation", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  store.begin("known-notification", payload);
+  store.update("known-notification", {
+    thread_id: "thread-1", turn_id: "original-turn", state: "running", cancel_requested: true,
+  });
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/resume") this.listener("turn/started", {
+      threadId: "thread-1", turn: { id: "newer-turn", status: "inProgress", items: [] },
+    });
+    if (method === "thread/turns/list") return { data: [
+      { id: "newer-turn", status: "inProgress", items: [] },
+      { id: "original-turn", status: "completed", items: [
+        { type: "agentMessage", text: '{"ok":true}' },
+      ] },
+    ], nextCursor: null };
+    if (method === "turn/interrupt") this.listener("turn/completed", {
+      threadId: "thread-1", turn: { id: params.turnId, status: "interrupted", items: [] },
+    });
+    return {};
+  };
+  const restored = new Store(store.folder);
+  await new Runner(restored, () => rpc as any).command({
+    id: "restore-notification", request_id: "known-notification", kind: "run", payload,
+  });
+  assert.equal(rpc.calls.filter(call => call.method === "turn/interrupt").length, 0);
+  assert.equal(rpc.calls.filter(call => call.method === "turn/start").length, 0);
+  assert.equal(restored.request("known-notification")?.turn_id, "original-turn");
+  assert.equal(restored.request("known-notification")?.state, "completed");
+});
+test("an unknown-turn recovery waits for its request marker before accepting a resumed turn", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  store.begin("unknown-notification", payload);
+  store.update("unknown-notification", {
+    thread_id: "thread-1", state: "execution_unknown", cancel_requested: true,
+  });
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/resume") this.listener("turn/started", {
+      threadId: "thread-1", turn: { id: "newer-turn", status: "inProgress", items: [] },
+    });
+    if (method === "thread/turns/list") return { data: [
+      { id: "newer-turn", status: "inProgress", items: [] },
+      { id: "original-turn", status: "completed", items: [
+        { type: "userMessage", content: [{ text: "[lead_request:unknown-notification]" }] },
+        { type: "agentMessage", text: '{"ok":true}' },
+      ] },
+    ], nextCursor: null };
+    if (method === "turn/interrupt") this.listener("turn/completed", {
+      threadId: "thread-1", turn: { id: params.turnId, status: "interrupted", items: [] },
+    });
+    return {};
+  };
+  const restored = new Store(store.folder);
+  await new Runner(restored, () => rpc as any).command({
+    id: "restore-unknown-notification", request_id: "unknown-notification", kind: "run", payload,
+  });
+  assert.equal(rpc.calls.filter(call => call.method === "turn/interrupt").length, 0);
+  assert.equal(rpc.calls.filter(call => call.method === "turn/start").length, 0);
+  assert.equal(restored.request("unknown-notification")?.turn_id, "original-turn");
+  assert.equal(restored.request("unknown-notification")?.state, "completed");
+});
 test("run persists original thread, explicit Sol medium and parsed result; replay does not run twice", async (t) => {
   const store = setup(t),
     rpc = new FakeRpc();

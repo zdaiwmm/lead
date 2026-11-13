@@ -123,7 +123,11 @@ export class Runner {
       // Authentication and account notifications remain local; never upload credentials.
       if (!/^(thread\/|turn\/|item\/|error$)/.test(method)) return;
       this.store.event(record.id, method, params);
-      if (method === "turn/started" && params.threadId === record.thread_id) {
+      if (
+        method === "turn/started" && params.threadId === record.thread_id &&
+        !terminal.has(record.state) && params.turn?.id &&
+        (record.turn_id ? params.turn.id === record.turn_id : record.state === "starting")
+      ) {
         this.store.update(record.id, {
           turn_id: params.turn?.id,
           state: "running",
