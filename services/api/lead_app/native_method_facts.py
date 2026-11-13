@@ -77,7 +77,7 @@ def _permission(context, quote, operation):
                 raise MethodFactError('browser_method_permission_denied')
         if re.search(r'\b(?:must|need\s+to|have\s+to)\s+(?:obtain|receive|get|have|secure)\b.{0,100}\b(?:approval|authorization|permission|consent)\b',sentence,re.I):
             raise MethodFactError('browser_method_permission_denied')
-        topic=re.search(r'\b(?:automat\w*|bots?|publish\w*|post(?:s|ing)?|repl\w*)\b|自动(?:化|工具)|机器人|发布|发帖|回复',sentence,re.I)
+        topic=re.search(r'\b(?:automat\w*|browser\s+assistants?|bots?|publish\w*|post(?:s|ing)?|repl\w*)\b|自动(?:化|工具)|机器人|发布|发帖|回复',sentence,re.I)
         denied=re.search(r"\b(?:no|not|never|prohibit\w*|forbidden|disallow\w*|disabled|banned|cannot|can't)\b|仅限管理员|禁止|不允许|不得|不能",sentence,re.I)
         privileged=re.search(r'\bonly\s+(?:administrators?|moderators?|owners?)\b',sentence,re.I)
         conditional=re.search(r'\b(?:if|unless|provided\s+that|subject\s+to|once|after)\b.{0,100}\b(?:approv\w*|authoriz\w*|permission|consent)\b',sentence,re.I)
@@ -89,7 +89,7 @@ def _permission(context, quote, operation):
     allowed_action=allowed_action or re.search(r'普通(?:成员|会员).{0,50}(?:可以|允许).{0,50}'+('(?:发布|发帖)' if operation=='publish' else '回复'),normalized)
     automated=re.search(r'\b(?:automated(?:\s+browser)?\s+tools?|browser\s+automation|automation|bots?)\s+(?:(?:are|is)\s+)?(?:permitted|allowed)\b',normalized,re.I)
     automated=automated or re.search(r'(?:允许|可以).{0,50}(?:自动工具|自动化)|(?:自动工具|自动化).{0,50}(?:允许|可以)',normalized)
-    automated=automated or re.search(r'\bmembers?\s+(?:may|can)\s+use\s+authorized\s+browser\s+automation\b[^.!?。！？]{0,220}\b'+action+r'\b',normalized,re.I)
+    automated=automated or re.search(r'\bmembers?\s+(?:may|can)\s+use\s+(?:an?\s+)?authorized\s+browser\s+(?:automation|assistant(?:\s+or\s+browser\s+automation)?)\b[^.!?。！？]{0,220}\b'+action+r'\b',normalized,re.I)
     automated=automated or re.search(r'\bmembers?\s+(?:may|can)\b[^.!?。！？]{0,220}\b'+action+r'\b[^.!?。！？]{0,220}\bincluding\s+through\s+authorized\s+browser\s+automation\b',normalized,re.I)
     if not member or not allowed_action or not automated:
         raise MethodFactError('browser_method_permission_unestablished')
