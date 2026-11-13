@@ -48,7 +48,7 @@ class NativeProtocolStop(BaseException):
 async def stop_on_protocol_failure(*args, **kwargs):
     try:
         return await _original_decision_model(*args, **kwargs)
-    except (ExecutorUnavailable, ValidationError) as error:
+    except (ExecutorUnavailable, ValidationError, json.JSONDecodeError) as error:
         raise NativeProtocolStop(str(error)) from error
 
 

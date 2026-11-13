@@ -12,7 +12,7 @@ const phase = process.argv[2];
 if (
   !secret ||
   !process.env.LEAD_CONSUMER_STATE ||
-  !["website", "decision", "content", "recall"].includes(phase)
+  !["website", "decision", "content", "recall", "subagent"].includes(phase)
 )
   throw new Error("explicit_disposable_consumer_fixture_required");
 const folder = resolve(process.env.LEAD_CONSUMER_STATE);
