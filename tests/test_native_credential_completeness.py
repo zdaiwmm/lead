@@ -31,7 +31,7 @@ async def page():
     ('<input type=email required value="member"><input type=password value="synthetic">',True,None,'','type=button'),
     ('<input required><input type=password value="synthetic">',True,None,'novalidate',''),
     ('<input required value="member"><input type=password>',False,'empty password','novalidate',''),
-    ('<input required value="member"><input type=password>',False,'empty password','','type=button'),
+    ('<input required value="member"><input type=password>',True,None,'','type=button'),
 ])
 @pytest.mark.asyncio
 async def test_only_actual_missing_or_invalid_credential_form_prevents_submit(page,fields,allowed,reason,form_attrs,button_attrs):
@@ -56,3 +56,36 @@ async def test_only_actual_missing_or_invalid_credential_form_prevents_submit(pa
     if reason:
         assert reason in result['reason']
     assert await page.evaluate('window.invalidEvents')==0
+
+
+@pytest.mark.parametrize('form_attrs',['','novalidate'])
+@pytest.mark.asyncio
+async def test_preparatory_button_can_reveal_empty_password_without_submitting(page,form_attrs):
+    await page.set_content('''<h1>Sign in</h1><form method=post action=/session '''+form_attrs+'''>
+        <input required value=member><input id=password type=password hidden>
+        <button id=continue type=button onclick="document.querySelector('#password').hidden=false">Continue</button>
+        <button type=submit>Sign in</button></form>''')
+    posts=[]
+    page.on('request',lambda request:posts.append(True) if request.method=='POST' else None)
+    facts=await page.locator('#continue').evaluate('node=>('+FORM_FACTS+').call(node)')
+    assert facts['passwordEmpty'] and facts['type']=='button'
+    controller=NativeConnection(SimpleNamespace(native_runtime=None),'task','connection')
+    controller.page=page
+    controller.lease={'origins':['http://credential.native-dom.test'],'authentication_endpoints':[facts['action']]}
+    async def descriptor():
+        return {}
+    async def node_facts(node):
+        return facts
+    async def auth_control(node):
+        return None
+    controller.descriptor=descriptor
+    controller.node_facts=node_facts
+    controller.auth_control=auth_control
+    assert not await page.locator('#password').is_visible()
+    assert (await controller.authorize({'name':'click','node':{},'values':{}}))['allowed']
+    await page.locator('#continue').click()
+    assert await page.locator('#password').is_visible()
+    assert await page.locator('#password').input_value()=='' and not posts
+    facts=await page.locator('button[type=submit]').evaluate('node=>('+FORM_FACTS+').call(node)')
+    assert facts['passwordEmpty'] and facts['type']=='submit'
+    assert not (await controller.authorize({'name':'click','node':{},'values':{}}))['allowed']

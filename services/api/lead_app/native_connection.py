@@ -328,7 +328,7 @@ class NativeConnection:
         elif name=='click':
             if facts['tag'] not in ('button','input') or facts['type'] not in ('submit','button'):
                 return {'allowed':False}
-            if facts['passwordEmpty']:
+            if facts['type']=='submit' and facts['passwordEmpty']:
                 return {'allowed':False,'reason':'The observed sign-in form has an empty password field. Fill that field before submitting.'}
             if facts['validatesOnSubmit'] and facts['requiredEmpty']:
                 return {'allowed':False,'reason':'The observed sign-in form has an empty required field. Complete that field before submitting.'}
