@@ -84,13 +84,13 @@ async def run(controller, gateway_endpoint, kind, goal):
         return {'engine':'codex','executor_pending':True,'executor_request_id':reference}
     from .local_executor import submit
     controller.local_executor = True
-    scope = await controller.start()
+    await controller.start()
     task, account, _ = await asyncio.to_thread(controller.snapshot)
     runtime = (task.get('result') or {}).get('runtime') or {}
     context = {'kind':kind,'agent_id':str(aid),'task_id':controller.task_id,
         'run_id':str(getattr(controller,'connection_id',controller.task_id)),
         'task_generation':task['input']['task_generation'],'attempt_token':runtime['attempt_token'],
-        'control_version':scope['control_version'],'profile_id':str(controller.actor.profile['id'])}
+        'control_version':controller.lease['control_version'],'profile_id':str(controller.actor.profile['id'])}
     for key in ('connection_id','action_id'):
         if hasattr(controller,key):
             context[key] = str(getattr(controller,key))

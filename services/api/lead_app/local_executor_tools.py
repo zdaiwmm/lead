@@ -16,6 +16,13 @@ async def call(device, request, name, arguments):
                 or str(device.get('tenant_id')) != str(request.get('tenant_id'))
                 or name != 'lead_public_read' or set(arguments) != {'url'}):
             raise ValueError('executor_tool_scope_changed')
+        from .admin_settings import for_agent
+        settings,_=await asyncio.to_thread(for_agent,str(request['agent_id']),'models')
+        tools=settings['tools']
+        if (not tools.get('public_web')
+                or context.get('mode')=='community_discovery' and not tools.get('community_research')
+                or context.get('browser_run_id') and not tools.get('advanced_research')):
+            raise ValueError('executor_public_research_disabled')
         from .fetch import fetch_product
         from .research import public_url
         url=public_url(arguments['url'])

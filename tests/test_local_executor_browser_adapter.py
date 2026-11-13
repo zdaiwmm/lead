@@ -49,6 +49,50 @@ async def test_pending_request_is_reused_and_native_page_stays_owned(monkeypatch
     assert controller.page is not None
 
 
+@pytest.mark.asyncio
+async def test_browser_request_uses_original_lease_control_not_observation_projection(monkeypatch):
+    from contextlib import contextmanager
+
+    from lead_app import db, local_executor
+
+    recorded=[]
+    @contextmanager
+    def transaction(*args):
+        yield SimpleNamespace(execute=lambda *args:None)
+    monkeypatch.setattr(db,'tx',transaction)
+    def submit(aid,key,payload,**kwargs):
+        recorded.append(payload)
+        return {'id':'original-request'}
+    monkeypatch.setattr(local_executor,'submit',submit)
+    task={'input':{'task_generation':2},'result':{'runtime':{'attempt_token':'attempt'}}}
+    controller=SimpleNamespace(actor=SimpleNamespace(aid='a',profile={'id':'p'}),task_id='task',
+        lease={'control_version':7},start=AsyncMock(return_value={'task_id':'task','generation':9,'target_id':'target'}),
+        snapshot=lambda:(task,{},{}),page=SimpleNamespace(url='https://fixture.test/'))
+    result=await adapter.run(controller,'https://gateway','action','Submit original action')
+    assert result['executor_pending']
+    assert recorded[0]['tool_context']['control_version']==7
+    assert recorded[0]['tool_context']['task_generation']==2
+
+
+@pytest.mark.parametrize('context,tools',[
+    ({'kind':'model'},{'public_web':False,'community_research':True,'advanced_research':True}),
+    ({'kind':'model','mode':'community_discovery'},{'public_web':True,'community_research':False,'advanced_research':True}),
+    ({'kind':'model','browser_run_id':'run'},{'public_web':True,'community_research':True,'advanced_research':False}),
+])
+@pytest.mark.asyncio
+async def test_disabling_research_after_queueing_prevents_actual_fetch(monkeypatch,context,tools):
+    from lead_app import admin_settings, fetch, local_executor_tools
+
+    monkeypatch.setattr(admin_settings,'for_agent',lambda *args:({'tools':tools},'current'))
+    read=AsyncMock()
+    monkeypatch.setattr(fetch,'fetch_product',read)
+    device={'id':'d','agent_id':'a','tenant_id':'t'}
+    request={'id':'r','device_id':'d','agent_id':'a','tenant_id':'t','payload':{'tool_context':context}}
+    with pytest.raises(ValueError,match='executor_public_research_disabled'):
+        await local_executor_tools.call(device,request,'lead_public_read',{'url':'https://example.com/'})
+    read.assert_not_awaited()
+
+
 def test_codex_controller_does_not_inherit_old_agent_fragment_limits():
     from lead_app.native_task import NativeTask
     actor=SimpleNamespace(native_runtime=None)
