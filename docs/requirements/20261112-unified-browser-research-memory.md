@@ -918,6 +918,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 第三次实际尝试`f517a3f / 834096cb…`仍在A/login停止（8.625秒）：模型传入数字观察编号形式`*[57]`，真实Playwright在identity节点查询抛无效CSS异常，原命令返回500；worker未留下最终result，不能把harness显示requests0/tokens0当作零调用或零费用。原transport快照有requests_started4/responses_received4/measured_responses3，仅证明至少4请求，不能据此结算部分usage。独立原库核验一笔40000 reservation unknown、usage0、period spent0/reserved40000，Task planned/temporarily_unavailable、认证POST1、业务Action0；A后续/B均未运行。保留原DB/nonce/日志及unknown，不重试原Task，进程0，仅移除本轮测试env的模型key。按完整片段保守扣8请求位/40000单位：native已计量仍15请求/39289 tokens，累计扣23请求位/79289单位；批准新增额度尚余81请求/421688单位。旧80000未知预留另列且未动。先离线修复无效selector的失败边界，并查明worker最终计量的异常收尾缺口；原worker stderr未保存，不能断言具体退出异常。未宣称身份或C22通过。
 
+- `159d155`/`b6ef6a1`（源`e7d478c`/`1275571`）完成本次离线修复并交叉窄审：原生CSS SyntaxError只转固定无值code，页面关闭/导航/取消等不吞；连接全空提示直接重核完整唯一strong-current，显式歧义/origin/doc/拆ID仍拒，私有字段继续实际CSS及fresh-network exact proof。SDK接口允许省略提示，明确数字观察编号不是CSS。runner对执行/清理异常导出失败及原meter，不输出异常正文；清理有2秒界且取消传播，不补造缺失usage。旧真实SDK假响应红例7.24秒同样4started/4responses/3measured且无result，支持可复现症状，不能还原原付费worker未保存的具体异常。最终精确prompt/app及runner两例真实SDK14.464秒通过：错误数字selector与空参数各5假HTTP，均原Task succeeded/connected、私有self、结果/完整计量及正常退出、凭据双false；实际私有值元素id元数据可见，不靠保存用户名或泄露value。47项真实DOM、13项反馈通过；主集成114项/31.21秒、13项需专用Linux产品环境skip，另184项交付合同通过，全静态及881文件凭据扫描通过。正式runner冻结blob仅该项更新为`ee306bac…f1533`、其余10项不变；原第三次40000 unknown及保守扣额不变，新真实尝试尚未开始。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
