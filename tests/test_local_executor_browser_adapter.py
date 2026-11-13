@@ -77,7 +77,7 @@ async def test_browser_request_uses_original_lease_control_not_observation_proje
 @pytest.mark.parametrize('context,tools',[
     ({'kind':'model'},{'public_web':False,'community_research':True,'advanced_research':True}),
     ({'kind':'model','mode':'community_discovery'},{'public_web':True,'community_research':False,'advanced_research':True}),
-    ({'kind':'model','browser_run_id':'run'},{'public_web':True,'community_research':True,'advanced_research':False}),
+    ({'kind':'model','browser_run_id':'run','requires_advanced_research':True},{'public_web':True,'community_research':True,'advanced_research':False}),
 ])
 @pytest.mark.asyncio
 async def test_disabling_research_after_queueing_prevents_actual_fetch(monkeypatch,context,tools):
@@ -91,6 +91,37 @@ async def test_disabling_research_after_queueing_prevents_actual_fetch(monkeypat
     with pytest.raises(ValueError,match='executor_public_research_disabled'):
         await local_executor_tools.call(device,request,'lead_public_read',{'url':'https://example.com/'})
     read.assert_not_awaited()
+
+
+def test_original_codex_task_keeps_native_route_after_project_mode_change(monkeypatch):
+    from lead_app import local_executor, local_executor_client, native_runner
+
+    calls=[]
+    def uses_native(aid,*,task_id=None):
+        calls.append((aid,task_id))
+        return task_id=='original-native-task'
+    monkeypatch.setattr(local_executor_client,'uses_native',uses_native,raising=False)
+    monkeypatch.setattr(local_executor,'enabled',lambda *args:False)
+    assert native_runner.local_executor_enabled('a',task_id='original-native-task')
+    assert not native_runner.local_executor_enabled('a',task_id='new-legacy-task')
+    assert calls==[('a','original-native-task'),('a','new-legacy-task')]
+
+
+@pytest.mark.asyncio
+async def test_basic_public_read_evidence_does_not_require_advanced_research(monkeypatch):
+    from lead_app import admin_settings, fetch, local_executor_tools
+
+    monkeypatch.setattr(admin_settings,'for_agent',lambda *args:({'tools':{
+        'public_web':True,'community_research':False,'advanced_research':False}},'current'))
+    read=AsyncMock(return_value={'url':'https://example.com/','title':'Actual HTTP source','text':'actual text'})
+    monkeypatch.setattr(fetch,'fetch_product',read)
+    monkeypatch.setattr(local_executor_tools,'_record_public_read',lambda request,context,value:value)
+    device={'id':'d','agent_id':'a','tenant_id':'t'}
+    request={'id':'r','device_id':'d','agent_id':'a','tenant_id':'t','payload':{
+        'tool_context':{'kind':'model','browser_run_id':'basic-run'}}}
+    observed=await local_executor_tools.call(device,request,'lead_public_read',{'url':'https://example.com/'})
+    assert observed['structuredContent']['text']=='actual text'
+    read.assert_awaited_once()
 
 
 def test_codex_controller_does_not_inherit_old_agent_fragment_limits():

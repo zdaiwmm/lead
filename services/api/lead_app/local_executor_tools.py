@@ -21,7 +21,7 @@ async def call(device, request, name, arguments):
         tools=settings['tools']
         if (not tools.get('public_web')
                 or context.get('mode')=='community_discovery' and not tools.get('community_research')
-                or context.get('browser_run_id') and not tools.get('advanced_research')):
+                or context.get('requires_advanced_research') and not tools.get('advanced_research')):
             raise ValueError('executor_public_research_disabled')
         from .fetch import fetch_product
         from .research import public_url

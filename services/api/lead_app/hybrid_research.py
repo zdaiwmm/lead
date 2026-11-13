@@ -84,7 +84,7 @@ class HybridResearchPage(ResearchPage):
 
 async def explore(aid, url, goal, *, mode="research", message_id=None, task_id=None):
     from .native_runner import local_executor_enabled
-    if local_executor_enabled(aid):
+    if local_executor_enabled(aid,task_id=task_id):
         return await codex_explore(aid,url,goal,mode=mode,message_id=message_id,task_id=task_id)
     from .admin_settings import for_agent
     from .config import model_reference, resolve_model
@@ -246,7 +246,7 @@ async def codex_explore(aid,url,goal,*,mode='research',message_id=None,task_id=N
         'model':'gpt-6.1-sol','effort':'medium',
         'output_schema':{'type':'object','properties':{'text':{'type':'string'},'success':{'type':'boolean'}},
             'required':['text','success'],'additionalProperties':False},
-        'tool_context':{'kind':'model','workspace_request':True,'browser_run_id':rid,'mode':mode},
+        'tool_context':{'kind':'model','workspace_request':True,'browser_run_id':rid,'mode':mode,'requires_advanced_research':True},
         'tools':[{'name':'lead_public_read','description':'Read an actual public source and retain its text and URL as Lead evidence.',
             'inputSchema':{'type':'object','properties':{'url':{'type':'string'}},'required':['url'],'additionalProperties':False}}]}
     try:

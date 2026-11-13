@@ -23,7 +23,7 @@ async def connect(controller,gateway_endpoint):
             verified=verified_profile(c,controller.actor.profile['id'])
         if not verified and not (await check(controller.actor))['verified']:
             raise ValueError('connection_exit_identity_unverified')
-    if local_executor_enabled(aid):
+    if getattr(controller,'local_executor_request_id',None) or local_executor_enabled(aid,task_id=controller.task_id):
         from .local_executor_browser import run
         result=await run(controller,gateway_endpoint,'connection',
             'Sign in on the original connection page using saved_username and saved_password placeholders. '
@@ -162,7 +162,7 @@ async def run_task(controller,gateway_endpoint,*,kind,goal):
     """One bounded SDK fragment on the current original task and budget ledger."""
     from .admin_settings import for_agent
     aid=controller.actor.aid
-    if local_executor_enabled(aid):
+    if getattr(controller,'local_executor_request_id',None) or local_executor_enabled(aid,task_id=controller.task_id):
         from .local_executor_browser import run
         return await run(controller,gateway_endpoint,kind,goal)
     task,account,intent=await asyncio.to_thread(controller.snapshot)
@@ -221,7 +221,14 @@ async def run_task(controller,gateway_endpoint,*,kind,goal):
             await asyncio.wait_for(child.communicate(),5)
 
 
-def local_executor_enabled(aid):
+def local_executor_enabled(aid,*,task_id=None):
+    try:
+        from .local_executor_client import uses_native
+    except ImportError:
+        # Compatibility for isolated legacy fixtures without the new bridge.
+        pass
+    else:
+        return uses_native(aid,task_id=task_id)
     try:
         from .local_executor import enabled
     except ImportError:
