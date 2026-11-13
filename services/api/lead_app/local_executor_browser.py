@@ -185,6 +185,8 @@ class BrowserToolWorker:
             except ValueError:
                 continue
             if response.get('id') == identifier:
+                if 'feedback' in response:
+                    return {'isError':True,'content':[{'type':'text','text':response['feedback']}]}
                 if 'error' in response:
                     raise ValueError(response['error'])
                 return response['result']
@@ -247,6 +249,9 @@ async def _worker():
     client = httpx.AsyncClient(timeout=30,trust_env=False)
     setup = {}
 
+    class ToolFeedbackError(ValueError):
+        """Only allowlisted, fixed manager feedback may cross both RPC layers."""
+
     async def manager(operation,args=None):
         response = await client.post(setup['gateway_endpoint']+f"/agents/{setup['agent_id']}/"+setup['command_path'],
             headers={'Authorization':'Bearer '+setup['gateway_token']},json={'run_id':setup['run_id'],
@@ -258,7 +263,7 @@ async def _worker():
                 body=None
             feedback = identity_rpc_feedback(operation,409,body) or method_rpc_feedback(operation,409,body)
             if feedback:
-                raise ValueError(feedback)
+                raise ToolFeedbackError(feedback)
         response.raise_for_status()
         return response.json()
 
@@ -302,7 +307,8 @@ async def _worker():
                         result={'content':[{'type':'text','text':json.dumps(value,ensure_ascii=False)}], 'structuredContent':value}
                 response={'id':request['id'],'result':result}
             except Exception as error:
-                response={'id':request['id'],'error':str(error)[:2000]}
+                response={'id':request['id'],
+                    'feedback' if isinstance(error,ToolFeedbackError) else 'error':str(error)[:2000]}
             output.write(json.dumps(response,ensure_ascii=False)+'\n')
             output.flush()
     finally:

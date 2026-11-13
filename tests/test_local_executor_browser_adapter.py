@@ -242,6 +242,30 @@ async def test_inspect_self_returns_server_observed_subject_and_namespace(monkey
     assert controller.self_entry['acting_subject']==observed['acting_subject']
 
 
+@pytest.mark.asyncio
+async def test_allowlisted_identity_feedback_survives_tool_worker_transport():
+    import json
+
+    from lead_app.native_identity_errors import IDENTITY_ERROR_HINTS
+
+    code='identity_private_current_subject_mismatch'
+    feedback=code+': '+IDENTITY_ERROR_HINTS[code]
+    worker=adapter.BrowserToolWorker(SimpleNamespace(), 'https://gateway')
+    worker.process=SimpleNamespace(returncode=None,stdin=SimpleNamespace(write=lambda value:None,drain=AsyncMock()),
+        stdout=SimpleNamespace(readline=AsyncMock(return_value=(json.dumps({'id':1,'feedback':feedback})+'\n').encode())))
+    observed=await worker._rpc('report_connection',{'subject_selector':'#actual-observed'})
+    assert observed=={'isError':True,'content':[{'type':'text','text':feedback}]}
+
+
+@pytest.mark.asyncio
+async def test_unclassified_worker_errors_do_not_become_public_tool_feedback():
+    worker=adapter.BrowserToolWorker(SimpleNamespace(), 'https://gateway')
+    worker.process=SimpleNamespace(returncode=None,stdin=SimpleNamespace(write=lambda value:None,drain=AsyncMock()),
+        stdout=SimpleNamespace(readline=AsyncMock(return_value=b'{"id":1,"error":"arbitrary private SDK detail"}\n')))
+    with pytest.raises(ValueError,match='arbitrary private SDK detail'):
+        await worker._rpc('browser_observe',{})
+
+
 def test_codex_controller_does_not_inherit_old_agent_fragment_limits():
     from lead_app.native_task import NativeTask
     actor=SimpleNamespace(native_runtime=None)
