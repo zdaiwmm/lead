@@ -1130,7 +1130,7 @@ Multica官方主线固定为[`773569db3ab53e304f2d08310621f1b15be393f0`](https:/
 
 - [x] P0：固定协议/工具契约及故障测试，设备与登录能力探测。
 - [x] P1：Lead目标→真实Codex研究/决策/内容→A原Task/Action发布→独立回执；同时验证追加、中断、关前端、进程重启与命令防重。P1不冒称全产品迁完或C22通过。
-- [ ] P2：A回复、B陌生布局、unknown只读回查；19入口及key门槛全部迁移；无服务器模型key矩阵。
+- [x] P2：A回复、B陌生布局、unknown只读回查；19入口及key门槛全部迁移；无服务器模型key矩阵。分阶段机械/模型、原失败与混合源范围见23.7，不宣称单次盲测。
 - [ ] P3：原生压缩/记忆边界、并行账号、断网/休眠/取消晚到回执、旧库迁移与回退；精确候选检查、main完整验证、同轮产物、正式部署与独立回读。
 
 工程行为、模型判断、业务效果分别留证。原A通过证据只按未变输入复用，不能记为Codex业务链通过。PR62原227文件/34200新增行中保留必要账号/研究/经验/回执契约，改造执行入口；旧Agent循环与模型计量退出新路径，旧实验和账单保留。
@@ -1159,3 +1159,17 @@ Multica官方主线固定为[`773569db3ab53e304f2d08310621f1b15be393f0`](https:/
 - 正式源文件已固定42个Git blob，连接器明确清单28个文件，未知路径继续拒绝；真实npm pack 3669成员通过安全结构、包名/bin和精确REVISION检查。此本地包仅验证布局，生产仍只用精确main成功run/attempt产物。a9ff553先行PR快速检查43494525050/1及镜像入口检查43494525032/1通过，最终head仍须全部必需检查；合并后精确main才执行完整应用验证，不用PR结果放行业务。
 - 只读发布交接位于 `/private/tmp/lead-codex-release-readonly-20261114/handoff.md`：已核现场仍7940/0031、历史reserved51246原样、零在途/维护/unknown。按同轮工具安装、精确main源与镜像独立挂载、备份克隆演练、保护审批原ZIP、迁移hold、正式应用切换、Telegram→Reddit各自置备/登记、finalize和独立回读执行；Telegram旧计划的expected.selector只按当次实际前态留原字节刷新，不改账号、凭据、出口或权限。
 - 生产项目配对必须真实owner在 `https://shui.click` 生成，本环境没有已连接浏览器，不能伪造OIDC或从DB造会话。软件部署、同SHA本机包安装及实际Codex能力检查可以先完成；项目启用依赖一次真实owner配对。后续精确main SHA、CI run/attempt、部署请求/独立回读与配对状态记录在同一PR交付栏，不为状态文案更换已经冻结的应用产物。
+
+### 23.7 原任务恢复与回执唯一性收尾
+
+- 原生改稿两轮采用稳定且独立的请求键，pending 不计轮，正文与轮数原子保存；原Task绑定的社群消费者关闭新任务模式后仍续原本机归属。隔离PG25项/1专用环境skip及嵌套消费者3项通过，不改legacy业务语义。
+- 冷账户恢复缺口已修：先fresh当前主体，再独立fresh私有页，保存的选择器仅作候选；缺当前主体、错主体、权限拒绝或已提交认证都交还原owner，caller不再重复取凭据。8条真实B HTTP/Chrome DOM先红后绿，3条入口续接及root定向84项通过/13专用环境skip，独立审查接受。
+- 回执唯一性不以当前ID/URL选择器读不到其他候选作为排除证据。所有新候选先独立读取完整回执；可读的不同作者/正文/父帖可排除，不可读继续未知。作者主页也必须先实际读取：仅全索引均为强作者byline且有独立bookmark、目的页fresh双读给出明确profile及精确成员身份、无文章/回执/原正文冲突时排除。原baseline始终冻结全部URL；任一普通/导航/permalink混合引用、完整第二回执、UGC及嵌套文章来源均保留为候选。独立19条实际Chrome反例与此前未变的18条回执回归通过，最后UGC祖先反例先真实红再绿，固定d04865a获得限定接受。
+- B原Action `e2b78e4e-601f-4cf0-8653-b7935c73949d` 已正式confirmed，原Task `4cf516dd-064d-4ff0-92d8-a644511b5992` succeeded，generation1、原attempt1及intent/grant/binding/account/profile均不变。新只读请求99523961在原thread01a1d68d、新turn中自然completed；不冒称旧native turn继续。原站点/API进程和原7001帖子未重建，独立HTTP DOM及SQL receipt核验通过，源文章集合前后同为7001/482；透明代理记录进入的POST0、blocked0，未由代理替产品挡住重发。旧失败和费用记录均保留，原线程用量只取累计快照不相加、不估金额。证据 `/private/tmp/lead-codex-b-original-receipt-confirmed-20261114.json`，root校验摘要 `/private/tmp/lead-codex-production-20261114/original-b-receipt-verified.json`。
+- 隔离验收服务升级只替换固定源码gateway，保留原API/站点/DB和逻辑端点；认证过期用各自独立的新标准认证Task通过原guarded工具恢复，每Task一次提交、无业务发布，不改旧Action。丢ACK使用原站前的固定loopback代理，唯一UID/端口规则、私有一次arm、原正文hash及真实上游成功后断ACK；14项机械与20轮并发精确一次通过。只读阶段同时核进入代理的所有POST和blocked均0，不用上游POST0冒充产品无重发。验收结束后将按原精确记录清理两条测试规则，不碰生产服务。
+- 回复发现531c6f58/f4a6f31c由真实Sol通过。首次实际回复Task a79dc9c9/Action428208fb在提交前遇到定位语义不一致：原方法用Playwright `:text-is`，执行guard用原生Element.matches解析，导致正确textarea也被拒。原native6653534f自然completed、proxy进入POST0，随后排查期间epoch6空闲关闭，把未发送的prepared记录保守转unknown；保活衔接未及时是本轮工程疏漏。原Action/attempt1及失败原样留存，不用POST0或claimed=false恢复、清账或重发旧正文。
+- 46081ec将执行定位统一为完整Playwright Locator，通过只读结构路径和pinned ElementHandle严格比对SDK实际backend node，前后核唯一性、原target/document、实物节点与完整selector语义；不裁剪伪类、靠坐标/属性/contains替代身份，也未加短超时。13真实DOM先4红9绿，修复后全绿，覆盖shadow、同属性不同节点、多匹配/foreign/detached/替换/导航/label变化；root最终版13 passed14.36秒，Ruff/diffcheck与限定独立审查接受。后续在同原Board/父帖7001用新独立正文/Task/Action验证，不冒称原a79或原失败Run已通过；技术配方刷新通过正常discover/propose_method重新核当前session字段，机械步骤不计真实模型发现。
+- 新独立回复Task de1482b8/native20acb608由真实Sol/medium完成，Action e5d0a48d/attempt1 confirmed；冻结submit仍为完整`:text-is`，实际输入与提交验证460新校验。原Board独立DOM核完整正文/作者/永久URL/父帖7001，SQL receipt_valid=true，透明代理进入POST1/blocked0；旧428未知原样保留，不把它改写成通过。证据 `/private/tmp/lead-codex-b-reply_verified-verified-20261114.json`，root独立对账摘要 `independent-b-reply-verified.json`。
+- 最后独立seed Task e6968438/Action9dc93240经原受控MCP机械提交一次（0模型），完整上游303后真实丢ACK，Task reconciling/Action unknown、attempt9e14319f/attempt1。随后同Task/generation1/Action/attempt只读Sol请求27b3c0dc自然completed，正式confirmed，原Board7003完整正文/作者与SQL回执独立核验通过；seed代理进入POST1/drop1/blocked0，只读阶段进入POST0/blocked0，没有靠代理防重替产品洗成功。机械seed无原生thread，真实只读请求建立首个native thread；不伪称同旧model turn继续。两份原始JSON及root摘要 `/private/tmp/lead-codex-production-20261114/b-lost-ack-recovery-verified.json`保留。
+- B能力按实际来源分列：本fixture初始化和会话技术刷新为机械；历史独立发布发现511e/nativeb271为真实Codex，其native_method_facts/native_task两组件c541→460字节未变；真实回复发现531c/nativef4a为d048；历史B认证9d9e/nativefbc2有真实thread/turn及completed记录，旧harness未标engine不补写标签。原API/Board保留b09，本轮gateway为460；本机测试daemon来自原checkout，部分ACK/provider/revision/安装代码与候选不同，正常模型/工具业务证据和后续工程回归分别核验，不宣称全组件单SHA、单次不中断或严格盲测。完整校准摘要 `/private/tmp/lead-codex-b-final-acceptance-summary-20261114.json`；旧Case原始5815/POST0历史不用于最终e2链。
+- 42冻结blob/28连接器路径与460精确树全部一致；975 tracked files凭据扫描、全Ruff/diffcheck通过。候选460的全部PR必需检查已通过。精确main完整验证、同轮工具/镜像、正式迁移/切换/独立回读尚未开始；此源码记录在发布前冻结，P3及最终准确SHA/CI/生产回读/owner配对状态由同PR62交付栏持续对账，不为状态文案重建已验证产物。
