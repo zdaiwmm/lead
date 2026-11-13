@@ -58,7 +58,11 @@ async def verify_login(
                         item.get("text", "") for item in value if isinstance(item, dict)
                     )
             text = "\n".join(parts)
-            model_calls[-1]['identity_feedback_code_seen']='identity_value_missing' in text
+            model_calls[-1]['identity_feedback_code_seen']='identity_element_ambiguous' in text
+            if mode.startswith('identity_inferred'):
+                lines=[line for line in text.splitlines() if line.strip().startswith('Signed in as') or '<a ' in line and ('rel=me' in line or 'rel="me"' in line)]
+                model_calls[-1]['current_dom_lines']=[line.replace(board.state.username,'saved_username').replace(board.state.password,'saved_password')[:500] for line in lines[-4:]]
+                model_calls[-1]['split_current_identity']=any('Signed in as' in line and 'Your account settings' not in line for line in lines)
             import re
 
             candidates = []
@@ -190,9 +194,9 @@ async def verify_login(
                 action = {
                     "inspect_self": {
                         "self_link_selector": "a[rel~=me]",
-                        "acting_subject_selector": "main > p",
+                        "acting_subject_selector": "#missing-observed-element" if mode=='identity_feedback' else "main > p",
                         "self_subject_prefix": "Signed in as ",
-                        "self_subject_suffix": " (absent)" if mode=='identity_feedback' else " · Your account settings",
+                        "self_subject_suffix": " (absent)" if mode=='identity_feedback' or mode.startswith('identity_inferred') else " · Your account settings",
                     }
                 }
             elif step==4 and mode=='identity_feedback':
@@ -276,7 +280,7 @@ async def verify_login(
             host="93.184.215.14",
             username="member-" + os.urandom(4).hex(),
             password="secret-" + os.urandom(6).hex(),
-            wrong_subject=mode == "wrong_subject",
+            wrong_subject=mode in ("wrong_subject","identity_inferred_wrong_subject"),
             require_otp=mode == "owner_otp",
         ),
         public_origin="http://93.184.215.14",

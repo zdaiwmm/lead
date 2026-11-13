@@ -246,9 +246,23 @@ async def _inspect_editor(page, proposal, *, account_id, binding_version, extern
             or suffix and suffix[0].isalnum() and external_account_id[-1].isalnum()):
         raise ValueError('browser_method_identity_semantics_missing')
     self_text=(await nodes['self_subject'].inner_text()).strip()
-    quoted=await nodes['self_subject'].evaluate("node=>!!node.closest('article,[role=article],blockquote')")
-    if quoted or self_text!=(prefix+external_account_id+suffix).strip():
+    quoted=await nodes['self_subject'].evaluate("node=>{const excluded='article,[role=article],blockquote,q,[contenteditable]:not([contenteditable=false])';return !!node.closest(excluded)||!!node.querySelector(excluded)}")
+    identity_root=None
+    if quoted:
         raise ValueError('browser_method_identity_changed')
+    if self_text!=(prefix+external_account_id+suffix).strip():
+        from .native_identity_facts import inspect_current_identity
+        identity_root=await page.evaluate_handle('document.documentElement')
+        resources.push_async_callback(identity_root.dispose)
+        current=await inspect_current_identity(page,connection_origin=connection_origin,require_self_link=False)
+        if current['acting_subject']!=external_account_id:
+            raise ValueError('browser_method_identity_changed')
+        prefix,suffix=current['self_subject_prefix'],current['self_subject_suffix']
+        selectors={**selectors,'self_subject':current['acting_subject_selector']}
+        nodes['self_subject']=await _node(page,selectors['self_subject'])
+        self_text=(await nodes['self_subject'].inner_text()).strip()
+        if self_text!=(prefix+external_account_id+suffix).strip():
+            raise ValueError('browser_method_identity_changed')
     target_href=await nodes['editor_target'].get_attribute('href')
     if (not await nodes['editor_target'].evaluate("node=>node.tagName==='A'")
             or not target_href or _url(target_href,page_url)!=target):
@@ -303,6 +317,7 @@ async def _inspect_editor(page, proposal, *, account_id, binding_version, extern
     # Re-read the identity and request-bearing DOM before returning. A reload or
     # mutation during inspection must not produce a mixed-document contract.
     if (page.url!=page_url or permission_page.url!=permission_url
+            or identity_root is not None and not await identity_root.evaluate('root=>root.isConnected&&root===document.documentElement')
             or (await nodes['self_subject'].inner_text()).strip()!=self_text
             or await _form_facts(nodes['editor_body'],nodes['submit'])!=facts
             or await nodes['editor_target'].get_attribute('href')!=target_href

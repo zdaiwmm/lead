@@ -40,13 +40,18 @@ _COMMON = r'''
 
 _ENTRY = r'''(node,args)=>{''' + _COMMON + r'''
  const link=args.link;
- if(!visible(link) || excluded(link)) return null;
+ const editable=node=>!!node.closest('input,textarea,select,[contenteditable]:not([contenteditable=false])');
+ const untrusted='article,[role=article],blockquote,q,pre,code,template,[itemprop=author],input,textarea,select,[contenteditable]:not([contenteditable=false])';
+ const painted=node=>{if(!visible(node))return false;for(let item=node;item;item=item.parentElement)if(getComputedStyle(item).opacity==='0')return false;return true;};
+ const trusted=node=>{const children=Array.from(node.querySelectorAll('*'));return !node.querySelector(untrusted)&&children.length<=2000&&painted(node)&&children.every(painted);};
+ if(!painted(link) || excluded(link)||editable(node)||editable(link)) return null;
  const candidates=Array.from(new Set([...all,...document.querySelectorAll('header,nav,[role=navigation]')]))
-   .filter(item=>visible(item)&&!excluded(item)&&acting.test(text(item)));
+   .filter(item=>visible(item)&&!excluded(item)&&!editable(item)&&acting.test(text(item))&&trusted(item));
  const current=candidates.filter(item=>!candidates.some(other=>other!==item&&item.contains(other)));
- const links=Array.from(document.querySelectorAll('a[rel]')).filter(item=>visible(item)&&!excluded(item)&&
+ const links=Array.from(document.querySelectorAll('a[rel]')).filter(item=>painted(item)&&!excluded(item)&&!editable(item)&&
    item.rel.toLowerCase().split(/\s+/).includes('me'));
- const block=node.closest('p,li,dd,td,label');
+ const strong=current[0];
+ const block=strong?.closest('p,li,dd,td,label');
  const sameBlock=!!block && block===link.closest('p,li,dd,td,label');
  const adjacent=(first,second)=>{
    if(first.parentElement!==second.parentElement || first.nextElementSibling!==second) return false;
@@ -59,7 +64,7 @@ _ENTRY = r'''(node,args)=>{''' + _COMMON + r'''
    href:link.getAttribute('href'), url:link.href, rel:link.rel,
    unique_link:links.length===1&&links[0]===link,
    unique_subject:current.length===1&&(node===current[0]||node.contains(current[0])),
-   related:node.contains(link)||sameBlock||adjacent(node,link)||adjacent(link,node)};
+   related:!!strong&&(strong.contains(link)||sameBlock||adjacent(strong,link)||adjacent(link,strong))};
 }'''
 
 _PRIVATE = r'''(node,args)=>{''' + _COMMON + r'''
@@ -208,3 +213,77 @@ async def inspect_private_subject(page, *, subject_selector, value_prefix='', va
         raise IdentityFactError('identity_document_changed')
     return {'subject': subject, 'self_selector': subject_selector,
             'value_prefix': prefix, 'value_suffix': value_suffix, 'evidence': {'label': actual_label}}
+
+
+_CURRENT_IDENTITY = r'''
+ const inspect=args=>{
+   const excluded='article,[role=article],blockquote,q,pre,code,template,[itemprop=author],input,textarea,select,[contenteditable]:not([contenteditable=false])';
+   const visible=node=>{const s=getComputedStyle(node),r=node.getBoundingClientRect();if(!node.isConnected||node.closest(excluded+',[hidden],[inert]')||r.width<=0||r.height<=0||s.display==='none'||s.visibility!=='visible')return false;for(let item=node;item;item=item.parentElement)if(getComputedStyle(item).opacity==='0')return false;return true;};
+   const text=node=>(node.innerText||'').trim();
+   const all=Array.from(document.querySelectorAll('p,div,span,strong,li,dd,td,label,section,aside,header,nav,main,[role=navigation]'));
+   if(all.length>2000)return null;
+   const acting=new RegExp('^'+args.acting,'i');
+   const candidates=all.filter(node=>visible(node)&&acting.test(text(node))&&!node.querySelector(excluded)&&
+     node.querySelectorAll('*').length<=2000&&Array.from(node.querySelectorAll('*')).every(visible));
+   const current=candidates.filter(node=>!candidates.some(other=>node!==other&&node.contains(other)));
+   const links=Array.from(document.querySelectorAll('a[rel]')).filter(node=>visible(node)&&node.rel.toLowerCase().split(/\s+/).includes('me'));
+   if(current.length!==1||links.length>1||args.require_link&&links.length!==1)return null;
+   const node=current[0],link=links[0]||null;
+   const block=node.closest('p,li,dd,td,label');
+   const adjacent=(first,second)=>{
+     if(first.parentElement!==second.parentElement||first.nextElementSibling!==second)return false;
+     for(let item=first.nextSibling;item!==second;item=item.nextSibling)if(!item||item.nodeType!==Node.TEXT_NODE||!/^[\s·|—–:-]*$/.test(item.textContent))return false;
+     return true;
+   };
+   if(link&&!(node.contains(link)||block&&block===link.closest('p,li,dd,td,label')||adjacent(node,link)||adjacent(link,node)))return null;
+   const selector=node=>{
+     if(node.id&&document.querySelectorAll('#'+CSS.escape(node.id)).length===1)return '#'+CSS.escape(node.id);
+     const path=[];let item=node;
+     while(item&&path.length<24){const tag=item.tagName.toLowerCase();let n=1;for(let p=item.previousElementSibling;p;p=p.previousElementSibling)if(p.tagName===item.tagName)n++;
+       path.unshift(tag+':nth-of-type('+n+')');item=item.parentElement;}
+     const css=path.join(' > ');return !item&&document.querySelectorAll(css).length===1&&document.querySelector(css)===node?css:null;
+   };
+   const full=text(node);let identity=full;
+   if(link&&node.contains(link)){
+     const label=text(link),start=full.indexOf(label);
+     if(!label||start<0||start!==full.lastIndexOf(label)||!/^[\s·|—–:;,-]*$/.test(full.slice(start+label.length)))return null;
+     identity=full.slice(0,start);
+   }
+   const subjectSelector=selector(node),linkSelector=link?selector(link):null;
+   if(!subjectSelector||link&&!linkSelector)return null;
+   return {node,link,facts:{url:location.href,text:full,identity_text:identity,subject_selector:subjectSelector,
+     link_selector:linkSelector,link_url:link?link.href:null}};
+ };
+'''
+
+
+async def inspect_current_identity(page, *, connection_origin, require_self_link=True):
+    """Infer complete current identity from strong DOM facts, never model affixes."""
+    page_url=page.url
+    if origin(page_url)!=origin(connection_origin):
+        raise IdentityFactError('identity_connection_origin_changed')
+    args={**_patterns(),'require_link':require_self_link}
+    proof=await page.evaluate_handle('args=>{'+_CURRENT_IDENTITY+
+        'return {root:document.documentElement,...inspect(args)}}',args)
+    try:
+        facts=await proof.evaluate('proof=>proof.facts')
+        if not facts or facts['url']!=page_url:
+            raise IdentityFactError('identity_current_self_unestablished')
+        if facts['link_url'] and (origin(facts['link_url'])!=origin(connection_origin) or urlsplit(facts['link_url']).fragment):
+            raise IdentityFactError('identity_self_origin_changed')
+        prefix=re.match(_ACTING,facts['identity_text'],re.I)
+        value=re.fullmatch(r'([@\w][\w.@:+-]{0,199})([\s·|—–:;,\-]*)',facts['identity_text'][prefix.end():]) if prefix else None
+        if not value:
+            raise IdentityFactError('identity_subject_invalid')
+        subject=_subject(value.group(1))
+        prefix=prefix.group()
+        suffix=facts['text'][len(prefix)+len(subject):]
+        fresh=await proof.evaluate('(proof,args)=>{'+_CURRENT_IDENTITY+
+            'if(proof.root!==document.documentElement)return null;const current=inspect(args);'
+            'return current&&current.node===proof.node&&current.link===proof.link?current.facts:null;}',args)
+        if page.url!=page_url or fresh!=facts:
+            raise IdentityFactError('identity_document_changed')
+        return {'self_url':facts['link_url'],'self_link_selector':facts['link_selector'],'acting_subject':subject,
+            'acting_subject_selector':facts['subject_selector'],'self_subject_prefix':prefix,'self_subject_suffix':suffix}
+    finally:
+        await proof.dispose()

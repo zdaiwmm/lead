@@ -378,13 +378,23 @@ class NativeConnection:
 
     async def inspect_self(self,args):
         await self.descriptor()
-        from .native_identity_facts import inspect_self_entry
+        from .native_identity_errors import IdentityFactError
+        from .native_identity_facts import inspect_current_identity, inspect_self_entry
         _,_,account=await asyncio.to_thread(self.snapshot)
-        facts=await inspect_self_entry(self.page,link_selector=args.get('self_link_selector'),
-            subject_selector=args.get('acting_subject_selector'),subject_prefix=args.get('self_subject_prefix',''),
-            subject_suffix=args.get('self_subject_suffix',''),connection_origin=account['connection_origin'])
+        try:
+            facts=await inspect_self_entry(self.page,link_selector=args.get('self_link_selector'),
+                subject_selector=args.get('acting_subject_selector'),subject_prefix=args.get('self_subject_prefix',''),
+                subject_suffix=args.get('self_subject_suffix',''),connection_origin=account['connection_origin'])
+            facts.update(acting_subject_selector=args['acting_subject_selector'],self_subject_prefix=args['self_subject_prefix'],
+                self_subject_suffix=args.get('self_subject_suffix',''))
+        except IdentityFactError as error:
+            if error.code not in ('identity_value_missing','identity_subject_invalid','identity_current_self_unestablished','identity_current_subject_semantics_missing'):
+                raise
+            facts=await inspect_current_identity(self.page,connection_origin=account['connection_origin'])
         href=facts['self_url']
-        self.self_entry={'url':href,'selector':facts['self_link_selector'],'acting_subject':facts['acting_subject']}
+        self.self_entry={'url':href,'selector':facts['self_link_selector'],'acting_subject':facts['acting_subject'],
+            'acting_subject_selector':facts['acting_subject_selector'],'self_subject_prefix':facts['self_subject_prefix'],
+            'self_subject_suffix':facts['self_subject_suffix']}
         await self.page.goto(href,wait_until='domcontentloaded',timeout=30000)
         await self.descriptor()
         return {'state':'self_surface_opened','url':self.page.url}
@@ -432,7 +442,10 @@ class NativeConnection:
         with tx(self.actor.aid) as c:
             c.execute('UPDATE lead.takeover_sessions SET connection_data=connection_data || %s WHERE id=%s',
                 (j({'self_url':href,'self_link_selector':self.self_entry['selector'],'self_selector':selector,'self_subject':subject,
-                    'self_value_prefix':observed['value_prefix'],'self_value_suffix':observed['value_suffix']}),self.connection_id))
+                    'self_value_prefix':observed['value_prefix'],'self_value_suffix':observed['value_suffix'],
+                    **{key:self.self_entry[source] for key,source in (
+                        ('acting_subject_selector','acting_subject_selector'),('acting_subject_prefix','self_subject_prefix'),
+                        ('acting_subject_suffix','self_subject_suffix')) if source in self.self_entry}}),self.connection_id))
         return self.remember_observation(self.observation,expected)
 
     async def command(self,operation,args):

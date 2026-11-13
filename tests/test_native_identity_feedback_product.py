@@ -10,7 +10,7 @@ pytestmark=pytest.mark.skipif(os.environ.get('LEAD_NATIVE_PRODUCT_TESTS')!='1',
 
 
 @pytest.mark.asyncio
-async def test_bad_affix_feedback_reaches_actual_sdk_then_corrected_identity_binds(monkeypatch):
+async def test_missing_element_feedback_reaches_actual_sdk_then_corrected_identity_binds(monkeypatch):
     from lead_app import account_profiles
     from lead_app.config import STATE
     from native_connection_product import verify_login
@@ -35,3 +35,39 @@ async def test_bad_affix_feedback_reaches_actual_sdk_then_corrected_identity_bin
     assert result['privacy']=={'literal_in_model_request':False,'literal_in_workdir':False}
     assert all(not row['username_literal_seen'] and not row['password_literal_seen'] for row in calls)
     assert result['temporary_login_cleared']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('wrong_subject',[False,True])
+async def test_server_identity_facts_bridge_split_sdk_text_without_model_affix_guess(monkeypatch,wrong_subject):
+    from lead_app import account_profiles
+    from lead_app.config import STATE
+    from lead_app.native_connection import NativeConnection
+    from native_connection_product import verify_login
+
+    monkeypatch.setattr(account_profiles,'native_available',lambda:True)
+    original=NativeConnection.inspect_self
+    observed=[]
+    async def inspect(controller,args):
+        text=await controller.page.locator('main > p').inner_text()
+        label=await controller.page.locator('a[rel~=me]').inner_text()
+        observed.append({'actual_element_includes_link_label':label in text,
+            'proposal_suffix_matches':text.endswith(args['self_subject_suffix'])})
+        return await original(controller,args)
+    monkeypatch.setattr(NativeConnection,'inspect_self',inspect)
+    result=await verify_login(monkeypatch,mode='identity_inferred_wrong_subject' if wrong_subject else 'identity_inferred')
+    calls=result['synthetic_model_diagnostics']
+    evidence={'observed':observed,'sdk_split_identity':any(row.get('split_current_identity') for row in calls),
+        'sdk_safe_lines':[line for row in calls for line in row.get('current_dom_lines',[])],
+        'task_state':result['task_state'],'account_state':result['account']['state'],'privacy':result['privacy'],
+        'actions':[row['action'] for row in calls],'private_self_observed':any(row['path']=='/account' for row in result['oracle']['requests'])}
+    (STATE/'identity-inferred-product.json').write_text(json.dumps(evidence,indent=2))
+    assert observed==[{'actual_element_includes_link_label':True,'proposal_suffix_matches':False}]
+    assert evidence['sdk_split_identity']
+    assert evidence['private_self_observed'] and result['oracle']['posts']==[]
+    assert result['privacy']=={'literal_in_model_request':False,'literal_in_workdir':False}
+    if wrong_subject:
+        assert result['task_state']=='waiting_user' and result['account']['state']=='pending'
+        assert result['account']['external_account_id'] is None
+    else:
+        assert result['task_state']=='succeeded' and result['account']['state']=='connected'
