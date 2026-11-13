@@ -10,8 +10,13 @@ from .budget import available
 from .db import all_rows, one
 
 
-def model_readiness(models):
+def model_readiness(models, aid=None):
+    from . import local_executor
     from .config import resolve_model
+
+    if local_executor.enabled(aid):
+        return {purpose: {"model": "gpt-6.1-sol", "provider": "codex", "configured": True}
+                for purpose in ("planning", "research")}
 
     result = {}
     for purpose in ("planning", "research"):
@@ -47,7 +52,8 @@ def context(c, aid, business):
     return {
         "budget": available(c, aid),
         "models": models,
-        "model_readiness": model_readiness(models),
+        "model_readiness": model_readiness(models, aid),
+        "native_executor": __import__("lead_app.local_executor", fromlist=["enabled"]).enabled(aid),
         "model_backoff": (
             one(c, "SELECT onboarding_state FROM lead.agents WHERE id=%s", (aid,)) or {}
         )
@@ -110,6 +116,9 @@ def assess(ctx, kind, value, task=None, *, paid_step=None, request_units=None):
         # A freshly measured request supersedes the size of an older, larger prompt.
         estimate = request_units
     headroom = ctx["budget"]["available_units"]
+    if ctx.get("native_executor"):
+        estimate = 0
+        headroom = None
     if headroom is None:
         headroom = float("inf")
     penalty = min(25, math.ceil(25 * estimate / max(1, headroom))) if estimate else 0
@@ -135,7 +144,7 @@ def assess(ctx, kind, value, task=None, *, paid_step=None, request_units=None):
         or ctx["models"].get("default_model")
         for p in purposes
     ]
-    cooling = not free and active(backoff, ctx["model_settings_version"], references)
+    cooling = not free and not ctx.get("native_executor") and active(backoff, ctx["model_settings_version"], references)
     payload = (task or {}).get("input", {})
     host = urlsplit(payload.get("candidate_url") or "").hostname
     if host in ("www.google.com", "google.com"):

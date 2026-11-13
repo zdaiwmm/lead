@@ -28,6 +28,38 @@ FACTS = {
     "retention": "The trusted server integration is healthy. Forty first-time customers completed core value. Only one returned or repeated the value within 30 days. Acquisition traffic and initial completion are adequate; repeat value is weak.",
 }
 CASES = [("pair",k) for k in ("demand","distribution","value")]+[("quote",k) for k in ("demand","measurement","value")]+[("commerce",k) for k in ("distribution","value","retention")]
+MEMORY_CASE = "memory_counterevidence"
+FACTS[MEMORY_CASE] = FACTS["distribution"] + (
+    " The latest observation covers the current seven-day window. Core-value results remain unknown "
+    "because there is no trustworthy current server-value receipt. Public website research is available."
+)
+MEMORY_PRIOR = (
+    "Historical synthetic observation: publishing to this same owned Facebook Page every day was effective "
+    "and produced core-value users. Continue publishing to the same Page every day."
+)
+
+
+def selected_cases(case="all", repetitions=None):
+    """The new case is opt-in; an omitted selection retains the legacy 27 runs."""
+    choices = {product+":"+branch:(product,branch) for product,branch in CASES}
+    if case == MEMORY_CASE:
+        if repetitions is not None and (type(repetitions) is not int or repetitions != 1):
+            raise ValueError("The memory counterevidence case permits exactly one primary/repair decision")
+        return [("quote",MEMORY_CASE,1)]
+    if case != "all" and case not in choices:
+        raise ValueError("Unknown evaluation case")
+    repetitions = 3 if repetitions is None else repetitions
+    if type(repetitions) is not int or not 1 <= repetitions <= 3:
+        raise ValueError("Evaluation repetitions must be between one and three")
+    cases = CASES if case == "all" else [choices[case]]
+    return [(product,branch,n) for product,branch in cases for n in range(1,repetitions+1)]
+
+
+def input_hash(value):
+    from lead_app.growth.store import digest
+    return digest(value)
+
+
 # These are evaluator expectations, never included in model context.
 RUBRIC = {
     "demand":{"audience","product","value"}, "distribution":{"distribution","audience"},
@@ -105,6 +137,76 @@ def seed_feedback(aid,product,branch):
     client.close()
 
 
+
+def seed_memory_counterevidence(aid,product):
+    """Synthetic current authority is separate from an old, optional conclusion."""
+    from datetime import timedelta
+
+    import psycopg
+    from lead_app.account_intents import set_intent
+    from lead_app.adapters.catalog import SPECS
+    from lead_app.config import database_kwargs
+    from lead_app.db import j, one, tx, uid
+    from lead_app.experiences import record_experience
+    from lead_app.growth.contracts import utcnow
+    from lead_app.growth.tools import _remember
+
+    if os.environ.get("LEAD_GROWTH_TEST_ENV") != "1" or database_kwargs(owner=True)["dbname"] == "lead":
+        raise ValueError("Synthetic Page capability seeding requires an isolated verification database")
+    url="https://"+product+".example/"
+    old,_=_remember(aid,{"url":url+"historical-note","title":"Synthetic historical Page note",
+        "text":MEMORY_PRIOR+" This is a synthetic historical fixture, not a production result."},source_type="evaluation_fixture")
+    identifier=record_experience(aid,"evaluation:memory-counterevidence",kind="business",
+        problem=PRODUCTS[product][1],conclusion=MEMORY_PRIOR,conditions={"product":url},
+        source_document_id=old.id,evidence=[{"kind":"document","id":str(old.id)}],
+        review_at=utcnow()+timedelta(days=1))
+    with tx(aid) as c:
+        c.execute("UPDATE lead.experiences SET checked_at=now()-interval '30 days' WHERE id=%s",(identifier,))
+        c.execute("UPDATE lead.knowledge_documents SET created_at=now()-interval '30 days' WHERE id=%s",(old.id,))
+        profile=one(c,"SELECT id FROM lead.browser_profiles WHERE slot='default'")
+        subject="fixture-self-"+uid()
+        account=one(c,"""INSERT INTO lead.social_accounts(tenant_id,agent_id,profile_id,platform,external_account_id,
+            display_name,state,verified_at,subject_ref) VALUES(lead.ctx_tenant(),%s,%s,'facebook',%s,
+            'Synthetic connected Page owner','connected',now(),%s) RETURNING id,binding_version""",
+            (aid,profile['id'],subject,j({'namespace':'facebook','external_id':subject,'id_kind':'stable'})))
+        page_url='https://www.facebook.com/fixture.'+uid().replace('-','')
+        from lead_app.browser_execution import validate_method
+        method=validate_method({'version':'native-browser-v1','account_id':str(account['id']),
+            'binding_version':account['binding_version'],'target_url':page_url,
+            'self_url':'https://www.facebook.com/fixture-self','operations':['publish'],'role':'owner',
+            'selectors':{key:'#fixture-'+key for key in ('self_subject','editor_target','editor_body','submit',
+                'receipt_author','receipt_body','receipt_url')},
+            'request':{'method':'POST','url':page_url+'/submit','body_kind':'form','content_field':'body','dynamic_fields':[]},
+            'evidence_refs':['fixture:current-page-owner','fixture:verified-text'],
+            'platform_permission':{'state':'approved','evidence_refs':['fixture:current-page-permission']}},
+            account_id=account['id'],binding_version=account['binding_version'],target_url=page_url,operation='publish')
+        c.execute("UPDATE lead.browser_profiles SET provider='chromium',sdk_version='browser-use/0.13.14' WHERE id=%s",(profile['id'],))
+        target=one(c,"""INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,external_target_id,
+            canonical_url,display_name,verified_permissions,state) VALUES(lead.ctx_tenant(),%s,%s,'page',%s,%s,
+            'Synthetic owned Page',%s,'active') RETURNING id""",(aid,account['id'],'fixture-page-'+uid(),page_url,
+            j({'actions':['publish'],'adapter_version':SPECS['facebook'].version,'binding_version':account['binding_version'],
+                'publishing_verified_formats':['text'],'role_evidence':['fixture:current-page-owner'],
+                'browser_method':method,'browser_methods':{'publish':method}})))
+        grant=one(c,"""INSERT INTO lead.authorization_grants(tenant_id,agent_id,target_id,version,allowed_actions,limits,granted_by)
+            VALUES(lead.ctx_tenant(),%s,%s,1,'["publish"]',%s,'synthetic_current_owner') RETURNING id""",
+            (aid,target['id'],j({'formats':['text'],'publish_per_day':1})))
+    from lead_app.execution_routes import register
+    register(aid,profile['id'])
+    intent_revision=set_intent(aid,account['id'],'running',source='owner_command',source_ref='evaluation:current-page-intent')
+    with tx(aid) as c:
+        c.execute("UPDATE lead.authorization_grants SET limits=limits || %s WHERE id=%s",
+            (j({'intent_revision':intent_revision,'account_id':str(account['id']),
+                'binding_version':account['binding_version']}),grant['id']))
+    # The evaluation owns this isolated database. The runtime role correctly
+    # cannot manufacture a platform-wide technical/permission acceptance.
+    with psycopg.connect(**database_kwargs(owner=True)) as c:
+        c.execute("""UPDATE lead.platform_capabilities SET permission_state='approved',technical_state='verified',
+            adapter_version=%s,evidence_ref='fixture:verified-text',reviewed_at=now()
+            WHERE platform='facebook' AND action_type='publish' AND target_type='page'""",(SPECS['facebook'].version,))
+    return {'experience_id':identifier,'historical_document_id':str(old.id),'account_id':str(account['id']),
+            'target_id':str(target['id']),'grant_id':str(grant['id']),
+            'authority':'synthetic_current_db_fixture_not_live_acceptance'}
+
 def hard_checks(proposals,accepted):
     failures = []
     for proposal in proposals:
@@ -120,7 +222,7 @@ def hard_checks(proposals,accepted):
     return sorted(set(failures))
 
 
-async def evaluate(state,output,max_units):
+async def evaluate(state,output,max_units,*,case="all",repetitions=None,model_runner=None):
     from lead_app import analytics, domain
     from lead_app.budget import growth_cost_context, set_daily_limit
     from lead_app.db import all_rows, j, one, tx
@@ -130,6 +232,12 @@ async def evaluate(state,output,max_units):
     from lead_app.growth.tools import _remember
     from lead_app.model import run_model
 
+    selection = selected_cases(case,repetitions)
+    if type(max_units) is not int or not 80000 <= max_units <= 6000000:
+        raise ValueError("Explicit evaluation bound must be between 80,000 and 6,000,000 token units")
+    output.parent.mkdir(parents=True,exist_ok=True)
+    model = model_runner or run_model
+    model_mode = "test_double" if model_runner is not None else "provider_adapter"
     semaphore = asyncio.Semaphore(3)
     records = []
     model_context = __import__("contextvars").ContextVar("evaluation_record")
@@ -144,15 +252,22 @@ async def evaluate(state,output,max_units):
         if provider_blocked:
             raise ValueError("evaluation_provider_blocked:"+provider_blocked)
         record = model_context.get()
+        keys = record.setdefault("model_call_keys",[])
+        if record["case"] == MEMORY_CASE and (len(keys) >= 2 or kwargs.get("call_key") != ("repair" if keys else "primary")):
+            raise ValueError("evaluation_request_limit")
         # Conservative bound for every actual primary/repair call; the actual
         # model adapter independently reserves and settles its real ledger.
         estimate = 80000
         if reserved+estimate>max_units:
+            record["budget_stop"] = "evaluation_budget_exhausted"
             raise ValueError("evaluation_budget_exhausted")
         reserved += estimate
+        keys.append(kwargs.get("call_key"))
         record["input_hashes"].append(digest(prompt))
+        record["model_inputs"].append(json.loads(json.dumps(prompt,default=str)))
+        record.setdefault("model_system_hashes",[]).append(digest(kwargs.get("system")))
         try:
-            value = await run_model(output_type,prompt,**kwargs)
+            value = await model(output_type,prompt,**kwargs)
         except Exception as error:
             chain=[]
             current=error
@@ -170,9 +285,10 @@ async def evaluate(state,output,max_units):
     async def run_case(product,branch,repetition):
         async with semaphore:
             aid = domain.create_agent(runtime_engine="growth")
-            record = {"case":product+":"+branch,"repetition":repetition,"agent_id":aid,
-                "fixture_version":"growth-generalization-v2","prompt_version":agent.PROMPT_VERSION,
-                "input_hashes":[],"proposals":[]}
+            record = {"case":MEMORY_CASE if branch==MEMORY_CASE else product+":"+branch,"repetition":repetition,"agent_id":aid,
+                "fixture_version":"growth-memory-counterevidence-v1" if branch==MEMORY_CASE else "growth-generalization-v2",
+                "prompt_version":agent.PROMPT_VERSION,
+                "input_hashes":[],"model_inputs":[],"proposals":[],"model_mode":model_mode}
             token = model_context.set(record)
             cost_token = None
             try:
@@ -180,46 +296,62 @@ async def evaluate(state,output,max_units):
                 with tx(aid) as c:
                     c.execute("UPDATE lead.agents SET desired_state='running',onboarding_state=onboarding_state || %s WHERE id=%s",(
                         j({"operating_contract":{"revision":1,"objective":PRODUCTS[product][1]},
-                           "evaluation_fixture":{"version":"growth-generalization-v2","synthetic":True}}),aid))
+                           "evaluation_fixture":{"version":record["fixture_version"],"synthetic":True}}),aid))
                     one(c,"""INSERT INTO lead.business_profiles(tenant_id,agent_id,revision,product_url,description,facts,source_refs)
                         VALUES(lead.ctx_tenant(),%s,1,%s,%s,%s,'[]') RETURNING id""",(aid,"https://"+product+".example/",
                         PRODUCTS[product][0],j({"core_value":PRODUCTS[product][1],"fixture_observations":FACTS[branch],
                             "measurement": "stale" if branch=="measurement" else "healthy" if branch in ("value","retention") else "missing"})))
                 _remember(aid,{"url":"https://"+product+".example/observations","title":"Synthetic observed feedback",
                     "text":FACTS[branch]+" These are fixed synthetic evaluation facts, not production results."})
+                if branch == MEMORY_CASE:
+                    record["memory_fixture"] = seed_memory_counterevidence(aid,product)
                 await asyncio.to_thread(seed_feedback,aid,product,branch)
                 ref = ensure_decision(aid,[{"reason":"business_fixture","revision":1}])
                 claim=advance(ref)["claim"]
                 cost_token = growth_cost_context.set({"task_id":ref["task_id"]})
                 context = agent.build_context(aid)
+                if branch == MEMORY_CASE:
+                    found = [item for item in context["experiences"] if str(item["id"]) == record["memory_fixture"]["experience_id"]]
+                    if len(found) != 1 or found[0]["problem"] != context["goal"]["objective"]:
+                        raise ValueError("evaluation_memory_not_retrieved")
+                    record["memory_retrieval_verified"] = True
                 record["input_context"] = context
-                record["logical_input_hash"] = digest({"product":PRODUCTS[product],"feedback":FACTS[branch]})
+                record["logical_input_hash"] = digest({"product":PRODUCTS[product],"feedback":FACTS[branch],
+                    **({"historical_experience":MEMORY_PRIOR,"fixture_version":"memory-counterevidence-v1"} if branch==MEMORY_CASE else {})})
                 record["result"] = await agent.decide(aid,ref["task_id"],decision_claim=claim)
                 with tx(aid) as c:
-                    record["usage"] = all_rows(c,"SELECT units,details->>'model' model FROM lead.usage_events ORDER BY created_at")
                     record["experiments"] = all_rows(c,"SELECT specification FROM lead.growth_experiments")
                     record["work"] = all_rows(c,"SELECT type,input->'spec' spec FROM lead.tasks WHERE type<>'growth.decision'")
                 record["hard_failures"] = hard_checks(record["proposals"],record["result"])
                 types = {x["specification"]["question_type"] for x in record["experiments"]}
-                record["rubric_question_type_matches"] = bool(types & RUBRIC[branch])
+                if branch != MEMORY_CASE:
+                    record["rubric_question_type_matches"] = bool(types & RUBRIC[branch])
                 record["semantic_review"] = "pending_raw_review"
                 record["context_bytes"] = len(json.dumps(context,default=str).encode())
             except Exception as error:
                 record["error"] = type(error).__name__+":"+str(error)[:160]
                 record["semantic_review"] = "not_evaluated"
             finally:
+                try:
+                    with tx(aid) as c:
+                        record["usage"] = all_rows(c,"SELECT id,reservation_id,category,units,details FROM lead.usage_events ORDER BY created_at")
+                        record["reservations"] = all_rows(c,"SELECT id,state,provider,units,created_at,expires_at FROM lead.budget_reservations ORDER BY created_at")
+                except Exception as error:
+                    record["error"] = record.get("error") or "usage_evidence_unavailable:"+type(error).__name__
+                    record["semantic_review"] = "not_evaluated"
                 if cost_token:
                     growth_cost_context.reset(cost_token)
                 model_context.reset(token)
                 domain.set_control(aid,"archive")
                 records.append(record)
                 output.write_text(json.dumps({"version":1,"candidate_prompt":agent.PROMPT_VERSION,
-                    "max_reserved_units":max_units,"admitted_upper_bound":reserved,"results":records},ensure_ascii=False,indent=2,default=str))
+                    "max_reserved_units":max_units,"admitted_upper_bound":reserved,"model_mode":model_mode,
+                    "selection":case,"selected_runs":len(selection),"results":records},ensure_ascii=False,indent=2,default=str))
                 os.chmod(output,0o600)
                 print(json.dumps({"case":record["case"],"repetition":repetition,"error":record.get("error"),
                     "accepted":len(record.get("result",{}).get("accepted",[])),"review":record["semantic_review"]}),flush=True)
     try:
-        await asyncio.gather(*(run_case(product,branch,n) for product,branch in CASES for n in range(1,4)))
+        await asyncio.gather(*(run_case(product,branch,n) for product,branch,n in selection))
     finally:
         agent.run_model = original
         analytics.resolve_public=original_resolve
@@ -232,7 +364,11 @@ def main():
     parser.add_argument("--state-dir",type=Path,required=True)
     parser.add_argument("--model-config",type=Path,required=True)
     parser.add_argument("--max-units",type=int,required=True)
+    parser.add_argument("--case",choices=["all",MEMORY_CASE,*[product+":"+branch for product,branch in CASES]],default="all",
+                        help="Default: original nine cases. memory_counterevidence runs only the new counterevidence case.")
+    parser.add_argument("--repetitions",type=int,help="One to three for original cases (default three); the memory case permits one only.")
     args = parser.parse_args()
+    selected_cases(args.case,args.repetitions)
     state = validate_state(args.state_dir)
     read_manifest(state)
     if not 80000<=args.max_units<=6000000:
@@ -252,7 +388,7 @@ def main():
     os.environ.update(config)
     sys.path.insert(0,str(ROOT/"services/api"))
     output = state/"reports/model-evaluation.json"
-    asyncio.run(evaluate(state,output,args.max_units))
+    asyncio.run(evaluate(state,output,args.max_units,case=args.case,repetitions=args.repetitions))
 
 
 if __name__=="__main__":

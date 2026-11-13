@@ -112,10 +112,14 @@ def submit_work(c, aid, spec):
             "goal_revision":objective_revision(require_agent(c,aid))}
     if spec.kind=="channel":
         agent = require_agent(c,aid)
+        operation = spec.payload.get('operation','publish')
+        parent = spec.payload.get('parent_url') if operation == 'reply' else None
         prior = one(c,"""SELECT t.id,t.input FROM lead.actions a JOIN lead.tasks t ON t.id=a.task_id
             WHERE a.target_id=%s AND a.state IN ('dispatching','unknown','confirmed')
             AND coalesce(t.input#>>'{spec,payload,content_id}',a.content_id::text)=%s
-            ORDER BY a.created_at LIMIT 1""",(spec.target_id,str(spec.payload.get("content_id"))))
+            AND a.type=%s AND (CASE WHEN a.type='reply' THEN
+                coalesce(a.intent->>'parent_url',t.input#>>'{spec,payload,parent_url}') END) IS NOT DISTINCT FROM %s
+            ORDER BY a.created_at LIMIT 1""",(spec.target_id,str(spec.payload.get("content_id")),operation,parent))
         if prior:
             return TaskRef(agent_id=UUID(str(aid)),task_id=prior["id"],
                 task_generation=prior["input"].get("task_generation",1)).model_dump(mode="json")
@@ -126,6 +130,17 @@ def submit_work(c, aid, spec):
             "goal_revision":objective_revision(agent),"content":spec.payload.get("content_id"),
             "content_hash":spec.payload.get("content_hash"),"original_action_id":spec.payload.get("original_action_id"),
             "binding":binding}
+        if not spec.payload.get('original_action_id'):
+            # Old planned tasks used this hash without a primitive or parent.
+            # Reuse only matching historical intent; never split it on upgrade.
+            legacy = one(c,'SELECT id,input FROM lead.tasks WHERE workflow_id=%s',('growth:'+str(aid)+':'+digest(material),))
+            previous = (legacy or {}).get('input',{}).get('spec',{}).get('payload',{})
+            previous_operation = previous.get('operation','publish')
+            previous_parent = previous.get('parent_url') if previous_operation == 'reply' else None
+            if legacy and (previous_operation,previous_parent) == (operation,parent):
+                return TaskRef(agent_id=UUID(str(aid)),task_id=legacy['id'],
+                    task_generation=legacy['input'].get('task_generation',1)).model_dump(mode='json')
+            material.update(operation=operation,parent_url=parent)
     workflow_id = "growth:" + str(aid) + ":" + digest(material)
     old = one(c, "SELECT id,input FROM lead.tasks WHERE workflow_id=%s", (workflow_id,))
     if old:
@@ -169,8 +184,12 @@ def create_experiment(c, aid, data):
     from ..admin_settings import effective
     from ..budget import available
     settings, _ = effective(c, "models", aid)
-    budget = available(c, aid)["available_units"]
+    from .. import local_executor
+    native_executor = local_executor.enabled(aid, connection=c)
+    budget = None if native_executor else available(c, aid)["available_units"]
     ceiling = 4*2*(settings["max_output_tokens"]+60000//2+1000)
+    if native_executor:
+        ceiling = 10_000_000  # Legacy schema compatibility; not a Codex call budget.
     if budget is not None:
         ceiling = min(ceiling,budget)
     if ceiling <= 0:
@@ -196,7 +215,7 @@ def create_experiment(c, aid, data):
         if one(c,"SELECT count(*) n FROM lead.growth_experiments WHERE state IN ('active','observing')")["n"]>=8:
             raise ValueError("active_experiment_capacity")
         costs = question_costs(c,question_key)
-        if costs["limit_units"] and costs["committed_units"]>=costs["limit_units"]:
+        if not native_executor and costs["limit_units"] and costs["committed_units"]>=costs["limit_units"]:
             raise ValueError("question_limit")
     row = one(c, """INSERT INTO lead.growth_experiments(tenant_id,agent_id,business_profile_id,
         objective_revision,question_key,variation_key,specification)
@@ -351,16 +370,24 @@ def accept_commands(aid, proposal, decision_task_id=None,*,business_snapshot=Non
                                 raise ValueError("account_scope")
                             from ..adapters.catalog import target_url
                             from .tools import AccountInput
-                            account = one(c,"SELECT platform FROM lead.social_accounts WHERE id=%s",(command.account_id,))
+                            account = one(c,"""SELECT a.platform,a.connection_origin,p.provider FROM lead.social_accounts a
+                                LEFT JOIN lead.browser_profiles p ON p.id=a.profile_id WHERE a.id=%s""",(command.account_id,))
                             proposed = AccountInput.model_validate(command.payload)
-                            urls = [target_url(account["platform"],url) for url in proposed.target_urls]
+                            if account['platform']=='web' and account.get('provider')=='chromium':
+                                from ..browser_execution import origin
+                                urls=list(proposed.target_urls)
+                                if any(not 1<=len(url)<=2000 or origin(url)!=origin(account['connection_origin']) for url in urls):
+                                    raise ValueError('target_not_permitted')
+                            else:
+                                urls = [target_url(account["platform"],url) for url in proposed.target_urls]
                             if not urls:
                                 raise ValueError("target_candidates_required")
                             from datetime import timedelta
 
                             from .contracts import utcnow
                             refs.append(submit_work(c,aid,TaskSpec(kind="account",purpose="discover",account_id=command.account_id,
-                                payload={"target_urls":urls},review_at=utcnow()+timedelta(hours=2))))
+                                payload={"target_urls":urls,**({'desired_operation':proposed.desired_operation}
+                                    if proposed.desired_operation is not None else {})},review_at=utcnow()+timedelta(hours=2))))
                             audit(c, aid, "growth.target_proposed", command.payload)
                     response = {"group": key, "task_refs": refs,
                                 "experiment_id": str(experiment["id"]) if experiment else None}

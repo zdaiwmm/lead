@@ -148,7 +148,7 @@ def parse_key(key):
             ("strategy" if parts[0] == "strategies" else "channel_rule"),
             parts[1],
         )
-        if platform not in {p[0] for p in PLATFORMS}:
+        if platform not in {p[0] for p in PLATFORMS} | {"web"}:
             raise ValueError("请选择有效的渠道")
         if len(parts) > 2:
             aid = str(UUID(parts[2]))
@@ -356,11 +356,12 @@ def write(
     from .admin_permissions import require_config
 
     require_config(key)
-    kind, aid, platform, target = check_scope(c, key, lock=True)
+    kind, _, _, _ = parse_key(key)
     if kind in {"models", "model_catalog"}:
         c.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(lead.ctx_tenant()::text || ':model-catalog',0))"
         )
+    kind, aid, platform, target = check_scope(c, key, lock=True)
     c.execute(
         "INSERT INTO lead.admin_configs(tenant_id,agent_id,config_key,kind) VALUES(lead.ctx_tenant(),%s,%s,%s) ON CONFLICT DO NOTHING",
         (aid, key, kind),

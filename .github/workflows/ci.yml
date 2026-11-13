@@ -51,12 +51,28 @@ jobs:
       - name: Tool regression
         run: python -m pytest --noconftest -q tests/test_ci_delivery.py tests/test_tool_release.py tests/test_prepare_home_image.py tests/test_home_release.py tests/test_home_systemd_release.py
   backend:
-    needs: scope
+    needs: [scope, frontend]
     if: github.event_name != 'pull_request' && needs.scope.outputs.kind == 'application'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        id: browser-python
+        with:
+          python-version: '3.12'
+      - name: Download the same-run tested browser runtime
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: lead-browser-runtime-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/browser-runtime-download
+      - name: Verify the original browser runtime before SDK tests
+        run: |
+          mkdir "$RUNNER_TEMP/lead-browser-runtime"
+          tar -xf "$RUNNER_TEMP/browser-runtime-download/lead-browser-runtime.tar" -C "$RUNNER_TEMP/lead-browser-runtime"
+          '${{ steps.browser-python.outputs.python-path }}' -IB scripts/build_browser_runtime.py "$GITHUB_SHA" "$RUNNER_TEMP/lead-browser-runtime" --verify
+          echo "LEAD_BROWSER_RUNTIME_DIR=$RUNNER_TEMP/lead-browser-runtime" >> "$GITHUB_ENV"
+          echo "LEAD_BROWSER_RUNTIME_PYTHON=${{ steps.browser-python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'
@@ -96,15 +112,20 @@ jobs:
             if curl --silent --fail http://127.0.0.1:8088/lead.js >/dev/null; then break; fi
             sleep 1
           done
+      - name: Native fixed-page SDK and namespace contract
+        run: |
+          PYTHONPATH="$LEAD_BROWSER_RUNTIME_DIR/site-packages:$PWD/services/api" ANONYMIZED_TELEMETRY=false \
+            "$LEAD_BROWSER_RUNTIME_PYTHON" -B -S tests/browser_namespace_cdp_probe.py \
+            "$PWD/scripts/browser_namespace.py" "$LEAD_BROWSER_RUNTIME_DIR/chromium/chrome-linux64/chrome"
       - name: Database, media and authorization tests
-        run: LEAD_TEST_CHANNEL_TEMPORAL=127.0.0.1:17233 LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_WORKFLOW_TESTS=1 LEAD_GROWTH_TEST_ENV=1 .venv/bin/pytest -q --junitxml=.state/ci-tests.xml
+        run: LEAD_TEST_CHANNEL_TEMPORAL=127.0.0.1:17233 LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_NATIVE_PRODUCT_TESTS=1 LEAD_WORKFLOW_TESTS=1 LEAD_GROWTH_TEST_ENV=1 .venv/bin/pytest -q --junitxml=.state/ci-tests.xml
       - if: always() && hashFiles('.state/infra.env') != ''
         run: docker compose --env-file .state/infra.env -f infra/compose.yaml down
   frontend:
     needs: scope
     if: needs.scope.outputs.kind == 'application'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: apps/web
@@ -117,6 +138,15 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      - name: Verify and package the local Codex connector
+        working-directory: services/local-executor
+        run: |
+          npm ci
+          npm test
+          npm run build
+          mkdir -p "$RUNNER_TEMP/lead-local-executor"
+          printf '%s\n' "$GITHUB_SHA" > REVISION
+          npm pack --pack-destination "$RUNNER_TEMP/lead-local-executor"
       - run: npm run build
         if: github.event_name != 'pull_request'
       - name: Reproduce home browser frames with synthetic images
@@ -133,11 +163,37 @@ jobs:
             mount --bind "$PWD" /run/lead-home/bin/web
             "$1" ../../tests/home_browser_frames.cjs ../../infra/home-browser-frames
           ' bash "$(command -v node)"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        if: github.event_name != 'pull_request'
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.browser-use.lock.txt
+            requirements.lock.txt
+      - name: Build and natively verify the isolated browser runtime once
+        if: github.event_name != 'pull_request'
+        working-directory: .
+        run: |
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS,RUNNER_ENVIRONMENT,http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY /usr/bin/python3 -IB .github/scripts/ci_apt_mirror.py
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\nAPT::Update::Error-Mode "any";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99lead-ci-acquire >/dev/null
+          python -IB scripts/build_browser_runtime.py "$GITHUB_SHA" "$RUNNER_TEMP/lead-browser-runtime" --with-system-deps
+          tar -cf "$RUNNER_TEMP/lead-browser-runtime.tar" -C "$RUNNER_TEMP/lead-browser-runtime" .
+      - name: Retain the tested browser runtime for the same-run backend
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lead-browser-runtime-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lead-browser-runtime.tar
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
       - name: Package the tested Linux application
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
           sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get install -y squashfs-tools
-          ../../scripts/build_home_image.sh "$GITHUB_SHA" "$RUNNER_TEMP/lead.squashfs"
+          ../../scripts/build_home_image.sh "$GITHUB_SHA" "$RUNNER_TEMP/lead.squashfs" "$RUNNER_TEMP/lead-browser-runtime" "$RUNNER_TEMP/lead-local-executor/lead-local-executor-0.1.0.tgz"
           for file in ../../infra/home-browser-frames/*; do
             unsquashfs -cat "$RUNNER_TEMP/lead.squashfs" "home-browser-frames/${file##*/}" | cmp "$file" -
           done
@@ -160,6 +216,21 @@ jobs:
           launcher = root / "services/api/lead_app/channel_executor.py"
           compile(launcher.read_bytes(), str(launcher), "exec")
           print("Exact release image root, REVISION and executor source are readable by non-root")
+          PY
+          sudo setpriv --reuid=65534 --regid=65534 --clear-groups "$(command -v python)" -IB - "$PWD/../../scripts/build_browser_runtime.py" "$image_root/services/browser-runtime" "$GITHUB_SHA" <<'PY'
+          import json
+          import runpy
+          import sys
+          from pathlib import Path
+
+          builder = runpy.run_path(sys.argv[1])
+          runtime = Path(sys.argv[2])
+          manifest = json.loads((runtime / "manifest.json").read_text())
+          assert manifest["sha"] == sys.argv[3]
+          assert builder["inventory"](runtime) == manifest["files"]
+          observed = builder["smoke"](runtime)
+          assert observed["chromium_version"] == manifest["chromium"]["version"]
+          print("Exact mounted Python 3.12 SDK and Chromium passed a non-root native smoke test")
           PY
       - name: Retain the exact release image
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'

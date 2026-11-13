@@ -1,8 +1,11 @@
 """Filesystem cutover, mount identity and lost-status regression cases (no production data)."""
 
 import importlib
+import io
+import json
 import stat
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -13,6 +16,9 @@ def hook(monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     h = importlib.import_module("home_systemd_release")
     monkeypatch.setattr(h, "STORE", tmp_path)
+    # A maintenance host may really have these installed. Unit tests select
+    # their own fixture tools instead of discovering the host's live verifier.
+    monkeypatch.setattr(h, "TOOLS", tmp_path / "tools")
     for sha in ("a" * 40, "b" * 40):
         (tmp_path / sha).mkdir()
     h.select("a" * 40)
@@ -121,6 +127,7 @@ def test_prior_request_recovered_before_new_deploy(hook, monkeypatch):
     "services/api/lead_app/app.py", "services/channel_adapters/reddit/entry.py",
     "services/channel_adapters/systemd/executor.conf.in",
     "scripts/verify_cadence_ui.py",
+    "scripts/evaluate_native_browser.py", "scripts/native_eval_seed.py",
 ))
 @pytest.mark.parametrize("unreviewed_path", ("infra/migrations/new.py", "scripts/unreviewed.py"))
 def test_deploy_path_checks_compatibility_and_skips_repeats(
@@ -1412,3 +1419,158 @@ def test_failed_provision_restores_previous_writable_layout_bytes(provisioning, 
         p.h.provision_executor(p.sha, p.path)
     assert layout.read_bytes() == prior
     assert layout.stat().st_mode & 0o777 == 0o600
+
+
+def test_unified_compatibility_only_consumes_exact_frozen_files(hook,tmp_path,monkeypatch):
+    tools=tmp_path/'tools'
+    tools.mkdir()
+    (tools/'home_live_maintenance.py').write_text('# fixture')
+    monkeypatch.setattr(hook,'TOOLS',tools)
+    monkeypatch.setattr(hook,'UNIFIED_BROWSER_FILES',{'scripts/browser_namespace.py':'c'*40})
+    monkeypatch.setattr(hook,'unified_cutover_pending',lambda sha:True)
+    def run(*args,**kwargs):
+        return 'c'*40 if args[0]=='git' else 't'
+    monkeypatch.setattr(hook,'run',run)
+    assert hook.reviewed_unified_browser('/mirror','b'*40,{'scripts/browser_namespace.py','scripts/arbitrary.py'})=={'scripts/browser_namespace.py'}
+    monkeypatch.setattr(hook,'run',lambda *a,**kw:'d'*40)
+    with pytest.raises(hook.Refused,match='compatibility review'):
+        hook.reviewed_unified_browser('/mirror','b'*40,{'scripts/browser_namespace.py'})
+
+
+def test_unified_unfrozen_schema_runtime_never_releases(hook,monkeypatch):
+    monkeypatch.setattr(hook,'UNIFIED_BROWSER_FILES',{'scripts/browser_namespace.py':'UNFROZEN'})
+    with pytest.raises(hook.Refused,match='not frozen'):
+        hook.reviewed_unified_browser('/mirror','b'*40,{'scripts/browser_namespace.py'})
+
+
+def test_local_executor_package_requires_exact_revision_and_safe_members(hook, monkeypatch, tmp_path):
+    root = tmp_path / 'sealed'
+    folder = root / 'services/local-executor'
+    folder.mkdir(parents=True)
+    package = folder / 'lead-local-executor.tgz'
+    monkeypatch.setattr(hook, 'image', lambda sha: root)
+    sha = 'b' * 40
+    def write(revision=sha, malicious=False):
+        files = {'package/REVISION': revision, 'package/package.json': json.dumps({
+            'name': '@lead/local-executor', 'bin': {'lead-executor': './dist/cli.js'}}),
+            'package/dist/cli.js': '#!/usr/bin/env node\n'}
+        with tarfile.open(package, 'w:gz') as output:
+            for name, text in files.items():
+                data = text.encode()
+                item = tarfile.TarInfo(name)
+                item.size = len(data)
+                output.addfile(item, io.BytesIO(data))
+            if malicious:
+                item = tarfile.TarInfo('package/dist/redirect')
+                item.type = tarfile.SYMTYPE
+                item.linkname = '/etc/passwd'
+                output.addfile(item)
+    write()
+    hook.verify_local_executor_package(sha)
+    write('a' * 40)
+    with pytest.raises(hook.Refused, match='revision'):
+        hook.verify_local_executor_package(sha)
+    write(malicious=True)
+    with pytest.raises(hook.Refused, match='member'):
+        hook.verify_local_executor_package(sha)
+
+
+def test_codex_release_requires_explicit_source_inventory(hook):
+    assert 'infra/migrations/sql/0034_local_executor.sql' in hook.UNIFIED_BROWSER_FILES
+    assert 'apps/web/next.config.ts' in hook.UNIFIED_BROWSER_FILES
+    assert 'services/local-executor/package-lock.json' in hook.UNIFIED_BROWSER_FILES
+    assert 'services/local-executor/src/runner.ts' in hook.UNIFIED_BROWSER_FILES
+    assert 'services/local-executor/src/arbitrary.ts' not in hook.UNIFIED_BROWSER_FILES
+
+
+def test_ambiguous_cutover_journals_refuse(hook,monkeypatch):
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda sha:True)
+    monkeypatch.setattr(hook,'unified_cutover_pending',lambda sha:True)
+    with pytest.raises(hook.Refused,match='ambiguous'):
+        hook.cutover_kind('b'*40)
+
+
+def test_unified_preflight_uses_original_hold_and_revision(hook,monkeypatch):
+    import json
+    old,sha='a'*40,'b'*40
+    reads=[]
+    monkeypatch.setattr(hook,'current',lambda:old)
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda revision:False)
+    monkeypatch.setattr(hook,'unified_cutover_pending',lambda revision:True)
+    def host_file(path,**kwargs):
+        assert path.name=='unified-browser-migration.json'
+        return json.dumps({'sha':sha,'old':old}).encode()
+    monkeypatch.setattr(hook,'executor_host_file',host_file)
+    monkeypatch.setattr(hook,'verify',lambda *a,**kw:reads.append((a,kw)))
+    assert hook.release_preflight(sha)==old
+    assert reads==[((old,),{'fenced':True,'require_idle':False})]
+
+
+@pytest.mark.parametrize('failure',[None,'hash','telegram','reddit','finish'])
+def test_unified_finalizer_preserves_hold_until_all_consumers_verify(hook,monkeypatch,failure):
+    import json
+    sha,old='b'*40,'a'*40
+    pending=True
+    calls=[]
+    stage=hook.STORE/('maintenance-'+sha)
+    monkeypatch.setattr(hook,'unified_cutover_pending',lambda revision:pending)
+    monkeypatch.setattr(hook,'UNIFIED_BROWSER_FILES',{'scripts/unified_browser_upgrade.py':'c'*40})
+    def host_file(path,**kwargs):
+        if path.name=='unified-browser-migration.json':
+            return json.dumps({'sha':sha,'old':old}).encode()
+        assert path==stage/'source/scripts/unified_browser_upgrade.py'
+        return b'# reviewed source'
+    monkeypatch.setattr(hook,'executor_host_file',host_file)
+    def provision(revision,path):
+        channel=path.name.removesuffix('-provision.json')
+        calls.append(channel)
+        if failure==channel:
+            raise hook.Refused('executor verification failed')
+    monkeypatch.setattr(hook,'provision_executor',provision)
+    monkeypatch.setattr(hook,'register_executors',lambda revision:calls.append('register'))
+    def run(*args,**kwargs):
+        nonlocal pending
+        if args[0]=='git':
+            return 'd'*40 if failure=='hash' else 'c'*40
+        assert args==(hook.EXECUTOR_PYTHON_SOURCE,'-I','-B',stage/'source/scripts/unified_browser_upgrade.py',
+            'finish','--sha',sha,'--old',old)
+        calls.append('finish')
+        if failure=='finish':
+            raise hook.Refused('readback failed')
+        pending=False
+        return ''
+    monkeypatch.setattr(hook,'run',run)
+    if failure:
+        with pytest.raises(hook.Refused):
+            hook.complete_unified_cutover(sha)
+        assert pending
+    else:
+        hook.complete_unified_cutover(sha)
+        assert not pending
+    assert calls==([] if failure=='hash' else ['telegram'] if failure=='telegram' else
+        ['telegram','reddit'] if failure=='reddit' else ['telegram','reddit','register','finish'])
+
+
+def test_maintenance_window_does_not_release_unified_upgrade_hold(hook,monkeypatch,tmp_path):
+    import json
+    tools=tmp_path/'tools'
+    tools.mkdir()
+    (tools/'home_live_maintenance.py').write_text('# fixture')
+    monkeypatch.setattr(hook,'TOOLS',tools)
+    monkeypatch.setattr(hook,'growth_cutover_pending',lambda sha:False)
+    monkeypatch.setattr(hook,'unified_cutover_pending',lambda sha:True)
+    monkeypatch.setattr(hook,'current',lambda:'a'*40)
+    monkeypatch.setattr(hook,'verify',lambda *a,**kw:None)
+    calls=[]
+    def run(*args,**kwargs):
+        calls.append(tuple(map(str,args)))
+        if args[0]==tools/'home_live_maintenance.py':
+            return json.dumps({'active_profiles':0}) if args[1]=='health' else 'idle'
+        if args[:2]==('systemctl','show'):
+            return 'inactive'
+        return ''
+    monkeypatch.setattr(hook,'run',run)
+    with hook.maintenance_window('a'*40,'b'*40):
+        pass
+    assert not any('restore' in call for call in calls)
+    assert not any(call[:2]==('systemctl','start') for call in calls)

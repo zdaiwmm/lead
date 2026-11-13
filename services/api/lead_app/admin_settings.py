@@ -7,7 +7,14 @@ from urllib.parse import urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from .admin_controls import (
     AttributionSettings,
@@ -31,12 +38,42 @@ class ToolSettings(SettingsModel):
     advanced_research: bool = True
     community_research: bool = True
     media_creation: bool = True
+    share_public_research: bool = True
 
 
 class TaskModels(SettingsModel):
     chat: str = ""
     planning: str = ""
     research: str = ""
+
+
+class ResearchOperationSettings(SettingsModel):
+    trial_eligible: bool = False
+    price_version: str = Field(default="", max_length=300)
+    max_units: int = Field(default=0, strict=True, ge=0, le=1_000_000_000)
+
+
+class ResearchProviderSettings(SettingsModel):
+    enabled: bool = False
+    starts_at: AwareDatetime | None = None
+    ends_at: AwareDatetime | None = None
+    evidence_ref: str = Field(default="", max_length=500)
+    paid_authorization_ref: str = Field(default="", max_length=500)
+    limit_units: int = Field(default=0, strict=True, ge=0, le=1_000_000_000)
+    project_limit_units: int = Field(default=0, strict=True, ge=0, le=1_000_000_000)
+    question_limit_units: int = Field(default=0, strict=True, ge=0, le=1_000_000_000)
+    operations: dict[Literal["web.search", "web.extract", "social.search", "social.item", "social.comments"], ResearchOperationSettings] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def allowance_evidence(self):
+        if self.enabled:
+            if not self.starts_at or not self.ends_at or self.starts_at >= self.ends_at or not self.evidence_ref:
+                raise ValueError("启用研究工具前需要额度周期和已核对的资格依据")
+            if not self.operations or any(not v.price_version or not v.max_units or (not v.trial_eligible and not self.paid_authorization_ref) for v in self.operations.values()):
+                raise ValueError("每个启用端点需要价格版本、单次上限，以及试用资格或付费授权依据")
+            if not 0 < self.question_limit_units <= self.project_limit_units <= self.limit_units:
+                raise ValueError("研究问题额度、项目额度与连接共享额度必须依次递增且非零")
+        return self
 
 
 class ModelSettings(SettingsModel):
@@ -50,6 +87,19 @@ class ModelSettings(SettingsModel):
     max_model_requests: int = Field(default=10, strict=True, ge=1, le=10)
     max_tool_calls: int = Field(default=12, strict=True, ge=0, le=20)
     tools: ToolSettings = Field(default_factory=ToolSettings)
+    research_providers: dict[Literal["tavily", "tikhub"], ResearchProviderSettings] = Field(default_factory=dict)
+
+    @field_validator("research_providers")
+    @classmethod
+    def provider_operations(cls, value):
+        allowed={"tavily":{"web.search","web.extract"},"tikhub":{"social.search","social.item","social.comments"}}
+        for provider, settings in value.items():
+            if set(settings.operations)-allowed[provider]:
+                raise ValueError("研究端点与供应商不匹配")
+            if provider=="tavily" and any(item.max_units<1000 for item in settings.operations.values()):
+                raise ValueError("Tavily basic 单次预留至少需要 1 credit")
+        return value
+
 
 
 class KnowledgeItem(SettingsModel):

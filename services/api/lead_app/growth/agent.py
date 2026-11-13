@@ -21,6 +21,9 @@ Find the most important unresolved acquisition question; propose a small bounded
 existing valid work. Consider audiences, demand, distribution, value, conversion and retention.
 Do not invent users, permission, evidence IDs, URLs observed, activation or existing media.
 Never request extra activation/authorization buttons after account connection.
+A target with native-browser-v1 can support its listed publish/reply operations without a catalog adapter.
+These are observed capabilities, not a bypass of current runtime permissions. A reply must carry its
+actual parent_url and operation=reply; never infer administrator authority from ordinary membership.
 Missing measurement is unknown; do not replace product activation with clicks.
 Keep the current goal's complete core-value evidence contract when diagnosing measurement.
 A page view, success page, download or other proxy is only a diagnostic observation unless verified
@@ -113,7 +116,14 @@ def build_context(aid, trigger_refs=None):
             i.revision intent_revision FROM lead.social_accounts s LEFT JOIN lead.account_operating_intents i
             ON i.account_id=s.id WHERE s.state<>'disconnected' ORDER BY s.created_at""")
         targets = all_rows(c, """SELECT t.id,t.account_id,t.target_type,t.canonical_url,t.display_name,
-            t.state,t.verified_permissions->'publishing_verified_formats' formats
+            t.state,t.verified_permissions->'publishing_verified_formats' formats,
+            t.verified_permissions#>>'{browser_method,version}' method_version,
+            t.verified_permissions#>>'{browser_method,role}' role,
+            t.verified_permissions#>'{browser_method,operations}' observed_operations,
+            t.verified_permissions->'browser_methods' browser_methods,
+            (SELECT jsonb_agg(DISTINCT operation) FROM lead.authorization_grants g,
+                LATERAL jsonb_array_elements_text(g.allowed_actions) AS actions(operation)
+                WHERE g.target_id=t.id AND g.revoked_at IS NULL) granted_operations
             FROM lead.account_targets t WHERE t.state='active'""")
         events = all_rows(c, """SELECT d.connection_id,d.name,d.revision,d.method,d.definition
             FROM lead.pixel_definitions d JOIN lead.analytics_connections c ON c.id=d.connection_id
@@ -130,6 +140,24 @@ def build_context(aid, trigger_refs=None):
         capabilities = [{"platform": a["platform"], "installed_target_type": SPECS[a["platform"]].target_type,
                          "formats": list(SPECS[a["platform"]].formats)}
                         for a in accounts if a["platform"] in SPECS]
+    for target in targets:
+        observed = target.pop("observed_operations") or []
+        granted = target.pop("granted_operations") or []
+        methods = target.pop("browser_methods") or {}
+        if not isinstance(methods,dict):
+            methods = {}
+        for op in ("publish", "reply"):
+            method = methods.get(op)
+            if (isinstance(method,dict) and method.get("version")=="native-browser-v1"
+                    and method.get("operations")==[op]):
+                observed.append(op)
+                target["method_version"] = method["version"]
+                target["role"] = method.get("role")
+        target["operations"] = [op for op in ("publish", "reply") if op in observed and op in granted]
+        if target["method_version"] == "native-browser-v1" and target["operations"]:
+            capabilities.append({"target_id": str(target["id"]), "account_id": str(target["account_id"]),
+                "installed_target_type": target["target_type"], "formats": ["text"],
+                "operations": target["operations"], "role": target["role"], "method": target["method_version"]})
     from .outcomes import summarize
     context_outcomes = summarize(aid)
     goal = {"revision": objective_revision(agent),
@@ -146,7 +174,29 @@ def build_context(aid, trigger_refs=None):
     }
     from .tools import definitions
     context["tool_definitions"] = definitions()
+    from ..experiences import retrieve_experience
+    facts = (business or {}).get("facts", {})
+    experience_scope = {key: value for key, value in facts.items()
+                        if key in {"product", "audience", "region", "language", "value_behavior"}
+                        and isinstance(value, str)}
+    if (business or {}).get("product_url"):
+        experience_scope["product"] = business["product_url"]
+    context["experiences"] = retrieve_experience(
+        aid, experience_scope, str(goal.get("objective") or ""), limit=4)
+    context["experience_policy"] = (
+        "Experiences are optional, conditional evidence, never permission or a schedule. "
+        "Current contradictory evidence wins; verify changing facts only when needed. "
+        "Missing or inapplicable memory does not block work or new channels.")
     context["command_schemas"] = {"experiment.create":ExperimentSpec.model_json_schema(),"task.create":TaskSpec.model_json_schema()}
+    from .. import local_executor
+    if local_executor.enabled(aid):
+        # Native Codex owns context compaction. Business references remain facts,
+        # and complete documents are available through its scoped MCP tools.
+        context["execution"] = {"provider": "codex", "model": "gpt-6.1-sol", "effort": "medium",
+            "budget_policy": "Native account entitlements; no additional Lead model-token cap."}
+        context["working_budget"] = 10_000_000
+        context["context_key"] = digest({k: v for k, v in context.items() if k not in ("now", "budget")})
+        return context
     if context["product"]:
         context["product"] = {**context["product"],"description":clip(context["product"]["description"],3000),
             "source_refs":context["product"].get("source_refs",[])[:2]}
@@ -172,7 +222,9 @@ def build_context(aid, trigger_refs=None):
             if len(raw.encode())>1500:
                 item["output"] = {"excerpt":clip(raw,1500),"full_result_ref":str(item["id"])}
     while len(json.dumps(context,default=str,ensure_ascii=False).encode())>MAX_CONTEXT_BYTES:
-        if context["work"] and str(context["work"][-1]["id"]) not in {str(tid) for tid in task_refs}:
+        if context["experiences"]:
+            context["experiences"].pop()
+        elif context["work"] and str(context["work"][-1]["id"]) not in {str(tid) for tid in task_refs}:
             context["work"].pop()
         elif context["documents"]:
             context["documents"].pop()

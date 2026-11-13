@@ -12,13 +12,15 @@ import os
 import select
 import shutil
 import socket
+import stat
 import sys
 import threading
 from pathlib import Path
 
 
 def relay(connection, path):
-    with connection, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as upstream:
+    family = socket.AF_INET if isinstance(path, tuple) else socket.AF_UNIX
+    with connection, socket.socket(family, socket.SOCK_STREAM) as upstream:
         try:
             upstream.connect(path)
             sockets = [connection, upstream]
@@ -34,6 +36,26 @@ def relay(connection, path):
                     destination.sendall(data)
         except OSError:
             return  # There is no direct-network fallback.
+
+
+def control_settings(directory, port, args):
+    """Accept one manager-owned private endpoint, never a caller-chosen network route."""
+    directory = Path(directory)
+    port = int(port)
+    if not 1024 <= port <= 65535:
+        raise ValueError("Invalid CDP control port")
+    if not directory.is_absolute() or directory.resolve(strict=True) != directory:
+        raise ValueError("Control directory must be an absolute non-symlink path")
+    info = directory.stat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700 or any(directory.iterdir())):
+        raise ValueError("Control directory must be private, owned and empty")
+    for name, value in (("--remote-debugging-port", str(port)),
+                        ("--remote-debugging-address", "127.0.0.1")):
+        settings = [arg for arg in args if arg == name or arg.startswith(name + "=")]
+        if settings != [name + "=" + value]:
+            raise ValueError("Chromium control arguments differ from the assigned endpoint")
+    return directory
 
 
 def inside(binary, args):
@@ -68,29 +90,41 @@ def inside(binary, args):
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", int(os.environ["LEAD_BROWSER_PROXY_PORT"])))
     listener.listen(64)
+    listeners = {listener: "/lead/forward.sock"}
+    if control_port := os.environ.get("LEAD_BROWSER_CDP_PORT"):
+        control = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        # The manager owns a fresh 0700 directory. Never replace an old socket.
+        control.bind("/lead/control/cdp.sock")
+        os.chmod("/lead/control/cdp.sock", 0o600)
+        control.listen(8)
+        listeners[control] = ("127.0.0.1", int(control_port))
     child = os.fork()
     if child == 0:
-        # The proxy helper must not keep Playwright's Juggler pipes alive.
-        for descriptor in (0, 1, 2, 3, 4):
-            if descriptor == listener.fileno():
-                continue
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        # The bridge cannot retain native transport or manager descriptors.
+        kept = {item.fileno() for item in listeners}
+        for entry in os.listdir("/proc/self/fd"):
+            descriptor = int(entry)
+            if descriptor not in kept:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
         while True:
-            connection, _ = listener.accept()
-            threading.Thread(
-                target=relay, args=(connection, "/lead/forward.sock"), daemon=True
-            ).start()
-    listener.close()
+            ready, _, _ = select.select(list(listeners), [], [])
+            for server in ready:
+                connection, _ = server.accept()
+                threading.Thread(
+                    target=relay, args=(connection, listeners[server]), daemon=True
+                ).start()
+    for server in listeners:
+        server.close()
     for name in list(os.environ):
         if name.startswith("LEAD_"):
             del os.environ[name]
     os.execv(binary, [binary, *args])
 
 
-def command(binary, profile, assets, proxy_socket, args):
+def command(binary, profile, assets, proxy_socket, args, *, control_directory=None, cdp_port=None):
     bwrap = shutil.which("bwrap")
     if not bwrap or os.geteuid() == 0:
         raise ValueError("Linux browser node requires rootless bubblewrap")
@@ -160,6 +194,14 @@ def command(binary, profile, assets, proxy_socket, args):
         "--chdir",
         str(profile),
     ]
+    if (control_directory is None) != (cdp_port is None):
+        raise ValueError("Both control directory and port are required")
+    if control_directory is not None:
+        control_directory = control_settings(control_directory, cdp_port, args)
+        if (control_directory.is_relative_to(profile) or profile.is_relative_to(control_directory)
+                or control_directory.is_relative_to(assets) or assets.is_relative_to(control_directory)):
+            raise ValueError("Control directory must be separate from browser data")
+        result += ["--bind", str(control_directory), "/lead/control"]
     # Bubblewrap forwards inherited descriptors to the executable. Its monitor
     # and PID 1 close their copies, allowing native transport EOF to propagate.
     return result + [
@@ -182,7 +224,11 @@ def main():
         values["LEAD_BROWSER_ASSETS"],
         values["LEAD_BROWSER_SOCKET"],
         sys.argv[1:],
+        control_directory=values.get("LEAD_BROWSER_CONTROL_DIRECTORY"),
+        cdp_port=values.get("LEAD_BROWSER_CDP_PORT"),
     )
+    if values.get("LEAD_BROWSER_CDP_PORT") == values.get("LEAD_BROWSER_PROXY_PORT"):
+        raise ValueError("Control and proxy ports must differ")
     for entry in os.listdir("/proc/self/fd"):
         descriptor = int(entry)
         if descriptor > 4:

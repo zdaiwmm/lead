@@ -218,6 +218,17 @@ async def run_model(
     workspace_models=None,
     call_key="primary",
 ):
+    from .local_executor_client import uses_native
+
+    if uses_native(agent_id):
+        from .local_executor_client import run_model as native_model
+
+        if agent_id:
+            from .admin_settings import for_agent
+            native_settings, _ = for_agent(agent_id, "models")
+            prompt = managed_prompt(agent_id, prompt, native_settings)
+        return await native_model(output, prompt, system, agent_id=agent_id,
+            purpose=purpose, call_key=call_key, tools=tools)
     from .budget import growth_cost_context
     growth = growth_cost_context.get()
     config = {"provider": "deepseek", **model_config()}

@@ -13,6 +13,8 @@ from uuid import UUID
 
 import httpx
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -35,12 +37,14 @@ from .auth import auth_mode, public_origin
 from .auth import router as auth_router
 from .browser_pilot import router as browser_pilot_router
 from .community_growth import GrowthConfig
-from .config import STATE, env, model_config
+from .config import ROOT, STATE, env, model_config
+from .connection_control import LoginInput
 from .conversions import router as conversion_router
 from .creative_pipeline import router as creative_router
 from .db import all_rows, audit, one, record, require_agent, tx
 from .events import router as event_router
 from .growth.views import router as growth_router
+from .local_executor_api import router as local_executor_router
 from .operating_playbooks import router as playbook_router
 from .operating_workspace import router as operations_router
 from .ops import router as ops_router
@@ -77,9 +81,18 @@ app.include_router(playbook_router)
 app.include_router(creative_router)
 app.include_router(operations_router)
 app.include_router(growth_router)
+app.include_router(local_executor_router)
 app.include_router(browser_pilot_router)
 app.include_router(admin_router)
 app.include_router(advanced_admin_router)
+
+
+@app.get("/api/executor/download")
+def download_local_executor():
+    package = ROOT / "services/local-executor/lead-local-executor.tgz"
+    if not package.is_file():
+        raise HTTPException(503, "本版本的本机连接器安装包尚未就绪")
+    return FileResponse(package, media_type="application/gzip", filename="lead-local-executor.tgz")
 
 
 @app.middleware("http")
@@ -215,6 +228,16 @@ async def local_auth(request, call_next):
     return response
 
 
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request,error):
+    if re.fullmatch(r'/api/agents/[^/]+/connect',request.url.path):
+        # Pydantic's default errors include the rejected raw input. Login values
+        # must never be echoed, even when type/length/extra-field validation fails.
+        detail=[{'loc':item['loc'],'type':item['type'],'msg':'连接资料格式无效'} for item in error.errors()]
+        return JSONResponse({'detail':detail},status_code=422)
+    return await request_validation_exception_handler(request,error)
+
+
 @app.exception_handler(ValueError)
 async def value_error(request, e):
     return JSONResponse({"detail": str(e)}, status_code=409)
@@ -271,11 +294,26 @@ class AgentSetupEdit(AgentSetupProfile):
 
 @app.post("/api/agents/setup/analyze")
 async def analyze_website(body: website_brief.Website, request: Request):
+    from . import local_executor
+    aid = str(body.agent_id) if body.agent_id else None
+    if aid:
+        with tx(aid) as c:
+            require_agent(c, aid)
+    from .local_executor_client import activity_jobs, execution_context, uses_native
+    key = "website:" + current_tenant() + ":" + str(body.request_id or hashlib.sha256(body.product_url.encode()).hexdigest())
+    if uses_native(aid, key=key):
+        async def continue_analysis():
+            context = execution_context.set({"key": key, "session_key": key, "agent_id": aid or local_executor.default_agent()})
+            try:
+                return await website_brief.analyze(body.product_url, aid)
+            finally:
+                execution_context.reset(context)
+        return await activity_jobs.step(key, continue_analysis)
     async def disconnected():
         while (await request.receive())["type"] != "http.disconnect":
             pass
 
-    work = asyncio.create_task(website_brief.analyze(body.product_url))
+    work = asyncio.create_task(website_brief.analyze(body.product_url, aid) if aid else website_brief.analyze(body.product_url))
     closed = asyncio.create_task(disconnected())
     try:
         await asyncio.wait((work, closed), return_when=asyncio.FIRST_COMPLETED)
@@ -290,8 +328,22 @@ async def analyze_website(body: website_brief.Website, request: Request):
 
 @app.post("/api/agents/setup/confirm", status_code=201)
 def confirm_website(body: website_brief.ConfirmedBrief):
-    brief = body.model_dump(exclude={"client_id"})
+    brief = body.model_dump(exclude={"client_id", "draft_agent_id"})
+    if body.draft_agent_id:
+        return {"id": domain.confirm_draft_agent(str(body.draft_agent_id), str(body.client_id), brief)}
     return {"id": domain.create_agent(str(body.client_id), confirmed_brief=brief,runtime_engine="growth")}
+
+
+class WebsiteDraft(BaseModel):
+    client_id: UUID
+
+
+@app.post("/api/agents/setup/draft", status_code=201)
+def create_website_draft(body: WebsiteDraft):
+    from .admin_permissions import require
+    require("agents.create", workspace=True)
+    return {"id": domain.create_agent("website-draft:" + str(body.client_id),
+        runtime_engine="growth", draft_client_id=str(body.client_id))}
 
 
 @app.post("/api/agents/setup", status_code=201)
@@ -503,6 +555,8 @@ class Connection(BaseModel):
     account_id: UUID | None = None
     new_account: bool = False
     start_managed_targets: bool = False
+    site_url: str | None = Field(default=None,max_length=2000)
+    login: LoginInput | None = None
 
 
 class LabPublish(BaseModel):
@@ -511,6 +565,7 @@ class LabPublish(BaseModel):
 
 
 class BrowserInput(BaseModel):
+    challenge_version: int | None = Field(default=None,ge=1)
     takeover: UUID | None = None
     kind: Literal["click", "text", "key", "scroll", "back", "forward", "reload", "composition_start", "composition_end"]
     x: float = 0
@@ -1021,14 +1076,15 @@ def platforms():
 @app.post("/api/agents/{aid}/connect")
 async def connect(aid: UUID, body: Connection):
     aid = str(aid)
-    if body.platform not in [p[0] for p in domain.PLATFORMS] + ["lab"]:
+    if body.platform not in [p[0] for p in domain.PLATFORMS] + ["lab", "web"]:
         raise HTTPException(400, "频道不存在")
     from .growth.store import enabled
     with tx(aid) as c:
         growth = enabled(require_agent(c, aid))
     if growth and body.platform != "lab":
         from .account_connection import begin
-        return await begin(aid, body.platform, account_id=body.account_id, new_account=body.new_account)
+        return await begin(aid, body.platform, account_id=body.account_id, new_account=body.new_account,
+                           site_url=body.site_url,login=body.login)
     from .account_profiles import for_platform
 
     profile = for_platform(
@@ -1159,15 +1215,92 @@ def end_takeover(aid: UUID, takeover: UUID | None = None):
     return {"ok": True}
 
 
+async def refresh_native_owner(aid, connection, *, write=False):
+    """Observe the original live owner page without a database lock across RPC."""
+    with tx(str(aid)) as c:
+        require_agent(c, str(aid), write)
+        native = one(c, """SELECT t.profile_id FROM lead.takeover_sessions t
+            JOIN lead.browser_profiles p ON p.id=t.profile_id WHERE t.id=%s
+            AND t.purpose='login' AND t.state='active' AND t.control_mode='owner'
+            AND t.expires_at>now() AND p.provider='chromium'
+            AND t.connection_data->>'site_url' IS NOT NULL""", (connection,))
+    if not native:
+        return
+    from .account_connection import rpc
+    try:
+        await rpc(str(aid), native['profile_id'], 'native/command', {
+            'run_id': str(connection), 'operation': 'owner_status',
+            'command_id': secrets.token_hex(16), 'args': {}}, timeout=15)
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == 409:
+            raise HTTPException(409, '当前本人验证已变化，请刷新窗口后重试') from None
+        raise HTTPException(503, '浏览器服务暂不可用，请稍后重试') from None
+    except (httpx.HTTPError, OSError):
+        raise HTTPException(503, '浏览器服务暂不可用，请稍后重试') from None
+
+
 @app.get("/api/agents/{aid}/connections/{takeover}")
-def connection_status(aid: UUID, takeover: UUID):
+async def connection_status(aid: UUID, takeover: UUID):
+    from .growth.contracts import utcnow
+    await refresh_native_owner(aid, takeover)
     with tx(str(aid)) as c:
         require_agent(c, str(aid))
-        session = one(c, "SELECT state,purpose,completed_account_id FROM lead.takeover_sessions WHERE id=%s", (takeover,))
+        session = one(c, """SELECT t.state,t.purpose,t.completed_account_id,t.control_mode,t.challenge_version,t.expires_at,
+            t.connection_data->>'owner_action' owner_action,p.provider FROM lead.takeover_sessions t
+            JOIN lead.browser_profiles p ON p.id=t.profile_id WHERE t.id=%s""", (takeover,))
         if not session:
             raise HTTPException(404)
         return {"status": "connected" if session["completed_account_id"] else session["state"],
-                "account_id": session["completed_account_id"]}
+                "account_id": session["completed_account_id"],
+                'can_review_read_dependencies':bool(session['provider']=='chromium' and session['purpose']=='login'
+                    and session['state']=='active' and session['control_mode']=='owner' and session['expires_at']>utcnow()),
+                **{key:session[key] for key in ("control_mode","challenge_version","owner_action","expires_at")}}
+
+
+class ReadDependencyDecision(BaseModel):
+    model_config={'extra':'forbid'}
+    challenge_version: int = Field(ge=1)
+    candidate_id: str = Field(pattern=r'^[a-f0-9]{64}$')
+    decision: Literal['approve','refuse']
+
+
+async def read_dependency_command(aid,connection,operation,args):
+    from .account_connection import rpc
+    from .growth.contracts import utcnow
+    from .native_frame_roles import public_reply
+    with tx(str(aid)) as c:
+        require_agent(c,str(aid),True)
+        row=one(c,"""SELECT t.* FROM lead.takeover_sessions t JOIN lead.browser_profiles p ON p.id=t.profile_id
+            WHERE t.id=%s AND t.purpose='login' AND t.state='active' AND t.control_mode='owner'
+            AND t.expires_at>now() AND p.provider='chromium'""",(connection,))
+        if not row or args.get('challenge_version',row['challenge_version'])!=row['challenge_version']:
+            raise HTTPException(409,'原连接或确认步骤已变化，请刷新后重试')
+    try:
+        await rpc(str(aid),row['profile_id'],'native/command',{'run_id':str(connection),
+            'command_id':secrets.token_hex(16),'operation':operation,'args':args},timeout=15)
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code==409:
+            raise HTTPException(409,'页面来源或本人步骤已变化，请刷新后重试') from None
+        raise HTTPException(503,'暂时无法核对原页面，请稍后重试') from None
+    except (httpx.HTTPError,OSError):
+        raise HTTPException(503,'暂时无法核对原页面，请稍后重试') from None
+    with tx(str(aid)) as c:
+        require_agent(c,str(aid),True)
+        current=one(c,'SELECT * FROM lead.takeover_sessions WHERE id=%s',(connection,))
+        if (not current or current['state']!='active' or current['control_mode']!='owner' or current['expires_at']<=utcnow()
+                or current['challenge_version']!=row['challenge_version']):
+            raise HTTPException(409,'原连接或本人步骤已变化，请刷新后重试')
+        return public_reply(current,current['connection_data'].get('read_dependencies',[]))
+
+
+@app.get('/api/agents/{aid}/connections/{connection}/read-dependencies')
+async def read_dependencies(aid: UUID,connection: UUID):
+    return await read_dependency_command(aid,connection,'read_dependencies',{})
+
+
+@app.post('/api/agents/{aid}/connections/{connection}/read-dependencies')
+async def decide_read_dependency(aid: UUID,connection: UUID,body: ReadDependencyDecision):
+    return await read_dependency_command(aid,connection,'read_dependency_decision',body.model_dump())
 
 
 @app.get("/api/agents/{aid}/browser/screenshot")
@@ -1280,3 +1413,24 @@ async def lab_submit(aid: str, request: Request):
 
 
 app.add_middleware(TelemetryMiddleware, service="lead-api")
+
+
+class ConnectionControl(BaseModel):
+    challenge_version: int = Field(ge=1)
+    action: Literal["resume", "cancel"]
+
+
+@app.post("/api/agents/{aid}/connections/{connection}/control")
+async def connection_control(aid: UUID, connection: UUID, body: ConnectionControl):
+    if body.action == 'resume':
+        await refresh_native_owner(aid, connection, write=True)
+        with tx(str(aid)) as c:
+            current=one(c,'SELECT connection_data FROM lead.takeover_sessions WHERE id=%s',(connection,))
+            if current and any(source.get('state')!='approved' or source.get('challenge_version')!=body.challenge_version
+                    for source in current['connection_data'].get('read_dependencies',[])):
+                raise HTTPException(409,'嵌入页面仍未获准公开只读访问；请核对来源或取消当前连接')
+    from .connection_control import transition
+    result=transition(str(aid),connection,body.challenge_version,'automatic',cancel=body.action=='cancel')
+    from .growth.runtime import wake_connection
+    wake_connection(str(aid),connection,result['challenge_version'])
+    return result

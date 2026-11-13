@@ -12,6 +12,28 @@ from lead_app.growth.contracts import (
 from lead_app.growth.store import accept_commands, create_experiment
 
 
+def test_large_optional_memory_preserves_current_evidence_and_decision(growth_agent):
+    from lead_app.experiences import record_experience, retrieve_experience
+    from lead_app.growth.agent import build_context
+    from lead_app.growth.tools import _remember
+
+    document, _ = _remember(growth_agent, {
+        'url': 'https://example.com/current-observation',
+        'title': 'Current contradictory observation',
+        'text': 'The current distribution has seven impressions and no tracked visitors.',
+    })
+    objective = build_context(growth_agent)['goal']['objective']
+    for index in range(4):
+        record_experience(growth_agent, 'large-optional-memory:' + str(index), kind='business',
+            problem=objective, conclusion='旧' * 6000)
+    assert len(retrieve_experience(growth_agent, {}, objective)) == 4
+
+    context = build_context(growth_agent)
+    assert any(str(item['id']) == str(document.id) for item in context['documents'])
+    assert context['goal']['objective'] == objective
+    assert len(context['experiences']) < 4
+
+
 def test_partial_acceptance(growth_agent):
     with tx(growth_agent) as c:
         spec = ExperimentSpec(question_type="audience",question="Who needs this product?",hypothesis="A concrete audience needs it",
@@ -137,3 +159,21 @@ def test_product_changed_while_model_worked_rejects_stale_business_input(growth_
             learning_signal="A real request",token_limit=1000,review_at=utcnow()+timedelta(hours=1)).model_dump(mode="json"))])
     result=accept_commands(growth_agent,proposal,business_snapshot={"id":None})
     assert not result["accepted"] and result["rejected"][0]["reason"]=="product_changed"
+
+
+def test_native_member_reply_is_visible_only_with_current_grant(growth_agent):
+    from lead_app import domain
+    from lead_app.growth.agent import build_context
+    domain.connect_lab(growth_agent)
+    with tx(growth_agent) as c:
+        target=one(c,"SELECT id FROM lead.account_targets")
+        c.execute("UPDATE lead.account_targets SET verified_permissions=%s WHERE id=%s",
+            (j({"browser_method":{"version":"native-browser-v1","role":"ordinary_member","operations":["reply","publish"]}}),target["id"]))
+        c.execute("UPDATE lead.authorization_grants SET allowed_actions='[\"reply\"]'")
+    context=build_context(growth_agent)
+    native=[cap for cap in context["capabilities"] if cap.get("method")=="native-browser-v1"]
+    assert len(native)==1 and native[0]["operations"]==["reply"]
+    assert native[0]["role"]=="ordinary_member"
+    with tx(growth_agent) as c:
+        c.execute("UPDATE lead.authorization_grants SET revoked_at=now()")
+    assert not [cap for cap in build_context(growth_agent)["capabilities"] if cap.get("method")=="native-browser-v1"]

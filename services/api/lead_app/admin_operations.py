@@ -65,7 +65,7 @@ def configuration_published(c, kind, aid):
             "SELECT body FROM lead.admin_configs WHERE config_key=%s",
             (f"{kind}/{agent_id}",),
         )
-        if not aid and override and override["body"] is not None:
+        if kind != "models" and not aid and override and override["body"] is not None:
             continue
         if kind == "brand":
             c.execute("SELECT set_config('app.agent_id',%s,true)", (agent_id,))
@@ -80,6 +80,13 @@ def configuration_published(c, kind, aid):
         else:
             emit(c, agent_id, "supervisor.wake")
             if kind == "models":
+                from .admin_settings import effective
+                # Serialize opt-out with experience insertion on the same
+                # project row; a late extraction cannot restore sharing.
+                one(c, "SELECT id FROM lead.agents WHERE id=%s FOR NO KEY UPDATE", (agent_id,))
+                model_settings, _ = effective(c, "models", agent_id)
+                if not model_settings.get("tools", {}).get("share_public_research", True):
+                    c.execute("UPDATE lead.experiences SET public_projection=NULL,version=version+1 WHERE agent_id=%s AND public_projection IS NOT NULL", (agent_id,))
                 for job in all_rows(
                     c,
                     """UPDATE lead.chat_jobs SET status='pending',error_code=NULL

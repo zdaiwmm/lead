@@ -10,6 +10,8 @@ import {
   X,
 } from "lucide-react";
 import SocialIcon from "./social-icon";
+import type { ConnectionLogin } from "./connection-details";
+import ConnectionReadDependencies from "./connection-read-dependencies";
 import { api, workspaceHeaders } from "./api-client";
 type Row = Record<string, any>;
 export default function AccountBrowser({
@@ -17,6 +19,9 @@ export default function AccountBrowser({
   platform,
   requestedAccountId,
   newAccount = false,
+  siteUrl,
+  login,
+  onCredentialsSent,
   name,
   onClose,
   onVerified,
@@ -26,6 +31,9 @@ export default function AccountBrowser({
   platform: string;
   requestedAccountId?: string;
   newAccount?: boolean;
+  siteUrl?: string;
+  login?: ConnectionLogin;
+  onCredentialsSent?: () => void;
   name: string;
   onClose: () => void;
   onVerified?: (started?: boolean) => Promise<void>;
@@ -42,6 +50,30 @@ export default function AccountBrowser({
   const [managedStart, setManagedStart] = useState(false);
   const [automatic, setAutomatic] = useState(false);
   const automaticConnection = useRef(false);
+  const initialDetails = useRef({ site_url: siteUrl, login });
+  const ownerInput = useRef(false);
+  const challengeVersion = useRef(0);
+  const [controlMode, setControlMode] = useState("automatic");
+  const [ownerAction, setOwnerAction] = useState("");
+  const [canReviewDependencies, setCanReviewDependencies] = useState(false);
+  const [dependencyBusy, setDependencyBusy] = useState(false);
+  function updateControl(session: Row) {
+    if (automaticConnection.current && typeof session.challenge_version === "number" &&
+      session.challenge_version < challengeVersion.current) return false;
+    const mode = session.control_mode === "owner" ? "owner" : "automatic";
+    if (ownerInput.current && (mode !== "owner" || challengeVersion.current !== session.challenge_version)) {
+      queue.current = [];
+      inputController.current?.abort();
+      keyboard.current && (keyboard.current.value = "");
+      composing.current = false;
+    }
+    ownerInput.current = !automaticConnection.current || mode === "owner";
+    challengeVersion.current = session.challenge_version || 0;
+    setControlMode(mode);
+    setOwnerAction(session.owner_action || "");
+    setCanReviewDependencies(session.can_review_read_dependencies === true);
+    return true;
+  }
   const [verifying, setVerifying] = useState(false);
   const [closing, setClosing] = useState(false);
   const [retry, setRetry] = useState(0);
@@ -61,7 +93,7 @@ export default function AccountBrowser({
     active.current = false;
     queue.current = [];
     setFrameError("");
-    setError("接管已结束，点击重试可重新连接专属浏览器");
+    setError("接管已结束，点击重试可重新打开登录窗口");
     setState("failed");
     setLatency(null);
   }, []);
@@ -173,7 +205,7 @@ export default function AccountBrowser({
 
   function drain(): Promise<boolean> {
     if (draining.current) return draining.current;
-    if (!active.current) return Promise.resolve(false);
+    if (!active.current || !ownerInput.current) return Promise.resolve(false);
     if (!queue.current.length) return Promise.resolve(true);
     frameController.current?.abort();
     const controller = new AbortController();
@@ -188,7 +220,9 @@ export default function AccountBrowser({
           !controller.signal.aborted
         ) {
           const command = queue.current.shift()!;
-          const body = { ...command, takeover: takeover.current };
+          if (!ownerInput.current) { queue.current = []; return false; }
+          const body = { ...command, takeover: takeover.current,
+            ...(automaticConnection.current ? { challenge_version: challengeVersion.current } : {}) };
           timeout = setTimeout(() => {
             timedOut = true;
             controller.abort();
@@ -223,7 +257,7 @@ export default function AccountBrowser({
     return task;
   }
   function input(command: Row) {
-    if (!active.current || stopping.current) return;
+    if (!active.current || stopping.current || !ownerInput.current) return;
     lastInput.current = performance.now();
     const previous = queue.current.at(-1);
     if (command.kind === "text" && previous?.kind === "text")
@@ -239,8 +273,17 @@ export default function AccountBrowser({
     if (inputTimer.current) clearTimeout(inputTimer.current);
     inputTimer.current = setTimeout(drain, command.kind === "text" ? 35 : 0);
   }
-  async function close(verify = false) {
+  async function close(verify = false, cancel = false) {
     if (stopping.current) return;
+    if (cancel) {
+      queue.current = [];
+      inputController.current?.abort();
+      composing.current = false;
+      if (keyboard.current) keyboard.current.value = "";
+      if (scrollTimer.current) clearTimeout(scrollTimer.current);
+      scrollTimer.current = null;
+      scrollDelta.current = 0;
+    }
     if (composing.current && keyboard.current) {
       const text = keyboard.current.value;
       keyboard.current.value = "";
@@ -264,11 +307,23 @@ export default function AccountBrowser({
     setError("");
     verify ? setVerifying(true) : setClosing(true);
     try {
-      if ((draining.current || queue.current.length) && !(await drain())) {
+      if (!cancel && (draining.current || queue.current.length) && !(await drain())) {
         stopping.current = false;
         return;
       }
       if (!mounted.current) return;
+      if (automaticConnection.current && takeover.current && (verify || cancel)) {
+        const result = await api(`/agents/${aid}/connections/${takeover.current}/control`, {
+          challenge_version: challengeVersion.current, action: cancel ? "cancel" : "resume",
+        });
+        if (cancel) { active.current = false; onClose(); }
+        else {
+          updateControl(result);
+          stopping.current = false;
+          await shot();
+        }
+        return;
+      }
       let recovered = false;
       if (verify && (!automaticConnection.current || challenge)) {
         const currentChallenge = challenge || (await api(`/agents/${aid}/browser/challenge/status`, {
@@ -317,12 +372,20 @@ export default function AccountBrowser({
     setState("opening");
     setError("");
     setChallenge(null);
+    ownerInput.current = false;
+    challengeVersion.current = 0;
+    setControlMode("automatic");
+    setOwnerAction("");
     const key = `${aid}:${platform}:${requestedAccountId || ""}:${newAccount}:${retry}`;
-    if (connection.current?.key !== key)
+    if (connection.current?.key !== key) {
+      const details = initialDetails.current;
+      initialDetails.current = { site_url: details.site_url, login: undefined };
       connection.current = {
         key,
-        promise: api(`/agents/${aid}/connect`, { platform, account_id: requestedAccountId, new_account: newAccount }),
+        promise: api(`/agents/${aid}/connect`, { platform, account_id: requestedAccountId, new_account: newAccount, ...details }),
       };
+      onCredentialsSent?.();
+    }
     connection.current.promise
       .then(async (session) => {
         if (canceled) return;
@@ -331,6 +394,7 @@ export default function AccountBrowser({
         accountId.current = session.account_id;
         automaticConnection.current = Boolean(session.automatic_connection);
         setAutomatic(Boolean(session.automatic_connection));
+        updateControl(session);
         setManagedStart(Boolean(session.managed_target_start));
         lastInput.current = performance.now();
         active.current = true;
@@ -366,12 +430,19 @@ export default function AccountBrowser({
       try {
         if (automaticConnection.current) {
           const connection = await api(`/agents/${aid}/connections/${takeover.current}`);
-          if (!canceled && connection.status === "connected") {
+          if (canceled) return;
+          if (!updateControl(connection)) return;
+          if (connection.status === "connected" || connection.state === "connected") {
             active.current = false;
             if (onVerified) await onVerified(false);
             else onClose();
             return;
           }
+          if (["expired", "ended", "canceled"].includes(connection.status || connection.state)) {
+            expire();
+            setError(connection.owner_action || "本次连接已结束，可重新连接。");
+          }
+          return;
         }
         const result = await api(`/agents/${aid}/browser/challenge/status`, {
           platform,
@@ -385,6 +456,7 @@ export default function AccountBrowser({
       }
     }, 2000);
     return () => {
+      initialDetails.current.login = undefined;
       canceled = true;
       mounted.current = false;
       active.current = false;
@@ -408,6 +480,7 @@ export default function AccountBrowser({
     const target = viewport.current;
     if (!target) return;
     function wheel(event: WheelEvent) {
+      if (!ownerInput.current) return;
       event.preventDefault();
       scrollDelta.current += event.deltaY * (event.deltaMode === 1 ? 20 : 1);
       if (scrollTimer.current) return;
@@ -460,17 +533,17 @@ export default function AccountBrowser({
           <div className="browser-title">
             <SocialIcon platform={platform} size={24} />
             <div>
-              <h2 id="account-browser-title">{challenge ? "完成验证" : "连接"} {name}</h2>
+              <h2 id="account-browser-title">{(automatic && controlMode === "owner") || challenge ? "完成验证" : "连接"} {name}</h2>
               <span className="muted small" role="status">
-                {challenge ? "请在原窗口完成真人验证，其他账号继续运行" : automatic ? "登录后自动连接并运营，可随时暂停；关闭窗口后后台仍会核对" : "在专属浏览器中登录账号"}
+                {automatic ? controlMode === "owner" ? ownerAction || "请在原窗口完成本人步骤，再继续连接" : "平台正在自动连接；关闭窗口后仍会在后台核对" : challenge ? "请在原窗口完成真人验证，其他账号继续运行" : "在受控窗口中登录账号"}
               </span>
             </div>
           </div>
           <div className="browser-header-actions">
-            {platform !== "lab" && (!automatic || challenge) && (
+            {platform !== "lab" && (!automatic || controlMode === "owner") && (
               <button
                 className="primary"
-                disabled={state !== "ready" || verifying || closing}
+                disabled={state !== "ready" || verifying || closing || dependencyBusy}
                 onClick={() => close(true)}
               >
                 {verifying ? (
@@ -478,9 +551,11 @@ export default function AccountBrowser({
                 ) : (
                   <Check size={15} />
                 )}
-                {verifying ? "正在完成验证…" : challenge ? "验证完成，继续任务" : managedStart ? "绑定并启动获客" : verifyLabel}
+                {verifying ? "正在完成验证…" : automatic ? "本人步骤已完成，继续连接" : challenge ? "验证完成，继续任务" : managedStart ? "绑定并启动获客" : verifyLabel}
               </button>
             )}
+            {automatic && <button className="text-button" disabled={state !== "ready" || verifying || closing}
+              onClick={() => close(false, true)}>取消连接</button>}
             <button
               ref={closeButton}
               className="icon"
@@ -492,12 +567,16 @@ export default function AccountBrowser({
             </button>
           </div>
         </header>
+        {automatic && controlMode === "owner" && canReviewDependencies && takeover.current &&
+          <ConnectionReadDependencies key={`${takeover.current}:${challengeVersion.current}`}
+            aid={aid} connectionId={takeover.current} challengeVersion={challengeVersion.current}
+            disabled={state !== "ready" || verifying || closing} onBusyChange={setDependencyBusy} />}
         <div className="browser-toolbar">
           <div>
             <button
               className="icon"
               aria-label="浏览器后退"
-              disabled={state !== "ready" || verifying || closing}
+              disabled={state !== "ready" || verifying || closing || automatic && controlMode !== "owner"}
               onClick={() => input({ kind: "back" })}
             >
               <ArrowLeft size={16} />
@@ -505,7 +584,7 @@ export default function AccountBrowser({
             <button
               className="icon"
               aria-label="浏览器前进"
-              disabled={state !== "ready" || verifying || closing}
+              disabled={state !== "ready" || verifying || closing || automatic && controlMode !== "owner"}
               onClick={() => input({ kind: "forward" })}
             >
               <ArrowRight size={16} />
@@ -513,7 +592,7 @@ export default function AccountBrowser({
             <button
               className="icon"
               aria-label="重新加载网页"
-              disabled={state !== "ready" || verifying || closing}
+              disabled={state !== "ready" || verifying || closing || automatic && controlMode !== "owner"}
               onClick={() => input({ kind: "reload" })}
             >
               <RefreshCw size={15} />
@@ -521,7 +600,7 @@ export default function AccountBrowser({
           </div>
           <span className="browser-address">
             <LockKeyhole size={12} />
-            {name} · 独立登录环境
+            {name} · 受控登录窗口
           </span>
           <button
             className="text-button"
@@ -555,6 +634,7 @@ export default function AccountBrowser({
               alt={`${name} 登录页面。点击输入框后可直接输入，支持滚轮滚动。`}
               onPointerDown={(e) => {
                 e.preventDefault();
+                if (!ownerInput.current) return;
                 const rect = e.currentTarget.getBoundingClientRect();
                 input({
                   kind: "click",
@@ -580,7 +660,7 @@ export default function AccountBrowser({
                 {state === "failed"
                   ? "浏览器未能打开"
                   : state === "opening"
-                    ? "正在打开专属浏览器"
+                    ? "正在打开登录窗口"
                     : "正在连接实时画面"}
               </strong>
               <span className="muted small">
@@ -594,7 +674,7 @@ export default function AccountBrowser({
             ref={keyboard}
             className="browser-keyboard"
             aria-label="浏览器键盘输入"
-            disabled={state !== "ready" || verifying || closing}
+            disabled={state !== "ready" || verifying || closing || automatic && controlMode !== "owner"}
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
@@ -663,8 +743,8 @@ export default function AccountBrowser({
               <small>{latency} ms</small>
             )}
           </span>
-          <span>点击画面即可输入 · 支持粘贴与滚轮</span>
-          <span className="muted">接管期间 Agent 已暂停</span>
+          <span>{automatic && controlMode !== "owner" ? "自动连接中，画面仅供查看" : "点击画面即可输入 · 支持粘贴与滚轮"}</span>
+          <span className="muted">{automatic ? controlMode === "owner" ? "本人步骤期间自动操作已暂停" : "其他账号继续运行" : "接管期间 Agent 已暂停"}</span>
         </footer>
       </div>
     </div>

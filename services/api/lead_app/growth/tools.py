@@ -3,7 +3,7 @@ import asyncio
 from contextvars import ContextVar
 from datetime import timedelta
 from typing import Literal
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 from uuid import UUID
 
 import httpx
@@ -20,11 +20,26 @@ from .store import digest, enabled, validate_refs
 submission_claim = ContextVar("growth_submission_claim",default=None)
 
 
+class ProviderCall(Contract):
+    provider: Literal["tavily", "tikhub"]
+    operation: Literal["web.search", "web.extract", "social.search", "social.item", "social.comments"]
+    args: dict = Field(default_factory=dict)
+
+
 class ResearchInput(Contract):
     question: str = Field(default="Understand the product and its evidence", max_length=1000)
     urls: list[str] = Field(default_factory=list, max_length=4)
     queries: list[str] = Field(default_factory=list, max_length=2)
     document_ids: list[UUID] = Field(default_factory=list,max_length=4)
+    access_mode: Literal["public", "account"] = "public"
+    account_id: UUID | None = None
+    provider_calls: list[ProviderCall] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def access_scope(self):
+        if (self.access_mode == "account") != (self.account_id is not None):
+            raise ValueError("account_access_requires_explicit_account")
+        return self
 
 
 class SourceFinding(Contract):
@@ -67,6 +82,8 @@ class ChannelInput(Contract):
     original_action_id: UUID | None = None
     format: str = Field(default="text", max_length=30)
     publication_purpose: Literal["business", "diagnostic"] = "business"
+    operation: Literal["publish", "reply"] = "publish"
+    parent_url: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def exact_intent(self):
@@ -75,6 +92,12 @@ class ChannelInput(Contract):
                 raise ValueError("reconciliation_cannot_replace_content")
         elif not self.content_id or not self.content_hash:
             raise ValueError("publication_requires_fixed_content")
+        if not self.original_action_id and self.operation == "reply" and not self.parent_url:
+            raise ValueError("reply_requires_original_parent")
+        if self.parent_url:
+            parsed = urlsplit(self.parent_url)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError("invalid_reply_parent")
         return self
 
 
@@ -83,6 +106,7 @@ class AccountInput(Contract):
     profile_id: UUID | None = None
     connection_account_id: UUID | None = None
     target_urls: list[str] = Field(default_factory=list,max_length=10)
+    desired_operation: Literal['publish','reply'] | None = None
 
 
 class ObserveInput(Contract):
@@ -107,7 +131,7 @@ def definitions():
             for name, schema in INPUTS.items()]
 
 
-def _remember(aid, page):
+def _remember(aid, page, *, source_type="public_read"):
     text = (page.get("text") or "").strip()[:18000]
     if not text:
         return None, False
@@ -118,9 +142,9 @@ def _remember(aid, page):
     source = page["url"]
     with tx(aid) as c:
         # Different tasks can read independently. Only duplicate artifact insertion is serialized.
-        c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (str(aid)+source+sha,))
-        old = one(c, "SELECT id FROM lead.knowledge_documents WHERE source_ref=%s AND sha256=%s AND deleted_at IS NULL",
-                  (source, sha))
+        c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (str(aid)+source+sha+source_type,))
+        old = one(c, "SELECT id FROM lead.knowledge_documents WHERE source_ref=%s AND sha256=%s AND source_type=%s AND deleted_at IS NULL",
+                  (source, sha, source_type))
         if old:
             return EvidenceRef(kind="document", id=old["id"]), False
         identifier = uid()
@@ -130,39 +154,204 @@ def _remember(aid, page):
         path.write_text(text)
         path.chmod(0o600)
         c.execute("""INSERT INTO lead.knowledge_documents(id,tenant_id,agent_id,revision,title,source_type,
-            source_ref,body_ref,sha256,trust_state) VALUES(%s,%s,%s,1,%s,'public_read',%s,%s,%s,'untrusted_source')""",
-            (identifier, current_tenant(), aid, (page.get("title") or source)[:500], source, str(path), sha))
+            source_ref,body_ref,sha256,trust_state) VALUES(%s,%s,%s,1,%s,%s,%s,%s,%s,'untrusted_source')""",
+            (identifier, current_tenant(), aid, (page.get("title") or source)[:500], source_type, source, str(path), sha))
         c.execute("""INSERT INTO lead.knowledge_chunks(tenant_id,agent_id,document_id,ordinal,body,search_vector)
             VALUES(%s,%s,%s,0,%s,to_tsvector('simple',%s))""", (current_tenant(), aid, identifier, text, text))
     return EvidenceRef(kind="document", id=identifier), True
 
 
-async def _read_source(aid,row,data,url,*,external_links=False):
+class SourceReadError(ValueError):
+    def __init__(self, scope, condition, wait=None):
+        super().__init__(condition)
+        self.failure_scope = {**scope, "condition": condition}
+        self.wait = wait
+
+
+def source_scope(url, data, *, provider="direct_http", operation="read"):
+    parsed = urlsplit(url)
+    return {"provider": provider, "operation": operation,
+            "origin": f"{parsed.scheme}://{parsed.netloc}", "url": url,
+            "access_mode": data.access_mode,
+            **({"account_id": str(data.account_id)} if data.account_id else {})}
+
+
+def source_failure(page):
+    from ..operating_work import search_challenge, unavailable_source
+    if not unavailable_source(page):
+        return None
+    title = (page.get("title") or "").strip().lower()
+    if search_challenge(page):
+        return "challenge"
+    if title in {"log in", "sign in", "login", "登录"} or page.get("requires_login"):
+        return "login_required"
+    if title == "page not found":
+        return "missing"
+    if not (page.get("text") or "").strip():
+        return "empty"
+    if title in {"blocked", "access denied", "403 forbidden"} or "blocked by network security" in page.get("text", "").lower():
+        return "access_denied"
+    return "unknown"
+
+
+def read_error(error, url, data, *, operation="read"):
+    scope = getattr(error, "failure_scope", None) or {
+        **source_scope(url, data, operation=operation),
+        "condition": "transport" if isinstance(error, (OSError, httpx.HTTPError)) else "unknown",
+    }
+    wait = getattr(error, "wait", None)
+    return {"url": url, "code": scope["condition"], "failure_scope": scope,
+            **({"wait": wait.model_dump(mode="json")} if wait else {})}
+
+
+def research_unavailable(errors, missing=False):
+    output = {"read_errors": errors,
+              "failure_scope": errors[0].get("failure_scope") if errors else None}
+    waits = [item["wait"] for item in errors if item.get("wait")]
+    if waits:
+        return WorkResult(outcome="waiting", wait=Wait.model_validate(waits[0]), output=output)
+    return WorkResult(outcome="failed", failure_code="research_input_missing" if missing else "source_unavailable", output=output)
+
+
+async def _read_source(aid,row,data,url,*,external_links=False,check_resources=False,required_provider=None):
     from ..operating_work import unavailable_source
-    try:
-        page = await asyncio.wait_for(fetch_product(url,**({"external_links":True} if external_links else {"discover_links":True})),30)
-    except PermissionError:
-        raise
-    except (OSError,httpx.TransportError):
-        page = None
-    if page is not None and (not page.get("requires_javascript") or unavailable_source(page)):
-        return page
+    scope = source_scope(url, data, operation="search" if external_links else "read")
+    if data.access_mode == "public" and required_provider != "browser":
+        if check_resources:
+            from .runtime import check_research_resource
+            wait = await asyncio.to_thread(check_research_resource, aid, row["id"], scope)
+            if wait:
+                raise SourceReadError(scope, "resource_blocked", wait)
+        try:
+            page = await asyncio.wait_for(fetch_product(url,**({"external_links":True} if external_links else {"discover_links":True})),30)
+        except PermissionError:
+            raise
+        except (OSError,httpx.TransportError):
+            page = None
+        if page is not None and (not page.get("requires_javascript") or unavailable_source(page)):
+            if condition := source_failure(page):
+                raise SourceReadError(scope, condition)
+            return {**page, "access_mode": data.access_mode, "attempt_scope": scope}
     from ..browser_tools import BrowserTools
     browser = BrowserTools(aid,data.question,task_id=str(row["id"]),mode="autonomous")
     state = "failed"
+    scope = {**scope, "provider": "account_browser" if data.access_mode == "account" else "browser"}
+    if check_resources:
+        from .runtime import check_research_resource
+        wait = await asyncio.to_thread(check_research_resource, aid, row["id"], scope)
+        if wait:
+            raise SourceReadError(scope, "resource_blocked", wait)
     try:
         rendered = await asyncio.wait_for(browser.command("open",{"url":url}),45)
         if rendered.get("error"):
-            raise OSError("Public browser read unavailable")
+            conditions = {'ACCOUNT_SUBJECT_CHANGED':'account_subject_changed',
+                          'ACCOUNT_IDENTITY_UNVERIFIED':'account_identity_unverified'}
+            condition = conditions.get(rendered['error']) if isinstance(rendered['error'],str) else None
+            raise SourceReadError(scope, condition if data.access_mode=='account' and condition
+                                  and rendered.get('condition')==condition else "transport")
+        if condition := source_failure(rendered):
+            raise SourceReadError(scope, condition)
         if external_links:
             rendered["links"] = observed_source_urls([item["href"] for item in rendered.get("elements",[]) if item.get("href")],rendered["url"])
         state = "succeeded"
-        return rendered
+        return {**rendered, "access_mode": data.access_mode, "attempt_scope": scope}
+    except SourceReadError:
+        raise
+    except (ValueError, OSError, httpx.HTTPError) as error:
+        raise SourceReadError(scope, "transport" if isinstance(error, (OSError, httpx.HTTPError)) else "unknown") from error
     finally:
-        await asyncio.wait_for(browser.finish(state),20)
+        try:
+            await asyncio.wait_for(browser.finish(state),20)
+        except (ValueError, OSError, httpx.HTTPError):
+            # Cleanup failure does not turn already obtained evidence into a
+            # different provider's failure or replace the original read error.
+            pass
 
 
-async def research(aid, row, spec):
+async def probe_research_resource(aid, root, scope, probe_row=None):
+    """Check exactly the failed read; no new question, search or model call."""
+    original = TaskSpec.model_validate(root["input"]["spec"])
+    data = ResearchInput.model_validate(original.payload)
+    url = scope.get("url")
+    provider = scope.get("provider")
+    if provider in ("tavily", "tikhub"):
+        if scope.get("access_mode") != "provider_public" or not any(
+                call.provider == provider and call.operation == scope.get("operation") for call in data.provider_calls):
+            return WorkResult(outcome="failed", failure_code="recovery_scope_missing")
+        # Reuse a later, actual response from the original billing ledger. This
+        # read never retransmits a paid request or settles an uncertain bill.
+        from ..research_providers import configuration, configuration_revision
+        episode = root.get("result", {}).get("runtime", {}).get("recovery", {})
+        with tx(aid) as c:
+            conf, reason = configuration(provider, scope["operation"], aid, connection=c)
+            revision = configuration_revision(provider, scope["operation"], aid, c)
+            ready = None
+            if conf and not reason and episode.get("last_failure_at"):
+                allowance = one(c, """SELECT 1 FROM lead.research_allowances
+                    WHERE connection_ref=%s AND period_key=%s
+                    AND spent_units+reserved_units+%s<=least(limit_units,%s)""",
+                    (conf["connection"],conf["period_key"],conf["max_units"],conf["limit_units"]))
+                period = one(c, """SELECT id,spent_units,reserved_units,limit_units FROM lead.budget_periods
+                    WHERE starts_at=%s AND unit=%s""",(conf["start"],provider+":"+conf["unit"]))
+                question = (one(c,"SELECT question_key FROM lead.growth_experiments WHERE id=%s",(root["experiment_id"],))
+                    if root.get("experiment_id") else None)
+                question = question["question_key"] if question else root["input"].get("purpose") or root.get("type", "growth.research")
+                spent = (one(c,"""SELECT coalesce(sum(units),0) n FROM lead.budget_reservations
+                    WHERE period_id=%s AND state<>'released' AND pricing_snapshot#>>'{research,question}'=%s""",
+                    (period["id"],question))["n"] if period else 0)
+                if (allowance and period
+                        and period["spent_units"]+period["reserved_units"]+conf["max_units"]<=min(period["limit_units"],conf["project_limit_units"])
+                        and spent+conf["max_units"]<=conf["question_limit_units"]):
+                    ready = one(c, """SELECT id FROM lead.budget_reservations
+                        WHERE state IN ('settled','unknown') AND created_at>%s
+                        AND pricing_snapshot#>>'{research,provider}'=%s
+                        AND pricing_snapshot#>>'{research,operation}'=%s
+                        AND pricing_snapshot#>>'{research,configuration_revision}'=%s
+                        AND pricing_snapshot#>>'{research,result,state}' IN ('complete','partial')
+                        ORDER BY created_at DESC LIMIT 1""",
+                        (episode["last_failure_at"],provider,scope["operation"],revision))
+        if not ready:
+            return WorkResult(outcome="failed", failure_code="recovery_evidence_pending", output={"failure_scope":scope})
+        return WorkResult(outcome="completed", output={"recovery_checks":[{
+            "resource":scope["resource"],"condition_revision":scope["condition_revision"],
+            "state":"ready","evidence_ref":"reservation:"+str(ready["id"])}]})
+    if not url or scope.get("access_mode") != data.access_mode:
+        return WorkResult(outcome="failed", failure_code="recovery_scope_missing")
+    if provider not in ("direct_http", "browser", "account_browser"):
+        # Paid tools need their own claim/charge proof. A public read cannot
+        # establish their recovery or authorize a repeat of an unknown bill.
+        return WorkResult(outcome="failed", failure_code="recovery_capability_gap",
+                          output={"failure_scope": scope})
+    try:
+        if provider == "direct_http":
+            if data.access_mode != "public":
+                raise SourceReadError(scope, "recovery_scope_missing")
+            page = await asyncio.wait_for(fetch_product(url, discover_links=False), 30)
+            condition = source_failure(page)
+            if condition or page.get("requires_javascript"):
+                raise SourceReadError(scope, condition or "capability_gap")
+        else:
+            if (not probe_row or probe_row.get("type") != "growth.recover"
+                    or (provider == "account_browser") != (data.access_mode == "account")):
+                raise SourceReadError(scope, "recovery_scope_missing")
+            page = await _read_source(aid, probe_row, data, url,
+                external_links=scope.get("operation") == "search", required_provider="browser")
+            if page["attempt_scope"]["provider"] != provider:
+                raise SourceReadError(scope, "recovery_scope_changed")
+        ref, _ = await asyncio.to_thread(_remember, aid, page,
+            source_type="account_read" if data.access_mode == "account" else "public_read")
+        if not ref:
+            raise SourceReadError(scope, "empty")
+        return WorkResult(outcome="completed", evidence_refs=[ref], output={
+            "recovery_checks": [{"resource": scope["resource"],
+                                 "condition_revision": scope["condition_revision"],
+                                 "state": "ready", "evidence_ref": str(ref.id)}]})
+    except (ValueError, OSError, httpx.HTTPError) as error:
+        return WorkResult(outcome="failed", failure_code="source_unavailable",
+                          output={"failure_scope": getattr(error, "failure_scope", scope)})
+
+
+async def research(aid, row, spec, claim=None):
     data = ResearchInput.model_validate(spec.payload)
     urls = list(data.urls)
     if spec.purpose == "product" and not urls:
@@ -172,6 +361,38 @@ async def research(aid, row, spec):
             urls.append(business["product_url"])
     errors = []
     local_pages,local_refs = [],[]
+    provider_results = []
+    provider_progress = False
+    provider_seen = set()
+    for call in data.provider_calls:
+        from ..research_providers import ENDPOINTS, research_call
+        from .runtime import check_research_resource
+        scope = {"provider": call.provider, "operation": call.operation,
+                 "endpoint": ENDPOINTS.get((call.provider, call.operation), (None, None))[1],
+                 "access_mode": "provider_public"}
+        wait = await asyncio.to_thread(check_research_resource, aid, row["id"], scope)
+        if wait:
+            errors.append(read_error(SourceReadError(scope, "resource_blocked", wait), scope["endpoint"], data))
+            continue
+        result = await research_call(aid, str(row["id"]), call.provider, call.operation,
+                                     call.args, digest([str(row["id"]), call.model_dump(mode="json")]),
+                                     execution_claim=claim)
+        provider_results.append(result)
+        if result.get("failure_scope"):
+            scope = {**result["failure_scope"], "condition": result.get("reason", "unknown")}
+            errors.append({"code": scope["condition"], "failure_scope": scope})
+        for source in result.get("sources", [])[:8]:
+            if source["source_id"] in provider_seen:
+                continue
+            provider_seen.add(source["source_id"])
+            page = {"url": source["url"], "title": source.get("excerpt") or source["url"],
+                    "text": source.get("body") or source.get("excerpt") or ""}
+            ref, added = await asyncio.to_thread(_remember, aid, page, source_type="provider:"+call.provider)
+            if ref and ref not in local_refs:
+                local_refs.append(ref)
+                provider_progress = provider_progress or added
+                local_pages.append({**source, "document_id": str(ref.id), "trust": "provider_reported",
+                                    "independently_verified": False})
     if data.document_ids:
         with tx(aid) as c:
             for identifier in data.document_ids:
@@ -187,17 +408,18 @@ async def research(aid, row, spec):
     for query in data.queries:
         index_url = "https://html.duckduckgo.com/html/?q="+quote_plus(query)
         try:
-            index = await _read_source(aid,row,data,index_url,external_links=True)
+            index = await _read_source(aid,row,data,index_url,external_links=True,check_resources=True)
             if not unavailable_source(index):
                 urls.extend(index.get("links",[])[:4])
             else:
                 errors.append({"url":index_url,"code":"search_source_unavailable"})
         except (ValueError,OSError,httpx.HTTPError) as error:
-            errors.append({"url":index_url,"code":type(error).__name__})
+            errors.append(read_error(error, index_url, data, operation="search"))
     if not urls:
         if local_refs:
             return WorkResult(outcome="completed",evidence_refs=local_refs,output={"pages":local_pages,
-                "knowledge_progress":False,"learning_progress":False,"context_available":True})
+                "knowledge_progress":provider_progress,"learning_progress":False,"context_available":True,
+                "provider_results":provider_results,"read_errors":errors})
         with tx(aid) as c:
             provided = one(c,"SELECT id,revision,description FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
         if spec.purpose=="product" and provided and provided["description"].strip():
@@ -208,25 +430,26 @@ async def research(aid, row, spec):
             return WorkResult(outcome="completed",evidence_refs=[{"kind":"business","id":provided["id"],"revision":provided["revision"]}],
                 output={"knowledge_progress":not seen,"learning_progress":not seen,"business_progress":False,"trust":"owner_asserted",
                         "learning":"The owner supplied a product introduction; independent validation is still required."})
-        return WorkResult(outcome="failed", failure_code="source_unavailable" if errors else "research_input_missing",output={"read_errors":errors})
-    evidence, pages, progress = local_refs, local_pages, False
+        return research_unavailable(errors, missing=not errors)
+    evidence, pages, progress = local_refs, local_pages, provider_progress
     # Direct/browser reads are bounded; the fallback owns only its public research run.
     for url in list(dict.fromkeys(urls))[:4]:
         try:
-            page = await _read_source(aid,row,data,url)
-            ref, added = await asyncio.to_thread(_remember, aid, page)
+            page = await _read_source(aid,row,data,url,check_resources=True)
+            ref, added = await asyncio.to_thread(_remember, aid, page,
+                source_type="account_read" if data.access_mode == "account" else "public_read")
             if ref:
                 evidence.append(ref)
                 progress = progress or added
                 pages.append({"url": page["url"], "title": page.get("title"), "document_id": str(ref.id),
                               "observed_links": page.get("links", []), "trust": "observed_source_claims"})
         except (ValueError,OSError,httpx.HTTPError) as error:
-            errors.append({"url": url, "code": type(error).__name__})
+            errors.append(read_error(error, url, data))
     if not evidence:
-        return WorkResult(outcome="failed", failure_code="source_unavailable", output={"read_errors": errors})
+        return research_unavailable(errors)
     findings,learning = [],False
     from ..config import any_model_configured
-    if spec.experiment_id and any_model_configured():
+    if spec.experiment_id and any_model_configured(aid):
         # Raw page count is not learning. Read/interpret within this same bounded
         # macro, charge the question root, and require exact original quotations.
         with tx(aid) as c:
@@ -257,6 +480,7 @@ Summarize evidence only, without new tasks, strategy or external actions.""",age
         key = None
     return WorkResult(outcome="completed", evidence_refs=evidence,
                       output={"question": data.question, "pages": pages, "read_errors": errors,
+                              "provider_results": provider_results,
                               "knowledge_progress": progress,"learning_progress":learning,"findings":findings,
                               "finding_hash":key,"business_progress": False})
 
@@ -366,7 +590,7 @@ async def execute_tool(aid, row, claim):
         result = await decide(aid, str(row["id"]), row["input"]["spec"]["payload"].get("triggers", []),decision_claim=claim)
         return WorkResult(outcome="completed", output=result)
     if spec.kind == "research":
-        return await research(aid, row, spec)
+        return await research(aid, row, spec, claim)
     if spec.kind == "content":
         return await content(aid, row, spec)
     if spec.kind == "account":
@@ -468,33 +692,54 @@ def prepare_channel(aid, task_id, data):
         if data.format!=content["body"].get("format","text"):
             raise ValueError("content_format_changed")
         grant = one(c,"SELECT * FROM lead.authorization_grants WHERE target_id=%s AND revoked_at IS NULL ORDER BY version DESC LIMIT 1",(target["id"],))
-        if not grant or "publish" not in grant["allowed_actions"]:
+        if not grant or data.operation not in grant["allowed_actions"]:
             raise ValueError("target_not_permitted")
         from ..execution_routes import resolve
         route = resolve(aid,account_id=spec.account_id)
         content = _bind_publication(c,aid,row,content,target)
         platform = target["platform"]
         release = SPECS[platform].version if platform in SPECS else "local-v1"
-        cap = one(c,"SELECT * FROM lead.platform_capabilities WHERE platform=%s AND action_type='publish' AND target_type=%s",(platform,target["target_type"]))
+        permissions = target["verified_permissions"] if isinstance(target["verified_permissions"],dict) else {}
+        methods = permissions.get("browser_methods") or {}
+        if not isinstance(methods,dict):
+            raise ValueError("browser_method_scope_changed")
+        method = methods.get(data.operation) or permissions.get("browser_method")
+        if method:
+            from ..browser_execution import validate_method
+            method = validate_method(method, account_id=str(spec.account_id),
+                                     binding_version=target["binding_version"],
+                                     target_url=target["canonical_url"], operation=data.operation)
+            release = method["version"]
+        elif data.operation == "reply":
+            raise ValueError("reply_browser_method_missing")
+        cap = one(c,"SELECT * FROM lead.platform_capabilities WHERE platform=%s AND action_type=%s AND target_type=%s",(platform,data.operation,target["target_type"]))
         verification = platform != "lab" and (not cap or cap["technical_state"] != "verified" or data.format not in target["verified_permissions"].get("publishing_verified_formats",[]))
         body = content["body"]
         publication = {**body,"platform":platform,"format":data.format,"adapter_version":release,
+                       "operation":data.operation,"parent_url":data.parent_url,
                        "growth_runtime":1,"content_hash":content["content_hash"],"binding_version":target["binding_version"],
                        "intent_revision":intent["revision"],"goal_revision":row["input"]["goal_revision"],
                        "task_generation":row["input"]["task_generation"],"execution_ref":route.model_dump(mode="json"),
                        "publication_purpose":data.publication_purpose,"verification_required":verification}
-        if isinstance(target["verified_permissions"],dict) and target["verified_permissions"].get("access_mode")=="ordinary_member":
+        if method:
+            publication["browser_method"] = method
+            from ..browser_actions import method_hash
+            producers=permissions.get('browser_method_producers') or {}
+            producer=producers.get(data.operation) if isinstance(producers,dict) else None
+            if isinstance(producer,dict) and producer.get('method_hash')==method_hash(method):
+                publication['browser_method_producer']=producer
+        if not method and isinstance(target["verified_permissions"],dict) and target["verified_permissions"].get("access_mode")=="ordinary_member":
             publication["reddit_rules_sha256"] = target["verified_permissions"].get("rules",{}).get("sha256")
         action = one(c,"""INSERT INTO lead.actions(tenant_id,agent_id,task_id,target_id,grant_id,content_id,operation_key,type,
-            intent,expected_control_version,expected_config_revision) VALUES(%s,%s,%s,%s,%s,%s,%s,'publish',%s,%s,%s) RETURNING *""",
-            (current_tenant(),aid,task_id,target["id"],grant["id"],content["id"],"growth:"+str(task_id),j(publication),agent["control_version"],agent["config_revision"]))
+            intent,expected_control_version,expected_config_revision) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+            (current_tenant(),aid,task_id,target["id"],grant["id"],content["id"],"growth:"+str(task_id),data.operation,j(publication),agent["control_version"],agent["config_revision"]))
         c.execute("UPDATE lead.tasks SET input=input || %s WHERE id=%s",(j({"key":action["operation_key"],"account_id":str(spec.account_id),
             "target_id":str(spec.target_id),"grant_id":str(grant["id"]),"content_id":str(content["id"]),"format":data.format,
             "body":body["body"],"media":body.get("media",[]),"link":body.get("link"),"publication_purpose":data.publication_purpose}),task_id))
         return action
 
 
-def submission_gate(c, actor, action,claim=None):
+def submission_gate(c, actor, action,claim=None,*,allow_method_repair=False):
     """Compatible control locks allow different Profiles to click concurrently."""
     from ..adapters.catalog import SPECS
     from ..admin_controls import enforce_channel
@@ -519,7 +764,13 @@ def submission_gate(c, actor, action,claim=None):
     if intent["scope"].get("target_scope")=="existing_grants" and target["external_target_id"] not in intent["scope"].get("target_ids",[]):
         raise ValueError("target_not_permitted")
     route = one(c,"SELECT * FROM lead.growth_read_route(%s)",(actor.profile["id"],))
-    if not route or route["generation"] != publication["execution_ref"]["route_generation"]:
+    from ..channel_contracts import ExecutionRef
+    from ..execution_routes import registered_reference
+    frozen_route = ExecutionRef.model_validate(publication["execution_ref"])
+    current_route = registered_reference(route) if route else None
+    if (current_route is None
+            or current_route.model_dump(exclude={"registry_revision"}) != frozen_route.model_dump(exclude={"registry_revision"})
+            or frozen_route.registry_revision is not None and current_route.registry_revision != frozen_route.registry_revision):
         raise ValueError("execution_route_changed")
     if not one(c,"SELECT profile_id FROM lead.profile_leases WHERE profile_id=%s AND epoch=%s AND state='held' AND expires_at>now() FOR SHARE",(actor.profile["id"],actor.epoch)):
         raise ValueError("profile_lease_lost")
@@ -550,18 +801,61 @@ def submission_gate(c, actor, action,claim=None):
     if not content or content["content_hash"] != publication["content_hash"]:
         raise ValueError("content_changed")
     grant = one(c,"SELECT * FROM lead.authorization_grants WHERE id=%s AND target_id=%s AND revoked_at IS NULL FOR SHARE",(action["grant_id"],action["target_id"]))
-    if not grant or "publish" not in grant["allowed_actions"] or (publication.get("media") and "upload_media" not in grant["allowed_actions"]):
+    operation = publication.get("operation", "publish")
+    if operation not in ("publish", "reply") or action["type"] != operation:
+        raise ValueError("action_operation_changed")
+    if not grant or operation not in grant["allowed_actions"] or (publication.get("media") and "upload_media" not in grant["allowed_actions"]):
         raise ValueError("target_not_permitted")
     platform, kind = account["platform"], publication.get("format","text")
+    method = publication.get("browser_method")
+    if method:
+        from ..browser_actions import (
+            execution_method,
+            prepare_method_repair,
+            repair_generation_current,
+        )
+        from ..browser_execution import validate_method
+        permissions = target["verified_permissions"] if isinstance(target["verified_permissions"],dict) else {}
+        methods = permissions.get("browser_methods") or {}
+        if not isinstance(methods,dict):
+            raise ValueError("browser_method_scope_changed")
+        current_method = validate_method(methods.get(operation) or permissions.get("browser_method"),
+            account_id=str(account["id"]), binding_version=account["binding_version"],
+            target_url=target["canonical_url"], operation=operation)
+        method=execution_method(c,action)
+        if current_method != method:
+            if not allow_method_repair:
+                raise ValueError("browser_method_changed")
+            method=prepare_method_repair(c,actor,action,task)
+        if task['input']['task_generation']!=publication['task_generation']:
+            repair=(one(c,'SELECT observation FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1',
+                (action['id'],)) or {}).get('observation',{}).get('method_repair',{})
+            if not repair and allow_method_repair:
+                repair=lease.get('browser_method_repair') or {}
+            if repair.get('task_generation')!=task['input']['task_generation'] and not repair_generation_current(c,actor,action,task):
+                raise ValueError('stale_submission_claim')
+    elif operation == "reply":
+        raise ValueError("reply_browser_method_missing")
     if kind not in grant["limits"].get("formats",[kind]):
         raise ValueError("target_not_permitted")
-    if one(c,"SELECT 1 FROM lead.takeover_sessions WHERE profile_id=%s AND state IN ('active','requested','ending') AND expires_at>now()",(actor.profile["id"],)):
+    if method:
+        controlled = one(c,"""SELECT 1 FROM lead.takeover_sessions ts
+            WHERE ts.profile_id=%s AND ts.state IN ('active','requested','ending') AND ts.expires_at>now()
+            AND (ts.purpose<>'login' OR NOT EXISTS(SELECT FROM lead.tasks w WHERE w.type='growth.account'
+                AND w.input#>>'{spec,payload,takeover_id}'=ts.id::text)
+                OR EXISTS(SELECT FROM lead.tasks w WHERE w.type='growth.account'
+                    AND w.input#>>'{spec,payload,takeover_id}'=ts.id::text
+                    AND w.input#>>'{spec,payload,connection_account_id}'=%s))""",
+            (actor.profile["id"],str(account["id"])))
+    else:
+        controlled = one(c,"SELECT 1 FROM lead.takeover_sessions WHERE profile_id=%s AND state IN ('active','requested','ending') AND expires_at>now()",(actor.profile["id"],))
+    if controlled:
         raise ValueError("owner_controls_profile")
     if platform != "lab":
         from ..admin_settings import validate_brand_content
         from ..reddit_member import ordinary_member
         validate_brand_content(c,actor.aid,"\n".join([publication.get("title", ""),publication.get("body", "")]))
-        if ordinary_member(target):
+        if ordinary_member(target) and not method:
             from datetime import datetime
 
             from ..reddit_member import member_scope
@@ -577,21 +871,23 @@ def submission_gate(c, actor, action,claim=None):
             scope = managed_scope(c,account)
             if not scope or str(scope["id"])!=scope_id:
                 raise ValueError("target_not_permitted")
-        cap = one(c,"SELECT * FROM lead.platform_capabilities WHERE platform=%s AND action_type='publish' AND target_type=%s",(platform,target["target_type"]))
+        cap = one(c,"SELECT * FROM lead.platform_capabilities WHERE platform=%s AND action_type=%s AND target_type=%s",(platform,operation,target["target_type"]))
         pilot = one(c,"SELECT lead.owner_browser_pilot_allowed(%s,%s) ok",(target["id"],grant["id"]))["ok"]
-        if not cap or (cap["permission_state"] != "approved" and not (cap["permission_state"] == "pending" and pilot)):
+        if not method and (not cap or (cap["permission_state"] != "approved" and not (cap["permission_state"] == "pending" and pilot))):
             raise ValueError("platform_access_missing")
-        if publication["adapter_version"] != SPECS[platform].version or target["verified_permissions"].get("adapter_version") != SPECS[platform].version:
+        if not method and (platform not in SPECS or publication["adapter_version"] != SPECS[platform].version or target["verified_permissions"].get("adapter_version") != SPECS[platform].version):
             raise ValueError("adapter_changed")
-        if not publication.get("verification_required") and (cap["technical_state"] != "verified" or kind not in target["verified_permissions"].get("publishing_verified_formats",[])):
+        if not method and not publication.get("verification_required") and (cap["technical_state"] != "verified" or kind not in target["verified_permissions"].get("publishing_verified_formats",[])):
             raise ValueError("verification_proof_missing")
         if env().get("LEAD_DEPLOYMENT_MODE")=="production" and not verified_profile(c,actor.profile["id"]):
             raise ValueError("identity_verification_missing")
-    maximum = grant["limits"].get("publish_per_day")
-    if maximum is not None and one(c,"SELECT count(*) n FROM lead.actions WHERE target_id=%s AND id<>%s AND state IN ('dispatching','unknown','confirmed') AND created_at>now()-interval '24 hours'",(target["id"],action["id"]))["n"] >= maximum:
+    maximum = grant["limits"].get(operation+"_per_day")
+    if maximum is not None and one(c,"SELECT count(*) n FROM lead.actions WHERE target_id=%s AND type=%s AND id<>%s AND state IN ('dispatching','unknown','confirmed') AND created_at>now()-interval '24 hours'",(target["id"],operation,action["id"]))["n"] >= maximum:
         raise ValueError("scope_publish_limit")
     enforce_channel(c,actor.aid,platform,target["id"],content_format=kind,action_id=action["id"])
     guard_action(c,action)
+    if allow_method_repair and method:
+        agent={**agent,'_native_method':method}
     return agent
 
 

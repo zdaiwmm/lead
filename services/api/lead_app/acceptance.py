@@ -103,7 +103,7 @@ def snapshot(aid, since, now=None, until=None):
                     "daily_plan_version",
                 )
             },
-            "models": {"version": version, "readiness": model_readiness(models)},
+            "models": {"version": version, "readiness": model_readiness(models, aid)},
             "model_problem": {
                 k: a["onboarding_state"].get("model_backoff", {}).get(k)
                 for k in (

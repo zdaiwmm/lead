@@ -26,10 +26,12 @@ import AgentPreferences from "./agent-preferences";
 import SocialAccounts from "./social-accounts";
 import GrowthStatus from "./growth-status";
 import AccountBrowser from "./account-browser";
+import ConnectionDetails from "./connection-details";
 import SocialIcon from "./social-icon";
 import NewAgentDialog from "./website-agent-dialog";
 import WorkflowGuide from "./workflow-guide";
 import NotificationIndicator from "./notification-indicator";
+import LocalExecutor from "./local-executor";
 
 type Row = Record<string, any>;
 type View = "home" | "agent" | "settings";
@@ -90,6 +92,11 @@ export default function Lead() {
   const [channels, setChannels] = useState(false);
   const [platforms, setPlatforms] = useState<Row[]>([]);
   const [browser, setBrowser] = useState<Row | null>(null);
+  const [connectionDraft, setConnectionDraft] = useState<Row | null>(null);
+  useEffect(() => {
+    setConnectionDraft(null);
+    setBrowser(null);
+  }, [current]);
   const [side, setSide] = useState(false);
   const end = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -316,7 +323,10 @@ export default function Lead() {
   async function connect(p: Row) {
     if (!current || readOnly) return;
     window.dispatchEvent(new Event("lead:close-dialogs"));
-    setBrowser({ platform: p.id, name: p.name, account_id: p.account_id, new_account: p.new_account });
+    const target = { agent_id: current, platform: p.id, name: p.name, account_id: p.account_id, new_account: p.new_account,
+      site_url: p.site_url || p.connection_origin };
+    if (p.account_id) setBrowser(target);
+    else setConnectionDraft({ ...target, id: p.id });
     setChannels(false);
   }
   const running = agents.filter((a) => a.desired_state === "running").length;
@@ -804,6 +814,7 @@ export default function Lead() {
                   onComplete={refresh}
                 />
                 </header>
+                <LocalExecutor key={"executor" + current} aid={current!} readOnly={readOnly} />
                 <div className="workspace-overview">
                 <GrowthStatus
                   key={"growth" + current}
@@ -1181,12 +1192,20 @@ export default function Lead() {
           }}
         />
       )}
-      {browser && current && (
+      {connectionDraft && connectionDraft.agent_id === current && <ConnectionDetails target={connectionDraft}
+        onClose={() => setConnectionDraft(null)} onConnect={details => {
+          setBrowser({ ...connectionDraft, ...details });
+          setConnectionDraft(null);
+        }} />}
+      {browser && current && browser.agent_id === current && (
         <AccountBrowser
           key={current + browser.platform}
           aid={current}
           platform={browser.platform}
           requestedAccountId={browser.account_id}
+          siteUrl={browser.site_url}
+          login={browser.login}
+          onCredentialsSent={() => setBrowser(value => value ? { ...value, login: undefined } : value)}
           newAccount={browser.new_account}
           name={browser.name}
           verifyLabel="核对登录状态"

@@ -26,6 +26,7 @@ class ExecutionRef(Contract):
     executor_ref: str
     transport_ref: str
     route_generation: int = Field(ge=1)
+    registry_revision: str | None = Field(default=None, strict=True, pattern=r'^[0-9a-f]{64}$')
 
 
 class TargetObservation(Contract):

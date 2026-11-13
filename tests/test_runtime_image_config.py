@@ -1,8 +1,11 @@
 """An immutable executor image retains its runtime helpers and operator settings."""
 
+import io
 import os
 import stat
 import subprocess
+import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -15,6 +18,7 @@ def test_home_image_contains_runtime_dependencies_without_operator_files(tmp_pat
     checkout.mkdir()
     required = (
         "services/api/lead_app/config.py",
+        "services/local-executor/package.json",
         "services/channel_adapters/reddit/entry.py",
         "apps/web/app/page.tsx",
         "infra/home-browser-frames/frame-live.cjs",
@@ -33,6 +37,10 @@ def test_home_image_contains_runtime_dependencies_without_operator_files(tmp_pat
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(name + "\n")
     (checkout / "scripts/browser_namespace.py").chmod(0o755)
+    # Real verifier and lock files; only dependencies/browser bytes are synthetic
+    # in this archive-membership test. Native execution is a mandatory CI step.
+    for name in ("scripts/build_browser_runtime.py", "requirements.lock.txt", "requirements.browser-use.lock.txt"):
+        (checkout / name).write_bytes((source / name).read_bytes())
     subprocess.run(["git", "init", "-q", str(checkout)], check=True)
     subprocess.run(["git", "add", "."], cwd=checkout, check=True)
     subprocess.run(
@@ -41,6 +49,21 @@ def test_home_image_contains_runtime_dependencies_without_operator_files(tmp_pat
         cwd=checkout, check=True,
     )
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
+    from test_browser_runtime_package import builder
+    runtime = tmp_path / "browser-runtime"
+    (runtime / "site-packages").mkdir(parents=True)
+    (runtime / "site-packages/fixture.py").write_text("# synthetic dependency\n")
+    chrome = runtime / builder.CHROME
+    chrome.parent.mkdir(parents=True)
+    chrome.write_text("#!/bin/sh\nexit 0\n")
+    chrome.chmod(0o755)
+    original = builder.sources(checkout, sha)
+    for name in builder.SOURCE_FILES[2:]:
+        (runtime / Path(name).name).write_bytes(original[name])
+    packages = builder.linux_requirements(*(original[name].decode() for name in builder.SOURCE_FILES[:2]))
+    builder.write_manifest(runtime, sha, original, packages,
+        {"python":{"required_minor":"3.12", "cache_tag":"cpython-312"},
+         "chromium_version":"fixture", "native_smoke":True}, "fixture")
     (checkout / "services/untracked-private.env").write_text("fixture-local-only\n")
     (checkout / "apps/web/.next").mkdir()
     (checkout / "apps/web/.next/BUILD_ID").write_text("fixture")
@@ -52,16 +75,30 @@ def test_home_image_contains_runtime_dependencies_without_operator_files(tmp_pat
     compressor.write_text('#!/bin/sh\ncp -R "$1" "$2"\n')
     compressor.chmod(0o755)
     image = tmp_path / "image"
+    connector = tmp_path / "connector.tgz"
+    with tarfile.open(connector, "w:gz") as archive:
+        data = b"#!/usr/bin/env node\n"
+        entry = tarfile.TarInfo("package/dist/cli.js")
+        entry.size = len(data)
+        archive.addfile(entry, io.BytesIO(data))
+        revision = (sha + "\n").encode()
+        entry = tarfile.TarInfo("package/REVISION")
+        entry.size = len(revision)
+        archive.addfile(entry, io.BytesIO(revision))
     subprocess.run(
-        ["bash", str(source / "scripts/build_home_image.sh"), sha, str(image)],
-        cwd=checkout, env={**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"]},
+        ["bash", str(source / "scripts/build_home_image.sh"), sha, str(image), str(runtime), str(connector)],
+        cwd=checkout, env={**os.environ, "PATH": str(tools) + os.pathsep + str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]},
         check=True,
     )
     # SquashFS inherits this exact staging root; executors traverse it as non-root.
     assert stat.S_IMODE(image.stat().st_mode) == 0o755
     assert (image / "REVISION").read_text() == sha + "\n"
+    assert (image / "services/local-executor/lead-local-executor.tgz").read_bytes() == connector.read_bytes()
     assert os.access(image / "scripts/browser_namespace.py", os.X_OK)
     assert not (image / "services/untracked-private.env").exists()
+    assert builder.verify(checkout, sha, image / "services/browser-runtime")["sha"] == sha
+    assert (image / "services/browser-runtime" / builder.CHROME).read_bytes() == chrome.read_bytes()
+    assert not (image / "scripts/build_browser_runtime.py").exists()
     for name in required:
         destination = name.replace("apps/web/", "web/").replace(
             "infra/home-browser-frames/", "home-browser-frames/"

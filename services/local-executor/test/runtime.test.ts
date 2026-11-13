@@ -1,0 +1,454 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Store } from "../src/store.ts";
+import { Runner } from "../src/runner.ts";
+
+class FakeRpc {
+  calls: any[] = [];
+  listener: any;
+  pendingListener: any;
+  async open() {}
+  async close() {}
+  onNotification(fn: any) {
+    this.listener = fn;
+  }
+  onRequest(fn: any) {
+    this.pendingListener = fn;
+  }
+  async request(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/start") return { thread: { id: "thread-1" } };
+    if (method === "thread/resume")
+      return { thread: { id: "thread-1", status: { type: "idle" } } };
+    if (method === "thread/turns/list") return { data: [], nextCursor: null };
+    if (method === "turn/start") {
+      setTimeout(
+        () =>
+          this.listener("item/completed", {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: { type: "agentMessage", text: '{"ok":true}' },
+          }),
+        1,
+      );
+      setTimeout(
+        () =>
+          this.listener("turn/completed", {
+            threadId: "thread-1",
+            turn: { id: "turn-1", status: "completed", items: [] },
+          }),
+        2,
+      );
+      return { turn: { id: "turn-1" } };
+    }
+    return {};
+  }
+  respond() {}
+}
+const payload = {
+  session_key: "same-conversation",
+  input: "Research this product",
+  instructions: "Use actual evidence",
+  output_schema: {
+    type: "object",
+    properties: { ok: { type: "boolean" } },
+    required: ["ok"],
+    additionalProperties: false,
+  },
+  model: "gpt-6.1-sol",
+  effort: "medium",
+  tools: [],
+};
+function setup(t: any) {
+  const folder = mkdtempSync(join(tmpdir(), "lead-connector-test-"));
+  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  return new Store(folder);
+}
+test("interrupting a queued request never starts its model turn", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  const runner = new Runner(store, () => rpc as any);
+  const work = runner.command({ id: "queued", request_id: "cancel-before-start", kind: "run", payload });
+  await runner.command({ id: "cancel", request_id: "cancel-before-start", kind: "interrupt", payload: {} });
+  await work;
+  assert.equal(store.request("cancel-before-start")?.state, "interrupted");
+  assert.equal(rpc.calls.filter(c => c.method === "turn/start").length, 0);
+});
+test("an offline interrupt survives restart and cancels only the reconciled original turn", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  store.begin("offline-cancel", payload);
+  store.update("offline-cancel", { thread_id: "thread-1", turn_id: "original-turn", state: "running" });
+  await new Runner(store).command({ id: "cancel-offline", request_id: "offline-cancel", kind: "interrupt", payload: {} });
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/turns/list") return { data: [{ id: "original-turn", status: "inProgress", items: [] }], nextCursor: null };
+    if (method === "turn/interrupt") this.listener("turn/completed", {
+      threadId: "thread-1", turn: { id: "original-turn", status: "interrupted", items: [] },
+    });
+    return {};
+  };
+  const restored = new Store(store.folder), runner = new Runner(restored, () => rpc as any);
+  const work = runner.command({ id: "resume", request_id: "offline-cancel", kind: "run", payload });
+  await Promise.race([work, new Promise(resolve => setTimeout(resolve, 100))]);
+  await runner.close();
+  await work;
+  const interrupts = rpc.calls.filter(c => c.method === "turn/interrupt");
+  assert.equal(interrupts.length, 1);
+  assert.equal(interrupts[0].params.turnId, "original-turn");
+  assert.equal(rpc.calls.filter(c => c.method === "turn/start").length, 0);
+  assert.equal(restored.request("offline-cancel")?.state, "interrupted");
+});
+test("known-turn cancellation ignores a newer turn quoting the original request marker", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  store.begin("known-turn", payload);
+  store.update("known-turn", {
+    thread_id: "thread-1", turn_id: "original-turn", state: "running", cancel_requested: true,
+  });
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/turns/list") return { data: [
+      { id: "newer-turn", status: "inProgress", items: [
+        { type: "agentMessage", text: "Quoted historical marker: [lead_request:known-turn]" },
+      ] },
+      { id: "original-turn", status: "completed", items: [
+        { type: "agentMessage", text: '{"ok":true}' },
+      ] },
+    ], nextCursor: null };
+    if (method === "turn/interrupt") this.listener("turn/completed", {
+      threadId: "thread-1", turn: { id: params.turnId, status: "interrupted", items: [] },
+    });
+    return {};
+  };
+  const restored = new Store(store.folder);
+  await new Runner(restored, () => rpc as any).command({
+    id: "restore-known", request_id: "known-turn", kind: "run", payload,
+  });
+  assert.equal(rpc.calls.filter(call => call.method === "turn/interrupt").length, 0);
+  assert.equal(rpc.calls.filter(call => call.method === "turn/start").length, 0);
+  assert.equal(restored.request("known-turn")?.turn_id, "original-turn");
+  assert.equal(restored.request("known-turn")?.state, "completed");
+  assert.deepEqual(restored.request("known-turn")?.output, { ok: true });
+});
+test("resuming a known turn ignores a different turn-start notification before reconciliation", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  store.begin("known-notification", payload);
+  store.update("known-notification", {
+    thread_id: "thread-1", turn_id: "original-turn", state: "running", cancel_requested: true,
+  });
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/resume") this.listener("turn/started", {
+      threadId: "thread-1", turn: { id: "newer-turn", status: "inProgress", items: [] },
+    });
+    if (method === "thread/turns/list") return { data: [
+      { id: "newer-turn", status: "inProgress", items: [] },
+      { id: "original-turn", status: "completed", items: [
+        { type: "agentMessage", text: '{"ok":true}' },
+      ] },
+    ], nextCursor: null };
+    if (method === "turn/interrupt") this.listener("turn/completed", {
+      threadId: "thread-1", turn: { id: params.turnId, status: "interrupted", items: [] },
+    });
+    return {};
+  };
+  const restored = new Store(store.folder);
+  await new Runner(restored, () => rpc as any).command({
+    id: "restore-notification", request_id: "known-notification", kind: "run", payload,
+  });
+  assert.equal(rpc.calls.filter(call => call.method === "turn/interrupt").length, 0);
+  assert.equal(rpc.calls.filter(call => call.method === "turn/start").length, 0);
+  assert.equal(restored.request("known-notification")?.turn_id, "original-turn");
+  assert.equal(restored.request("known-notification")?.state, "completed");
+});
+test("an unknown-turn recovery waits for its request marker before accepting a resumed turn", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  store.begin("unknown-notification", payload);
+  store.update("unknown-notification", {
+    thread_id: "thread-1", state: "execution_unknown", cancel_requested: true,
+  });
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/resume") this.listener("turn/started", {
+      threadId: "thread-1", turn: { id: "newer-turn", status: "inProgress", items: [] },
+    });
+    if (method === "thread/turns/list") return { data: [
+      { id: "newer-turn", status: "inProgress", items: [] },
+      { id: "original-turn", status: "completed", items: [
+        { type: "userMessage", content: [{ text: "[lead_request:unknown-notification]" }] },
+        { type: "agentMessage", text: '{"ok":true}' },
+      ] },
+    ], nextCursor: null };
+    if (method === "turn/interrupt") this.listener("turn/completed", {
+      threadId: "thread-1", turn: { id: params.turnId, status: "interrupted", items: [] },
+    });
+    return {};
+  };
+  const restored = new Store(store.folder);
+  await new Runner(restored, () => rpc as any).command({
+    id: "restore-unknown-notification", request_id: "unknown-notification", kind: "run", payload,
+  });
+  assert.equal(rpc.calls.filter(call => call.method === "turn/interrupt").length, 0);
+  assert.equal(rpc.calls.filter(call => call.method === "turn/start").length, 0);
+  assert.equal(restored.request("unknown-notification")?.turn_id, "original-turn");
+  assert.equal(restored.request("unknown-notification")?.state, "completed");
+});
+test("unknown recovery ignores an unrelated early completion until marker proof", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  store.begin("foreign-completion", payload);
+  store.update("foreign-completion", { thread_id: "thread-1", state: "execution_unknown" });
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/turns/list") {
+      this.listener("turn/completed", { threadId: "thread-1", turn: {
+        id: "other-turn", status: "completed", items: [{ type: "agentMessage", text: '{"ok":false}' }],
+      } });
+      return { data: [{ id: "other-turn", status: "completed", items: [
+        { type: "agentMessage", text: "Quoted historical request [lead_request:foreign-completion]" },
+      ] }, { id: "original-turn", status: "completed", items: [
+        { type: "userMessage", content: [{ text: "[lead_request:foreign-completion]" }] },
+        { type: "agentMessage", text: '{"ok":true}' },
+      ] }], nextCursor: null };
+    }
+    return {};
+  };
+  await new Runner(store, () => rpc as any).command({
+    id: "restore-foreign-completion", request_id: "foreign-completion", kind: "run", payload,
+  });
+  assert.equal(store.request("foreign-completion")?.turn_id, "original-turn");
+  assert.deepEqual(store.request("foreign-completion")?.output, { ok: true });
+  const canonical = store.outbox().filter(event => event.method === "request/started");
+  assert.deepEqual(canonical.map(event => event.params), [
+    { thread_id: "thread-1" }, { thread_id: "thread-1", turn_id: "original-turn" },
+  ]);
+});
+test("unknown recovery retains an original completion arriving before an in-progress history snapshot", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  store.begin("early-original", payload);
+  store.update("early-original", { thread_id: "thread-1", state: "execution_unknown" });
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/turns/list") {
+      this.listener("item/completed", { threadId: "thread-1", turnId: "original-turn",
+        item: { type: "agentMessage", text: '{"ok":true}' } });
+      this.listener("turn/completed", { threadId: "thread-1", turn: {
+        id: "original-turn", status: "completed", items: [],
+      } });
+      return { data: [{ id: "original-turn", status: "inProgress", items: [
+        { type: "userMessage", content: [{ text: "[lead_request:early-original]" }] },
+      ] }], nextCursor: null };
+    }
+    return {};
+  };
+  const runner = new Runner(store, () => rpc as any);
+  const work = runner.command({ id: "restore-early-original", request_id: "early-original", kind: "run", payload });
+  await Promise.race([work, new Promise(resolve => setTimeout(resolve, 100))]);
+  await runner.close();
+  await work;
+  assert.equal(store.request("early-original")?.state, "completed");
+  assert.deepEqual(store.request("early-original")?.output, { ok: true });
+  assert.equal(store.outbox().filter(event => event.method === "result").at(-1)?.params.reconciled, true);
+  assert.equal(rpc.calls.filter(call => call.method === "turn/start").length, 0);
+});
+test("a fresh turn keeps completion before its ACK and emits only proven root pointers", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/start") return { thread: { id: "thread-1" } };
+    if (method === "turn/start") {
+      this.listener("thread/started", { thread: { id: "child-thread" } });
+      this.listener("item/completed", { threadId: "thread-1", turnId: "original-turn",
+        item: { type: "agentMessage", text: '{"ok":true}' } });
+      this.listener("turn/completed", { threadId: "thread-1", turn: {
+        id: "original-turn", status: "completed", items: [],
+      } });
+      return { turn: { id: "original-turn", status: "inProgress", items: [] } };
+    }
+    return {};
+  };
+  await new Runner(store, () => rpc as any).command({
+    id: "early-start", request_id: "early-start", kind: "run", payload,
+  });
+  assert.equal(store.request("early-start")?.state, "completed");
+  assert.deepEqual(store.request("early-start")?.output, { ok: true });
+  assert.deepEqual(store.outbox().filter(event => event.method === "request/started").map(event => event.params), [
+    { thread_id: "thread-1" }, { thread_id: "thread-1", turn_id: "original-turn" },
+  ]);
+  assert.ok(store.outbox().some(event => event.method === "thread/started" && event.params.thread?.id === "child-thread"));
+});
+test("run persists original thread, explicit Sol medium and parsed result; replay does not run twice", async (t) => {
+  const store = setup(t),
+    rpc = new FakeRpc();
+  const runner = new Runner(store, () => rpc as any);
+  await runner.command({ id: "c1", request_id: "r1", kind: "run", payload });
+  assert.equal(rpc.calls.filter((c) => c.method === "turn/start").length, 1);
+  assert.equal(
+    rpc.calls.find((c) => c.method === "turn/start").params.effort,
+    "medium",
+  );
+  assert.equal(
+    rpc.calls.find((c) => c.method === "turn/start").params.model,
+    "gpt-6.1-sol",
+  );
+  assert.equal(store.request("r1")?.thread_id, "thread-1");
+  assert.deepEqual(store.request("r1")?.output, { ok: true });
+  await runner.command({ id: "c1", request_id: "r1", kind: "run", payload });
+  assert.equal(rpc.calls.filter((c) => c.method === "turn/start").length, 1);
+});
+test("lost start acknowledgment is recorded unknown, never a fresh turn", async (t) => {
+  const store = setup(t),
+    rpc = new FakeRpc();
+  rpc.request = async function (method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/start") return { thread: { id: "thread-1" } };
+    if (method === "turn/start") throw new Error("pipe closed");
+    return { data: [], nextCursor: null };
+  };
+  await new Runner(store, () => rpc as any).command({
+    id: "c2",
+    request_id: "r2",
+    kind: "run",
+    payload,
+  });
+  assert.equal(store.request("r2")?.state, "execution_unknown");
+  await new Runner(new Store(store.folder), () => rpc as any).command({
+    id: "c2",
+    request_id: "r2",
+    kind: "run",
+    payload,
+  });
+  assert.equal(rpc.calls.filter((c) => c.method === "turn/start").length, 1);
+});
+test("durable events are replayed until acknowledged and request identity conflict rejected", (t) => {
+  const store = setup(t);
+  store.begin("r", payload);
+  store.event("r", "progress", { value: 1 });
+  const second = new Store(store.folder);
+  assert.equal(second.outbox().length, 1);
+  assert.throws(
+    () => second.begin("r", { ...payload, input: "different" }),
+    /identity_conflict/,
+  );
+  second.ack(second.outbox().map((e) => e.id));
+  assert.equal(new Store(store.folder).outbox().length, 0);
+});
+test("session key cannot control workspace path", (t) => {
+  const store = setup(t);
+  assert.ok(
+    store
+      .workspace("../../outside")
+      .startsWith(join(store.folder, "workspaces")),
+  );
+});
+test("restart reconciles an unknown original turn by marker without starting another turn", async (t) => {
+  const store = setup(t);
+  const record = store.begin("lost-ack", payload);
+  store.update(record.id, {
+    thread_id: "thread-1",
+    state: "execution_unknown",
+  });
+  const rpc = new FakeRpc();
+  rpc.request = async function (method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/turns/list")
+      return {
+        data: [
+          {
+            id: "original-turn",
+            status: "completed",
+            items: [
+              {
+                type: "userMessage",
+                content: [{ text: "[lead_request:lost-ack]" }],
+              },
+              { type: "agentMessage", text: '{"ok":true}' },
+            ],
+          },
+        ],
+        nextCursor: null,
+      };
+    return { thread: { id: "thread-1" } };
+  };
+  await new Runner(store, () => rpc as any).command({
+    id: "original-command",
+    request_id: "lost-ack",
+    kind: "run",
+    payload,
+  });
+  assert.equal(store.request("lost-ack")?.state, "completed");
+  assert.equal(store.request("lost-ack")?.turn_id, "original-turn");
+  assert.equal(rpc.calls.filter((c) => c.method === "turn/start").length, 0);
+});
+test("approval requests wait for matching user response and steering names the current turn", async (t) => {
+  const store = setup(t),
+    rpc = new FakeRpc(),
+    responses: any[] = [];
+  rpc.respond = (id: any, value: any) => {
+    responses.push({ id, value });
+  };
+  rpc.request = async function (method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/start") return { thread: { id: "thread-1" } };
+    if (method === "turn/start") {
+      setTimeout(
+        () =>
+          this.pendingListener(31, "item/commandExecution/requestApproval", {
+            threadId: "thread-1",
+            turnId: "turn-1",
+          }),
+        1,
+      );
+      return { turn: { id: "turn-1" } };
+    }
+    return {};
+  };
+  const runner = new Runner(store, () => rpc as any),
+    run = runner.command({
+      id: "c",
+      request_id: "approval",
+      kind: "run",
+      payload,
+    });
+  while (!store.request("approval")?.pending)
+    await new Promise((r) => setImmediate(r));
+  assert.equal(responses.length, 0);
+  assert.equal(store.request("approval")?.state, "waiting_user");
+  await runner.command({
+    id: "steer",
+    request_id: "approval",
+    kind: "steer",
+    payload: { input: "Use latest instructions" },
+  });
+  assert.equal(
+    rpc.calls.find((c) => c.method === "turn/steer").params.expectedTurnId,
+    "turn-1",
+  );
+  await runner.command({
+    id: "respond",
+    request_id: "approval",
+    kind: "respond",
+    payload: { id: 31, result: { decision: "decline" } },
+  });
+  assert.deepEqual(responses, [{ id: 31, value: { decision: "decline" } }]);
+  rpc.listener("turn/completed", {
+    threadId: "thread-1",
+    turn: { id: "turn-1", status: "interrupted", items: [] },
+  });
+  await run;
+  assert.equal(store.request("approval")?.state, "interrupted");
+});
+test("request-level disabled search is preserved when loading the native thread", async (t) => {
+  const store = setup(t),
+    rpc = new FakeRpc();
+  await new Runner(store, () => rpc as any).command({
+    id: "search-off",
+    request_id: "search-off",
+    kind: "run",
+    payload: { ...payload, web_search: "disabled" },
+  });
+  assert.equal(
+    rpc.calls.find((c) => c.method === "thread/start").params.config.web_search,
+    "disabled",
+  );
+});

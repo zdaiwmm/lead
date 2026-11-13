@@ -34,7 +34,7 @@ PLATFORMS = [
 
 
 def create_agent(
-    request_key=None, setup=None, setup_template_version=None, *, confirmed_brief=None, runtime_engine="growth"
+    request_key=None, setup=None, setup_template_version=None, *, confirmed_brief=None, runtime_engine="growth", draft_client_id=None
 ):
     if runtime_engine not in ("growth","legacy"):
         raise ValueError("invalid_runtime_engine")
@@ -78,6 +78,9 @@ def create_agent(
             "INSERT INTO lead.agent_revisions(tenant_id,agent_id,revision,provider,model_ref,prompt_version,toolset_version,output_schema_version) VALUES(%s,%s,1,%s,%s,'lead-1','browser-1','1')",
             (current_tenant(), aid, model.get("provider", "deepseek"), model["model"]),
         )
+        if draft_client_id:
+            c.execute("UPDATE lead.agents SET onboarding_state=onboarding_state||%s WHERE id=%s",
+                (j({"website_setup_draft": {"client_id": str(draft_client_id)}}), aid))
         c.execute(
             "INSERT INTO lead.conversations(tenant_id,agent_id) VALUES(%s,%s)",
             (current_tenant(), aid),
@@ -135,6 +138,27 @@ def create_agent(
             c.execute("UPDATE lead.agents SET onboarding_state=onboarding_state || '{\"setup_pending\":false}'::jsonb WHERE id=%s",(aid,))
             bootstrap(c,aid)
     return aid
+
+
+def confirm_draft_agent(aid, client_id, brief):
+    fingerprint = hashlib.sha256(json.dumps(brief, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    with tx(aid) as c:
+        agent = require_agent(c, aid, True)
+        draft = agent["onboarding_state"].get("website_setup_draft") or {}
+        if draft.get("client_id") != str(client_id):
+            raise ValueError("website_setup_draft_changed")
+        if draft.get("confirmed_hash"):
+            if draft["confirmed_hash"] != fingerprint:
+                raise ValueError("website_setup_confirmation_changed")
+            return str(aid)
+        if one(c, "SELECT id FROM lead.business_profiles LIMIT 1"):
+            raise ValueError("website_setup_draft_already_used")
+        _save_confirmed_brief(c, aid, brief)
+        c.execute("UPDATE lead.agents SET name=%s,onboarding_state=onboarding_state||%s WHERE id=%s",
+            (brief["product_name"] or agent["name"], j({"website_setup_draft": {**draft, "confirmed_hash": fingerprint}}), aid))
+        from .growth.migration import bootstrap
+        bootstrap(c, aid)
+    return str(aid)
 
 
 def _save_confirmed_brief(c, aid, brief):
@@ -344,6 +368,9 @@ def agent_detail(aid, *, chat=False, message_seq=None):
             account["operating_intent"] = one(c,"SELECT desired,revision FROM lead.account_operating_intents WHERE account_id=%s",(account["id"],))
             from .growth.store import enabled as growth_enabled
             if growth_enabled(a):
+                from .browser_capabilities import verified_operations
+                account["verified_operations"] = verified_operations(c,account["id"])
+                account["operational_ready"] = bool(account["operational_ready"] or account["verified_operations"])
                 discovery = one(c,"""SELECT state,result->'output'->'output' output FROM lead.tasks WHERE type='growth.account'
                     AND input#>>'{spec,purpose}'='discover' AND input#>>'{spec,account_id}'=%s
                     ORDER BY created_at DESC,id DESC LIMIT 1""",(str(account["id"]),))

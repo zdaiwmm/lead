@@ -1748,6 +1748,35 @@ progress::-moz-progress-bar {
   gap: 16px;
   border-bottom: 1px solid var(--line);
 }
+.connection-read-dependencies {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.connection-read-dependencies h3 { font-size: 14px; font-weight: 500; margin-bottom: 4px; }
+.connection-read-dependency {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding-top: 12px;
+}
+.connection-read-dependency > div:first-child { min-width: 0; }
+.connection-read-address { font-size: 13px; overflow-wrap: anywhere; }
+.connection-read-address-summary { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.connection-read-full-address { font-size: 12px; color: var(--text-muted); }
+.connection-read-full-address summary { cursor: pointer; padding-block: 4px; }
+.connection-read-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.connection-read-error { display: flex; align-items: center; gap: 12px; margin-top: 8px; font-size: 13px; }
+.account-browser-panel:has(.connection-read-dependencies) { overflow-y: auto; }
+.account-browser-panel:has(.connection-read-dependencies) > :not(.account-browser-screen) { flex-shrink: 0; }
+@media (max-width: 650px) {
+  .connection-read-dependencies { padding: 12px 16px; }
+  .connection-read-dependency { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .connection-read-actions { align-self: flex-end; }
+  .connection-read-actions button { min-height: 40px; }
+  .account-browser-panel:has(.connection-read-dependencies) .account-browser-screen { min-height: 120px; }
+}
 .browser-toolbar > div {
   display: flex;
   gap: 4px;
@@ -2218,13 +2247,19 @@ progress::-moz-progress-bar {
   }
   .account-browser-header {
     padding: 16px;
-    gap: 8px;
+    gap: 12px;
+    flex-wrap: wrap;
   }
   .browser-header-actions {
     gap: 4px;
+    margin-left: auto;
+    justify-content: flex-end;
+    max-width: 100%;
   }
   .browser-title {
     gap: 10px;
+    flex: 1 0 100%;
+    min-width: 0;
   }
   .browser-title h2 {
     font-size: 14px;

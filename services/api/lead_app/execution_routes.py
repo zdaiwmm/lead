@@ -1,4 +1,5 @@
 """Resolve registered transports; callers cannot supply an arbitrary RPC URL."""
+import hashlib
 import json
 from urllib.parse import urlsplit
 
@@ -15,11 +16,41 @@ def transports():
     if not isinstance(values, dict):
         raise ValueError("invalid_transport_registry")
     for key, url in values.items():
-        parsed = urlsplit(url)
-        if (not isinstance(key, str) or parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "::1")
+        if not isinstance(key, str) or not isinstance(url, str):
+            raise ValueError("invalid_transport_registry")
+        try:
+            parsed = urlsplit(url)
+            parsed.port  # Reject malformed/out-of-range ports before issuing references.
+        except ValueError:
+            raise ValueError("invalid_transport_registry") from None
+        if (parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "::1")
                 or parsed.username or parsed.password or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
             raise ValueError("invalid_transport_registry")
     return values
+
+
+def _registry_revision(transport_ref, registry):
+    value = {"transport_ref": transport_ref, "url": registry[transport_ref].rstrip("/")}
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def registered_reference(row, registry=None):
+    """New server references freeze the selected registration, never legacy history."""
+    registry = transports() if registry is None else registry
+    if row["transport_ref"] not in registry:
+        raise ValueError("execution_route_missing")
+    return ExecutionRef(profile_id=row["profile_id"], executor_ref=row["executor_ref"],
+                        transport_ref=row["transport_ref"], route_generation=row["generation"],
+                        registry_revision=_registry_revision(row["transport_ref"], registry))
+
+
+def _registered_endpoint(reference, registry):
+    if reference.transport_ref not in registry:
+        raise ValueError("execution_route_missing")
+    if (reference.registry_revision is not None
+            and reference.registry_revision != _registry_revision(reference.transport_ref, registry)):
+        raise ValueError("execution_registry_changed")
+    return registry[reference.transport_ref].rstrip("/")
 
 
 def default_transport(platform):
@@ -31,7 +62,8 @@ def default_transport(platform):
 
 
 def register(aid, profile_id, transport_ref="shared", executor_ref="browser", expected_generation=None):
-    if transport_ref not in transports():
+    registry = transports()
+    if transport_ref not in registry:
         raise ValueError("transport_not_installed")
     with tx(aid) as c:
         require_agent(c, aid)
@@ -43,8 +75,7 @@ def register(aid, profile_id, transport_ref="shared", executor_ref="browser", ex
         if old and expected_generation is not None and old["generation"] != expected_generation:
             raise ValueError("route_changed")
         if old and (old["transport_ref"], old["executor_ref"]) == (transport_ref, executor_ref):
-            return ExecutionRef.model_validate({k: old[k] for k in ("profile_id","executor_ref","transport_ref")} |
-                                               {"route_generation":old["generation"]})
+            return registered_reference(old, registry)
         row = c.execute("""INSERT INTO lead.profile_execution_routes(tenant_id,agent_id,profile_id,executor_ref,transport_ref)
           VALUES(lead.ctx_tenant(),%s,%s,%s,%s) ON CONFLICT(profile_id) DO UPDATE SET
           executor_ref=EXCLUDED.executor_ref,transport_ref=EXCLUDED.transport_ref,
@@ -53,8 +84,7 @@ def register(aid, profile_id, transport_ref="shared", executor_ref="browser", ex
               IS DISTINCT FROM (EXCLUDED.executor_ref,EXCLUDED.transport_ref) THEN 1 ELSE 0 END,
           updated_at=now() RETURNING *""",
           (aid, profile_id, executor_ref, transport_ref)).fetchone()
-    return ExecutionRef(profile_id=row["profile_id"], executor_ref=row["executor_ref"],
-                        transport_ref=row["transport_ref"], route_generation=row["generation"])
+    return registered_reference(row, registry)
 
 
 def resolve(aid, *, account_id=None, profile_id=None):
@@ -70,14 +100,14 @@ def resolve(aid, *, account_id=None, profile_id=None):
         if not profile_id:
             raise ValueError("explicit_profile_required")
         row = one(c, "SELECT * FROM lead.profile_execution_routes WHERE profile_id=%s", (profile_id,))
-        if not row or row["transport_ref"] not in transports():
+        if not row:
             raise ValueError("execution_route_missing")
-        return ExecutionRef(profile_id=row["profile_id"], executor_ref=row["executor_ref"],
-                            transport_ref=row["transport_ref"], route_generation=row["generation"])
+        return registered_reference(row)
 
 
 def endpoint(reference):
-    return transports()[reference.transport_ref].rstrip("/")
+    # Compare and select from the same read; an alias may change between calls.
+    return _registered_endpoint(reference, transports())
 
 
 def research_endpoint(aid, run_id):
@@ -89,6 +119,7 @@ def research_endpoint(aid, run_id):
 def request_route(c, aid, path, data=None):
     """All browser consumers resolve the same explicit server-side reference."""
     from urllib.parse import parse_qs
+    registry = transports()
     data = data or {}
     query = parse_qs(urlsplit(path).query)
     profile = data.get("profile_id")
@@ -104,8 +135,9 @@ def request_route(c, aid, path, data=None):
         if original and original["state"] in ("dispatching","unknown","confirmed") and original_ref:
             # Reconcile on the original executor even after a route/binding change.
             reference = ExecutionRef.model_validate(original_ref)
-            if reference.transport_ref not in transports():
+            if reference.transport_ref not in registry:
                 raise ValueError("original_execution_route_unavailable")
+            _registered_endpoint(reference, registry)
             return reference
         row = one(c, """SELECT s.profile_id FROM lead.actions a JOIN lead.account_targets t ON t.id=a.target_id
             JOIN lead.social_accounts s ON s.id=t.account_id WHERE a.id=%s""", (action,))
@@ -119,7 +151,6 @@ def request_route(c, aid, path, data=None):
     if not profile:
         raise ValueError("explicit_profile_required")
     route = one(c, "SELECT * FROM lead.profile_execution_routes WHERE profile_id=%s", (profile,))
-    if not route or route["transport_ref"] not in transports():
+    if not route:
         raise ValueError("execution_route_missing")
-    return ExecutionRef(profile_id=route["profile_id"], executor_ref=route["executor_ref"],
-                        transport_ref=route["transport_ref"], route_generation=route["generation"])
+    return registered_reference(route, registry)

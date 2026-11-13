@@ -98,9 +98,16 @@ class BrowserTools:
 
     def tools(self):
         from .admin_settings import for_agent
+        from .local_executor_client import uses_native
 
         settings, _ = for_agent(self.aid, "models")
-        if not settings["tools"]["public_web"] or not settings["max_tool_calls"]:
+        if not settings["tools"]["public_web"]:
+            return []
+        if uses_native(self.aid, task_id=self.task_id):
+            if not self.run_id:
+                self.run_id = begin_run(self.aid, self.goal, self.message_id, self.task_id, self.mode)
+            return CodexResearchTools(self)
+        if not settings["max_tool_calls"]:
             return []
         async def prepare_browser_tool(ctx, definition):
             return definition if self.steps < min(7, settings["max_tool_calls"]) else None
@@ -188,3 +195,14 @@ class BrowserTools:
             except httpx.HTTPError:
                 pass
         return self.sources + self.extra_sources
+
+
+class CodexResearchTools:
+    """A scoped evidence handle, not a serialized Python tool or Agent."""
+    def __init__(self, owner):
+        self.owner = owner
+        self.local_executor_context = {"browser_run_id": str(owner.run_id), "mode": owner.mode}
+
+    def resume(self, context):
+        if context.get("browser_run_id"):
+            self.owner.run_id = context["browser_run_id"]

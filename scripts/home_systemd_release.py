@@ -13,6 +13,7 @@ import re
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from contextlib import contextmanager
@@ -969,7 +970,7 @@ def maintenance_window(old, sha):
             else:
                 # During a refused/aborted drain a profile may legitimately still be open.
                 verify(revision, fenced=True, require_idle=False)
-            if not growth_cutover_pending(sha):
+            if not cutover_pending(sha):
                 run(site, "restore", sha)
                 run("systemctl", "start", "lead-home-live.path", "lead-home-ingress.socket")
 
@@ -984,6 +985,28 @@ def growth_cutover_pending(sha):
     executor_directory(stage,private=True)
     require(executor_host_file(marker,private=True).decode().strip()==sha,"growth cutover journal differs")
     return True
+
+
+def unified_cutover_pending(sha):
+    require(SHA.fullmatch(sha),"invalid cutover revision")
+    stage=STORE/("maintenance-"+sha)
+    marker=stage/"unified-browser-cutover.pending"
+    if not os.path.lexists(marker):
+        return False
+    executor_directory(stage,private=True)
+    require(executor_host_file(marker,private=True).decode().strip()==sha,"unified-browser cutover journal differs")
+    return True
+
+
+def cutover_kind(sha):
+    growth=growth_cutover_pending(sha)
+    unified=unified_cutover_pending(sha)
+    require(not (growth and unified),'ambiguous cutover journals')
+    return 'growth' if growth else 'unified-browser' if unified else None
+
+
+def cutover_pending(sha):
+    return cutover_kind(sha) is not None
 
 
 # These node tools were deployed and verified independently of the application image.
@@ -1048,7 +1071,7 @@ FAULT_ISOLATION_FILES = {'scripts/fault_isolation_upgrade.py': '6fa2986893c3d1db
 def fault_schema_query():
     return """SELECT
         (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN
-            (ARRAY['0030_fault_isolation'],ARRAY['0031_growth_runtime'])
+            (ARRAY['0030_fault_isolation'],ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'])
         AND (SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity)
              FROM pg_class WHERE oid IN (to_regclass('lead.runtime_issues'),to_regclass('lead.ui_revisions')))
         AND (SELECT count(*)=4 FROM pg_policies WHERE schemaname='lead'
@@ -1093,7 +1116,7 @@ GROWTH_RUNTIME_FILES = {'scripts/growth_runtime_upgrade.py': '5a98672c797361272a
 
 
 def growth_schema_query():
-    return """SELECT (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0031_growth_runtime']
+    return """SELECT (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN (ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'])
         AND (SELECT count(*)=3 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class WHERE oid IN
             (to_regclass('lead.growth_experiments'),to_regclass('lead.account_operating_intents'),to_regclass('lead.profile_execution_routes')))
         AND (SELECT count(*)=6 FROM pg_policies WHERE schemaname='lead'
@@ -1116,9 +1139,9 @@ def growth_schema_query():
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_read_route' AND md5(prosrc)='ae42619cd4089f6f2bbfc6f70e9d343d')
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_set_intent' AND md5(prosrc)='5cfb3ef37809d4c947cfbf4a30d856e3')
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_disconnect_intent' AND md5(prosrc)='b568fc706e1f0bfca2e071224facd5a3')
-        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_complete_connection' AND md5(prosrc)='cab9778a5c090dd092b03c2982327ba4')
-        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_receipt_valid' AND md5(prosrc)='a4bca05077668d2f9a28a7806ffbecc1')
-        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_confirm_publication' AND md5(prosrc)='1be562501250d3092463dadc05414241')
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_complete_connection' AND md5(prosrc) IN ('cab9778a5c090dd092b03c2982327ba4','fe6c839637f14db267c2b0dae12b6eef'))
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_receipt_valid' AND md5(prosrc) IN ('a4bca05077668d2f9a28a7806ffbecc1','f868f71708e1cdcd167aac21b3a43630'))
+        AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_confirm_publication' AND md5(prosrc) IN ('1be562501250d3092463dadc05414241','4e4b9df37d438d1232deba642c577e93'))
         AND EXISTS(SELECT FROM pg_proc WHERE pronamespace='lead'::regnamespace AND proname='growth_owner_fence' AND md5(prosrc)='5ac78ca4773b17f90ef940d253b885dd')
     """
 
@@ -1157,20 +1180,271 @@ def complete_growth_cutover(sha):
     require(not growth_cutover_pending(sha),'growth finalizer did not release its journal')
 
 
+# Exact blobs are frozen only after core/schema/runtime packaging has passed its
+# targeted checks. Unfrozen values deliberately cannot admit a release.
+UNIFIED_BROWSER_FILES = {
+    'apps/web/next.config.ts': '36f582242ca36fa5274008ef981aec32580a8590',
+    'infra/migrations/sql/0032_research_memory.sql': '1cd03ca94dae3bdd3bcd11124c92bd224a9c6e15',
+    'infra/migrations/sql/0033_unified_browser.sql': '2328c5a253438f1b157d24cf71f81b18075485b8',
+    'infra/migrations/sql/0034_local_executor.sql': '77be5f0e80251e67020427e4b4f9947079196753',
+    'infra/migrations/versions/0032_research_memory.py': '6f1423fefdd2fa3aba498b37d9f7fad9159ced65',
+    'infra/migrations/versions/0033_unified_browser.py': '8f75f097ad91baac8295537e6d5a52b49b503693',
+    'infra/migrations/versions/0034_local_executor.py': '8902def3c7daa0578de3e9e3bebf9674992d1411',
+    'requirements.browser-use.lock.txt': '9105c7748d6aa830f312114e4f9d3e1431e4f911',
+    'requirements.lock.txt': 'dcf3273dc078a66007e8db836ecefa2518834bbf',
+    'scripts/browser_namespace.py': '7ecb47f233761b910317126d9d15e8edfb9fe21b',
+    'scripts/browser_use_runner.py': '7abc6429011cd5087ca5413b1916ab24969116df',
+    'scripts/build_browser_runtime.py': 'cbc4d3d3521a2fe50c589813cf0d3956289ca94a',
+    'scripts/build_home_image.sh': 'e6317873f2e1df290fe780141f352f0a03699278',
+    'scripts/unified_browser_upgrade.py': '64ba9808dd6a667338b0af6e09b2f73abb5a3f2a',
+    'services/local-executor/.gitignore': '72bdd5d427f474fb9b7835d3226d921ef7a8bd6f',
+    'services/local-executor/README.md': 'a14c1164203cadf8aa3ede18c649c536aa73e5f8',
+    'services/local-executor/package-lock.json': 'cc1e5486a892bed0fdb59f70c6c0cc083659bbdc',
+    'services/local-executor/package.json': 'e7f3c2fc9606e76c01dcdd91dab71650fa1202cf',
+    'services/local-executor/src/capabilities.ts': 'e49690e0145c8b1354273db0751f7d6e75a91fe7',
+    'services/local-executor/src/cli.ts': 'b759a15663023ff9861b4a7fdce8134c95abebab',
+    'services/local-executor/src/daemon.ts': 'e9c49fa5297b64e5da72d5e38ee35122cbba3ccb',
+    'services/local-executor/src/launchd.ts': '1e77964b223df26ec81407c9c94cd7061e280d69',
+    'services/local-executor/src/mcp.ts': '6567311ef9d318ba0e1793085155128ad3dc85d8',
+    'services/local-executor/src/rpc.ts': '7f6929242c23086ef5126ce6eaa951939c07250f',
+    'services/local-executor/src/runner.ts': 'b72b3ccbe60c4ebb1a91dcaab32ce6149f08e41b',
+    'services/local-executor/src/store.ts': '8e28f5b83f01ad366994707fc57e2fe582df6a7f',
+    'services/local-executor/src/transport.ts': '67420728f073acd762e15484aa485df30cd67994',
+    'services/local-executor/src/types.ts': '7dedb73166381d0409232a12d83b5bcfd9f03b39',
+    'services/local-executor/test/cli.test.ts': '1298a9fc3b82b7a9136076f5d51dd385d8447926',
+    'services/local-executor/test/consumer-api.py': '409e9c530464f9e2da19469a40316498ed2fa836',
+    'services/local-executor/test/consumer-compact.ts': 'd58c5832684a7709ce20bfd219194e4bb45f7670',
+    'services/local-executor/test/consumer-runner.ts': 'ffa1dfed3a0a2d04572790a3d8b92d5daa14b1fb',
+    'services/local-executor/test/integration-api.py': '3e89fb92c88d7dff046573599452c66bb14c4a21',
+    'services/local-executor/test/integration-control.ts': '4b2e278a428b5424c748443220f5f494d0a2dfcd',
+    'services/local-executor/test/integration.ts': '69d2cc0244096085227945f7543dba96b628d077',
+    'services/local-executor/test/mcp.test.ts': '40c634be81ee3731a91c390bb689ede4d2fff8e4',
+    'services/local-executor/test/runtime.test.ts': 'd363bed2b4e1297e93ecd4e356f000c94ede27ed',
+    'services/local-executor/test/subagent-api.py': '2d143bc1608954fc729a12751c889961375fd3cf',
+    'services/local-executor/test/subagent-metadata.ts': '610a0e379c23d928785f552d3cbe88a2451f88b5',
+    'services/local-executor/test/transport.test.ts': '290aadf7abc7a7ed1e1a68eda2b43a73ee310e3a',
+    'services/local-executor/test/verify_onboarding_ui.py': 'ccff869c5a5e4abd8719c6ba8dc80b1f4d1b3fdb',
+    'services/local-executor/tsconfig.json': '513e6691417731913efca310e2b6d7f0142ca98e',
+}
+
+
+LOCAL_EXECUTOR_FILES = frozenset((
+    'services/local-executor/.gitignore',
+    'services/local-executor/README.md',
+    'services/local-executor/package-lock.json',
+    'services/local-executor/package.json',
+    'services/local-executor/src/capabilities.ts',
+    'services/local-executor/src/cli.ts',
+    'services/local-executor/src/daemon.ts',
+    'services/local-executor/src/launchd.ts',
+    'services/local-executor/src/mcp.ts',
+    'services/local-executor/src/rpc.ts',
+    'services/local-executor/src/runner.ts',
+    'services/local-executor/src/store.ts',
+    'services/local-executor/src/transport.ts',
+    'services/local-executor/src/types.ts',
+    'services/local-executor/test/cli.test.ts',
+    'services/local-executor/test/consumer-api.py',
+    'services/local-executor/test/consumer-compact.ts',
+    'services/local-executor/test/consumer-runner.ts',
+    'services/local-executor/test/integration-api.py',
+    'services/local-executor/test/integration-control.ts',
+    'services/local-executor/test/integration.ts',
+    'services/local-executor/test/mcp.test.ts',
+    'services/local-executor/test/runtime.test.ts',
+    'services/local-executor/test/subagent-api.py',
+    'services/local-executor/test/subagent-metadata.ts',
+    'services/local-executor/test/transport.test.ts',
+    'services/local-executor/test/verify_onboarding_ui.py',
+    'services/local-executor/tsconfig.json',
+))
+
+
+def browser_schema_query():
+    return "SELECT ("+growth_schema_query().removeprefix("SELECT ")+""" )
+        AND (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN (ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'])
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.growth_complete_connection(uuid,uuid,uuid,bigint,bigint,bigint,jsonb,text,jsonb)') AND prosecdef AND md5(prosrc)='fe6c839637f14db267c2b0dae12b6eef')
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.growth_receipt_valid(uuid)') AND prosecdef AND md5(prosrc)='f868f71708e1cdcd167aac21b3a43630')
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.growth_confirm_publication(uuid)') AND prosecdef AND md5(prosrc)='4e4b9df37d438d1232deba642c577e93')
+        AND (SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class WHERE oid IN
+            (to_regclass('lead.experiences'),to_regclass('lead.research_allowances')))
+        AND (SELECT count(*)=3 FROM pg_policies WHERE schemaname='lead'
+            AND (tablename,policyname) IN (('experiences','agent_scope'),('experiences','member_scope'),('research_allowances','tenant_scope')))
+        AND has_table_privilege('lead_runtime','lead.experiences','SELECT')
+        AND has_table_privilege('lead_runtime','lead.experiences','INSERT')
+        AND has_table_privilege('lead_runtime','lead.research_allowances','UPDATE')
+        AND has_function_privilege('lead_runtime','lead.public_experiences(uuid)','EXECUTE')
+        AND NOT EXISTS(SELECT FROM pg_proc p,aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE p.oid=to_regprocedure('lead.public_experiences(uuid)') AND a.grantee=0 AND a.privilege_type='EXECUTE')
+        AND EXISTS(SELECT FROM pg_trigger WHERE tgrelid='lead.experiences'::regclass
+            AND tgname='experience_projection' AND tgenabled='O' AND tgfoid=to_regprocedure('lead.check_experience_projection()'))
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.public_experiences(uuid)') AND prosecdef AND md5(prosrc)='bc25a6e8dbac3fcd198153cbc9723b66')
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.check_experience_projection()') AND md5(prosrc)='134fb9fdb3ee79a63ba3fd411c6c8f8c')
+        AND (SELECT count(*)=5 FROM pg_constraint WHERE convalidated AND
+            (conrelid,conname,md5(pg_get_constraintdef(oid))) IN (
+            ('lead.takeover_sessions'::regclass,'connection_scoped_account','0075da41f4dee854c2f4f69d61bd1838'),
+            ('lead.takeover_sessions'::regclass,'takeover_sessions_automatic_attempts_check','bdadc4dcd889555ef5d133595e2c23eb'),
+            ('lead.takeover_sessions'::regclass,'takeover_sessions_challenge_version_check','d4e4efd7f90a999728a087f7df9d272e'),
+            ('lead.takeover_sessions'::regclass,'takeover_sessions_control_mode_check','9090f486dcd4bf6c44e1b59e343edf12'),
+            ('lead.social_accounts'::regclass,'web_connection_origin_required','d046c50b7d4dfff2a1753f8acc18ca8b')))
+        AND (SELECT count(*)=3 FROM pg_index i JOIN pg_class x ON x.oid=i.indexrelid
+            WHERE x.relnamespace='lead'::regnamespace AND i.indisunique AND i.indisvalid AND i.indisready
+            AND (x.relname,md5(pg_get_indexdef(i.indexrelid))) IN (
+            ('browser_request_original_action','eb4fcee9f141150500a90664e355d933'),
+            ('one_account_controller','6ec20aed23f164cfd84f75f917554342'),
+            ('one_live_takeover','7d8070d98dff321128fb72c9adc5cf18')))
+        AND (SELECT count(*)=2 FROM pg_trigger WHERE tgenabled='O' AND
+            (tgrelid,tgname,tgfoid) IN (
+            ('lead.takeover_sessions'::regclass,'connection_login_lifetime',to_regprocedure('lead.clear_connection_login()')),
+            ('lead.agents'::regclass,'expire_login_control',to_regprocedure('lead.expire_login_on_control_change()'))))
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.clear_connection_login()') AND md5(prosrc)='6a9c4c62dd7a1a54c805ed43f8850842')
+        AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.expire_login_on_control_change()') AND md5(prosrc)='fe200520acc3d2ca82f22e36dd616a7c')
+        AND has_function_privilege('lead_auth','lead.growth_complete_connection(uuid,uuid,uuid,bigint,bigint,bigint,jsonb,text,jsonb)','EXECUTE')
+        AND NOT has_function_privilege('lead_runtime','lead.growth_complete_connection(uuid,uuid,uuid,bigint,bigint,bigint,jsonb,text,jsonb)','EXECUTE')
+    """
+
+
+def local_executor_schema_query():
+    """Exact additive transport keys and RLS; no production facts are sampled."""
+    return """SELECT
+        (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0034_local_executor']
+        AND (SELECT count(*)=5 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class
+            WHERE relnamespace='lead'::regnamespace AND relname IN ('local_executor_devices','local_executor_projects',
+                'local_executor_requests','local_executor_commands','local_executor_events'))
+        AND (SELECT count(*)=10 AND bool_and(polcmd='*' AND polroles=ARRAY[0::oid] AND
+            CASE polname
+              WHEN 'agent_scope' THEN polpermissive AND md5(pg_get_expr(polqual,polrelid))='3e0c5a9d5892e92b7636fe01c2340832'
+                AND md5(pg_get_expr(polwithcheck,polrelid))='3e0c5a9d5892e92b7636fe01c2340832'
+              WHEN 'member_scope' THEN NOT polpermissive AND md5(pg_get_expr(polqual,polrelid))='ba49c86007a3518c764dfc9790c67b50'
+                AND md5(pg_get_expr(polwithcheck,polrelid))='ba49c86007a3518c764dfc9790c67b50'
+              ELSE false END) FROM pg_policy
+            WHERE polrelid IN (to_regclass('lead.local_executor_devices'),to_regclass('lead.local_executor_projects'),
+                to_regclass('lead.local_executor_requests'),to_regclass('lead.local_executor_commands'),to_regclass('lead.local_executor_events')))
+        AND (SELECT count(*)=22 FROM pg_constraint WHERE convalidated
+            AND (conindid=0 OR EXISTS(SELECT FROM pg_index WHERE indexrelid=conindid AND indisunique AND indisvalid AND indisready))
+            AND (conrelid,conname,md5(pg_get_constraintdef(oid))) IN (
+            ('lead.local_executor_commands'::regclass,'local_executor_commands_kind_check','7704c55ae6424857a322dd140d4c0b0c'),
+            ('lead.local_executor_commands'::regclass,'local_executor_commands_pkey','4c6419b3704337bbfe50f018842a9ad3'),
+            ('lead.local_executor_commands'::regclass,'local_executor_commands_tenant_id_agent_id_request_id_comma_key','c23f1b0177643c131288608b0515bfa8'),
+            ('lead.local_executor_commands'::regclass,'local_executor_commands_tenant_id_agent_id_request_id_fkey','f8bd293d1a3855cb11c2b2c9ebe4b053'),
+            ('lead.local_executor_devices'::regclass,'local_executor_devices_epoch_check','542480a8da1ec524fa52b99f57b19ee8'),
+            ('lead.local_executor_devices'::regclass,'local_executor_devices_pkey','4c6419b3704337bbfe50f018842a9ad3'),
+            ('lead.local_executor_devices'::regclass,'local_executor_devices_state_check','8047b4af23b864dd84d9c178112b1c05'),
+            ('lead.local_executor_devices'::regclass,'local_executor_devices_tenant_id_agent_id_fkey','03af99f687a8794aaae4a68c0b96058b'),
+            ('lead.local_executor_devices'::regclass,'local_executor_devices_tenant_id_agent_id_id_key','6309755b4f041a54136c3df39beb5874'),
+            ('lead.local_executor_events'::regclass,'local_executor_events_pkey','d21c800fdf017e9de072dd72b98ea446'),
+            ('lead.local_executor_events'::regclass,'local_executor_events_tenant_id_agent_id_request_id_fkey','f8bd293d1a3855cb11c2b2c9ebe4b053'),
+            ('lead.local_executor_projects'::regclass,'local_executor_projects_mode_check','601fb6282b6d3e461e0f30e3c7448f04'),
+            ('lead.local_executor_projects'::regclass,'local_executor_projects_pkey','f34326dabef8749613ed9f8abb497019'),
+            ('lead.local_executor_projects'::regclass,'local_executor_projects_tenant_id_agent_id_device_id_fkey','b6920ea1bc091fd7bec91856e4910a8f'),
+            ('lead.local_executor_projects'::regclass,'local_executor_projects_tenant_id_agent_id_fkey','03af99f687a8794aaae4a68c0b96058b'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_pkey','4c6419b3704337bbfe50f018842a9ad3'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_state_check','fd2d500fc858b1c1402e822d3389e28c'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_tenant_id_agent_id_device_id_fkey','b6920ea1bc091fd7bec91856e4910a8f'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_tenant_id_agent_id_fkey','03af99f687a8794aaae4a68c0b96058b'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_tenant_id_agent_id_id_key','6309755b4f041a54136c3df39beb5874'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_tenant_id_agent_id_request_key_key','5bf052683cf55aff8667edc520c5d5d1'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_tenant_id_agent_id_task_id_fkey','262a2148e4eef17c00764e401acdc4c7')))
+        AND NOT EXISTS(SELECT FROM pg_trigger t JOIN pg_constraint c ON c.oid=t.tgconstraint
+            WHERE c.contype='f' AND t.tgenabled<>'O' AND c.conrelid IN
+                (to_regclass('lead.local_executor_devices'),to_regclass('lead.local_executor_projects'),
+                to_regclass('lead.local_executor_requests'),to_regclass('lead.local_executor_commands'),to_regclass('lead.local_executor_events')))
+        AND (SELECT bool_and(has_table_privilege('lead_runtime',oid,'SELECT')
+            AND has_table_privilege('lead_runtime',oid,'INSERT') AND has_table_privilege('lead_runtime',oid,'UPDATE')
+            AND NOT has_table_privilege('lead_runtime',oid,'DELETE'))
+            FROM pg_class WHERE relnamespace='lead'::regnamespace AND relname IN ('local_executor_devices','local_executor_projects',
+                'local_executor_requests','local_executor_commands','local_executor_events'))
+    """
+
+
+def unified_schema_query():
+    return "SELECT ("+browser_schema_query().removeprefix("SELECT").strip()+") AND ("+local_executor_schema_query().removeprefix("SELECT").strip()+")"
+
+
+def verify_local_executor_package(sha):
+    """Inspect the same immutable image's package without extracting or running it."""
+    root = image(sha)
+    package = root/'services/local-executor/lead-local-executor.tgz'
+    require(package.is_file() and package.resolve() == package, 'local executor package unavailable or redirected')
+    with tarfile.open(package, 'r:gz') as archive:
+        members = archive.getmembers()
+        names = [member.name for member in members]
+        require(len(names) == len(set(names)), 'duplicate local executor package member')
+        for member in members:
+            path = Path(member.name)
+            require(not path.is_absolute() and '..' not in path.parts and path.parts and path.parts[0] == 'package'
+                    and (member.isfile() or member.isdir()), 'unsafe local executor package member')
+        for name in ('package/REVISION','package/package.json','package/dist/cli.js'):
+            require(name in names and archive.getmember(name).isfile(), 'local executor package member missing')
+        require(archive.extractfile('package/REVISION').read().decode().strip() == sha, 'local executor package revision differs')
+        metadata = json.load(archive.extractfile('package/package.json'))
+        require(metadata.get('name') == '@lead/local-executor' and metadata.get('bin',{}).get('lead-executor') == './dist/cli.js',
+                'local executor package identity differs')
+
+
+def reviewed_unified_browser(mirror,sha,extra):
+    paths=extra.intersection(UNIFIED_BROWSER_FILES)
+    if not paths:
+        return set()
+    require(all(SHA.fullmatch(value) for value in UNIFIED_BROWSER_FILES.values()),'unified-browser release blobs are not frozen')
+    for path in paths:
+        require(run('git','--git-dir',mirror,'rev-parse',f'{sha}:{path}')==UNIFIED_BROWSER_FILES[path],
+                'unified-browser files require compatibility review')
+    site=TOOLS/'home_live_maintenance.py'
+    require(site.is_file(),'existing node database verifier required')
+    program=('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(unified_schema_query())+'))')
+    require(run('/usr/bin/python3','-IB','-c',program)=='t','unified-browser schema is not ready')
+    require(unified_cutover_pending(sha),'unified-browser cutover hold is missing')
+    if paths.intersection(LOCAL_EXECUTOR_FILES):
+        verify_local_executor_package(sha)
+    return paths
+
+
+def verify_unified_cutover(sha):
+    require(unified_cutover_pending(sha),'unified-browser cutover pending marker missing')
+    require(current()==sha,'cutover current revision differs')
+    intake=run('systemctl','show','lead-home-ingress.socket','-p','ActiveState','--value')
+    require(intake in ('active','inactive'),'cutover ingress state unavailable')
+    verify(sha,fenced=intake=='inactive',require_idle=False)
+    verify_executors(sha)
+    site=TOOLS/'home_live_maintenance.py'
+    require(site.is_file(),'existing node database verifier required')
+    program=('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(unified_schema_query())+'))')
+    require(run('/usr/bin/python3','-IB','-c',program)=='t','unified-browser schema is not ready')
+    verify_local_executor_package(sha)
+    require(current()==sha and unified_cutover_pending(sha),'cutover changed during verification')
+
+
+def complete_unified_cutover(sha):
+    require(unified_cutover_pending(sha),'unified-browser cutover hold is missing')
+    stage=STORE/('maintenance-'+sha)
+    journal=json.loads(executor_host_file(stage/'unified-browser-migration.json',private=True))
+    require(journal.get('sha')==sha and SHA.fullmatch(journal.get('old','')),'unified-browser migration journal differs')
+    helper=stage/'source/scripts/unified_browser_upgrade.py'
+    executor_host_file(helper)
+    expected=UNIFIED_BROWSER_FILES['scripts/unified_browser_upgrade.py']
+    require(SHA.fullmatch(expected) and run('git','hash-object','--no-filters',helper)==expected,'unified-browser finalizer source differs')
+    for channel in ('telegram','reddit'):
+        provision_executor(sha,EXECUTOR_REGISTRY.parent/(channel+'-provision.json'))
+    register_executors(sha)
+    run(EXECUTOR_PYTHON_SOURCE,'-I','-B',helper,'finish','--sha',sha,'--old',journal['old'],timeout=360)
+    require(not unified_cutover_pending(sha),'unified-browser finalizer did not release its journal')
+
+
 def release_preflight(sha):
     live=current()
-    pending=growth_cutover_pending(sha)
-    if pending:
-        journal=json.loads(executor_host_file(STORE/('maintenance-'+sha)/'growth-migration.json',private=True))
-        require(journal.get('sha')==sha and live in (journal.get('old'),sha),'growth preflight revision differs')
-    verify(live,fenced=pending,require_idle=not pending)
+    kind=cutover_kind(sha)
+    if kind:
+        journal=json.loads(executor_host_file(STORE/('maintenance-'+sha)/(kind+'-migration.json'),private=True))
+        require(journal.get('sha')==sha and live in (journal.get('old'),sha),'cutover preflight revision differs')
+    verify(live,fenced=bool(kind),require_idle=not kind)
     return live
 
 
 def finalize_cutover(sha):
-    if growth_cutover_pending(sha):
+    kind=cutover_kind(sha)
+    if kind:
         require(current()==sha,'application cutover has not completed; inspect original request')
-        complete_growth_cutover(sha)
+        (complete_growth_cutover if kind=='growth' else complete_unified_cutover)(sha)
 
 
 # These site units are installed and verified separately; only these reviewed blobs
@@ -1227,7 +1501,8 @@ OPERATOR_ONLY_FILES = {
 
 # Local verification sources stay outside tool bundles and application images.
 LOCAL_VERIFICATION_FILES = {"scripts/verify_cadence_ui.py","scripts/verify_growth_runtime.py",
-    "scripts/verify_growth_ui.py","scripts/verify_growth_executor.py","scripts/evaluate_growth_model.py","scripts/render_operating_playbooks.py",
+    "scripts/evaluate_native_browser.py","scripts/native_eval_seed.py",
+    "scripts/verify_growth_ui.py","scripts/verify_connection_ui.py","scripts/verify_growth_executor.py","scripts/evaluate_growth_model.py","scripts/render_operating_playbooks.py",
     "scripts/verify_operating_board_model.cjs","scripts/verify_operating_ui.py"}
 
 
@@ -1273,7 +1548,7 @@ def deploy(sha):
     with (STORE / "deploy.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         old = current()
-        verify(old,fenced=growth_cutover_pending(sha),require_idle=False)
+        verify(old,fenced=cutover_pending(sha),require_idle=False)
         if old == sha:
             return
         if not (STORE / sha).is_mount():
@@ -1298,6 +1573,7 @@ def deploy(sha):
         extra -= LOCAL_VERIFICATION_FILES
         extra -= reviewed_maintenance_files(mirror, sha, extra)
         extra -= reviewed_channel_schema(mirror, sha, extra)
+        extra -= reviewed_unified_browser(mirror, sha, extra)
         extra -= reviewed_fault_isolation(mirror, sha, extra)
         extra -= reviewed_growth_runtime(mirror,sha,extra)
         extra -= reviewed_reddit_site(mirror, sha, extra)
@@ -1340,12 +1616,12 @@ def deploy(sha):
             run("systemctl", "stop", fence)
             if not (TOOLS / "home_live_maintenance.py").is_file():
                 run("systemctl", "start", "lead-home-ingress.socket")
-        verify(sha,fenced=growth_cutover_pending(sha))
+        verify(sha,fenced=cutover_pending(sha))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("current", "deploy", "verify", "preflight", "finalize-cutover", "executors", "provision-executor", "register-executors"))
+    parser.add_argument("action", choices=("current", "deploy", "verify", "preflight", "finalize-cutover", "verify-cutover", "executors", "provision-executor", "register-executors"))
     parser.add_argument("sha", nargs="?")
     parser.add_argument("plan", nargs="?")
     args = parser.parse_args()
@@ -1362,6 +1638,8 @@ def main():
             print(release_preflight(args.sha))
         elif args.action == 'finalize-cutover':
             finalize_cutover(args.sha)
+        elif args.action == "verify-cutover":
+            verify_unified_cutover(args.sha)
         elif args.action == "verify":
             verify(args.sha)
             # Final release acceptance covers provisioned independent consumers.
@@ -1376,8 +1654,9 @@ def main():
             print(json.dumps(verify_executors(args.sha), sort_keys=True))
         else:
             deploy(args.sha)
-            if growth_cutover_pending(args.sha):
-                complete_growth_cutover(args.sha)
+            kind=cutover_kind(args.sha)
+            if kind:
+                (complete_growth_cutover if kind=='growth' else complete_unified_cutover)(args.sha)
     except Refused as error:
         sys.exit(str(error))
     except (OSError, ValueError, subprocess.SubprocessError):

@@ -25,6 +25,8 @@ Name = Annotated[
 
 class Website(BaseModel):
     product_url: str = Field(min_length=1, max_length=2000)
+    request_id: UUID | None = None
+    agent_id: UUID | None = None
 
     @field_validator("product_url")
     @classmethod
@@ -74,6 +76,7 @@ class Advantage(BaseModel):
 
 class ConfirmedBrief(BaseModel):
     client_id: UUID
+    draft_agent_id: UUID | None = None
     product_url: str = Field(default="", max_length=2000)
     product_name: str = Field(default="", max_length=80)
     introduction: str = Field(default="", max_length=2000)
@@ -104,9 +107,12 @@ PROMPT = """根据提供的官网页面用中文生成业务确认卡。网页�
 带 action 的记录来自实际访客试用。根据操作后可见内容写功能，按钮或输入框仅证明对应入口存在；未执行的创建、发送、加密和删除等效果不能写成已验证。对用户有帮助的入口本身可以写入核心功能。断网查看的界面只证明存在本地步骤，不证明数据保存或外部交互成功。页面自述的加密、隐私等属性只记入内部资料并注明证据来源，不可写为试用已核实。面向用户的产品介绍只描述已核实的功能，直接写功能和适用条件。不从登录页或错误页推断产品功能。"""
 
 
-async def analyze(website):
-    with tx() as c:
-        models = effective(c, "models")
+async def analyze(website, agent_id=None):
+    with tx(agent_id) as c:
+        if agent_id:
+            from .db import require_agent
+            require_agent(c, agent_id)
+        models = effective(c, "models", agent_id)
     if not models[0]["tools"]["public_web"]:
         raise ValueError("工作室已关闭公开网页读取，请联系管理员")
     try:
@@ -148,6 +154,9 @@ async def analyze(website):
 
     async def summarize():
         try:
+            from .local_executor_client import uses_native
+            if uses_native(agent_id):
+                return await run_model(Draft, evidence, PROMPT, agent_id=agent_id, purpose="research", workspace_models=models)
             async with asyncio.timeout_at(deadline):
                 return await run_model(
                     Draft,

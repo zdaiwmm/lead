@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api-client";
 import ConfigEditor, { clone, Row } from "./config-editor";
+import ResearchProviders from "./research-providers";
 import { Lines } from "./strategy-form";
 import Disclosure from "./disclosure";
 
@@ -370,6 +371,7 @@ function Models({
             ["advanced_research", "进阶网页研究"],
             ["community_research", "社群线索研究"],
             ["media_creation", "原创图文与视频制作"],
+            ["share_public_research", "同工作室复用公开来源摘录（不共享私有分析）"],
           ].map(([key, label]) => (
             <label className="admin-checkbox" key={key}>
               <input
@@ -389,6 +391,11 @@ function Models({
             ? "本机尚未启用进阶研究环境，勾选后也需环境就绪才能使用。"
             : ""}
         </p>
+        <ResearchProviders
+          value={body.research_providers || {}}
+          change={(value) => field("research_providers", value)}
+          status={options.research_providers || {}}
+        />
       </Disclosure>
     </>
   );
@@ -912,7 +919,13 @@ export function NotificationInbox({ aid = "" }: { aid?: string }) {
             <div className="admin-notification-heading">
               <strong>{item.title}</strong>
               <span className="muted small">
-                {item.resolved_at ? "已恢复" : item.muted ? "故障仍在 · 已静音" : item.read_at ? "已读" : "未读"}
+                {item.resolved_at
+                  ? "已恢复"
+                  : item.muted
+                    ? "故障仍在 · 已静音"
+                    : item.read_at
+                      ? "已读"
+                      : "未读"}
               </span>
             </div>
             <p>{item.message}</p>

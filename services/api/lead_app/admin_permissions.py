@@ -1,6 +1,7 @@
 """Per-request capability decisions backed by published workspace policy and RLS."""
 
 import re
+from contextlib import nullcontext
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -73,14 +74,14 @@ class MemberAccessSettings(BaseModel):
     members: list[MemberPolicy] = Field(default_factory=list, max_length=300)
 
 
-def resolve(identity):
+def resolve(identity, *, connection=None):
     if identity["role"] == "owner":
         return {
             "capabilities": list(CAPABILITIES),
             "agent_ids": None,
             "access_resolved": True,
         }
-    with tx() as c:
+    with (nullcontext(connection) if connection is not None else tx()) as c:
         row = one(
             c,
             "SELECT body FROM lead.admin_configs WHERE config_key='member-access/default'",
@@ -165,11 +166,20 @@ def workbench_permission(method, path):
         return None
     if path.endswith("/browser/screenshot"):
         return "accounts.manage"
+    if re.fullmatch(r'/api/agents/[^/]+/connections/[^/]+/read-dependencies',path):
+        return 'accounts.manage'
     if method == "GET":
         if path.endswith("/export"):
             return "agents.edit"
         if path.endswith("/analytics"):
             return "analytics.manage"  # includes the public website write key
+        return None
+    # These device handlers choose the existing control/chat capability from
+    # the actual command kind. Do not additionally require unrelated editing.
+    executor_agent = r"/api/agents/[0-9a-fA-F-]{36}/executor/"
+    executor_post = r"(?:pairing|mode|devices/[0-9a-fA-F-]{36}/revoke|requests/[0-9a-fA-F-]{36}/commands)"
+    if (method == "POST" and re.fullmatch(executor_agent + executor_post, path)
+            or method == "DELETE" and re.fullmatch(executor_agent + r"devices/[0-9a-fA-F-]{36}", path)):
         return None
     if re.fullmatch(r"/api/agents(?:/setup(?:/analyze|/confirm)?)?", path):
         return "agents.create"
@@ -180,6 +190,8 @@ def workbench_permission(method, path):
         return "admin.budgets"
     if suffix in ("messages", "retry"):
         return "agents.chat"
+    if suffix.startswith("connections/"):
+        return "accounts.manage"
     if suffix == "control" or suffix.endswith("/control"):
         return "agents.control"
     if suffix.startswith(("analytics", "tracking-links")):

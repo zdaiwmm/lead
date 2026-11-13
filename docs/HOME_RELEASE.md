@@ -115,6 +115,16 @@ PR #26 新增 `httpx2` 后，家庭节点共享解释器须已经由节点维护
 
 预先撤除模型临时覆盖且持有维护状态时，如果正式入口在切换前拒绝，不要让维护状态等待下一轮 CI。先只读确认 selector 未变、独立核验旧映像，再恢复备份的原配置和服务，健康检查通过后通过 `home_live_maintenance.py restore <本次SHA>` 解除维护；记录原覆盖仍存在和本次未上线。禁止把旧请求改写成成功，后续使用新的已确认正式请求。
 
+## 本机 Codex 执行层
+
+本轮应用携带 0034 迁移和同 SHA 的本机连接器；从线上 0031 升级时仍使用 `unified_browser_upgrade.py` 的备份克隆演练、维护、安全点、原表对账和最终恢复流程。连接器包由同轮 CI 构建，镜像内 `services/local-executor/lead-local-executor.tgz` 的 `package/REVISION` 必须等于应用 SHA。不能用本地重建包代替该产物。应用和两个独立渠道执行器的切换、回读完成后，分别记录本机设备安装与项目启用结果。
+
+登录 Lead 后通过 `/api/executor/download` 下载该版本安装包，在已有 Node24 和官方 Codex CLI 的本人电脑安装 `npm install -g ~/Downloads/lead-local-executor.tgz`。在项目「本机 Codex」生成并执行连接指令；指令包含项目 UUID、短期配对码和 `--install`，配对后启动独立用户后台服务。原 Codex 登录保持在本机，连接器不读取、复制或上传认证文件。状态报告真实 CLI、ChatGPT 权益、Sol/medium 和连接器 SHA；安装成功与真实模型/业务验证分别记录。
+
+每个项目使用独立 `~/.lead/executors/<UUID>` 和 LaunchAgent。网页关闭不终止执行；电脑休眠或离线时，业务保留原请求等待恢复。设备更换不会自动迁移旧会话，未知发送必须在原线程和原 Action 对账。解除连接立即撤销设备权限；成员角色、项目范围和能力在每次设备请求重新核验。配对启用该项目的新任务本机执行，已固定的旧任务继续按原归属完成；未配对的已有项目保留原配置，不静默代用 API 模型。
+
+长模型等待通过短 Temporal Activity 轮询，原请求与线程持久化；业务取消阻止新工具提交并中断原 turn，进程关闭仅等待原请求恢复。原生压缩由 Codex 执行。原生长期记忆可通过本机 `LEAD_CODEX_MEMORIES=1` 启用并由后台安装保留；它沿用本人的原 Codex home，不修改全局设置，启用前核对跨项目记忆范围。经营事实、可撤销经验、账号归属和外部回执仍由 Lead 保存。
+
 ## 独立渠道执行器
 
 配置及启动入口为 `lead_app.channel_executor`。公共代码来自同轮只读应用镜像，私有平台代码放在独立只读适配器目录，禁止用旧 `browser.py`、`backups.py`、`budget.py` 等覆盖公共包。账号由当前 Profile 绑定解析，配置只选择项目和资料槽，不固化外部账号。现有家庭节点的依赖继续从已核验、只读的 `/run/lead-home/bin/site` 加载；不继承任意 `PYTHONPATH`。

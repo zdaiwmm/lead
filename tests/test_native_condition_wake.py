@@ -1,0 +1,163 @@
+from datetime import datetime, timedelta
+
+from fastapi.testclient import TestClient
+from lead_app import api
+from lead_app.connection_control import transition
+from lead_app.db import all_rows, j, one, tx
+from lead_app.growth.contracts import TaskSpec, Wait, WorkResult, utcnow
+from lead_app.growth.runtime import (
+    _resource_condition,
+    advance,
+    finish,
+    wake_connection,
+)
+from lead_app.security import token
+from test_growth_account_connection import account, login_work
+
+
+def waiting_connection(aid):
+    identifier=account(aid)
+    row,connection,_=login_work(aid,identifier)
+    with tx(aid) as c:
+        c.execute("UPDATE lead.browser_profiles SET provider='chromium' WHERE id=%s",(connection['profile_id'],))
+    ref={'agent_id':aid,'task_id':str(row['id']),'task_generation':row['input']['task_generation']}
+    claim=advance(ref)['claim']
+    owner=transition(aid,connection['id'],connection['challenge_version'],'owner')
+    finish(claim,WorkResult(outcome='waiting',wait=Wait(reason='challenge',producer='account_connection',
+        recovery_action='owner',episode_root=row['id'],check_at=utcnow()+timedelta(minutes=10))))
+    return ref,connection,owner,claim
+
+
+def control(aid,connection,owner,action):
+    with TestClient(api.app) as client:
+        client.cookies.set('lead_session',token('owner'))
+        return client.post(f"/api/agents/{aid}/connections/{connection['id']}/control",
+            headers={'Origin':'http://127.0.0.1:3100','X-Lead-Request':'1'},
+            json={'action':action,'challenge_version':owner['challenge_version']})
+
+
+def condition(aid,ref):
+    with tx(aid) as c:
+        row=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(ref['task_id'],))
+        agent=one(c,'SELECT * FROM lead.agents WHERE id=%s',(aid,))
+        return _resource_condition(c,agent,row,TaskSpec.model_validate(row['input']['spec']))
+
+
+def test_owner_handoff_changes_condition_and_wakes_only_original_wait(growth_agent):
+    ref,connection,owner,claim=waiting_connection(growth_agent)
+    before=condition(growth_agent,ref)
+    with tx(growth_agent) as c:
+        events={str(row['id']) for row in all_rows(c,"SELECT id FROM lead.outbox_events WHERE event_type='growth.work'")}
+    response=control(growth_agent,connection,owner,'resume')
+    assert response.status_code==200,response.text
+    assert condition(growth_agent,ref)!=before
+    with tx(growth_agent) as c:
+        work=[row for row in all_rows(c,"SELECT * FROM lead.outbox_events WHERE event_type='growth.work'") if str(row['id']) not in events]
+        assert [row['payload'] for row in work]==[ref]
+        task=one(c,'SELECT input,result FROM lead.tasks WHERE id=%s',(ref['task_id'],))
+        assert task['input']['task_generation']==ref['task_generation']
+        assert task['result']['runtime']['attempts']==1
+    ready=advance(ref)
+    assert ready['state']=='ready' and ready['claim']['attempt_token']!=claim['attempt_token']
+    assert control(growth_agent,connection,owner,'resume').status_code==409
+
+
+def test_cancel_ends_original_wait_without_restarting_authentication(growth_agent):
+    ref,connection,owner,_=waiting_connection(growth_agent)
+    response=control(growth_agent,connection,owner,'cancel')
+    assert response.status_code==200,response.text
+    assert advance(ref)['state']=='terminal'
+    with tx(growth_agent) as c:
+        task=one(c,'SELECT state,result FROM lead.tasks WHERE id=%s',(ref['task_id'],))
+    assert task['state']=='canceled'
+    assert task['result']['runtime']['attempt_token'] is None
+
+
+def test_actual_same_account_reverification_changes_read_condition(growth_agent):
+    from lead_app.growth.runtime import _current_research_resource
+    identifier=account(growth_agent)
+    scope={'provider':'account_browser','operation':'read','origin':'https://fixture.test',
+           'access_mode':'account','account_id':identifier}
+    with tx(growth_agent) as c:
+        before=_current_research_resource(c,scope)
+        c.execute("UPDATE lead.social_accounts SET verified_at=verified_at+interval '1 second' WHERE id=%s",(identifier,))
+        assert _current_research_resource(c,scope)!=before
+
+
+def automatic_connection_claim(aid):
+    identifier=account(aid)
+    row,connection,_=login_work(aid,identifier)
+    with tx(aid) as c:
+        c.execute("UPDATE lead.browser_profiles SET provider='chromium' WHERE id=%s",(connection['profile_id'],))
+        c.execute("UPDATE lead.takeover_sessions SET control_mode='automatic' WHERE id=%s",(connection['id'],))
+    ref={'agent_id':aid,'task_id':str(row['id']),'task_generation':row['input']['task_generation']}
+    admitted=advance(ref)
+    assert admitted['state']=='ready'
+    return ref,row,connection,admitted['claim']
+
+
+def test_resume_before_old_owner_wait_finishes_wakes_once_without_resetting_attempts(growth_agent):
+    aid=growth_agent
+    ref,row,connection,claim=automatic_connection_claim(aid)
+    owner=transition(aid,connection['id'],connection['challenge_version'],'owner')
+    # Owner sees the handoff before its old automatic worker has returned.
+    response=control(aid,connection,owner,'resume')
+    assert response.status_code==200,response.text
+    with tx(aid) as c:
+        before={str(event['id']) for event in all_rows(c,"SELECT id FROM lead.outbox_events WHERE event_type='growth.work'")}
+    result=finish(claim,WorkResult(outcome='waiting',wait=Wait(reason='challenge',producer='account_connection',
+        recovery_action='owner',episode_root=row['id'],check_at=utcnow()+timedelta(minutes=10))))
+    assert result['accepted_control']
+    with tx(aid) as c:
+        task=one(c,'SELECT state,input,result FROM lead.tasks WHERE id=%s',(row['id'],))
+        events=all_rows(c,"SELECT id,payload FROM lead.outbox_events WHERE event_type='growth.work'")
+    assert task['state']=='planned'
+    assert task['input']==row['input']
+    assert task['result']['runtime']['attempts']==1
+    assert task['result']['runtime']['attempt_token'] is None and task['result']['runtime']['lease_until'] is None
+    assert task['result']['runtime']['wait'] is None
+    assert [event['payload'] for event in events if str(event['id']) not in before]==[ref]
+    emitted={str(event['id']) for event in events}
+    for _ in range(2):
+        assert wake_connection(aid,connection['id'],response.json()['challenge_version'])==[]
+    with tx(aid) as c:
+        assert {str(event['id']) for event in all_rows(c,"SELECT id FROM lead.outbox_events WHERE event_type='growth.work'") }==emitted
+    ready=advance(ref)
+    assert ready['state']=='ready' and ready['claim']['attempt_token']!=claim['attempt_token']
+    with tx(aid) as c:
+        actual=one(c,'SELECT input,result FROM lead.tasks WHERE id=%s',(row['id'],))
+    assert actual['input']['task_generation']==ref['task_generation']
+    assert actual['result']['runtime']['attempts']==2
+
+
+def test_automatic_connection_recheck_preserves_backoff_and_emits_no_immediate_work(growth_agent):
+    aid=growth_agent
+    ref,row,_,claim=automatic_connection_claim(aid)
+    with tx(aid) as c:
+        before={str(event['id']) for event in all_rows(c,"SELECT id FROM lead.outbox_events WHERE event_type='growth.work'")}
+    wait=Wait(reason='temporarily_unavailable',producer='account_connection',recovery_action='recheck',
+        episode_root=row['id'],check_at=utcnow()+timedelta(seconds=10))
+    assert finish(claim,WorkResult(outcome='waiting',wait=wait))['accepted_control']
+    assert advance(ref)['state']=='wait'
+    with tx(aid) as c:
+        task=one(c,'SELECT state,result FROM lead.tasks WHERE id=%s',(row['id'],))
+        after={str(event['id']) for event in all_rows(c,"SELECT id FROM lead.outbox_events WHERE event_type='growth.work'")}
+    assert task['state']=='planned' and task['result']['runtime']['wait']['recovery_action']=='recheck'
+    assert datetime.fromisoformat(task['result']['runtime']['wait']['check_at'])==wait.check_at
+    assert after==before
+
+
+def test_current_execution_method_changes_condition_without_rotating_authority(growth_agent):
+    from test_browser_action_transactions import native_work
+    _, action, claim, _, _, _ = native_work(growth_agent)
+    before = condition(growth_agent, claim['ref'])
+    method = action['intent']['browser_method']
+    changed = {**method, 'selectors': {**method['selectors'], 'submit': '#corrected-submit'}}
+    with tx(growth_agent) as c:
+        grant = one(c, 'SELECT * FROM lead.authorization_grants WHERE id=%s', (action['grant_id'],))
+        c.execute("UPDATE lead.account_targets SET verified_permissions=verified_permissions || %s WHERE id=%s",
+                  (j({'browser_method': changed}), action['target_id']))
+    assert condition(growth_agent, claim['ref']) != before
+    with tx(growth_agent) as c:
+        assert one(c, 'SELECT * FROM lead.authorization_grants WHERE id=%s', (action['grant_id'],)) == grant
+        assert one(c, 'SELECT intent FROM lead.actions WHERE id=%s', (action['id'],))['intent'] == action['intent']

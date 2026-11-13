@@ -75,6 +75,7 @@ def public_url(value, base=None):
 class ResearchPage:
     def __init__(self, actor, run_id):
         self.actor = actor
+        self.command_lock = actor.lock
         self.run_id = run_id
         self.page = None
         self.context = None
@@ -373,8 +374,12 @@ class ResearchPage:
             "snapshot": self.snapshot,
         }
 
+    async def observation_scope(self):
+        # Legacy isolated research pages retain their existing route gate.
+        return None
+
     async def command(self, operation, args, command_id):
-        async with self.actor.lock:
+        async with self.command_lock:
             self.actor.touch()
             await self.ensure()
             self.gate()
@@ -523,14 +528,19 @@ class ResearchPage:
                 else:
                     raise ValueError("未知浏览操作")
                 self.gate()
+                observation_scope = await self.observation_scope()
                 result = metadata if metadata is not None else await self.observe()
                 result["evidence_id"] = step
                 result["run_id"] = self.run_id
                 folder = STATE / "evidence" / self.actor.aid
                 folder.mkdir(parents=True, exist_ok=True, mode=0o700)
                 screenshot = folder / (step + ".png")
-                if metadata is None:
-                    await self.page.screenshot(path=str(screenshot))
+                screenshot_bytes=await self.page.screenshot() if metadata is None else None
+                if observation_scope != await self.observation_scope():
+                    raise ValueError("browser_document_changed_during_observation")
+                if screenshot_bytes is not None:
+                    screenshot.write_bytes(screenshot_bytes)
+                    screenshot.chmod(0o600)
                 bodyfile = folder / (step + ".json")
                 bodyfile.write_text(json.dumps(result, ensure_ascii=False))
                 with tx(self.actor.aid) as c:
@@ -586,7 +596,23 @@ class ResearchPage:
 def begin_run(aid, goal, message_id=None, task_id=None, mode="research"):
     # Public reading never borrows a social login or its manually controlled page.
     from .account_profiles import public_research
-    profile = public_research(aid)
+    profile = None
+    with tx(aid) as c:
+        if task_id:
+            task = one(c,'SELECT * FROM lead.tasks WHERE id=%s',(task_id,))
+            context=task_research_scope(c,task) if task else {}
+            payload=context.get('payload',{})
+            if payload.get('access_mode') == 'account':
+                account_id = payload.get('account_id')
+                if not account_id or str(context.get('account_id')) != str(account_id):
+                    raise ValueError('research_account_scope_missing')
+                profile = one(c,"""SELECT p.* FROM lead.browser_profiles p JOIN lead.social_accounts s ON s.profile_id=p.id
+                    WHERE s.id=%s AND s.state='connected' AND s.binding_version=%s""",
+                    (account_id,context.get('binding_version')))
+                if not profile or profile['provider'] != 'chromium':
+                    raise ValueError('account_browser_capability_gap')
+    if profile is None:
+        profile = public_research(aid)
     with tx(aid) as c:
         a = require_agent(c, aid, True)
         if one(
@@ -641,3 +667,47 @@ def finish_run(aid, rid, state="succeeded"):
             }
             for s in steps
         ]
+
+
+def task_research_scope(c,task):
+    """A recovery read uses its original failure scope and the recover TaskRef."""
+    from datetime import datetime
+
+    from .growth.contracts import utcnow
+    source=task
+    spec=source['input'].get('spec',{})
+    recovery_scope=None
+    if task['type']=='growth.recover':
+        payload=spec.get('payload',{})
+        source=one(c,'SELECT * FROM lead.tasks WHERE id=%s',(payload.get('episode_root'),))
+        recovery=((source or {}).get('result') or {}).get('runtime',{}).get('recovery',{})
+        if (not source or recovery.get('status')!='blocked'
+                or recovery.get('condition_revision')!=payload.get('condition_revision')
+                or not recovery.get('probe_lease_until')
+                or datetime.fromisoformat(recovery['probe_lease_until'])<=utcnow()):
+            raise ValueError('recovery_read_scope_changed')
+        recovery_scope=recovery.get('failure_scope') or {}
+        if not recovery.get('resource') or not recovery_scope.get('url'):
+            raise ValueError('recovery_read_scope_missing')
+        spec=source['input'].get('spec',{})
+    payload=spec.get('payload',{})
+    if recovery_scope and (recovery_scope.get('access_mode','public')!=payload.get('access_mode','public')
+            or str(recovery_scope.get('account_id'))!=str(payload.get('account_id'))):
+        raise ValueError('recovery_read_scope_changed')
+    return {'payload':payload,'account_id':spec.get('account_id'),
+            'binding_version':source['input'].get('binding_version'),'recovery_scope':recovery_scope}
+
+
+def account_read_origins(c,account_id,binding_version):
+    from .browser_execution import origin
+    account=one(c,"SELECT * FROM lead.social_accounts WHERE id=%s AND state='connected' AND binding_version=%s",(account_id,binding_version))
+    if not account:
+        raise ValueError('research_account_scope_changed')
+    bound=account.get('connection_origin')
+    if not bound:
+        from .domain import PLATFORMS
+        bound=next((url for name,_,url in PLATFORMS if name==account['platform']),None)
+    if not bound:
+        raise ValueError('research_account_origin_missing')
+    origin(bound)
+    return [bound]

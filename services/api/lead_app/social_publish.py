@@ -18,6 +18,9 @@ from .scope import current_tenant
 
 
 async def execute(actor, action_id,*,growth_claim=None):
+    if getattr(actor,'native_runtime',None):
+        from .native_action import execute_native
+        return await execute_native(actor,action_id,growth_claim)
     from .growth.tools import submission_claim
     token = submission_claim.set(growth_claim) if growth_claim else None
     try:

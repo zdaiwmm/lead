@@ -14,7 +14,7 @@ from .store import digest, objective_revision
 
 router = APIRouter()
 LABELS = {"research":"调查产品与真实需求","content":"制作有依据的内容","account":"核对账号与可运营位置",
-          "channel":"推进渠道操作","observe":"核对真实结果","recover":"恢复受影响的能力","decision":"根据证据调整下一步"}
+          "channel":"推进渠道操作","observe":"核对真实结果","recover":"检查受影响的能力","decision":"根据证据调整下一步"}
 
 
 def render_growth(aid):
@@ -23,6 +23,7 @@ def render_growth(aid):
         contract = agent["onboarding_state"].get("operating_contract",{})
         work = all_rows(c,"""SELECT t.id,t.state,t.type,t.created_at,t.scheduled_at,t.experiment_id,
             t.input#>>'{spec,purpose}' purpose,t.result#>'{runtime,wait}' wait,t.result#>'{runtime,recovery}' recovery,
+            t.result#>'{output,output}' probe_output,
             s.platform,s.id account_id FROM lead.tasks t
             LEFT JOIN lead.social_accounts s ON s.id::text=coalesce(t.input#>>'{spec,account_id}',t.input->>'account_id')
             WHERE t.type LIKE 'growth.%%' AND (t.state IN ('planned','queued','running','waiting_user','reconciling')
@@ -32,11 +33,19 @@ def render_growth(aid):
             specification->>'hypothesis' hypothesis,specification->>'learning_signal' learning_signal,
             specification->>'review_at' review_at,conclusion FROM lead.growth_experiments
             ORDER BY updated_at DESC,id DESC LIMIT 8""")
-        recent = all_rows(c,"""SELECT id,type,state,completed_at FROM lead.tasks WHERE type LIKE 'growth.%%'
+        recent = all_rows(c,"""SELECT id,type,state,completed_at,result#>'{output,output}' probe_output FROM lead.tasks WHERE type LIKE 'growth.%%'
             AND type<>'growth.decision' AND state IN ('succeeded','failed','canceled')
             ORDER BY completed_at DESC,id DESC LIMIT 6""")
     for item in work+recent:
         item["title"] = LABELS.get(item["type"].removeprefix("growth."),"推进工作")
+        if item["type"] == "growth.recover":
+            output = item.pop("probe_output", None) or {}
+            item["probe"] = {key: output.get(key) for key in (
+                "state", "reason", "resource", "condition_revision", "next_check_at", "resumed_count")}
+            if item["probe"]["resumed_count"] is None:
+                item["probe"]["resumed_count"] = len(output.get("resumed_refs") or []) or int(bool(output.get("resumed")))
+        else:
+            item.pop("probe_output", None)
         episode = item.get("recovery")
         if episode and episode.get("status")=="blocked":
             item["wait"]={"reason":episode.get("reason") or "recovery_exhausted",
