@@ -383,9 +383,11 @@ class NativeAction(NativeTask):
                     const article=node.closest('article,[role=article]');
                     const label=node.getAttribute('aria-label')||(node.closest('p,dd,td,label')?.innerText||'').replace(node.innerText,'');
                     const address=node.closest('address');
+                    const before=document.createRange();
+                    if(address){before.selectNodeContents(address);before.setEndBefore(node);}
                     const byline=node.tagName==='A' && address && address.closest('article,[role=article]')===article &&
-                        address.querySelectorAll('a').length===1 && /^\s*by\s+$/i.test(address.innerText.replace(node.innerText,''));
-                    return !!article && !node.closest('blockquote') && !body.closest('blockquote') &&
+                        address.querySelectorAll('a').length===1 && /^\s*by\s+$/i.test(before.toString());
+                    return !!article && !node.closest('blockquote,q') && !body.closest('blockquote,q') &&
                         body.closest('article,[role=article]')===article && link.closest('article,[role=article]')===article &&
                         (/author|posted by|written by|作者|发布者/i.test(label)||byline);
                 }""",[body_handle,link_handle])

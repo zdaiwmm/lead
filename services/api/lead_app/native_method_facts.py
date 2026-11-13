@@ -6,6 +6,7 @@ with its separately verified private account endpoint. Unrecognized forms/rules
 remain local capability gaps.
 """
 import re
+from contextlib import AsyncExitStack
 from urllib.parse import urljoin, urlsplit
 from uuid import UUID
 
@@ -75,6 +76,7 @@ _FORM = '''(body,submit)=>{
   submitAction:submit.hasAttribute('formaction')?submit.formAction:form.action,
   submitMethod:submit.hasAttribute('formmethod')?submit.formMethod:form.method,
   submitEncoding:submit.hasAttribute('formenctype')?submit.formEnctype:form.enctype,
+  submitLabel:submit.innerText||submit.value||'',formLabel:form.getAttribute('aria-label')||'',
   controls:Array.from(form.elements).map(node=>({tag:node.tagName,type:node.type,name:node.name,
    value:node.value,disabled:node.matches(':disabled'),body:node===body,submit:node===submit}))};
 }'''
@@ -99,6 +101,11 @@ def _request(facts, *, page_url, expected_origin, operation, parent_url, externa
     url=_url(facts['action'],page_url)
     if origin(url)!=expected_origin:
         raise ValueError('browser_method_request_origin_changed')
+    from .native_session_facts import reject_dangerous_endpoint
+    reject_dangerous_endpoint(url)
+    if re.search(r'\b(?:delete|destroy|remove|purchase|pay|payment|billing|checkout|charge|subscribe)\b|删除|销毁|购买|支付|扣费|充值',
+                 facts['submitLabel']+' '+facts['formLabel'],re.I):
+        raise ValueError('browser_method_dangerous_operation')
     content=facts['bodyName']
     if not isinstance(content,str) or not 1<=len(content)<=100:
         raise ValueError('browser_method_content_field_missing')
@@ -159,8 +166,27 @@ def _request(facts, *, page_url, expected_origin, operation, parent_url, externa
     return result
 
 
+_BOOKMARK = r'''proof=>{
+ const node=proof.node,article=proof.article;
+ if(proof.root!==document.documentElement || !node.isConnected || !article ||
+    node.closest('article,[role=article]')!==article || node.closest('nav,[role=navigation],blockquote,q,pre,code') ||
+    node.tagName!=='A' || !node.rel.toLowerCase().split(/\s+/).includes('bookmark') || node.href!==location.href) return null;
+ const bookmarks=Array.from(document.querySelectorAll('a[rel]')).filter(link=>
+    link.rel.toLowerCase().split(/\s+/).includes('bookmark')&&link.href===location.href);
+ return bookmarks.length===1&&bookmarks[0]===node?{url:location.href,href:node.href}:null;
+}'''
+
+
 async def inspect_editor(page, proposal, *, account_id, binding_version, external_account_id,
                          connection_origin, operation, evidence_ref, permission_page=None):
+    async with AsyncExitStack() as resources:
+        return await _inspect_editor(page,proposal,account_id=account_id,binding_version=binding_version,
+            external_account_id=external_account_id,connection_origin=connection_origin,operation=operation,
+            evidence_ref=evidence_ref,permission_page=permission_page,resources=resources)
+
+
+async def _inspect_editor(page, proposal, *, account_id, binding_version, external_account_id,
+                         connection_origin, operation, evidence_ref, permission_page,resources):
     """Inspect one current member editor; the caller owns all page/DB authority."""
     if (operation not in ('publish','reply') or not isinstance(proposal,dict)
             or type(binding_version) is not int or binding_version<1
@@ -202,6 +228,8 @@ async def inspect_editor(page, proposal, *, account_id, binding_version, externa
     parent=None
     parent_href=None
     parent_identifier=None
+    bookmark=None
+    bookmark_facts=None
     if operation=='reply':
         parent_href=await nodes['editor_parent'].get_attribute('href')
         parent=_url(parent_href,page_url)
@@ -219,6 +247,12 @@ async def inspect_editor(page, proposal, *, account_id, binding_version, externa
             raise ValueError('browser_method_parent_changed')
         if canonical_count==1:
             parent_identifier=canonical_numeric_id(parent)
+        else:
+            bookmark=await nodes['editor_parent'].evaluate_handle("node=>({node,root:document.documentElement,article:node.closest('article,[role=article]')})")
+            resources.push_async_callback(bookmark.dispose)
+            bookmark_facts=await bookmark.evaluate(_BOOKMARK)
+            if bookmark_facts and bookmark_facts['url']==parent:
+                parent_identifier=canonical_numeric_id(parent)
     facts=await _form_facts(nodes['editor_body'],nodes['submit'])
     request=_request(facts,page_url=page_url,expected_origin=expected_origin,operation=operation,
                      parent_url=parent,external_account_id=external_account_id,parent_identifier=parent_identifier)
@@ -242,6 +276,7 @@ async def inspect_editor(page, proposal, *, account_id, binding_version, externa
             or operation=='reply' and await nodes['editor_parent'].get_attribute('href')!=parent_href
             or operation=='reply' and (await canonicals.count()!=canonical_count
                 or canonical_count==1 and await canonicals.get_attribute('href')!=canonical_href)
+            or bookmark_facts is not None and await bookmark.evaluate(_BOOKMARK)!=bookmark_facts
             or await permission.inner_text()!=actual
             or await permission.evaluate("node=>(node.closest('section,[role=region],aside,fieldset')||node.parentElement||node).innerText")!=context):
         raise ValueError('browser_method_document_changed')

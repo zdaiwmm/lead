@@ -115,13 +115,78 @@ async def test_full_url_parent_encoding_remains_supported(common_page):
         'record_ref':parent,'nonce':'live'})},{'operation':'reply','parent_url':parent,'body':'Reply'})
 
 
-@pytest.mark.parametrize('structure',['address','legacy_author','p_by','fake_address','quoted','other_article',
+@pytest.mark.parametrize('change',['valid','no_rel','outside_article','duplicate','quoted','different_article',
+    'conflicting_canonical','multiple_canonical','late_rel_change','late_document_change'])
+async def test_current_article_bookmark_is_an_independent_numeric_parent_source(common_page,change,monkeypatch):
+    from lead_app import native_method_facts
+
+    page,context,_=common_page
+    proposal,kwargs,parent=await editor(page,context)
+    await page.locator('#parent').evaluate("node=>{node.rel='bookmark';const article=document.createElement('article');node.before(article);article.append(node)}")
+    if change=='no_rel':
+        await page.locator('#parent').evaluate("node=>node.removeAttribute('rel')")
+    elif change=='outside_article':
+        await page.locator('#parent').evaluate("node=>node.closest('article').before(node)")
+    elif change=='duplicate':
+        await page.locator('article').evaluate("node=>{const copy=node.firstElementChild.cloneNode(true);copy.id='duplicate';node.append(copy)}")
+    elif change=='quoted':
+        await page.locator('article').evaluate("node=>{const quote=document.createElement('blockquote');node.before(quote);quote.append(node)}")
+    elif change=='different_article':
+        await page.locator('#parent').evaluate("node=>{const other=document.createElement('article');other.innerHTML='<a rel=bookmark href=\"'+location.href+'\">Other post</a>';node.closest('article').after(other);node.rel=''}")
+    elif change in ('conflicting_canonical','multiple_canonical'):
+        await page.locator('head').evaluate("(node,duplicate)=>{node.innerHTML+='<link rel=canonical href=/records/43>';if(duplicate)node.innerHTML+='<link rel=canonical href=/records/42>'}",change=='multiple_canonical')
+    elif change in ('late_rel_change','late_document_change'):
+        original=native_method_facts._form_facts
+        async def mutate(*args):
+            facts=await original(*args)
+            if change=='late_rel_change':
+                await page.locator('#parent').evaluate("node=>node.rel=''")
+            else:
+                await page.set_content(await page.content())
+            return facts
+        monkeypatch.setattr(native_method_facts,'_form_facts',mutate)
+    if change=='valid':
+        method=await inspect_editor(page,proposal,**kwargs)
+        assert method['request']['parent_binding']=={'canonical_url':parent,'value':'42'}
+    else:
+        with pytest.raises(ValueError):
+            await inspect_editor(page,proposal,**kwargs)
+
+
+@pytest.mark.parametrize('operation',['publish','reply'])
+@pytest.mark.parametrize('change',['delete_endpoint','billing_endpoint','delete_submit','purchase_submit','delete_form','ordinary_body'])
+async def test_member_rules_do_not_relabel_a_dangerous_form(common_page,change,operation):
+    page,context,_=common_page
+    proposal,kwargs,_=await editor(page,context)
+    kwargs['operation']=operation
+    if operation=='publish':
+        proposal['selectors'].pop('editor_parent')
+    if change.endswith('_endpoint'):
+        await page.locator('form').evaluate('(form,path)=>form.action=path','/delete' if change=='delete_endpoint' else '/billing')
+    elif change.endswith('_submit'):
+        await page.locator('#send').evaluate('(node,text)=>node.innerText=text','Delete account' if change=='delete_submit' else 'Purchase access')
+    elif change=='delete_form':
+        await page.locator('form').evaluate("form=>form.setAttribute('aria-label','Delete account')")
+    else:
+        await page.locator('textarea').fill('An educational post about delete operations and payment security.')
+    if change=='ordinary_body':
+        assert (await inspect_editor(page,proposal,**kwargs))['request']['url']==ORIGIN+'/respond'
+    else:
+        with pytest.raises(ValueError):
+            await inspect_editor(page,proposal,**kwargs)
+
+
+@pytest.mark.parametrize('structure',['address','address_metadata','address_time','legacy_author','p_by','fake_address','quoted','other_article',
     'two_authors','by_after','wrong_handle','not_by'])
 async def test_semantic_address_byline_belongs_to_actual_receipt_article(common_page,structure):
     page,context,_=common_page
     await page.goto(ORIGIN+'/records/900')
     byline='<address>By <a id=author href=/members/a>member-A</a></address>'
-    if structure=='legacy_author':
+    if structure=='address_metadata':
+        byline=byline.replace('</address>',' <span>· Display name (Account ID: stable-17)</span></address>')
+    elif structure=='address_time':
+        byline=byline.replace('</address>',' <time datetime=2026-11-13>· Today</time></address>')
+    elif structure=='legacy_author':
         byline='<p>Author: <a id=author href=/members/a>member-A</a></p>'
     elif structure=='p_by':
         byline=byline.replace('address','p')
@@ -151,7 +216,7 @@ async def test_semantic_address_byline_belongs_to_actual_receipt_article(common_
         return current.url
     controller.document=document
     receipt=await controller.read_receipt(page,{'author':'#author','body':'#body','url':'#url','parent':'#parent'})
-    assert bool(receipt) is (structure in ('address','legacy_author'))
+    assert bool(receipt) is (structure in ('address','address_metadata','address_time','legacy_author'))
 
 
 @pytest.mark.parametrize('rule,allowed',[
