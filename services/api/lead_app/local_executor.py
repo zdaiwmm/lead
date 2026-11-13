@@ -107,7 +107,7 @@ def create_pairing(aid):
             VALUES(%s,%s,%s,%s,%s)""", (device_id, current_tenant(), aid, _digest(code), expires))
         audit(c, aid, "executor.pairing_created", {"device_id": device_id})
     return {"code": code, "expires_at": expires.isoformat(), "device_id": device_id,
-            "connect_command": "lead-local-executor pair --url "+public_origin()+" --code "+code}
+            "connect_command": "lead-executor pair --url "+public_origin()+" --code "+code}
 
 
 def pair(code, name, platform, capabilities):
@@ -233,10 +233,13 @@ def status(aid):
             FROM lead.local_executor_requests ORDER BY created_at DESC LIMIT 30""")
         pending = all_rows(c, """SELECT e.event_id,e.request_id,e.method,e.params,e.created_at
             FROM lead.local_executor_events e JOIN lead.local_executor_requests r ON r.id=e.request_id
-            WHERE r.state='waiting_input' ORDER BY e.created_at DESC LIMIT 20""")
+            WHERE r.state NOT IN ('completed','failed','interrupted','execution_unknown','canceled')
+            AND e.method='server/request' AND NOT EXISTS(SELECT 1 FROM lead.local_executor_commands c
+                WHERE c.request_id=e.request_id AND c.kind='respond' AND c.payload->>'id'=e.params->>'id')
+            ORDER BY e.created_at DESC LIMIT 20""")
     for device in devices:
         device["online"] = _online(device)
-    return {"mode": project["mode"] if project else "legacy", "device_id": project["device_id"] if project else None,
+    return {"agent_id": str(aid), "mode": project["mode"] if project else "legacy", "device_id": project["device_id"] if project else None,
             "devices": devices, "requests": requests, "pending_inputs": pending, "model": MODEL, "effort": EFFORT}
 
 
@@ -267,6 +270,11 @@ def command(aid, request_id, kind, payload, command_id=None):
                       (j({"canceled": True}), row["id"]))
         elif row["scope"].get("control_version") != agent["control_version"]:
             raise ValueError("executor_scope_changed")
+        if kind == "respond":
+            pending = one(c, """SELECT event_id FROM lead.local_executor_events WHERE request_id=%s
+                AND method='server/request' AND params->>'id'=%s""", (row["id"], str(payload.get("id"))))
+            if not pending:
+                raise ValueError("executor_response_unavailable")
         item = _enqueue(c, row, kind, payload, str(command_id or uuid4()))
         audit(c, str(aid), "executor.command", {"request_id": str(request_id), "kind": kind})
         return {"id": str(item["id"]), "request_id": str(request_id), "kind": kind}
@@ -322,7 +330,11 @@ def events(bearer, epoch, entries):
             if method == "result":
                 if params.get("state") not in TERMINAL:
                     raise ValueError("executor_result_invalid")
-                if request["state"] in TERMINAL and request.get("result") != params:
+                reconciled = (request["state"] == "execution_unknown" and params.get("reconciled") is True
+                              and params.get("state") in {"completed", "failed", "interrupted"}
+                              and request.get("thread_id") and params.get("thread_id") == request["thread_id"]
+                              and (not request.get("turn_id") or params.get("turn_id") == request["turn_id"]))
+                if request["state"] in TERMINAL and request.get("result") != params and not reconciled:
                     raise ValueError("executor_result_conflict")
             c.execute("""INSERT INTO lead.local_executor_events(tenant_id,agent_id,request_id,event_id,event_hash,method,params)
                 VALUES(%s,%s,%s,%s,%s,%s,%s)""", (claims["tenant_id"], claims["agent_id"], request["id"],

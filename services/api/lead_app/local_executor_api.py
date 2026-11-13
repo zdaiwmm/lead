@@ -93,6 +93,7 @@ async def executor_mode(aid: UUID, body: Mode):
 
 
 @router.delete("/api/agents/{aid}/executor/devices/{device_id}")
+@router.post("/api/agents/{aid}/executor/devices/{device_id}/revoke")
 async def executor_revoke(aid: UUID, device_id: UUID):
     require("agents.control")
     return await _run(executor.revoke, str(aid), str(device_id))

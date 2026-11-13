@@ -92,6 +92,14 @@ def test_unknown_result_never_reissues_run_or_marks_business_task(growth_agent):
     assert executor.request_status(growth_agent, request["id"])["state"] == "execution_unknown"
     assert executor.poll(device["token"], 1, instance_id="first")["commands"] == []
     assert executor.submit(growth_agent, "lost-ack", payload(), session_key="lost-ack")["state"] == "execution_unknown"
+    with pytest.raises(ValueError, match="executor_result_conflict"):
+        executor.events(device["token"], 1, [{"id": "wrong-thread", "request_id": str(request["id"]), "method": "result",
+                                            "params": {"state": "completed", "thread_id": "thr-other", "reconciled": True}}])
+    executor.events(device["token"], 1, [{"id": "reconciled", "request_id": str(request["id"]), "method": "result",
+                                        "params": {"state": "completed", "thread_id": "thr-original", "turn_id": "turn-original",
+                                                   "output": {"receipt": "read_original_thread"}, "reconciled": True}}])
+    assert executor.request_status(growth_agent, request["id"])["state"] == "completed"
+    assert executor.poll(device["token"], 1, instance_id="first")["commands"] == []
 
 
 def test_foreign_device_and_tenant_cannot_read_request(growth_agent):
@@ -211,6 +219,7 @@ def test_owner_controls_require_capability_and_transport_requires_bearer(growth_
     with tenant_scope(current_tenant(), {"role": "owner", "subject": "fixture", "issuer": "local"}):
         response = client.post(path)
         assert response.status_code == 200
+        assert response.json()["connect_command"].startswith("lead-executor pair --url ")
         assert "<Lead地址>" not in response.json()["connect_command"]
     assert client.post("/executor/v1/poll", json={"epoch": 1}).status_code == 401
     assert client.post("/executor/v1/poll", json={"epoch": 1}, headers={"Authorization": "Bearer forged"}).status_code == 401
