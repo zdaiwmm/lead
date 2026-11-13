@@ -319,6 +319,14 @@ async def test_sso_bound_original_actions_use_worker_transport_and_replay_no_new
                     closed.set()
             listener = await asyncio.start_server(stream,'127.0.0.1',0,ssl=tls_server)
             proxy = actor.forward_proxy
+            previous_resolve = proxy.resolve
+            async def tls_resolve(host):
+                # This sole test destination uses the exact local TLS mapping
+                # below; every business hostname keeps the strict fixture DNS.
+                if host=='93.184.215.230':
+                    return host
+                return await previous_resolve(host)
+            monkeypatch.setattr(proxy,'resolve',tls_resolve)
             previous_connect = proxy.connect
             async def tls_transport(ip,port):
                 if ip=='93.184.215.230' and port==443:
