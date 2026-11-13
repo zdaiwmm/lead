@@ -135,6 +135,37 @@ def caller(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('kind', ['connect', 'run_task'])
+@pytest.mark.parametrize('configured_ceiling', [2, 8])
+async def test_evaluation_tail_budget_reaches_actual_worker_payload_and_restores(caller, kind, configured_ceiling):
+    from lead_app import admin_settings
+
+    from scripts.evaluate_native_browser import stage_model_request_ceiling
+
+    original = admin_settings.for_agent
+    settings, version = original(AID, 'models')
+    settings['max_model_requests'] = configured_ceiling
+    with stage_model_request_ceiling(AID, 3) as ceiling:
+        assert ceiling == min(3, configured_ceiling)
+        limited, current_version = admin_settings.for_agent(AID, 'models')
+        assert limited == {**settings, 'max_model_requests': ceiling}
+        assert current_version == version and settings['max_model_requests'] == configured_ceiling
+        assert admin_settings.for_agent('other-agent', 'models')[0] is settings
+        assert admin_settings.for_agent(AID, 'brand')[0] is settings
+        await caller.invoke(kind)
+    assert caller.inputs[0]['max_requests'] == min(3, configured_ceiling)
+    assert caller.inputs[0]['max_total_tokens'] == 40000
+    assert caller.inputs[0]['model']['key'] == MODEL_KEY
+    assert admin_settings.for_agent is original
+    with stage_model_request_ceiling(AID, None) as ceiling:
+        assert ceiling == 8 and admin_settings.for_agent is original
+    with pytest.raises(RuntimeError, match='synthetic interruption'):
+        with stage_model_request_ceiling(AID, 1):
+            raise RuntimeError('synthetic interruption')
+    assert admin_settings.for_agent is original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['connect', 'run_task'])
 @pytest.mark.parametrize('configured', [False, True])
 async def test_actual_native_caller_passes_explicit_route_selection_only_on_stdin(caller, configured, kind, capsys, caplog):
     route = str(caller.root / 'synthetic-model.sock') if configured else None

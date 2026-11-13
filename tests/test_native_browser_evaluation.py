@@ -62,9 +62,10 @@ def test_aggregate_allowance_counts_completed_stages_across_both_sites():
     from scripts import evaluate_native_browser as evaluation
     usage = [{'units': 1200, 'details': {'requests': 6}},
              {'units': 1800, 'details': {'requests': 5}}]
+    assert evaluation.require_run_allowance({'requests': 18, 'tokens_and_reserved_units': 480000}, [], usage) == 7
+    assert evaluation.require_run_allowance({'requests': 19, 'tokens_and_reserved_units': 43000}, [], usage) == 8
     with pytest.raises(evaluation.AcceptanceStop, match='aggregate_request_allowance'):
-        evaluation.require_run_allowance({'requests': 18, 'tokens_and_reserved_units': 480000}, [], usage)
-    evaluation.require_run_allowance({'requests': 19, 'tokens_and_reserved_units': 43000}, [], usage)
+        evaluation.require_run_allowance({'requests': 11, 'tokens_and_reserved_units': 480000}, [], usage)
 
 
 @pytest.mark.parametrize('reservations,usage,limit,reason', [
@@ -93,6 +94,23 @@ def test_aggregate_allowance_cannot_expand_the_registered_native_ceiling(allowan
         validate_run_allowance(allowance)
 
 
+@pytest.mark.parametrize('requests,units,reservations,reason', [
+    (1, 40000, [], None),
+    (2, 40000, [], 'aggregate_allowance_exceeded'),
+    (1, 40001, [], 'aggregate_allowance_exceeded'),
+    (1, 40000, [{'state': 'unknown'}], 'unresolved_prior_reservation'),
+])
+def test_final_stage_checks_actual_totals_without_reserving_another_fragment(requests, units, reservations, reason):
+    from scripts.evaluate_native_browser import AcceptanceStop, verify_run_spend
+    allowance = {'requests': 1, 'tokens_and_reserved_units': 40000}
+    usage = [{'units': units, 'details': {'requests': requests}}]
+    if reason:
+        with pytest.raises(AcceptanceStop, match=reason):
+            verify_run_spend(allowance, reservations, usage)
+    else:
+        verify_run_spend(allowance, reservations, usage)
+
+
 @pytest.mark.asyncio
 async def test_aggregate_allowance_stops_before_task_admission(monkeypatch, tmp_path):
     from types import SimpleNamespace
@@ -110,7 +128,7 @@ async def test_aggregate_allowance_stops_before_task_admission(monkeypatch, tmp_
 
     monkeypatch.setattr(runtime, 'advance', forbidden)
     case = Case('synthetic', SimpleNamespace(case_id='budget'), 'http://unused',
-        output=tmp_path/'case.json', run_allowance={'requests': 8, 'tokens_and_reserved_units': 480000})
+        output=tmp_path/'case.json', run_allowance={'requests': 1, 'tokens_and_reserved_units': 480000})
     with pytest.raises(AcceptanceStop, match='aggregate_request_allowance'):
         await case.perform('login', {'task_id': 'original', 'task_generation': 1})
 

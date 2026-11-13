@@ -112,11 +112,7 @@ def validate_run_allowance(allowance):
         raise ValueError('invalid_aggregate_native_allowance')
 
 
-def require_run_allowance(allowance, reservations, usage):
-    """Reserve room for one full fragment using the original cumulative ledger."""
-    validate_run_allowance(allowance)
-    if allowance is None:
-        return
+def measured_run_totals(reservations, usage):
     if any(row.get('state') not in ('settled', 'released') for row in reservations):
         raise AcceptanceStop('unresolved_prior_reservation')
     requests = units = 0
@@ -129,10 +125,56 @@ def require_run_allowance(allowance, reservations, usage):
             raise AcceptanceStop('unmeasured_prior_token_units')
         requests += count
         units += row['units']
-    if requests + FRAGMENT['requests'] > allowance['requests']:
+    return requests, units
+
+
+def require_run_allowance(allowance, reservations, usage):
+    """Keep the full token reserve; clamp the last fragment to remaining calls."""
+    validate_run_allowance(allowance)
+    if allowance is None:
+        return
+    requests, units = measured_run_totals(reservations, usage)
+    if requests >= allowance['requests']:
         raise AcceptanceStop('aggregate_request_allowance')
     if units + FRAGMENT['tokens_and_reserved_units'] > allowance['tokens_and_reserved_units']:
         raise AcceptanceStop('aggregate_token_allowance')
+    return min(FRAGMENT['requests'], allowance['requests'] - requests)
+
+
+def verify_run_spend(allowance, reservations, usage):
+    if allowance is None:
+        return
+    validate_run_allowance(allowance)
+    requests, units = measured_run_totals(reservations, usage)
+    if requests > allowance['requests'] or units > allowance['tokens_and_reserved_units']:
+        raise AcceptanceStop('aggregate_allowance_exceeded')
+
+
+@contextmanager
+def stage_model_request_ceiling(aid, ceiling):
+    """Only this sequential synthetic evaluator lowers its Agent's call cap."""
+    if ceiling is None:
+        yield FRAGMENT['requests']
+        return
+    if type(ceiling) is not int or not 1 <= ceiling <= FRAGMENT['requests']:
+        raise ValueError('invalid_stage_request_ceiling')
+    from lead_app import admin_settings
+
+    original = admin_settings.for_agent
+    settings, _ = original(aid, 'models')
+    effective = min(settings['max_model_requests'], FRAGMENT['requests'], ceiling)
+
+    def bounded(request_aid, kind):
+        values, version = original(request_aid, kind)
+        if str(request_aid) == str(aid) and kind == 'models':
+            values = {**values, 'max_model_requests': min(values['max_model_requests'], effective)}
+        return values, version
+
+    admin_settings.for_agent = bounded
+    try:
+        yield effective
+    finally:
+        admin_settings.for_agent = original
 
 
 @contextmanager
@@ -203,8 +245,9 @@ class NativeCase:
         from lead_app.config import STATE
         from lead_app.growth.runtime import advance, execute, finish
         before, prior_usage = self.ledger()
+        request_ceiling = None
         if not seed:
-            require_run_allowance(self.run_allowance, before, prior_usage)
+            request_ceiling = require_run_allowance(self.run_allowance, before, prior_usage)
         paths = set((STATE/'browser-use-runs').glob('*/result.json'))
         if self.before_stage:
             await self.before_stage(name, self)
@@ -213,11 +256,13 @@ class NativeCase:
         source_before = sum(row['method'] == 'POST' for row in self.site.snapshot()['requests'])
         self.report['mechanical_seed' if seed else 'active_stage'] = stage
         self.persist()
-        admitted = advance(ref, now=now)
-        if admitted['state'] != 'ready':
-            raise AcceptanceStop('task_not_admitted:' + name + ':' + admitted['state'])
-        result = await execute(admitted['claim'])
-        finish(admitted['claim'], result)
+        with stage_model_request_ceiling(self.aid, request_ceiling) as effective_ceiling:
+            stage['request_ceiling'] = 0 if seed else effective_ceiling
+            admitted = advance(ref, now=now)
+            if admitted['state'] != 'ready':
+                raise AcceptanceStop('task_not_admitted:' + name + ':' + admitted['state'])
+            result = await execute(admitted['claim'])
+            finish(admitted['claim'], result)
         current, usage = self.ledger()
         fresh = [row for row in current if row['id'] not in {row['id'] for row in before}]
         workers = []
@@ -239,8 +284,9 @@ class NativeCase:
             self.report['stages'].append(stage)
         self.report.pop('active_stage', None)
         self.persist()
+        verify_run_spend(self.run_allowance, current, usage)
         if (result['outcome'] != expected or len(fresh) != (0 if seed else 1)
-                or requests > (0 if seed else 8) or stage['reservation_units'] > (0 if seed else 40000)
+                or requests > stage['request_ceiling'] or stage['reservation_units'] > (0 if seed else 40000)
                 or stage['seconds'] > 180 or any(row['state'] != 'settled' for row in fresh)
                 or any(row['usage'].get('billing_unknown') or row['usage'].get('unmeasured_requests')
                        or row['usage'].get('credential_literal_seen') for row in workers)):
