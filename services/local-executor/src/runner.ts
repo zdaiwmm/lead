@@ -20,6 +20,7 @@ export function nativeArgs(memories = false) {
   const settings: Record<string, unknown> = {
     model: MODEL,
     model_reasoning_effort: EFFORT,
+    model_provider: "openai",
     web_search: "live",
     "agents.enabled": true,
     "agents.default_subagent_model": MODEL,
@@ -254,6 +255,7 @@ export class Runner {
     status: string,
     turnId: string,
     items: Dict[] = [],
+    reconciled = false,
   ) {
     if (terminal.has(record.state)) return;
     let state =
@@ -284,6 +286,7 @@ export class Runner {
       output,
       thread_id: record.thread_id,
       turn_id: turnId,
+      ...(reconciled ? { reconciled: true } : {}),
       ...(status === "completed" && state === "failed"
         ? { error: "invalid_structured_output" }
         : {}),
@@ -311,7 +314,7 @@ export class Runner {
           this.store.update(record.id, { state: "running" });
           return;
         }
-        this.complete(record, turn.status, turn.id, turn.items);
+        this.complete(record, turn.status, turn.id, turn.items, true);
         finish();
         return;
       }
