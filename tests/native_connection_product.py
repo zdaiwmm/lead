@@ -48,6 +48,21 @@ async def verify_login(
                 }
             )
             request = json.loads(raw)
+            if mode.startswith('batch_'):
+                parameters=request.get('tools',[{}])[0].get('function',{}).get('parameters',{})
+                properties=parameters.get('properties',{})
+                def operation_enum(node):
+                    if isinstance(node,dict):
+                        if node.get('properties',{}).get('operation',{}).get('enum')==['publish','reply']:
+                            return True
+                        return any(operation_enum(value) for value in node.values())
+                    return isinstance(node,list) and any(operation_enum(value) for value in node)
+                model_calls[-1]['sdk_contract']={'thinking_field':'thinking' in properties,
+                    'planning_fields':'plan_update' in properties and 'current_plan_item' in properties,
+                    'normal_required':all(key in parameters.get('required',[]) for key in ('evaluation_previous_goal','memory','next_goal','action')),
+                    'operation_enum':operation_enum(parameters),
+                    'provider_thinking_disabled':request.get('thinking')=={'type':'disabled'},
+                    'output_limit':request.get('max_tokens')}
             if mode=='trace_probe' or mode.startswith('credential_form_probe_'):
                 model_calls[-1]['trace_in_model_prompt']=b'safe-step-trace' in raw
             parts = []
@@ -60,6 +75,8 @@ async def verify_login(
                         item.get("text", "") for item in value if isinstance(item, dict)
                     )
             text = "\n".join(parts)
+            if mode.startswith('batch_'):
+                model_calls[-1]['discovery_context_seen']=all(key in text for key in ('starting_urls','account_origin','intent_scope'))
             model_calls[-1]['identity_feedback_code_seen']='identity_element_ambiguous' in text
             if mode=='method_feedback':
                 model_calls[-1]['method_feedback_code_seen']='browser_method_element_ambiguous' in text
@@ -261,7 +278,33 @@ async def verify_login(
                 action={'report_connection':{'subject_selector':'#subject'}}
             elif step == 4 and (mode != "owner_otp" or workflow.get("allow_identity")):
                 action = {"report_connection": {"subject_selector": "#subject"}}
-            model_calls[-1]["action"] = list(action)[0]
+            actions=[action]
+            if mode.startswith('batch_') and workflow['kind']=='login':
+                fields={}
+                for line in lines:
+                    marker=re.search(r'\[(\d+)\]',line)
+                    if not marker:
+                        continue
+                    if '<input' in line.lower():
+                        role='password' if re.search(r'type=[\"\']?password\b',line,re.I) else 'username' if re.search(r'(?:name|autocomplete)=[\"\']?username\b',line,re.I) else None
+                        if role:
+                            fields[role]=int(marker[1])
+                    elif '<button' in line.lower():
+                        fields['submit']=int(marker[1])
+                if step==0 and 'username' in fields and 'password' in fields:
+                    actions=[{'guarded_input':{'index':fields['username'],'text':'saved_username','clear':True}},
+                        {'guarded_input':{'index':fields['password'],'text':'<secret>saved_password</secret>','clear':True}}]
+                    if mode=='batch_navigation':
+                        actions[0]={'guarded_navigate':{'url':board.origin+'/login?fresh=1'}}
+                elif mode=='batch_login' and step==1 and 'submit' in fields:
+                    actions=[{'guarded_click':{'index':fields['submit']}}]
+                elif mode=='batch_login' and step==2:
+                    actions=[{'inspect_self':{}}]
+                elif mode=='batch_login' and step==3:
+                    actions=[{'report_connection':{'subject_selector':'#subject'}}]
+                else:
+                    actions=[{'done':{'success':False,'text':'Controlled batch boundary diagnostic completed.'}}]
+            model_calls[-1]["action"] = list(actions[0])[0]
             from lead_app.config import STATE
 
             (STATE / "synthetic-model-status.json").write_text(json.dumps(model_calls))
@@ -272,7 +315,11 @@ async def verify_login(
                 }
                 for index, line in candidates
             ]
-            content = json.dumps({"action": [action]})
+            content = json.dumps({'thinking':'Use only the assigned page and authorized tools.',
+                'evaluation_previous_goal':'Controlled offline step.','memory':'Controlled fixture state.',
+                'next_goal':'Complete the assigned bounded task.','current_plan_item':0,
+                'plan_update':['Complete the controlled assigned task.'] if step==0 else None,
+                'action':actions})
             tool = request.get("tools", [{"function": {"name": "AgentOutput"}}])[0][
                 "function"
             ]["name"]

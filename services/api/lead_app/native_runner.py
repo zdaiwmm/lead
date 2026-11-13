@@ -114,11 +114,20 @@ async def connect(controller,gateway_endpoint):
             await asyncio.wait_for(child.communicate(),5)
 
 
+def discovery_task_context(task,account,intent):
+    """Original task pages and intent constraints are data, never new authority."""
+    scope=intent.get('scope') or {}
+    return {'starting_urls':task['input']['spec']['payload'].get('target_urls',[]),
+        'account_origin':account['connection_origin'],'intent_scope':{
+            'target_scope':scope.get('target_scope'),'target_ids':scope.get('target_ids',[]),
+            'excluded_targets':scope.get('excluded_targets',[])}}
+
+
 async def run_task(controller,gateway_endpoint,*,kind,goal):
     """One bounded SDK fragment on the current original task and budget ledger."""
     from .admin_settings import for_agent
     aid=controller.actor.aid
-    task,account,_=await asyncio.to_thread(controller.snapshot)
+    task,account,intent=await asyncio.to_thread(controller.snapshot)
     scope=await controller.start()
     settings,version=for_agent(aid,'models')
     model=resolve_model(settings['default_model'])
@@ -139,6 +148,7 @@ async def run_task(controller,gateway_endpoint,*,kind,goal):
             script=ROOT/'scripts/browser_use_runner.py'
     folder=STATE/'browser-use-runs'/('task-'+controller.task_id+'-'+uid())
     payload={'native_scope':scope,'native_kind':kind,'native_goal':goal,'agent_id':aid,'run_id':controller.task_id,
+        'discovery_context':discovery_task_context(task,account,intent) if kind=='discovery' else None,
         'sensitive_data':{'bound_account_subject':account['external_account_id']},
         'url':controller.page.url,'goal':goal,'command_path':'native/task-command','gateway_endpoint':gateway_endpoint,
         'gateway_token':internal_token(),'model':model,'model_socket':model_socket,'max_steps':20,'max_requests':min(8,settings['max_model_requests']),
