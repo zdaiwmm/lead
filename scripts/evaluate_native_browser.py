@@ -14,7 +14,7 @@ import os
 import stat
 import time
 from contextlib import ExitStack, contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -22,6 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 STAGES = ('login', 'discover_publish', 'publish', 'discover_reply', 'reply', 'reconcile')
 FRAGMENT = {'requests': 8, 'tokens_and_reserved_units': 200000, 'active_steps': 20,
             'seconds': 180, 'output_tokens': 8000}
+PER_SITE_FRAGMENTS = 10  # Four single fragments and two discovery tasks of at most three.
+TWO_SITE_REQUESTS = 2 * PER_SITE_FRAGMENTS * FRAGMENT['requests']
+TWO_SITE_UNITS = 2 * PER_SITE_FRAGMENTS * FRAGMENT['tokens_and_reserved_units']
 
 
 def sha(value):
@@ -41,19 +44,19 @@ def source_manifest(root=ROOT):
 
 
 def plan(root=ROOT):
-    return {'version': 'native-c22-six-tasks-v3', 'state': 'draft',
+    return {'version': 'native-c22-six-tasks-v4', 'state': 'draft',
             'source_hashes': source_manifest(root), 'private_config_sha256': None,
             'runtime_manifest_sha256': None, 'site_adapter_sha256': {}, 'model': None,
             'provider_credential_sha256': None,
             'stages': list(STAGES), 'fragment': FRAGMENT,
-            'per_site': {'fragments': 6, 'requests': 48, 'tokens_and_reserved_units': 1200000},
-            'two_sites': {'requests': 96, 'tokens_and_reserved_units': 2400000},
+            'per_site': {'fragments': PER_SITE_FRAGMENTS, 'requests': TWO_SITE_REQUESTS//2, 'tokens_and_reserved_units': TWO_SITE_UNITS//2},
+            'two_sites': {'requests': TWO_SITE_REQUESTS, 'tokens_and_reserved_units': TWO_SITE_UNITS},
             'optional_business': {'requests': 1, 'tokens_and_reserved_units': 40000,
                                   'repair': False, 'business_execution': False},
             'execution_allowance': None,
-            'total_new_ceiling': {'requests': 97, 'tokens_and_reserved_units': 2440000},
+            'total_new_ceiling': {'requests': TWO_SITE_REQUESTS+1, 'tokens_and_reserved_units': TWO_SITE_UNITS+40000},
             'prior_unknown_units': 80000,
-            'stop': 'First failed/waiting/unknown paid stage or unmeasured request stops all later stages and sites; no retries or paid continuation.',
+            'stop': 'First failed/unknown paid stage, unmeasured request or other waiting stops all later stages and sites. Only the original discovery task may continue its verified native_discovery checkpoint at the server due time, at most three total fragments; no retry of a failed stage.',
             'seed': 'Separate zero-model SDK input/click of the server-learned publish method; lose its acknowledgement once. Never manufacture unknown in SQL.',
             'site_protocol': ['case_id', 'origin', 'entry_url', 'target_url', 'username', 'password',
                               'expected_subject', 'listener_port', 'snapshot()', 'arm_drop_ack()', 'close()'],
@@ -106,9 +109,9 @@ def validate_run_allowance(allowance):
     if allowance is None:
         return
     if (not isinstance(allowance, dict) or set(allowance) != {'requests', 'tokens_and_reserved_units'}
-            or type(allowance['requests']) is not int or not 0 <= allowance['requests'] <= 96
+            or type(allowance['requests']) is not int or not 0 <= allowance['requests'] <= TWO_SITE_REQUESTS
             or type(allowance['tokens_and_reserved_units']) is not int
-            or not 0 <= allowance['tokens_and_reserved_units'] <= 2400000):
+            or not 0 <= allowance['tokens_and_reserved_units'] <= TWO_SITE_UNITS):
         raise ValueError('invalid_aggregate_native_allowance')
 
 
@@ -241,7 +244,60 @@ class NativeCase:
             return all_rows(c, 'SELECT id,state,units,pricing_snapshot FROM lead.budget_reservations'), all_rows(
                 c, 'SELECT reservation_id,units,details FROM lead.usage_events')
 
+    def discovery_due(self, name, ref, result):
+        if name not in ('discover_publish', 'discover_reply') or result.get('outcome') != 'waiting' or result.get('failure_code'):
+            return None
+        row = self.row(ref)
+        runtime = (row.get('result') or {}).get('runtime') or {}
+        checkpoint, wait = result.get('checkpoint'), result.get('wait')
+        count = (runtime.get('native_progress') or {}).get('fragments')
+        if (row.get('type') != 'growth.account' or row.get('state') != 'planned'
+                or str(row.get('id')) != str(ref['task_id'])
+                or row.get('input', {}).get('task_generation') != ref['task_generation']
+                or row.get('input', {}).get('spec', {}).get('purpose') != 'discover'
+                or type(count) is not int or not 1 <= count < 3
+                or not isinstance(checkpoint, dict) or checkpoint.get('stage') != 'native_discovery'
+                or not checkpoint.get('execution_ref') or checkpoint != runtime.get('checkpoint')
+                or not isinstance(wait, dict) or wait != runtime.get('wait')
+                or wait.get('reason') != 'bounded_browser_fragment' or wait.get('producer') != 'account_connection'
+                or wait.get('responsibility') != 'product' or wait.get('recovery_action') != 'recheck'
+                or str(wait.get('episode_root')) != str(ref['task_id'])):
+            return None
+        try:
+            due = datetime.fromisoformat(wait['check_at'])
+            return due if due.tzinfo is not None else None
+        except (KeyError, TypeError, ValueError):
+            return None
+
     async def perform(self, name, ref, *, expected='completed', seed=False, now=None):
+        fragments = []
+        start = len(self.report['stages'])
+        for number in range(1, 4):
+            try:
+                result = await self.perform_fragment(name, ref, expected=expected, seed=seed, now=now)
+            finally:
+                if not seed and len(self.report['stages']) > start + bool(fragments):
+                    fragment = self.report['stages'].pop()
+                    fragment['fragment'] = number
+                    fragments.append(fragment)
+                    stage = dict(fragment)
+                    stage.pop('fragment', None)
+                    for field in ('requests', 'reservation_units', 'source_post_delta', 'seconds', 'request_ceiling'):
+                        stage[field] = sum(item[field] for item in fragments)
+                    for field in ('workers', 'reservations', 'usage'):
+                        stage[field] = [item for fragment in fragments for item in fragment[field]]
+                    stage['fragments'] = list(fragments)
+                    self.report['stages'][start:] = [stage]
+                    self.persist()
+            if result['outcome'] != 'waiting':
+                return result
+            due = None if seed or number == 3 else self.discovery_due(name, ref, result)
+            if due is None:
+                raise AcceptanceStop('bounded_stage_failed:' + name)
+            await asyncio.sleep(max(0, (due-datetime.now(timezone.utc)).total_seconds()))
+        raise AcceptanceStop('bounded_stage_failed:' + name)
+
+    async def perform_fragment(self, name, ref, *, expected='completed', seed=False, now=None):
         from lead_app.config import STATE
         from lead_app.growth.runtime import advance, execute, finish
         before, prior_usage = self.ledger()
@@ -285,7 +341,8 @@ class NativeCase:
         self.report.pop('active_stage', None)
         self.persist()
         verify_run_spend(self.run_allowance, current, usage)
-        if (result['outcome'] != expected or len(fresh) != (0 if seed else 1)
+        continuing = not seed and self.discovery_due(name, ref, result) is not None
+        if (result['outcome'] != expected and not continuing or len(fresh) != (0 if seed else 1)
                 or requests > stage['request_ceiling'] or stage['reservation_units'] > (0 if seed else FRAGMENT['tokens_and_reserved_units'])
                 or stage['seconds'] > 180 or any(row['state'] != 'settled' for row in fresh)
                 or any(row['usage'].get('billing_unknown') or row['usage'].get('unmeasured_requests')
@@ -300,7 +357,7 @@ class NativeCase:
                 or not 1 <= row['usage']['vision_images_sent'] <= row['usage'].get('request_count', 0)
                 for row in workers):
             raise AcceptanceStop('visual_image_missing_or_invalid:' + name)
-        if sum(row['requests'] for row in self.report['stages']) > 48:
+        if sum(row['requests'] for row in self.report['stages']) > TWO_SITE_REQUESTS//2:
             raise AcceptanceStop('case_request_limit')
         return result
 

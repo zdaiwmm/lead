@@ -13,7 +13,7 @@ def test_default_prereg_is_a_draft_with_exact_bounded_stages(tmp_path):
     draft = plan()
     assert draft['state'] == 'draft' and draft['stages'] == list(STAGES)
     assert FRAGMENT == {'requests': 8, 'tokens_and_reserved_units': 200000, 'active_steps': 20, 'seconds': 180, 'output_tokens': 8000}
-    assert draft['total_new_ceiling'] == {'requests': 97, 'tokens_and_reserved_units': 2440000}
+    assert draft['total_new_ceiling'] == {'requests': 161, 'tokens_and_reserved_units': 4040000}
     path = tmp_path/'draft.json'
     private_write(path, draft)
     assert path.stat().st_mode & 0o077 == 0
@@ -84,8 +84,8 @@ def test_aggregate_allowance_stops_unmeasured_or_insufficient_budget(reservation
 
 
 @pytest.mark.parametrize('allowance', [
-    {'requests': 97, 'tokens_and_reserved_units': 480000},
-    {'requests': 96, 'tokens_and_reserved_units': 2400001},
+    {'requests': 161, 'tokens_and_reserved_units': 480000},
+    {'requests': 160, 'tokens_and_reserved_units': 4000001},
     {'requests': True, 'tokens_and_reserved_units': 480000},
 ])
 def test_aggregate_allowance_cannot_expand_the_registered_native_ceiling(allowance):
