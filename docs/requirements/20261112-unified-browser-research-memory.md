@@ -922,6 +922,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 第四次真实尝试`b5d9b54 / 67ac7d76…`在A/login按约停止：8请求/21478 reported tokens（20549输入/929输出，14720缓存为输入子集）、16.763秒，最终worker结果和原usage均完整、unknown=false/unmeasured0，40000预留settled、period spent21478/reserved0。认证POST0、业务Action0，Task waiting_user，A后续/B均未运行。worker最终错误仅留下三条request-limit、text空、history steps12；不能把本地12步当12实际请求，也不能据无operation字段的200 telemetry推断模型选了什么。先补不含文本/值/selector/URL/私密异常的有界动作/错误码投影，停止无诊断付费尝试，不凭猜测放宽登录门禁。原DB/nonce/报告、前三次失败及第三次unknown保留，进程0、本轮测试env模型key已移除。native已测23请求/60767 tokens，另第三次保守8位/40000未知，累计扣31请求位/100767单位；新增授权余额现73请求/400210单位，不追加额度。精确head的PR快速CI`43392358229/1`通过；镜像检查`43392358234/1`在未改脚本的公开InRelease TLS连接前置5秒超时，签名/apt未执行，只读诊断留证并仅重试该失败检查，仍须核实际结果。
 
+- `a07d1f3`（源`24e6717`）补有界安全诊断并独立窄审接受：只投影既有SDK history中的固定操作名/错误码、有限索引及结果状态，最多32步、每步8项，0600原子落盘；不保存参数、正文、身份、selector、URL或原异常，不改变观察、权限、提示、预算或重试。结构/写盘异常只标记不可用并保留meter，取消继续传播。实际SDK先留缺trace红及RootModel形状红，最终同一A-only假响应例1项8.193秒通过：失效索引、错误凭据placeholder两类早期错误均留存，随后原任务/私有self/connected完成，7假HTTP及7条完整usage、双凭据literal false、正常进程退出、测试库清理。五项执行源码及packaged runner均精确对账，runner blob冻结为`16fb499…e8c868`，其余10项不变。主集成61项/2项专用Linux skip，另184项交付合同、全静态及884文件凭据扫描通过。该投影仅作模型提案/工具结果诊断，不作身份、源站发送或计费凭证，也不能反推未留动作记录的第四次行为。两次镜像CI在不同runner均于单镜像连接前置超时，原签名/apt检查未运行，下一head自然重验后再决定可达性修复，未改校验规则。尚无第五次付费结果，授权余额73/400210不变。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。

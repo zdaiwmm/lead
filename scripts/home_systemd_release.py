@@ -1188,7 +1188,7 @@ UNIFIED_BROWSER_FILES = {
     'infra/migrations/versions/0033_unified_browser.py': '8f75f097ad91baac8295537e6d5a52b49b503693',
     'infra/migrations/sql/0033_unified_browser.sql': '2328c5a253438f1b157d24cf71f81b18075485b8',
     'scripts/browser_namespace.py': '7ecb47f233761b910317126d9d15e8edfb9fe21b',
-    'scripts/browser_use_runner.py': 'ee306bac1d191616495f12561cb32fdc178f1533',
+    'scripts/browser_use_runner.py': '16fb49991799383260e59fc99bc59571dee8c868',
     'scripts/build_home_image.sh': '45e639192d96135a2f8eaf38077670740a29e0a7',
     'scripts/build_browser_runtime.py': 'cbc4d3d3521a2fe50c589813cf0d3956289ca94a',
     'requirements.browser-use.lock.txt': '9105c7748d6aa830f312114e4f9d3e1431e4f911',
