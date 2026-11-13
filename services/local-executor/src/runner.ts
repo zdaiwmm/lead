@@ -98,6 +98,8 @@ export class Runner {
       return;
     const reconcileOnly = record.state === "execution_unknown";
     if (reconcileOnly && !record.thread_id) return;
+    const recovering = reconcileOnly ||
+      ["starting", "running", "waiting_user", "reconciling"].includes(record.state);
     const payload = record.payload,
       cwd = this.store.workspace(payload.session_key),
       rpc = this.factory(payload, cwd);
@@ -106,6 +108,25 @@ export class Runner {
       finish = resolve;
     });
     this.active.set(record.id, { rpc, finish });
+    // Native notifications may precede the RPC ACK or a history response. Keep
+    // them by turn ID until the ACK or original-request history proves ownership.
+    const messages = new Map<string, string>(), completed = new Map<string, Dict>();
+    let provenTurn: string | undefined;
+    const proveTurn = (turnId: string) => {
+      provenTurn = turnId;
+      this.store.update(record.id, {
+        turn_id: turnId,
+        ...(messages.has(turnId) ? { last_message: messages.get(turnId) } : {}),
+      });
+      this.store.event(record.id, "request/started", {
+        thread_id: record.thread_id, turn_id: turnId,
+      });
+      return completed.get(turnId);
+    };
+    const finishTurn = (turn: Dict) => {
+      this.complete(record, turn.status, turn.id, turn.items, recovering);
+      finish();
+    };
     rpc.onNotification((method, params) => {
       if (method === "connection/closed") {
         if (!terminal.has(record.state)) {
@@ -124,30 +145,23 @@ export class Runner {
       if (!/^(thread\/|turn\/|item\/|error$)/.test(method)) return;
       this.store.event(record.id, method, params);
       if (
-        method === "turn/started" && params.threadId === record.thread_id &&
-        !terminal.has(record.state) && params.turn?.id &&
-        (record.turn_id ? params.turn.id === record.turn_id : record.state === "starting")
-      ) {
-        this.store.update(record.id, {
-          turn_id: params.turn?.id,
-          state: "running",
-        });
-      }
-      if (
         method === "item/completed" &&
         params.threadId === record.thread_id &&
         params.item?.type === "agentMessage" &&
-        (!record.turn_id || params.turnId === record.turn_id)
-      )
-        this.store.update(record.id, { last_message: params.item.text });
+        params.turnId
+      ) {
+        messages.set(params.turnId, params.item.text);
+        if (params.turnId === provenTurn)
+          this.store.update(record.id, { last_message: params.item.text });
+      }
       if (
         method === "turn/completed" &&
         params.threadId === record.thread_id &&
-        (!record.turn_id || params.turn.id === record.turn_id)
+        params.turn?.id
       ) {
         const turn = params.turn;
-        this.complete(record, turn.status, turn.id, turn.items);
-        finish();
+        completed.set(turn.id, turn);
+        if (turn.id === provenTurn) finishTurn(turn);
       }
     });
     rpc.onRequest((id, method, params) => {
@@ -193,13 +207,9 @@ export class Runner {
           excludeTurns: true,
         });
         this.store.update(record.id, { thread_id: thread });
-        if (
-          reconcileOnly ||
-          ["starting", "running", "waiting_user", "reconciling"].includes(
-            record.state,
-          )
-        ) {
-          await this.reconcile(record, rpc, finish);
+        this.store.event(record.id, "request/started", { thread_id: thread });
+        if (recovering) {
+          await this.reconcile(record, rpc, finish, proveTurn);
           if (record.cancel_requested && record.state === "running")
             await rpc.request("turn/interrupt", { threadId: record.thread_id, turnId: record.turn_id });
           await done;
@@ -216,6 +226,7 @@ export class Runner {
         thread = started.thread.id;
         this.store.update(record.id, { thread_id: thread });
         this.store.setThread(payload.session_key, thread!);
+        this.store.event(record.id, "request/started", { thread_id: thread });
         this.store.event(record.id, "thread/started", {
           thread: started.thread,
         });
@@ -242,6 +253,9 @@ export class Runner {
           turn_id: result.turn.id,
           state: "running",
         });
+      const early = proveTurn(result.turn.id);
+      if (early || result.turn.status && result.turn.status !== "inProgress")
+        finishTurn(early || result.turn);
       if (record.cancel_requested && !terminal.has(record.state))
         await rpc.request("turn/interrupt", { threadId: record.thread_id, turnId: record.turn_id });
       await done;
@@ -304,7 +318,12 @@ export class Runner {
         : {}),
     });
   }
-  async reconcile(record: RequestRecord, rpc: RpcLike, finish: () => void) {
+  async reconcile(
+    record: RequestRecord,
+    rpc: RpcLike,
+    finish: () => void,
+    proveTurn: (turnId: string) => Dict | undefined,
+  ) {
     this.store.update(record.id, { state: "reconciling" });
     let cursor: string | undefined;
     do {
@@ -317,18 +336,19 @@ export class Runner {
       for (const turn of page.data || []) {
         // Once known, the native turn ID is authoritative. Later conversation
         // turns may quote an old request marker without belonging to it.
+        const marker = "[lead_request:" + record.id + "]";
         const match = record.turn_id
           ? turn.id === record.turn_id
-          : JSON.stringify(turn.items || []).includes(
-              "[lead_request:" + record.id + "]",
-            );
+          : (turn.items || []).some((item: Dict) => item.type === "userMessage" &&
+              (item.content || []).some((part: Dict) => typeof part.text === "string" &&
+                (part.text === marker || part.text.startsWith(marker + "\n"))));
         if (!match) continue;
-        this.store.update(record.id, { turn_id: turn.id });
-        if (turn.status === "inProgress") {
+        const observed = proveTurn(turn.id) || turn;
+        if (observed.status === "inProgress") {
           this.store.update(record.id, { state: "running" });
           return;
         }
-        this.complete(record, turn.status, turn.id, turn.items, true);
+        this.complete(record, observed.status, observed.id, observed.items, true);
         finish();
         return;
       }

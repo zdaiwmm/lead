@@ -194,6 +194,89 @@ test("an unknown-turn recovery waits for its request marker before accepting a r
   assert.equal(restored.request("unknown-notification")?.turn_id, "original-turn");
   assert.equal(restored.request("unknown-notification")?.state, "completed");
 });
+test("unknown recovery ignores an unrelated early completion until marker proof", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  store.begin("foreign-completion", payload);
+  store.update("foreign-completion", { thread_id: "thread-1", state: "execution_unknown" });
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/turns/list") {
+      this.listener("turn/completed", { threadId: "thread-1", turn: {
+        id: "other-turn", status: "completed", items: [{ type: "agentMessage", text: '{"ok":false}' }],
+      } });
+      return { data: [{ id: "other-turn", status: "completed", items: [
+        { type: "agentMessage", text: "Quoted historical request [lead_request:foreign-completion]" },
+      ] }, { id: "original-turn", status: "completed", items: [
+        { type: "userMessage", content: [{ text: "[lead_request:foreign-completion]" }] },
+        { type: "agentMessage", text: '{"ok":true}' },
+      ] }], nextCursor: null };
+    }
+    return {};
+  };
+  await new Runner(store, () => rpc as any).command({
+    id: "restore-foreign-completion", request_id: "foreign-completion", kind: "run", payload,
+  });
+  assert.equal(store.request("foreign-completion")?.turn_id, "original-turn");
+  assert.deepEqual(store.request("foreign-completion")?.output, { ok: true });
+  const canonical = store.outbox().filter(event => event.method === "request/started");
+  assert.deepEqual(canonical.map(event => event.params), [
+    { thread_id: "thread-1" }, { thread_id: "thread-1", turn_id: "original-turn" },
+  ]);
+});
+test("unknown recovery retains an original completion arriving before an in-progress history snapshot", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  store.begin("early-original", payload);
+  store.update("early-original", { thread_id: "thread-1", state: "execution_unknown" });
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/turns/list") {
+      this.listener("item/completed", { threadId: "thread-1", turnId: "original-turn",
+        item: { type: "agentMessage", text: '{"ok":true}' } });
+      this.listener("turn/completed", { threadId: "thread-1", turn: {
+        id: "original-turn", status: "completed", items: [],
+      } });
+      return { data: [{ id: "original-turn", status: "inProgress", items: [
+        { type: "userMessage", content: [{ text: "[lead_request:early-original]" }] },
+      ] }], nextCursor: null };
+    }
+    return {};
+  };
+  const runner = new Runner(store, () => rpc as any);
+  const work = runner.command({ id: "restore-early-original", request_id: "early-original", kind: "run", payload });
+  await Promise.race([work, new Promise(resolve => setTimeout(resolve, 100))]);
+  await runner.close();
+  await work;
+  assert.equal(store.request("early-original")?.state, "completed");
+  assert.deepEqual(store.request("early-original")?.output, { ok: true });
+  assert.equal(store.outbox().filter(event => event.method === "result").at(-1)?.params.reconciled, true);
+  assert.equal(rpc.calls.filter(call => call.method === "turn/start").length, 0);
+});
+test("a fresh turn keeps completion before its ACK and emits only proven root pointers", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/start") return { thread: { id: "thread-1" } };
+    if (method === "turn/start") {
+      this.listener("thread/started", { thread: { id: "child-thread" } });
+      this.listener("item/completed", { threadId: "thread-1", turnId: "original-turn",
+        item: { type: "agentMessage", text: '{"ok":true}' } });
+      this.listener("turn/completed", { threadId: "thread-1", turn: {
+        id: "original-turn", status: "completed", items: [],
+      } });
+      return { turn: { id: "original-turn", status: "inProgress", items: [] } };
+    }
+    return {};
+  };
+  await new Runner(store, () => rpc as any).command({
+    id: "early-start", request_id: "early-start", kind: "run", payload,
+  });
+  assert.equal(store.request("early-start")?.state, "completed");
+  assert.deepEqual(store.request("early-start")?.output, { ok: true });
+  assert.deepEqual(store.outbox().filter(event => event.method === "request/started").map(event => event.params), [
+    { thread_id: "thread-1" }, { thread_id: "thread-1", turn_id: "original-turn" },
+  ]);
+  assert.ok(store.outbox().some(event => event.method === "thread/started" && event.params.thread?.id === "child-thread"));
+});
 test("run persists original thread, explicit Sol medium and parsed result; replay does not run twice", async (t) => {
   const store = setup(t),
     rpc = new FakeRpc();
