@@ -247,7 +247,8 @@ class NativeAction(NativeTask):
             raise ValueError('native_task_progress_limit')
         await self.descriptor()
         node=args.get('node') or {}
-        if node.get('target_id') not in (await self.descriptor())['targets']:
+        if (node.get('target_id')!=self.lease['target_id']
+                or node.get('target_id') not in (await self.descriptor())['targets']):
             return {'allowed':False}
         gate=self.actor.native_runtime.gate
         sessions=[sid for sid,info in gate.targets.items() if info['targetId']==node['target_id'] and gate.owners.get(sid)==self.lease['target_id']]
@@ -260,17 +261,17 @@ class NativeAction(NativeTask):
             return {'allowed':False}
         try:
             selectors=self.action['intent']['browser_method']['selectors']
-            result=await gate.send('Runtime.callFunctionOn',{'objectId':identifier,'functionDeclaration':
-                'function(selectors){return {body:this.matches(selectors.editor_body),submit:this.matches(selectors.submit),tag:this.tagName,type:this.type};}',
-                'arguments':[{'value':selectors}],'returnByValue':True},sid)
-            actual=result.get('result',{}).get('value') or {}
+            from .native_selector_identity import match_control
+            key='editor_body' if args.get('name')=='input' else 'submit' if args.get('name')=='click' else None
+            actual=await match_control(self,sid,identifier,selectors.get(key))
+            await self.descriptor()
         finally:
             await gate.send('Runtime.releaseObject',{'objectId':identifier},sid)
         values=args.get('values') or {}
         if args.get('name')=='input':
-            allowed=actual.get('body') and actual.get('tag')=='TEXTAREA' and values.get('text')==self.action['intent']['body']
+            allowed=actual.get('matches') and actual.get('tag')=='TEXTAREA' and values.get('text')==self.action['intent']['body']
         elif args.get('name')=='click':
-            allowed=actual.get('submit') and actual.get('type')=='submit'
+            allowed=actual.get('matches') and actual.get('type')=='submit'
         else:
             allowed=False
         if allowed and args.get('name')=='click':
