@@ -201,9 +201,20 @@ def scoped_session_class():
                 'permissions': [], 'accept_downloads': False, 'auto_download_pdfs': False})
             self._startup_scope = dict(lease)
             self._scope_reader = read_scope
-            await self.refresh_assigned_scope()
-            await self.start()
-            await self.bind_scope(lease, read_scope)
+            try:
+                await self.refresh_assigned_scope()
+                await self.start()
+                await self.bind_scope(lease, read_scope)
+            except BaseException:
+                # This precedes Agent.run's normal finally. Without an
+                # intentional stop, SDK reconnect/event tasks can outlive a
+                # rejected startup and hang asyncio.run's cancellation drain.
+                self._intentional_stop = True
+                try:
+                    await asyncio.wait_for(self.stop(), 2)
+                except (Exception, asyncio.CancelledError):
+                    pass
+                raise
 
         async def bind_scope(self, lease, read_scope):
             self._scope_reader = read_scope
