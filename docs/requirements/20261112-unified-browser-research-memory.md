@@ -1028,6 +1028,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - `c3238ac`固定验收续接，`7de5c4b`集成通用跨页发现文案：编辑器与target_url规则页可以分开，观察规则后回到所需编辑器提案，服务端仍另页独立核验；移除必访私有设置页与隐藏兼容hint的模型提示。未加入A/B网址或选择器配方，权限、片段次数与完整视觉配置不变。独立限定审查 evaluator SHA256 `387dbc8e9a6ff9823ec39a11d9a24381e2f7589f73211d8060c647ad62aa12a2`、goal `e208104193e6af000e882fe347808df53f6a8399adeb43cd0c999808c656758d`；runner新blob `7abc6429011cd5087ca5413b1916ab24969116df`，其余10冻结项不变，2项精确兼容检查通过。root定向126通过/3专用环境skip；误纳入的1个未变DB-only operation-map测试在本机因数据库认证不匹配setup-error，原XML保留且不算行为通过，该功能复用前轮真实DB证据，精确main完整CI仍必验。真实模型回复/B尚未通过。
 
+- A-only实际SDK两页受控验证2项101.639秒通过：点击确实换文档；规则页有许可而无reply编辑器，编辑器页有parent/target/body而无规则；4次点击往返后第5次原方法提案成功，8次纯循环则原checkpoint且无POST。新goal+v4组合已有同Task/代次1的两片实际记录：8次首片planned、原DB due约15秒后第二片1次提案成功/Task succeeded，单stage共9图/9假请求/2笔settled/POST0。原私有测试67.449秒XML仍1红，仅UUID与JSON字符串直接比较的仪器断言；规范化已有report后同Task/gen相等，未重跑SDK/未改XML。原claim token未落盘，后置新token比较断言未执行，不冒称新token实证，复用未变canonical advance/finish约束。core证据 `.state/discovery-click-continuation-final.json` SHA256 `639637ee5d6cdfca31784d5277d94ca3972cdaa755ac3770b3f22462cf767b20`，11项业务/packaged源码和evaluator d9ee84与root一致；新goal/schema在9个实际SDK请求均可见。旧schema测量只查message而未查tool字段，不用于根因结论；受控索引相同亦不能证明旧真实模型点击意图。零真实模型调用，core仍未读B，自己的DB已删；不替代下一真实C22。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
