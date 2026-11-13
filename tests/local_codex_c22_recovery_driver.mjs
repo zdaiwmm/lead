@@ -21,7 +21,8 @@ async function status(){
  assert.ok(response.ok,'original_fixture_status_unavailable');return await response.json();
 }
 const original=await status();
-const before=new Set(original.requests.map(row=>row.id));
+const terminal=new Set(['completed','failed','interrupted','execution_unknown','canceled']);
+const before=new Set(original.requests.filter(row=>row.task_id!==task||terminal.has(row.state)).map(row=>row.id));
 const daemon=new Daemon(store,undefined,undefined,caps);
 let daemonError;
 const running=daemon.run().catch(error=>{daemonError=error;});
