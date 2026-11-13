@@ -114,3 +114,26 @@ async def test_action_poll_keeps_original_pending_controller_after_submit(monkey
     assert not writes
     controller.close.assert_not_awaited()
 
+
+def test_actual_public_read_source_shape_and_producer_are_preserved(monkeypatch):
+    from contextlib import contextmanager
+
+    from lead_app import db, local_executor_tools
+
+    writes=[]
+    @contextmanager
+    def transaction(*args):
+        yield SimpleNamespace(execute=lambda *args:writes.append(args))
+    monkeypatch.setattr(db,'tx',transaction)
+    monkeypatch.setattr(db,'require_agent',lambda *args:{'control_version':4,'config_revision':2})
+    monkeypatch.setattr(db,'one',lambda c,sql,args: {'agent_id':'a','id':'run','state':'running',
+        'control_version':4,'config_revision':2} if 'browser_runs' in sql else {'n':1})
+    observed={'url':'https://source.test/','title':'Actual source','text':'Original source text',
+        'links':['https://t.me/observed_group','https://example.com/actual-link']}
+    result=local_executor_tools._record_public_read({'agent_id':'a'},{'browser_run_id':'run'},observed)
+    assert result['text']=='Original source text'
+    assert result['engine']=='codex-web'
+    assert result['community_links']==[{'href':'https://t.me/observed_group','name':''}]
+    assert result['run_id']=='run' and result['evidence_id']
+    assert 'codex-public-read' in writes[0][0]
+
