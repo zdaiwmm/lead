@@ -76,7 +76,7 @@ class CodexCase(NativeCase):
             await asyncio.sleep(1)
         while True:
             with tx(self.aid) as c:
-                requests=all_rows(c,'SELECT id,state,thread_id,turn_id,usage FROM lead.local_executor_requests WHERE task_id=%s ORDER BY created_at',(ref['task_id'],))
+                requests=all_rows(c,"SELECT id,state,thread_id,turn_id,usage FROM lead.local_executor_requests WHERE task_id=%s AND scope->>'attempt_token'=%s ORDER BY created_at",(ref['task_id'],admitted['claim']['attempt_token']))
             if seed or not requests or all(row['state'] in ('completed','failed','interrupted','execution_unknown','canceled') for row in requests):
                 break
             # A verified business fact may precede Codex's final message. Do not

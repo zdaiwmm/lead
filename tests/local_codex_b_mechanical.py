@@ -45,6 +45,26 @@ def main():
     while True:
         state=post('/fixture/c22/status')
         assert not state['failure'],state['failure']
+        stages=state['cases'].get('b',{}).get('stages',[])
+        if os.environ.get('LEAD_C22_STOP_AFTER_DISCOVERY')=='1' and any(row['stage']=='discover_publish' for row in stages):
+            assert [(row['stage'],row['outcome'],row['source_post_delta']) for row in stages]==[
+                ('login','completed',1),('discover_publish','completed',0)]
+            assert all(not request.get('thread_id') for row in stages for request in row['requests'])
+            target=Path(os.environ['LEAD_C22_BINDING_STATE'])
+            assert not target.exists(),'existing_connector_binding_must_not_be_replaced'
+            target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            from local_codex_c22_mechanical import url
+            target.write_text(json.dumps({'version':1,'requests':{},'sessions':{},'events':[],'controls':[],
+                'binding':{'url':url,'token':bearer,'epoch':epoch,'device_id':device['device_id'],
+                    'name':'Original synthetic setup, handed to official daemon'}}))
+            target.chmod(0o600)
+            state['mechanical_setup']={'model_requests':0,'real_model':False,
+                'original_device_binding_saved':True,'stages':['login','discover_publish']}
+            out=Path(os.environ['LEAD_C22_MECHANICAL_REPORT'])
+            out.write_text(json.dumps(state,indent=2))
+            out.chmod(0o600)
+            print(json.dumps(state['mechanical_setup']))
+            return
         if state['cases'].get('b',{}).get('completed'):
             assert rejected_targets==2
             state['b_dom_diagnostic']={'model_requests':0,'real_model':False,
