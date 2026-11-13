@@ -77,6 +77,22 @@ def test_discovery_prompt_url_projection_omits_url_secrets_and_malformed_scope_v
     assert 'private' not in str(result)
 
 
+@pytest.mark.parametrize('native_scope,kind,expected',[
+    ({'target_id':'owned'},'discovery',8),
+    ({'target_id':'owned'},'action',3),
+    ({'target_id':'owned'},'connection',3),
+    ({'target_id':'owned'},'reconcile',3),
+    (None,'discovery',3),
+])
+def test_discovery_sdk_error_capacity_preserves_other_worker_limits(native_scope,kind,expected):
+    call=next(node for node in ast.walk(runner_tree()) if isinstance(node,ast.Call)
+        and isinstance(node.func,ast.Name) and node.func.id=='Agent')
+    expression=next(arg.value for arg in call.keywords if arg.arg=='max_failures')
+    limit=eval(compile(ast.Expression(expression),'<failure-capacity>','eval'),
+        {'native_scope':native_scope,'data':{'native_kind':kind}})
+    assert limit==expected
+
+
 def test_method_identity_hints_are_optional_without_relaxing_observed_editor_fields():
     from pydantic import BaseModel, ConfigDict, Field
 

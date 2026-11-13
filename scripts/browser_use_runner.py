@@ -297,7 +297,7 @@ async def main(data):
             directly_open_url=False,
             enable_planning=bool(native_scope),
             enable_signal_handler=False,
-            max_failures=3,
+            max_failures=8 if native_scope and data.get('native_kind')=='discovery' else 3,
             max_actions_per_step=2 if native_scope else 1,
             llm_timeout=model_timeout,
             step_timeout=45,
