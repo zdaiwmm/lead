@@ -45,6 +45,7 @@ export interface RequestRecord {
   pending?: Dict;
   last_message?: string;
   command_ids: string[];
+  cancel_requested?: boolean;
 }
 export interface RpcLike {
   open(): Promise<void>;

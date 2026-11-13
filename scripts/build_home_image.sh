@@ -32,7 +32,8 @@ test ! -e "$stage/services/browser-runtime"
 cp -a "$browser_runtime" "$stage/services/browser-runtime"
 python3 -IB scripts/build_browser_runtime.py "$sha" "$stage/services/browser-runtime" --verify
 test -s "$local_executor"
-tar -tzf "$local_executor" | grep -qx 'package/dist/cli.js'
+tar -tzf "$local_executor" | rg -qx 'package/dist/cli.js'
+[[ $(tar -xOzf "$local_executor" package/REVISION) == "$sha" ]]
 cp "$local_executor" "$stage/services/local-executor/lead-local-executor.tgz"
 mv "$stage/apps/web" "$stage/web"
 mv "$stage/infra/home-browser-frames" "$stage/home-browser-frames"

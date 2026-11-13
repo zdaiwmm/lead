@@ -10,6 +10,7 @@ from .cadence_events import wait_result, wake_clocks
 from .channel_delivery import current
 from .config import env
 from .db import all_rows, j, one, tx
+from .local_executor_client import native_continuation
 from .scope import scoped_activity
 
 
@@ -225,8 +226,11 @@ def select(args):
         return {"delay": 300, "reason": reason}, None
 
 
+
+
 @activity.defn
 @scoped_activity
+@native_continuation("channel_research")
 @managed_execution("channel_research")
 async def channel_research_tick(args: dict):
     from .operating_kernel import run_work

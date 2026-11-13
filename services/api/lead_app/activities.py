@@ -18,6 +18,7 @@ from .channels import store_target
 from .config import any_model_configured
 from .db import all_rows, append_message, emit, j, one, record, require_agent, tx
 from .domain import agent_detail, metrics, set_control, snapshot_preferences
+from .local_executor_client import native_continuation
 from .model import ContentDecision, Decision, ModelUnavailable, run_model
 from .operating_playbooks import (
     PLANNING_INSTRUCTIONS,
@@ -89,9 +90,8 @@ def direct_control(text, intent):
 @activity.defn
 @scoped_activity
 async def chat_job(args: dict):
-    from . import local_executor
-    from .local_executor_client import activity_jobs, execution_context
-    if local_executor.enabled(args["agent_id"]):
+    from .local_executor_client import activity_jobs, execution_context, uses_native
+    if uses_native(args["agent_id"], key="chat:" + args["job_id"]):
         async def continue_chat():
             context = execution_context.set({"key": "chat:" + args["job_id"], "session_key": "chat:" + args["agent_id"]})
             try:
@@ -174,7 +174,8 @@ async def _chat_job(args: dict):
         url = website_for_message(
             message["content"]["text"], history, detail["business"]
         )
-        if url and any_model_configured(aid):
+        from . import local_executor
+        if url and any_model_configured(aid) and not local_executor.enabled(aid):
             page = await browser.command("open", {"url": url})
         from .growth.store import enabled as growth_enabled
         from .growth.views import render_growth
@@ -587,6 +588,7 @@ def prepare_action(aid, task_id):
 
 @activity.defn
 @scoped_activity
+@native_continuation("publish")
 @managed_execution("publish")
 async def execute_task(args: dict):
     aid, task_id = args["agent_id"], args["task_id"]

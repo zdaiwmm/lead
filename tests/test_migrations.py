@@ -93,7 +93,7 @@ def test_channel_upgrade_joins_installed_restore_history(isolated_database, base
     upgrade(isolated_database, roles=False)
     upgrade(isolated_database, roles=False)
     with psycopg.connect(**isolated_database) as c:
-        assert c.execute("SELECT version_num FROM lead_migration_version").fetchall() == [("0033_unified_browser",)]
+        assert c.execute("SELECT version_num FROM lead_migration_version").fetchall() == [("0034_local_executor",)]
         after = c.execute("""SELECT md5(prosrc),prosecdef,proconfig,proacl::text FROM pg_proc
             WHERE oid=to_regprocedure('lead.local_restore_ready()')""").fetchone()
         assert after[:3] == ("f0b323f641b48d4ab81322cc4f501b42", True, ["search_path=pg_catalog, lead"])

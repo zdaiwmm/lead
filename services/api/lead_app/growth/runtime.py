@@ -73,6 +73,10 @@ def _native_session_condition(c, profile):
 def _resource_condition(c, agent, row, spec):
     """Conditions come from actual references/configuration, never a model-supplied retry key."""
     if spec.kind in ("content", "decision") or _runtime(row).get("failure_stage")=="model":
+        from .. import local_executor
+        if local_executor.enabled(str(agent["id"]), connection=c) or local_executor.bound(str(agent["id"]), task_id=str(row["id"]), connection=c):
+            device = one(c, "SELECT device_id FROM lead.local_executor_projects WHERE agent_id=%s", (agent["id"],))
+            return "codex:" + str((device or {}).get("device_id") or "offline"), digest(["gpt-6.1-sol", "medium", (device or {}).get("device_id")])
         from ..admin_settings import effective, task_connection
         settings, version = effective(c, "models", str(agent["id"]))
         from .agent import PROMPT_VERSION
@@ -679,9 +683,8 @@ async def execute(claim):
         from ..budget import growth_cost_context
         cost_token = growth_cost_context.set({"task_id": str(ref.task_id), "experiment_id": str(row["experiment_id"]) if row["experiment_id"] else None})
         try:
-            from .. import local_executor
-            from ..local_executor_client import execution_context
-            native = local_executor.enabled(str(ref.agent_id))
+            from ..local_executor_client import execution_context, uses_native
+            native = uses_native(str(ref.agent_id), task_id=str(ref.task_id))
             context_token = execution_context.set({"key": "task:" + str(ref.task_id) + ":" + str(ref.task_generation),
                 "task_id": str(ref.task_id), "session_key": "decision:" + str(ref.agent_id) + ":" + str(row["input"].get("goal_revision", 1))
                 if claim.get("kind") == "decision" else "task:" + str(ref.task_id)})
@@ -734,7 +737,8 @@ def recover_due(aid, now=None, cursor=None):
             c.execute("UPDATE lead.growth_experiments SET recovery_checked_at=%s WHERE id=%s",(now,experiment["id"]))
             costs = question_costs(c,experiment["question_key"])
             expired = datetime.fromisoformat(experiment["specification"]["review_at"])<=now
-            if not expired and costs["committed_units"] < costs["limit_units"]:
+            from .. import local_executor
+            if not expired and (local_executor.enabled(aid, connection=c) or costs["committed_units"] < costs["limit_units"]):
                 continue
             progress = experiment_progress(c,experiment["id"])
             c.execute("""UPDATE lead.growth_experiments SET state='closed',closed_at=now(),updated_at=now(),revision=revision+1,
@@ -1092,9 +1096,8 @@ async def growth_advance(args: dict):
 @activity.defn
 @scoped_activity
 async def growth_execute(args: dict):
-    from .. import local_executor
-    from ..local_executor_client import activity_jobs
-    if local_executor.enabled(args["agent_id"]):
+    from ..local_executor_client import activity_jobs, uses_native
+    if uses_native(args["agent_id"], task_id=args["claim"]["ref"]["task_id"]):
         claim = args["claim"]
         key = "growth:" + str(claim["ref"]["task_id"]) + ":" + claim["attempt_token"]
         with tx(args["agent_id"]) as c:

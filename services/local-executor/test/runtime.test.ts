@@ -67,6 +67,15 @@ function setup(t: any) {
   t.after(() => rmSync(folder, { recursive: true, force: true }));
   return new Store(folder);
 }
+test("interrupting a queued request never starts its model turn", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  const runner = new Runner(store, () => rpc as any);
+  const work = runner.command({ id: "queued", request_id: "cancel-before-start", kind: "run", payload });
+  await runner.command({ id: "cancel", request_id: "cancel-before-start", kind: "interrupt", payload: {} });
+  await work;
+  assert.equal(store.request("cancel-before-start")?.state, "interrupted");
+  assert.equal(rpc.calls.filter(c => c.method === "turn/start").length, 0);
+});
 test("run persists original thread, explicit Sol medium and parsed result; replay does not run twice", async (t) => {
   const store = setup(t),
     rpc = new FakeRpc();

@@ -295,13 +295,17 @@ class AgentSetupEdit(AgentSetupProfile):
 @app.post("/api/agents/setup/analyze")
 async def analyze_website(body: website_brief.Website, request: Request):
     from . import local_executor
-    if local_executor.enabled():
-        from .local_executor_client import activity_jobs, execution_context
-        key = "website:" + current_tenant() + ":" + str(body.request_id or hashlib.sha256(body.product_url.encode()).hexdigest())
+    aid = str(body.agent_id) if body.agent_id else None
+    if aid:
+        with tx(aid) as c:
+            require_agent(c, aid)
+    from .local_executor_client import activity_jobs, execution_context, uses_native
+    key = "website:" + current_tenant() + ":" + str(body.request_id or hashlib.sha256(body.product_url.encode()).hexdigest())
+    if uses_native(aid, key=key):
         async def continue_analysis():
-            context = execution_context.set({"key": key, "session_key": key})
+            context = execution_context.set({"key": key, "session_key": key, "agent_id": aid or local_executor.default_agent()})
             try:
-                return await website_brief.analyze(body.product_url)
+                return await website_brief.analyze(body.product_url, aid)
             finally:
                 execution_context.reset(context)
         return await activity_jobs.step(key, continue_analysis)
@@ -309,7 +313,7 @@ async def analyze_website(body: website_brief.Website, request: Request):
         while (await request.receive())["type"] != "http.disconnect":
             pass
 
-    work = asyncio.create_task(website_brief.analyze(body.product_url))
+    work = asyncio.create_task(website_brief.analyze(body.product_url, aid) if aid else website_brief.analyze(body.product_url))
     closed = asyncio.create_task(disconnected())
     try:
         await asyncio.wait((work, closed), return_when=asyncio.FIRST_COMPLETED)
@@ -324,8 +328,22 @@ async def analyze_website(body: website_brief.Website, request: Request):
 
 @app.post("/api/agents/setup/confirm", status_code=201)
 def confirm_website(body: website_brief.ConfirmedBrief):
-    brief = body.model_dump(exclude={"client_id"})
+    brief = body.model_dump(exclude={"client_id", "draft_agent_id"})
+    if body.draft_agent_id:
+        return {"id": domain.confirm_draft_agent(str(body.draft_agent_id), str(body.client_id), brief)}
     return {"id": domain.create_agent(str(body.client_id), confirmed_brief=brief,runtime_engine="growth")}
+
+
+class WebsiteDraft(BaseModel):
+    client_id: UUID
+
+
+@app.post("/api/agents/setup/draft", status_code=201)
+def create_website_draft(body: WebsiteDraft):
+    from .admin_permissions import require
+    require("agents.create", workspace=True)
+    return {"id": domain.create_agent("website-draft:" + str(body.client_id),
+        runtime_engine="growth", draft_client_id=str(body.client_id))}
 
 
 @app.post("/api/agents/setup", status_code=201)

@@ -1951,14 +1951,21 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
             await asyncio.to_thread(community_checkpoints.begin, aid, task["id"], "prepare" if args and args[0].__name__ in {"CommunityDecision", "PlacementDecision", "ReplyRevision"} else "decide")
         started = time.monotonic()
         error = None
+        context_token = None
         try:
             from . import local_executor
+            if local_executor.enabled(aid) and task:
+                from .local_executor_client import execution_context
+                context_token = execution_context.set({"key": "community:" + str(task["id"]),
+                    "task_id": str(task["id"]), "session_key": "community:" + str(task["id"])})
             operation = invoke_model(*args, **kwargs)
             return await operation if local_executor.enabled(aid) else await asyncio.wait_for(operation, timeout=60)
         except Exception as exc:
             error = type(exc).__name__
             raise
         finally:
+            if context_token is not None:
+                execution_context.reset(context_token)
             save_timing("model", started, error)
 
     caller = rpc

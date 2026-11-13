@@ -10,6 +10,7 @@ from .admin_operations import managed_execution
 from .atomic_dispatch import channel_pilot
 from .cadence_events import wait_result
 from .db import emit, j, one, tx
+from .local_executor_client import native_continuation
 from .operating_playbooks import channel_for
 from .scope import current_tenant, scoped_activity
 
@@ -262,8 +263,11 @@ def finish(args, target_id, result):
     return {"delay": 1}
 
 
+
+
 @activity.defn
 @scoped_activity
+@native_continuation("channel_delivery")
 @managed_execution("channel_delivery")
 async def channel_delivery_tick(args: dict):
     from .activities import _publication_cycle

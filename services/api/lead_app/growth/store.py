@@ -185,7 +185,7 @@ def create_experiment(c, aid, data):
     from ..budget import available
     settings, _ = effective(c, "models", aid)
     from .. import local_executor
-    native_executor = local_executor.enabled(aid)
+    native_executor = local_executor.enabled(aid, connection=c)
     budget = None if native_executor else available(c, aid)["available_units"]
     ceiling = 4*2*(settings["max_output_tokens"]+60000//2+1000)
     if native_executor:
@@ -215,7 +215,7 @@ def create_experiment(c, aid, data):
         if one(c,"SELECT count(*) n FROM lead.growth_experiments WHERE state IN ('active','observing')")["n"]>=8:
             raise ValueError("active_experiment_capacity")
         costs = question_costs(c,question_key)
-        if costs["limit_units"] and costs["committed_units"]>=costs["limit_units"]:
+        if not native_executor and costs["limit_units"] and costs["committed_units"]>=costs["limit_units"]:
             raise ValueError("question_limit")
     row = one(c, """INSERT INTO lead.growth_experiments(tenant_id,agent_id,business_profile_id,
         objective_revision,question_key,variation_key,specification)

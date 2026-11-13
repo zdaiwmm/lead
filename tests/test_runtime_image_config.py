@@ -1,9 +1,11 @@
 """An immutable executor image retains its runtime helpers and operator settings."""
 
+import io
 import os
 import stat
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,7 @@ def test_home_image_contains_runtime_dependencies_without_operator_files(tmp_pat
     checkout.mkdir()
     required = (
         "services/api/lead_app/config.py",
+        "services/local-executor/package.json",
         "services/channel_adapters/reddit/entry.py",
         "apps/web/app/page.tsx",
         "infra/home-browser-frames/frame-live.cjs",
@@ -72,14 +75,25 @@ def test_home_image_contains_runtime_dependencies_without_operator_files(tmp_pat
     compressor.write_text('#!/bin/sh\ncp -R "$1" "$2"\n')
     compressor.chmod(0o755)
     image = tmp_path / "image"
+    connector = tmp_path / "connector.tgz"
+    with tarfile.open(connector, "w:gz") as archive:
+        data = b"#!/usr/bin/env node\n"
+        entry = tarfile.TarInfo("package/dist/cli.js")
+        entry.size = len(data)
+        archive.addfile(entry, io.BytesIO(data))
+        revision = (sha + "\n").encode()
+        entry = tarfile.TarInfo("package/REVISION")
+        entry.size = len(revision)
+        archive.addfile(entry, io.BytesIO(revision))
     subprocess.run(
-        ["bash", str(source / "scripts/build_home_image.sh"), sha, str(image), str(runtime)],
+        ["bash", str(source / "scripts/build_home_image.sh"), sha, str(image), str(runtime), str(connector)],
         cwd=checkout, env={**os.environ, "PATH": str(tools) + os.pathsep + str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]},
         check=True,
     )
     # SquashFS inherits this exact staging root; executors traverse it as non-root.
     assert stat.S_IMODE(image.stat().st_mode) == 0o755
     assert (image / "REVISION").read_text() == sha + "\n"
+    assert (image / "services/local-executor/lead-local-executor.tgz").read_bytes() == connector.read_bytes()
     assert os.access(image / "scripts/browser_namespace.py", os.X_OK)
     assert not (image / "services/untracked-private.env").exists()
     assert builder.verify(checkout, sha, image / "services/browser-runtime")["sha"] == sha

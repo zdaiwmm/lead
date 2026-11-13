@@ -58,9 +58,8 @@ async def autonomous_cycle(args: dict):
             return {"stop":True,"delay":86400,"reason":"growth_owns_scope"}
     if str(args["agent_id"]) in resident_cycle_agent_ids(env()):
         return {"delay": 300, "cadence_version": 1, "reason": "device_resident_owns_cycle"}
-    from . import local_executor
-    if local_executor.enabled(args["agent_id"]):
-        from .local_executor_client import activity_jobs, execution_context
+    from .local_executor_client import activity_jobs, execution_context, uses_native
+    if uses_native(args["agent_id"], key="cycle:" + args["cycle_id"]):
         async def continue_cycle():
             context = execution_context.set({"key": "cycle:" + args["cycle_id"],
                 "session_key": "operating:" + args["agent_id"]})

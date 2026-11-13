@@ -9,6 +9,7 @@ import hmac
 import json
 import secrets
 import time
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -64,9 +65,9 @@ def _online(device):
                 and device.get("capabilities", {}).get("ready"))
 
 
-def default_agent():
+def default_agent(*, connection=None):
     """Only the current tenant's explicitly paired, nonarchived projects qualify."""
-    with tx() as c:
+    with (nullcontext(connection) if connection is not None else tx()) as c:
         row = one(c, """SELECT p.agent_id FROM lead.local_executor_projects p
             JOIN lead.agents a ON a.id=p.agent_id AND a.tenant_id=p.tenant_id
             JOIN lead.local_executor_devices d ON d.id=p.device_id AND d.tenant_id=p.tenant_id AND d.agent_id=p.agent_id
@@ -75,10 +76,10 @@ def default_agent():
         return str(row["agent_id"]) if row else None
 
 
-def enabled(aid=None):
+def enabled(aid=None, *, connection=None):
     if aid is None:
-        return default_agent() is not None
-    with tx(str(aid)) as c:
+        return default_agent(connection=connection) is not None
+    with (nullcontext(connection) if connection is not None else tx(str(aid))) as c:
         row = one(c, "SELECT mode FROM lead.local_executor_projects WHERE agent_id=%s", (aid,))
         return bool(row and row["mode"] == "codex")
 
@@ -91,6 +92,18 @@ def configured(aid=None):
         return _online(one(c, """SELECT d.* FROM lead.local_executor_projects p JOIN lead.local_executor_devices d
             ON d.id=p.device_id AND d.tenant_id=p.tenant_id AND d.agent_id=p.agent_id
             WHERE p.agent_id=%s AND p.mode='codex'""", (aid,)))
+
+
+def bound(aid, *, task_id=None, key=None, connection=None):
+    """An in-flight job keeps its original execution route across mode changes."""
+    if not aid or not (task_id or key):
+        return False
+    with (nullcontext(connection) if connection is not None else tx(str(aid))) as c:
+        if task_id:
+            return bool(one(c, """SELECT r.id FROM lead.local_executor_requests r JOIN lead.tasks t ON t.id=r.task_id
+                AND t.tenant_id=r.tenant_id AND t.agent_id=r.agent_id WHERE r.task_id=%s
+                AND coalesce(t.input->>'task_generation','1')=coalesce(r.scope->>'task_generation','1') LIMIT 1""", (task_id,)))
+        return bool(one(c, "SELECT id FROM lead.local_executor_requests WHERE left(request_key,%s)=%s LIMIT 1", (len(key)+1, key+":")))
 
 
 def create_pairing(aid):
@@ -174,7 +187,13 @@ def _request(c, request_id, device=None, lock=False):
     return row
 
 
-def submit(aid, request_key, payload, *, session_key, task_id=None):
+def request_by_key(aid, request_key):
+    with tx(str(aid)) as c:
+        require_agent(c, aid)
+        return one(c, "SELECT * FROM lead.local_executor_requests WHERE request_key=%s", (request_key,))
+
+
+def submit(aid, request_key, payload, *, session_key, task_id=None, resume=False):
     aid = str(aid or default_agent() or "")
     if not aid:
         raise ValueError("executor_not_configured")
@@ -187,16 +206,20 @@ def submit(aid, request_key, payload, *, session_key, task_id=None):
         previous = one(c, "SELECT * FROM lead.local_executor_requests WHERE request_key=%s", (request_key,))
         if previous:
             if previous["request_hash"] != fingerprint:
-                raise ValueError("executor_request_conflict")
+                if (not resume or previous["session_key"] != session_key
+                        or str(previous.get("task_id") or "") != str(task_id or "")
+                        or previous["payload"].get("output_schema") != body.get("output_schema")):
+                    raise ValueError("executor_request_conflict")
             return previous
         project = one(c, "SELECT * FROM lead.local_executor_projects WHERE agent_id=%s", (aid,))
-        if not project or project["mode"] != "codex":
-            raise ValueError("executor_not_configured")
         # A session is pinned to its first device. Re-pairing never migrates an
         # existing conversation or an uncertain send to a different runtime.
         session = one(c, """SELECT device_id FROM lead.local_executor_requests WHERE session_key=%s
             AND device_id IS NOT NULL ORDER BY created_at,id LIMIT 1""", (session_key,))
-        device_id = session["device_id"] if session else project["device_id"]
+        task_binding = one(c, "SELECT device_id FROM lead.local_executor_requests WHERE task_id=%s ORDER BY created_at,id LIMIT 1", (task_id,)) if task_id else None
+        if not project or project["mode"] != "codex" and not (session or task_binding):
+            raise ValueError("executor_not_configured")
+        device_id = session["device_id"] if session else task_binding["device_id"] if task_binding else project["device_id"]
         scope = {"control_version": agent["control_version"]}
         if task_id:
             task = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (task_id,))
@@ -298,6 +321,25 @@ def poll(bearer, epoch, *, instance_id=None, capabilities=None):
         c.execute("""UPDATE lead.local_executor_requests r SET device_id=%s WHERE r.device_id IS NULL AND r.state='queued'
             AND EXISTS(SELECT 1 FROM lead.local_executor_projects p WHERE p.agent_id=r.agent_id
                 AND p.tenant_id=r.tenant_id AND p.mode='codex' AND p.device_id=%s)""", (device["id"], device["id"]))
+        agent = require_agent(c, claims["agent_id"])
+        active = all_rows(c, "SELECT * FROM lead.local_executor_requests WHERE device_id=%s AND state NOT IN ('completed','failed','interrupted','execution_unknown','canceled')", (device["id"],))
+        from .admin_settings import effective
+        settings, _ = effective(c, "models", claims["agent_id"])
+        for request in active:
+            scope = request["scope"]
+            changed = (scope.get("canceled") or scope.get("control_version") != agent["control_version"]
+                or request["payload"].get("web_search") == "live" and not settings["tools"]["public_web"])
+            if request["task_id"]:
+                task = one(c, "SELECT state,input,result FROM lead.tasks WHERE id=%s", (request["task_id"],))
+                runtime = (task.get("result") or {}).get("runtime", {}) if task else {}
+                changed = changed or not task or task["state"] == "canceled" or (
+                    task["state"] != "succeeded" and scope.get("attempt_token") is not None
+                    and runtime.get("attempt_token") != scope["attempt_token"])
+            if changed:
+                c.execute("UPDATE lead.local_executor_requests SET scope=scope||%s WHERE id=%s", (j({"canceled": True}), request["id"]))
+                # A queued row can already have reached the device with a lost
+                # ACK. Send an original-request interrupt, never infer no start.
+                _enqueue(c, request, "interrupt", {}, "business-scope-fence")
         rows = all_rows(c, """SELECT c.id,c.kind,c.request_id,c.payload FROM lead.local_executor_commands c
             JOIN lead.local_executor_requests r ON r.id=c.request_id AND r.agent_id=c.agent_id AND r.tenant_id=c.tenant_id
             WHERE r.device_id=%s AND c.acknowledged_at IS NULL AND r.state NOT IN

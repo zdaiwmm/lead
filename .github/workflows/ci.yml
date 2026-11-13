@@ -145,6 +145,7 @@ jobs:
           npm test
           npm run build
           mkdir -p "$RUNNER_TEMP/lead-local-executor"
+          printf '%s\n' "$GITHUB_SHA" > REVISION
           npm pack --pack-destination "$RUNNER_TEMP/lead-local-executor"
       - run: npm run build
         if: github.event_name != 'pull_request'

@@ -218,9 +218,9 @@ async def run_model(
     workspace_models=None,
     call_key="primary",
 ):
-    from . import local_executor
+    from .local_executor_client import uses_native
 
-    if local_executor.enabled(agent_id):
+    if uses_native(agent_id):
         from .local_executor_client import run_model as native_model
 
         if agent_id:

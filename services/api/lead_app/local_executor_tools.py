@@ -14,7 +14,15 @@ async def call(device, request, name, arguments):
         if (str(device.get('id',device.get('device_id'))) != str(request.get('device_id'))
                 or str(device.get('agent_id')) != str(request.get('agent_id'))
                 or str(device.get('tenant_id')) != str(request.get('tenant_id'))
-                or name != 'lead_public_read' or set(arguments) != {'url'}):
+                or name not in {'lead_public_read','lead_document_read','lead_task_read'}):
+            raise ValueError('executor_tool_scope_changed')
+        if name != 'lead_public_read':
+            if context.get('workspace_request') or set(arguments) != {'id'}:
+                raise ValueError('executor_tool_scope_changed')
+            result = await asyncio.to_thread(_business_read, request, name, arguments['id'])
+            return {'content':[{'type':'text','text':json.dumps(result,ensure_ascii=False,default=str)}],
+                'structuredContent':result}
+        if set(arguments) != {'url'}:
             raise ValueError('executor_tool_scope_changed')
         from .admin_settings import for_agent
         settings,_=await asyncio.to_thread(for_agent,str(request['agent_id']),'models')
@@ -55,6 +63,24 @@ async def call(device, request, name, arguments):
             failure={'code':'browser_tool_unavailable'}
         return {'isError':True,'content':[{'type':'text','text':json.dumps(failure,ensure_ascii=False)}]}
     return response.json()
+
+
+def _business_read(request, name, reference):
+    from uuid import UUID
+
+    from .db import all_rows, one, require_agent, tx
+    identifier = str(UUID(str(reference)))
+    with tx(str(request['agent_id'])) as c:
+        require_agent(c, request['agent_id'])
+        if name == 'lead_document_read':
+            row = one(c, "SELECT id,title,source_ref,source_type,trust_state,created_at FROM lead.knowledge_documents WHERE id=%s AND deleted_at IS NULL", (identifier,))
+            if not row:
+                raise LookupError('source_unavailable')
+            return {**row, 'chunks':all_rows(c, "SELECT ordinal,body FROM lead.knowledge_chunks WHERE document_id=%s ORDER BY ordinal", (identifier,))}
+        row = one(c, "SELECT id,type,state,input->'spec' specification,result->'output' output FROM lead.tasks WHERE id=%s", (identifier,))
+        if not row:
+            raise LookupError('task_unavailable')
+        return row
 
 
 def _record_public_read(request,context,observed):

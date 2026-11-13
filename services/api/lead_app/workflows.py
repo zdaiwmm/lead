@@ -15,6 +15,15 @@ RETRY = RetryPolicy(
 LEGACY_CYCLE_GAP_SECONDS = 480
 
 
+async def durable_activity(name, args, **options):
+    result = await workflow.execute_activity(name, args, **options)
+    if workflow.patched("local-codex-channel-continuation-v1"):
+        while isinstance(result, dict) and result.get("executor_pending"):
+            await workflow.sleep(2)
+            result = await workflow.execute_activity(name, args, **options)
+    return result
+
+
 def activity_queue(kind):
     # Recorded patch preserves old histories; custom/test queues remain local.
     isolated = workflow.patched("isolated-activity-capacity-" + kind + "-v1")
@@ -146,7 +155,7 @@ class ChannelDeliveryWorkflow:
             seen = self.wake_count
             pending_tick = pending_tick or str(workflow.uuid4())
             try:
-                result = await workflow.execute_activity(
+                result = await durable_activity(
                     "channel_research_tick" if args.get("lane")=="research" else "channel_delivery_tick", {**args, "tick": pending_tick},
                     start_to_close_timeout=timedelta(minutes=8), retry_policy=RETRY,
                 )
@@ -263,7 +272,7 @@ class PublishWorkflow:
             )
             for _ in range(100):
                 try:
-                    result = await workflow.execute_activity(
+                    result = await durable_activity(
                         "execute_task",
                         args,
                         start_to_close_timeout=timedelta(minutes=4),
@@ -291,7 +300,7 @@ class PublishWorkflow:
                 if result.get("state") != "unknown":
                     break
                 await workflow.sleep(delay)
-                result = await workflow.execute_activity(
+                result = await durable_activity(
                     "execute_task",
                     args,
                     start_to_close_timeout=timedelta(minutes=4),
@@ -317,7 +326,7 @@ class PublishWorkflow:
             else RETRY
         )
         try:
-            result = await workflow.execute_activity(
+            result = await durable_activity(
                 "execute_task",
                 args,
                 start_to_close_timeout=timedelta(minutes=4),
@@ -339,7 +348,7 @@ class PublishWorkflow:
                 if result.get("state") != "unknown":
                     break
                 await workflow.sleep(delay)
-                result = await workflow.execute_activity(
+                result = await durable_activity(
                     "execute_task",
                     args,
                     start_to_close_timeout=timedelta(minutes=4),
@@ -349,7 +358,7 @@ class PublishWorkflow:
                 )
         elif result.get("state") == "unknown":
             await workflow.sleep(5)
-            result = await workflow.execute_activity(
+            result = await durable_activity(
                 "execute_task",
                 args,
                 start_to_close_timeout=timedelta(minutes=4),

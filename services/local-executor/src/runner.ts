@@ -215,6 +215,10 @@ export class Runner {
         });
       }
       // Persist BEFORE sending. A lost ACK may mean the turn already ran.
+      if (record.cancel_requested) {
+        this.complete(record, "interrupted", "");
+        return;
+      }
       this.store.update(record.id, { state: "starting" });
       const marker = "[lead_request:" + record.id + "]";
       const result = await rpc.request("turn/start", {
@@ -232,6 +236,8 @@ export class Runner {
           turn_id: result.turn.id,
           state: "running",
         });
+      if (record.cancel_requested && !terminal.has(record.state))
+        await rpc.request("turn/interrupt", { threadId: record.thread_id, turnId: record.turn_id });
       await done;
     } catch (error) {
       if (!terminal.has(record.state)) {
@@ -333,7 +339,16 @@ export class Runner {
     if (this.store.data.controls.includes(command.id)) return;
     const record = this.store.request(command.request_id),
       active = this.active.get(command.request_id);
-    if (!record || !active) throw new Error("request_not_active");
+    if (!record) throw new Error("request_not_active");
+    if (command.kind === "interrupt" && (!active || !record.turn_id)) {
+      this.store.update(record.id, { cancel_requested: true });
+      this.store.data.controls.push(command.id);
+      this.store.save();
+      this.store.event(record.id, "command/ack", { command_id: command.id });
+      if (!active && record.state === "prepared") this.complete(record, "interrupted", "");
+      return;
+    }
+    if (!active) throw new Error("request_not_active");
     // Control messages have no established RPC idempotency either: persist before send.
     this.store.data.controls.push(command.id);
     this.store.save();

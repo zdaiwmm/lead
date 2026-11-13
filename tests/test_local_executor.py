@@ -39,6 +39,16 @@ def test_pairing_is_single_use_and_credentials_are_hashed(growth_agent):
     assert executor.default_agent() == str(growth_agent)
 
 
+def test_control_change_fences_original_request_and_interrupts_same_turn(growth_agent):
+    device = connected(growth_agent)
+    request = executor.submit(growth_agent, "control-original", payload(), session_key="control-original")
+    with tx(growth_agent) as c:
+        c.execute("UPDATE lead.agents SET control_version=control_version+1 WHERE id=%s", (growth_agent,))
+    commands = executor.poll(device["token"], 1, instance_id="first")["commands"]
+    assert any(item["kind"] == "interrupt" and item["request_id"] == str(request["id"]) for item in commands)
+    assert executor.request_status(growth_agent, request["id"])["scope"]["canceled"] is True
+
+
 def test_request_key_hash_and_session_stay_on_original_device(growth_agent):
     first = connected(growth_agent)
     request = executor.submit(growth_agent, "original", payload(), session_key="same-task")
