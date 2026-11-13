@@ -865,7 +865,9 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - C22网络准备继续按真实消费者验证：原A完整机械链路改用`alpha-c22.test`及与注册执行器相同的域名映射，6项46.524秒通过，六阶段仍5/2/3/2/3/2次受控模型HTTP，三个独立DOM回执均为该域名，unknown回查无重发；此前双域名原代理测试分别达到两个独立源站并拒绝未登记域名/端口。实际SDK的105项依赖均与锁一致；Playwright/greenlet/pyee由分离的管理端环境提供固定1.62.0/3.5.6/13.0.1。此为开发隔离环境，不能冒充同轮CI生产运行时产物（`mrw28/reports/c22-sdk-domains-*`）。
 
-- C28/C31正式fresh订阅`2af4856`（源`f0e40d8`）在原Task.start/Action.prepare_submit接当前页session刷新，前后核对原lease/document/element，实际新per-page事件须在1秒内证明当前root/version/worker，global退役/替换target继续拒绝；无controller只清本页旧投影，15秒提交proof期限不扩大。12项主集成检查0.14秒；真实原组合不带测试侧fresh已完成正常confirmed、NoAck unknown、持页Task取得当前投影、worker v1→v2、v2从原Cache并发重放2次源0、原unknown Task同Action/attempt1 confirmed。源POST/帖总2，原grant/intent不变，11次假模型HTTP且凭据literal0。整体首轮仍红62.67秒，停在可选C33第一个TLS CONNECT收到502、尚未断控；已定位为测试resolver未登记其本地TLS目标，不算产品断控反例。修测试接线后才可继续完整C33，原失败保留。helper关于投影缺失只陈述观察，不将其归因于尚未证实的about:blank/导航机制。
+- C28/C31正式fresh订阅`2af4856`（源`f0e40d8`）在原Task.start/Action.prepare_submit接当前页session刷新，前后核对原lease/document/page对象，实际新per-page事件须在1秒内证明当前root/version/worker，global退役/替换target继续拒绝；无controller只清本页旧投影，15秒提交proof期限不扩大。12项主集成检查0.14秒；真实原组合不带测试侧fresh已完成正常confirmed、NoAck unknown、持页Task取得当前投影、worker v1→v2、v2从原Cache并发重放2次源0、原unknown Task同Action/attempt1 confirmed。源POST/帖总2，原grant/intent不变，11次假模型HTTP且凭据literal0。整体首轮仍红62.67秒，停在可选C33第一个TLS CONNECT收到502、尚未断控；已定位为测试resolver未登记其本地TLS目标，不算产品断控反例。修测试接线后才可继续完整C33，原失败保留。helper关于投影缺失只陈述观察，不将其归因于尚未证实的about:blank/导航机制。
+
+- C33修正测试TLS目标映射后，实际走到CONNECT200/TLS BEFORE及未完整header，单独关闭gate控制连接后runtime.closed/actor.disconnected/proxy.tasks0，但TLS读抛WRONG_VERSION_NUMBER，不能称clean EOF。主负责人在短真实TLS与原plain CONNECT用例复现2红1绿，plain流实际读到关闭时追加的HTTP502；旧测试仅等待EOF而忽略尾部字节，漏检。代理现对取消或已经开始的CONNECT/认证响应只关闭，不追加第二段HTTP；15项真实代理/原生失败不回落直接消费者4.08秒通过，仍待同实例完整C33复验。无新增真实模型请求。
 
 ### 22.2 尚未放行与部署约束
 

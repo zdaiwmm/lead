@@ -148,7 +148,7 @@ async def test_close_with_active_connect_and_partial_header(monkeypatch, connect
         assert proxy.tasks
         await asyncio.wait_for(proxy.close(), 1)
         assert not proxy.tasks
-        await asyncio.wait_for(reader.read(), 1)
+        assert await asyncio.wait_for(reader.read(), 1) == b""
         assert reader.at_eof()
     finally:
         for task in list(proxy.tasks):

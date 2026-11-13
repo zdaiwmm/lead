@@ -319,6 +319,7 @@ class BrowserForwardProxy:
         remote = None
         pipes = []
         header_received=False
+        response_started=False
         try:
             header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 15)
             header_received=True
@@ -356,12 +357,14 @@ class BrowserForwardProxy:
                     "state": "verified",
                     "proof_digest": hashlib.sha256(payload).hexdigest(),
                 }
+                response_started=True
                 writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 await writer.drain()
                 return
             if not hmac.compare_digest(
                 headers.get("proxy-authorization", ""), self.auth
             ):
+                response_started=True
                 writer.write(
                     b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="lead"\r\nContent-Length: 0\r\n\r\n'
                 )
@@ -380,6 +383,7 @@ class BrowserForwardProxy:
                 ip = await self.resolve(host)
                 up_reader, remote = await self.connect(ip, port)
                 self.check_control(control_token)
+                response_started=True
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 await writer.drain()
             else:
@@ -424,12 +428,14 @@ class BrowserForwardProxy:
             for p in pipes:
                 p.cancel()
             await asyncio.gather(*pipes, return_exceptions=True)
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as error:
             self.denied += 1
-            if writer.is_closing() or not header_received:
+            if writer.is_closing() or not header_received or response_started or isinstance(error,asyncio.CancelledError):
                 # Chromium opens speculative proxy sockets. An idle header
                 # deadline closes that socket, never queues a 502 as the reply
                 # to a future request that the browser has not sent yet.
+                # Once CONNECT succeeds the stream belongs to the tunnel;
+                # cancellation must close it without appending plaintext HTTP.
                 return
             try:
                 writer.write(
