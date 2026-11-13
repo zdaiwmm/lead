@@ -7,7 +7,7 @@ import pytest
 
 
 @pytest.mark.parametrize('change,allowed',[(None,True),('body',False),('controller',False),('retired',False),
-    ('other_context',False),('duplicate',False),('document',False)])
+    ('other_context',False),('duplicate',False),('document',False),('target_replaced',False)])
 def test_worker_submit_requires_exact_network_and_current_controlled_client(change,allowed):
     from lead_app.native_action import NativeAction
 
@@ -36,4 +36,6 @@ def test_worker_submit_requires_exact_network_and_current_controlled_client(chan
         gate.network[('request','other')]=gate.network[('request','sw-session')]
     elif change=='document':
         gate.documents['page'][0]='new-frame'
+    elif change=='target_replaced':
+        gate.worker_versions['v1']['targetId']='replacement-worker'
     assert bool(controller.worker_submit_source(request)) is allowed

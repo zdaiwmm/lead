@@ -245,7 +245,8 @@ class NativeAction(NativeTask):
             if version.get('targetId')==target['targetId'] and version.get('status')=='activated'
             and version.get('runningStatus')=='running' and root in version.get('controlledClients',[])
             and gate.worker_versions.get(version['versionId'],{}).get('status')=='activated'
-            and gate.worker_versions.get(version['versionId'],{}).get('runningStatus')=='running']
+            and gate.worker_versions.get(version['versionId'],{}).get('runningStatus')=='running'
+            and gate.worker_versions.get(version['versionId'],{}).get('targetId') in (None,target['targetId'])]
         if len(versions)!=1:
             return None
         document=gate.documents.get(root)
