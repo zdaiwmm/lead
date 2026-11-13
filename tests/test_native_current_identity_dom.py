@@ -140,3 +140,83 @@ async def test_method_uses_full_server_subject_equal_to_verified_private_identit
         method=await inspect_editor(page,proposal,**kwargs)
         assert method['self_subject_suffix']==' · Settings'
         assert (await page.locator(method['selectors']['self_subject']).inner_text())==method['self_subject_prefix']+'member-A'+method['self_subject_suffix']
+
+
+@pytest.mark.parametrize('stage',['method','prepare'])
+@pytest.mark.parametrize('change',['hidden_old_visible_other','two_visible_current','late_second_subject','normal','manual_unknown_metadata'])
+async def test_manual_identity_match_never_bypasses_current_complete_dom_facts(common_page,stage,change,monkeypatch):
+    from types import SimpleNamespace
+
+    from lead_app import native_worker_controller
+    from lead_app.native_action import NativeAction
+
+    page,context,_=common_page
+    proposal,kwargs,parent=await editor(page,context)
+    method=await inspect_editor(page,proposal,**kwargs)
+    if change=='hidden_old_visible_other':
+        await page.locator('#current').evaluate("node=>node.style.opacity='0'")
+    if change in ('hidden_old_visible_other','two_visible_current'):
+        await page.locator('main').evaluate("node=>node.insertAdjacentHTML('beforeend','<p>Posting as member-B</p>')")
+    elif change=='manual_unknown_metadata':
+        await page.locator('#current').evaluate("node=>node.innerText='Signed in as member-A (Display name)'")
+        proposal['self_subject_suffix']=' (Display name)'
+        method['self_subject_suffix']=' (Display name)'
+    if change=='late_second_subject' and stage=='method':
+        from lead_app import native_method_facts
+        original=native_method_facts._form_facts
+        async def mutate(*args):
+            facts=await original(*args)
+            if await page.locator('#late-subject').count()==0:
+                await page.locator('main').evaluate("node=>node.insertAdjacentHTML('beforeend','<p id=late-subject>Posting as member-B</p>')")
+            return facts
+        monkeypatch.setattr(native_method_facts,'_form_facts',mutate)
+    async def run():
+        if stage=='method':
+            return await inspect_editor(page,proposal,**kwargs)
+        controller=NativeAction.__new__(NativeAction)
+        controller.page=page
+        controller.lease={'target_id':'original-target','document_revision':1}
+        controller.runtime=SimpleNamespace()
+        controller.snapshot=lambda:({}, {'external_account_id':'member-A'}, {})
+        controller.action={'type':'reply','intent':{'browser_method':method,'body':'Original answer','parent_url':parent}}
+        controller.submit_proof=None
+        await page.locator('textarea').fill('Original answer')
+        async def descriptor():
+            return {'target_id':'original-target'}
+        documents=0
+        async def document():
+            nonlocal documents
+            documents+=1
+            if change=='late_second_subject' and documents==2:
+                await page.locator('main').evaluate("node=>node.insertAdjacentHTML('beforeend','<p>Posting as member-B</p>')")
+            cdp=await context.new_cdp_session(page)
+            try:
+                frame=(await cdp.send('Page.getFrameTree'))['frameTree']['frame']
+                return ('original-root',[(frame['id'],frame['loaderId'],frame['url'])])
+            finally:
+                await cdp.detach()
+        async def no_worker(*args):
+            return None
+        controller.descriptor=descriptor
+        controller.document=document
+        monkeypatch.setattr(native_worker_controller,'refresh_page_controller',no_worker)
+        await controller.prepare_submit()
+        return controller.submit_proof
+    if change=='normal':
+        assert await run()
+    else:
+        with pytest.raises(ValueError):
+            await run()
+
+
+@pytest.mark.parametrize('hidden',['visible','field','ancestor'])
+async def test_private_identity_value_must_be_visible_including_ancestor_opacity(common_page,hidden):
+    from lead_app.native_identity_facts import inspect_private_subject
+    page,_,_=common_page
+    await page.set_content('<p>Account ID: <strong id=subject>member-A</strong></p>')
+    if hidden!='visible':
+        await page.locator('#subject').evaluate("(node,ancestor)=>(ancestor?node.parentElement:node).style.opacity='0'",hidden=='ancestor')
+        with pytest.raises(ValueError):
+            await inspect_private_subject(page,subject_selector='#subject')
+    else:
+        assert (await inspect_private_subject(page,subject_selector='#subject'))['subject']=='member-A'

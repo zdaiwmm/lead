@@ -239,6 +239,7 @@ class NativeAction(NativeTask):
         return decision
 
     async def prepare_submit(self):
+        from .native_identity_facts import inspect_current_identity
         from .native_worker_controller import refresh_page_controller
 
         await self.descriptor()
@@ -247,6 +248,9 @@ class NativeAction(NativeTask):
         _,account,_=await asyncio.to_thread(self.snapshot)
         method=self.action['intent']['browser_method']
         selectors=method['selectors']
+        current=await inspect_current_identity(self.page,connection_origin=method['target_url'],require_self_link=False)
+        if current['acting_subject']!=account['external_account_id']:
+            raise ValueError('editor_or_identity_changed')
         expected=(method.get('self_subject_prefix','')+account['external_account_id']+method.get('self_subject_suffix','')).strip()
         if (await self.page.locator(selectors['self_subject']).inner_text()).strip()!=expected:
             raise ValueError('editor_or_identity_changed')
@@ -264,7 +268,8 @@ class NativeAction(NativeTask):
             if len(values)!=1:
                 raise ValueError('browser_dynamic_field_changed')
             dynamic[name]=values[0]
-        if before!=await self.document():
+        if (before!=await self.document() or
+                current!=await inspect_current_identity(self.page,connection_origin=method['target_url'],require_self_link=False)):
             raise ValueError('action_document_changed')
         self.submit_proof={'observed':observed,'dynamic':dynamic,'frame_id':before[1][0][0],
             'revision':self.lease.get('document_revision',0),'editor_url':self.page.url,

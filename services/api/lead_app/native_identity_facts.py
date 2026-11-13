@@ -22,6 +22,7 @@ _COMMON = r'''
    !args.allow_navigation && !!node.closest('nav,[role=navigation]');
  const visible = node => {
    const style=getComputedStyle(node), bounds=node.getBoundingClientRect();
+   for(let item=node;item;item=item.parentElement)if(getComputedStyle(item).opacity==='0')return false;
    return node.isConnected && !node.closest('[hidden],[inert]') && bounds.width>0 && bounds.height>0 &&
      style.display!=='none' && !['hidden','collapse'].includes(style.visibility);
  };
