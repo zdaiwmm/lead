@@ -58,6 +58,17 @@ async def autonomous_cycle(args: dict):
             return {"stop":True,"delay":86400,"reason":"growth_owns_scope"}
     if str(args["agent_id"]) in resident_cycle_agent_ids(env()):
         return {"delay": 300, "cadence_version": 1, "reason": "device_resident_owns_cycle"}
+    from . import local_executor
+    if local_executor.enabled(args["agent_id"]):
+        from .local_executor_client import activity_jobs, execution_context
+        async def continue_cycle():
+            context = execution_context.set({"key": "cycle:" + args["cycle_id"],
+                "session_key": "operating:" + args["agent_id"]})
+            try:
+                return await managed_autonomous_cycle(args)
+            finally:
+                execution_context.reset(context)
+        return await activity_jobs.step("cycle:" + args["cycle_id"], continue_cycle)
     return await managed_autonomous_cycle(args)
 
 
@@ -340,6 +351,8 @@ async def publish_outbox(client):
                     workspace_retry_at.clear()
                 credential_state = current_credentials
                 for tenant in await asyncio.to_thread(execution_tenants):
+                    with tenant_scope(tenant):
+                        workspace_configured = any_model_configured()
                     for kind, interval in (("analytics", 5), ("notifications", 5), ("external_notifications", 5), ("experiences", 600), ("reddit_review", 60), ("growth", 60)):
                         if kind == "analytics" and env().get("LEAD_ANALYTICS_DEDICATED") == "1":
                             continue
@@ -352,9 +365,9 @@ async def publish_outbox(client):
                         continue
                     try:
                         await deliver_workspace(
-                            client, tenant, configured, tenant in configured_workspaces
+                            client, tenant, workspace_configured, tenant in configured_workspaces
                         )
-                        if configured:
+                        if workspace_configured:
                             configured_workspaces.add(tenant)
                         workspace_failures.pop(tenant, None)
                         workspace_retry_at.pop(tenant, None)

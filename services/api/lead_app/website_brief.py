@@ -25,6 +25,7 @@ Name = Annotated[
 
 class Website(BaseModel):
     product_url: str = Field(min_length=1, max_length=2000)
+    request_id: UUID | None = None
 
     @field_validator("product_url")
     @classmethod
@@ -148,6 +149,9 @@ async def analyze(website):
 
     async def summarize():
         try:
+            from . import local_executor
+            if local_executor.enabled():
+                return await run_model(Draft, evidence, PROMPT, purpose="research", workspace_models=models)
             async with asyncio.timeout_at(deadline):
                 return await run_model(
                     Draft,

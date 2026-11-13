@@ -1952,7 +1952,9 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
         started = time.monotonic()
         error = None
         try:
-            return await asyncio.wait_for(invoke_model(*args, **kwargs), timeout=60)
+            from . import local_executor
+            operation = invoke_model(*args, **kwargs)
+            return await operation if local_executor.enabled(aid) else await asyncio.wait_for(operation, timeout=60)
         except Exception as exc:
             error = type(exc).__name__
             raise

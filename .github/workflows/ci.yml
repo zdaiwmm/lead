@@ -138,6 +138,14 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      - name: Verify and package the local Codex connector
+        working-directory: services/local-executor
+        run: |
+          npm ci
+          npm test
+          npm run build
+          mkdir -p "$RUNNER_TEMP/lead-local-executor"
+          npm pack --pack-destination "$RUNNER_TEMP/lead-local-executor"
       - run: npm run build
         if: github.event_name != 'pull_request'
       - name: Reproduce home browser frames with synthetic images
@@ -184,7 +192,7 @@ jobs:
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
           sudo --preserve-env=http_proxy,https_proxy,all_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY apt-get install -y squashfs-tools
-          ../../scripts/build_home_image.sh "$GITHUB_SHA" "$RUNNER_TEMP/lead.squashfs" "$RUNNER_TEMP/lead-browser-runtime"
+          ../../scripts/build_home_image.sh "$GITHUB_SHA" "$RUNNER_TEMP/lead.squashfs" "$RUNNER_TEMP/lead-browser-runtime" "$RUNNER_TEMP/lead-local-executor/lead-local-executor-0.1.0.tgz"
           for file in ../../infra/home-browser-frames/*; do
             unsquashfs -cat "$RUNNER_TEMP/lead.squashfs" "home-browser-frames/${file##*/}" | cmp "$file" -
           done

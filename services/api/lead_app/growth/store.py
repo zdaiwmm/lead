@@ -184,8 +184,12 @@ def create_experiment(c, aid, data):
     from ..admin_settings import effective
     from ..budget import available
     settings, _ = effective(c, "models", aid)
-    budget = available(c, aid)["available_units"]
+    from .. import local_executor
+    native_executor = local_executor.enabled(aid)
+    budget = None if native_executor else available(c, aid)["available_units"]
     ceiling = 4*2*(settings["max_output_tokens"]+60000//2+1000)
+    if native_executor:
+        ceiling = 10_000_000  # Legacy schema compatibility; not a Codex call budget.
     if budget is not None:
         ceiling = min(ceiling,budget)
     if ceiling <= 0:

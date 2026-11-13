@@ -74,7 +74,9 @@ def checks():
             }
         )
 
-    add("model_key", bool(model_config()["key"]))
+    from . import local_executor
+    native = local_executor.enabled()
+    add("local_codex" if native else "model_key", local_executor.configured() if native else bool(model_config()["key"]))
     for name, path in (
         ("local_configuration", STATE / "config.json"),
         ("model_environment", environment_file()),

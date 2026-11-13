@@ -54,6 +54,12 @@ class GrowthWorkWorkflow:
                 result = await workflow.execute_activity("growth_execute", {"agent_id": ref["agent_id"], "claim": claim},
                     task_queue=activity_queue(lane), start_to_close_timeout=timedelta(seconds=500),
                     retry_policy=RetryPolicy(maximum_attempts=1))
+                if workflow.patched("local-codex-activity-continuation-v1"):
+                    while result.get("executor_pending"):
+                        await workflow.sleep(2)
+                        result = await workflow.execute_activity("growth_execute", {"agent_id": ref["agent_id"], "claim": claim},
+                            task_queue=activity_queue(lane), start_to_close_timeout=timedelta(seconds=30),
+                            retry_policy=RETRY)
             except ActivityError:
                 # A lost worker may have crossed an external barrier. Re-read the original ledger.
                 result = {"outcome": "failed", "failure_code": "execution_lost"}
@@ -207,13 +213,18 @@ class ChatWorkflow:
             await workflow.wait_condition(lambda: bool(self.queue))
             job = self.queue.pop(0)
             try:
-                await workflow.execute_activity(
+                result = await workflow.execute_activity(
                     "chat_job",
                     {"agent_id": agent_id, "job_id": job},
                     start_to_close_timeout=timedelta(minutes=4),
                     task_queue=activity_queue("chat"),
                     retry_policy=RETRY,
                 )
+                if workflow.patched("local-codex-chat-continuation-v1"):
+                    while isinstance(result, dict) and result.get("executor_pending"):
+                        await workflow.sleep(2)
+                        result = await workflow.execute_activity("chat_job", {"agent_id": agent_id, "job_id": job},
+                            start_to_close_timeout=timedelta(seconds=30), task_queue=activity_queue("chat"), retry_policy=RETRY)
             except ActivityError:
                 if not recover:
                     raise
@@ -376,6 +387,11 @@ class SupervisorWorkflow:
                     heartbeat_timeout=timedelta(minutes=2) if stage_heartbeat else None,
                     retry_policy=RETRY,
                 )
+                if workflow.patched("local-codex-supervisor-continuation-v1"):
+                    while result.get("executor_pending"):
+                        await workflow.sleep(2)
+                        result = await workflow.execute_activity("autonomous_cycle", {"agent_id": aid, "cycle_id": pending_cycle},
+                            start_to_close_timeout=timedelta(seconds=30), retry_policy=RETRY)
                 pending_cycle = None
             except ActivityError:
                 if not recover:

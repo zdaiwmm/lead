@@ -449,7 +449,7 @@ async def research(aid, row, spec, claim=None):
         return research_unavailable(errors)
     findings,learning = [],False
     from ..config import any_model_configured
-    if spec.experiment_id and any_model_configured():
+    if spec.experiment_id and any_model_configured(aid):
         # Raw page count is not learning. Read/interpret within this same bounded
         # macro, charge the question root, and require exact original quotations.
         with tx(aid) as c:

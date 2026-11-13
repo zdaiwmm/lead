@@ -77,7 +77,10 @@ def resolve_model(reference):
     return {**model_config(provider), "model": name}
 
 
-def any_model_configured():
+def any_model_configured(agent_id=None):
+    from . import local_executor
+    if local_executor.enabled(agent_id):
+        return True
     return any(model_config(provider)["key"] for provider in ("deepseek", "openai"))
 
 

@@ -679,7 +679,17 @@ async def execute(claim):
         from ..budget import growth_cost_context
         cost_token = growth_cost_context.set({"task_id": str(ref.task_id), "experiment_id": str(row["experiment_id"]) if row["experiment_id"] else None})
         try:
-            result = await asyncio.wait_for(execute_tool(str(ref.agent_id), row, claim), timeout=480)
+            from .. import local_executor
+            from ..local_executor_client import execution_context
+            native = local_executor.enabled(str(ref.agent_id))
+            context_token = execution_context.set({"key": "task:" + str(ref.task_id) + ":" + str(ref.task_generation),
+                "task_id": str(ref.task_id), "session_key": "decision:" + str(ref.agent_id) + ":" + str(row["input"].get("goal_revision", 1))
+                if claim.get("kind") == "decision" else "task:" + str(ref.task_id)})
+            try:
+                operation = execute_tool(str(ref.agent_id), row, claim)
+                result = await operation if native else await asyncio.wait_for(operation, timeout=480)
+            finally:
+                execution_context.reset(context_token)
             return WorkResult.model_validate(result).model_dump(mode="json")
         finally:
             growth_cost_context.reset(cost_token)
@@ -1082,6 +1092,21 @@ async def growth_advance(args: dict):
 @activity.defn
 @scoped_activity
 async def growth_execute(args: dict):
+    from .. import local_executor
+    from ..local_executor_client import activity_jobs
+    if local_executor.enabled(args["agent_id"]):
+        claim = args["claim"]
+        key = "growth:" + str(claim["ref"]["task_id"]) + ":" + claim["attempt_token"]
+        with tx(args["agent_id"]) as c:
+            row = one(c, "SELECT t.*,a.control_version current_control FROM lead.tasks t JOIN lead.agents a ON a.id=t.agent_id WHERE t.id=%s FOR UPDATE OF t", (claim["ref"]["task_id"],))
+            runtime = _runtime(row or {})
+            if (not row or row["state"] != "running" or runtime.get("attempt_token") != claim["attempt_token"]
+                    or row["current_control"] != claim.get("control_version")):
+                activity_jobs.cancel(key)
+                return WorkResult(outcome="failed", failure_code="scope_changed").model_dump(mode="json")
+            runtime["lease_until"] = (utcnow() + timedelta(minutes=9)).isoformat()
+            c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime}',%s) WHERE id=%s", (j(runtime), row["id"]))
+        return await activity_jobs.step(key, lambda: execute(claim))
     return await execute(args["claim"])
 
 

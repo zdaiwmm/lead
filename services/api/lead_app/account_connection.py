@@ -115,10 +115,14 @@ def all_rows_for_account(aid, account_id):
 async def rpc(aid, profile_id, path, body=None, timeout=90):
     route = await asyncio.to_thread(resolve, aid, profile_id=profile_id)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-        response = await client.post(endpoint(route)+f"/agents/{aid}/"+path, json=body or {},
-                                     headers={"Authorization": "Bearer "+internal_token()})
-        response.raise_for_status()
-        return response.json()
+        while True:
+            response = await client.post(endpoint(route)+f"/agents/{aid}/"+path, json=body or {},
+                                         headers={"Authorization": "Bearer "+internal_token()})
+            response.raise_for_status()
+            value = response.json()
+            if not value.get("executor_pending"):
+                return value
+            await asyncio.sleep(2)
 
 
 async def begin(aid, platform, *, account_id=None, new_account=False, site_url=None, login=None):

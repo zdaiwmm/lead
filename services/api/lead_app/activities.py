@@ -50,13 +50,14 @@ async def browser_rpc(path, data=None):
                 from .execution_routes import endpoint, request_route
                 base = endpoint(request_route(c, matched[1], path, data))
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-        result = await client.post(
-            base + path,
-            json=data or {},
-            headers={"Authorization": "Bearer " + internal_token(), **trace_headers()},
-        )
-        result.raise_for_status()
-        return result.json()
+        while True:
+            result = await client.post(base + path, json=data or {},
+                headers={"Authorization": "Bearer " + internal_token(), **trace_headers()})
+            result.raise_for_status()
+            value = result.json()
+            if not value.get("executor_pending"):
+                return value
+            await asyncio.sleep(2)
 
 
 def direct_control(text, intent):
@@ -88,6 +89,20 @@ def direct_control(text, intent):
 @activity.defn
 @scoped_activity
 async def chat_job(args: dict):
+    from . import local_executor
+    from .local_executor_client import activity_jobs, execution_context
+    if local_executor.enabled(args["agent_id"]):
+        async def continue_chat():
+            context = execution_context.set({"key": "chat:" + args["job_id"], "session_key": "chat:" + args["agent_id"]})
+            try:
+                return await _chat_job(args)
+            finally:
+                execution_context.reset(context)
+        return await activity_jobs.step("chat:" + args["job_id"], continue_chat)
+    return await _chat_job(args)
+
+
+async def _chat_job(args: dict):
     aid, job_id = args["agent_id"], args["job_id"]
     with tx(aid) as c:
         job = one(c, "SELECT * FROM lead.chat_jobs WHERE id=%s", (job_id,))
@@ -159,7 +174,7 @@ async def chat_job(args: dict):
         url = website_for_message(
             message["content"]["text"], history, detail["business"]
         )
-        if url and any_model_configured():
+        if url and any_model_configured(aid):
             page = await browser.command("open", {"url": url})
         from .growth.store import enabled as growth_enabled
         from .growth.views import render_growth
@@ -1266,7 +1281,7 @@ async def _publication_cycle(args: dict):
 
         with tx(aid) as c:
             current_models, current_model_version = effective(c, "models", aid)
-        if not model_readiness(current_models)["planning"]["configured"]:
+        if not model_readiness(current_models, aid)["planning"]["configured"]:
             return {"delay": 300, "reason": "model_not_configured"}
 
         backoff = a["onboarding_state"].get("model_backoff", {})
@@ -1275,7 +1290,7 @@ async def _publication_cycle(args: dict):
         if active(
             backoff,
             current_model_version,
-            [model_readiness(current_models)["planning"]["model"]],
+            [model_readiness(current_models, aid)["planning"]["model"]],
         ):
             return {
                 "delay": 300,

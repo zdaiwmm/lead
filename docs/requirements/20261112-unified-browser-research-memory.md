@@ -1102,3 +1102,41 @@ Multica官方主线固定为[`773569db3ab53e304f2d08310621f1b15be393f0`](https:/
 本机只读flags：`hooks`、`multi_agent`、`shell_tool`为stable/true；`memories`为stable/false。因此不把独立长期记忆功能写成已经启用；会话续接/压缩已有官方接口。当前CLI版本仍为0.167.0-alpha.4.1；能力存在、配置启用与Lead完整流程通过分别核验。
 
 来源：[CLI能力](https://learn.chatgpt.com/docs/cli)、[app-server](https://learn.chatgpt.com/docs/app-server)、[Skills与插件](https://learn.chatgpt.com/docs/skills-and-plugins)、[子Agent](https://learn.chatgpt.com/docs/agent-configuration/subagents)、[公开搜索](https://learn.chatgpt.com/docs/web-search?surface=cli)、[MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)、[Hooks](https://learn.chatgpt.com/docs/hooks)。具体集成以设备已安装版本的协议为准，尚不据文档可用性宣称C22或本地执行层改造完成。
+
+## 23. 本地 Codex 完整执行层（2026-11-14，已批准实施与部署）
+
+用户确认完整方案并指令“按照方案实施，并完成验证，部署”。本次授权包括方案内实现、验证、PR62交付和既有生产环境部署；不复发旧 confirmed/unknown Action，不恢复封存的第17次实验。初期业务主线程与子Agent均为 `gpt-6.1-sol / medium`，功能质量优先，不新增小额窗口、视觉裁剪、规划裁剪或自动降模型。原已知/未知消耗不改写。
+
+### 23.1 已确认架构与基线
+
+- GitHub实时main与规则来源为 `d53f32c4d3a55a64a9c5ced440c62c94bf0a7614`，需求HEAD `9c9cec2`。共享目录保留所有原任务未提交内容，本次继续同需求干净隔离工作树及唯一PR62。
+- 本地Node24/TypeScript连接器管理官方 `codex app-server --listen stdio://`，复用本人原Codex登录，不读取复制认证文件，不做模型API代理。MCP适配采用官方TS SDK1.32.2。设备出站HTTPS连接Lead，无公网本机端口。
+- Codex是唯一通用Agent运行时：规划、实时搜索、视觉、终端/脚本、子Agent、工作区、Skills/插件/MCP、压缩、事件、中断与续接全部复用原生能力。原生长期记忆支持按本次配置启用，先核本人home与其他项目的边界，不新造记忆平台；业务事实和可撤销经验留Lead。
+- 首版保留现有受控浏览器及账号/出口。MCP只暴露经过原Task/Connection/Action校验的观察、页面动作、认证、方法发现、提交和回执工具，不暴露CDP，不再在工具内运行browser-use Agent/LLM。
+- 本机CLI0.167.0-alpha.4.1已只读核到ChatGPT认证及实际model/list中的Sol/medium（默认low须覆盖）；尚未启动模型thread/turn。稳定schema证据位于 `/private/tmp/lead-codex-runtime-schema-20261114`。
+
+### 23.2 固定接口与实现包
+
+1. 连接器 `services/local-executor/`：pair/run/status/用户级后台安装；app-server双向RPC；每session串行、跨任务并行；WAL/outbox；稳定请求marker与原thread对账；支持steer/interrupt/respond及图片MCP结果。
+2. 后端 `local_executor*` 与0034迁移：配对、设备、请求/命令/事件；tenant/agent复合归属与RLS；固定device/epoch/thread。`submit(aid,request_key,payload,session_key,task_id)`同key/hash幂等，结果不直接放行业务Task。
+3. 浏览器工具：拆出原身份/提交契约与无模型BrowserSession；退出新路径的180秒分片、三片、20步等旧通用循环限制。所有工具从request固定scope取身份，不用进程全局current_task。
+4. 全部19处run_model消费者迁移：对话/官网2、决策与探活2、新研究/内容2、旧策略/研究3、社群发现3、社群运行/改稿3、内容池/Reddit/Telegram/旧发稿4；改模型key就绪隐性门槛，服务器无模型key可运行。
+5. 产品入口：设备/连接状态、配对、问题与审批、执行进度和控制；同步运营流程图。旧API模型配置仅兼容既有模式，Codex工作区不静默回退。
+6. 生命周期：持久异步请求释放Temporal Activity；续租、离线等待、设备epoch；同Task generation/thread续接，取消阻止后续提交但晚到回执仍落账。RPC ACK未知先读原thread/items，不能证明时execution_unknown，不新开thread或盲重发。
+
+连接器协议：`POST /executor/v1/pair`；Bearer认证的`poll/events/tools`。命令为run/steer/interrupt/respond，事件含稳定id/request_id/method/params；result.output承载模型结果。run payload含session_key/input/instructions/output_schema/model/effort/tools/tool_context。owner入口为`/api/agents/{aid}/executor`及其pairing/mode/requests控制。
+
+### 23.3 分阶段与检查点
+
+- [ ] P0：固定协议/工具契约及故障测试，设备与登录能力探测。
+- [ ] P1：Lead目标→真实Codex研究/决策/内容→A原Task/Action发布→独立回执；同时验证追加、中断、关前端、进程重启与命令防重。P1不冒称全产品迁完或C22通过。
+- [ ] P2：A回复、B陌生布局、unknown只读回查；19入口及key门槛全部迁移；无服务器模型key矩阵。
+- [ ] P3：原生压缩/记忆边界、并行账号、断网/休眠/取消晚到回执、旧库迁移与回退；精确候选检查、main完整验证、同轮产物、正式部署与独立回读。
+
+工程行为、模型判断、业务效果分别留证。原A通过证据只按未变输入复用，不能记为Codex业务链通过。PR62原227文件/34200新增行中保留必要账号/研究/经验/回执契约，改造执行入口；旧Agent循环与模型计量退出新路径，旧实验和账单保留。
+
+### 23.4 开工状态与分工
+
+主负责人负责模型消费者、生命周期、产品集成、真实闭环和发布；连接器、持久后端和浏览器工具各自独立任务目录/分支实施，按固定接口顺序汇合，不共写核心文件。纯工程验证使用专用隔离库，不连接默认库或生产数据。PR62旧verify失败为外部Ubuntu镜像连通性检查超时，不能沿用旧绿放行；最终精确head仍核全部必需检查。
+
+已查GitHub最近生产请求7728622792为7940fbef、状态success（2026-11-12），仅证明该次回传；实施期间仍需核实际运行版本/在途发布，不把GitHub历史当现场版本。

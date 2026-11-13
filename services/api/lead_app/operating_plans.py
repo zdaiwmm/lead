@@ -626,7 +626,7 @@ def platform_issues(c, agent, mode, now):
     from .operating_admission import model_readiness
 
     models, version = effective(c, "models", str(agent["id"]))
-    missing = [p for p, r in model_readiness(models).items() if not r["configured"]]
+    missing = [p for p, r in model_readiness(models, str(agent["id"])).items() if not r["configured"]]
     if missing:
         issues.append(
             {
@@ -641,7 +641,7 @@ def platform_issues(c, agent, mode, now):
     from .model_backoff import active
 
     if not missing and active(
-        backoff, version, [r["model"] for r in model_readiness(models).values()]
+        backoff, version, [r["model"] for r in model_readiness(models, str(agent["id"])).values()]
     ):
         issues.append(
             {

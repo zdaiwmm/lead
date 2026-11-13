@@ -4,6 +4,7 @@ set -euo pipefail
 sha=${1:?full commit required}
 output=${2:?new output file required}
 browser_runtime=${3:?same-run tested browser runtime required}
+local_executor=${4:?same-run tested local executor package required}
 [[ $sha =~ ^[a-f0-9]{40}$ && ! -e $output ]]
 root=$(git rev-parse --show-toplevel)
 cd "$root"
@@ -30,6 +31,9 @@ git archive "$sha" services apps/web infra/home-browser-frames "${runtime_paths[
 test ! -e "$stage/services/browser-runtime"
 cp -a "$browser_runtime" "$stage/services/browser-runtime"
 python3 -IB scripts/build_browser_runtime.py "$sha" "$stage/services/browser-runtime" --verify
+test -s "$local_executor"
+tar -tzf "$local_executor" | grep -qx 'package/dist/cli.js'
+cp "$local_executor" "$stage/services/local-executor/lead-local-executor.tgz"
 mv "$stage/apps/web" "$stage/web"
 mv "$stage/infra/home-browser-frames" "$stage/home-browser-frames"
 rmdir "$stage/apps"

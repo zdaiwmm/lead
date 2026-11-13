@@ -71,11 +71,21 @@ export default function WebsiteAgentDialog(props: Props) {
     setNotice("");
     setError("");
     try {
-      const draft: Brief = await api(
+      const requestId = crypto.randomUUID();
+      let draft: Brief = await api(
         "/agents/setup/analyze",
-        { product_url: brief.product_url.trim() },
+        { product_url: brief.product_url.trim(), request_id: requestId },
         controller.signal,
       );
+      while ((draft as any).executor_pending && !controller.signal.aborted) {
+        await new Promise<void>((resolve, reject) => {
+          const canceled = () => { clearTimeout(timer); reject(controller.signal.reason); };
+          const timer = setTimeout(() => { controller.signal.removeEventListener("abort", canceled); resolve(); }, 2000);
+          controller.signal.addEventListener("abort", canceled, { once: true });
+          if (controller.signal.aborted) canceled();
+        });
+        draft = await api("/agents/setup/analyze", { product_url: brief.product_url.trim(), request_id: requestId }, controller.signal);
+      }
       if (controller.signal.aborted) return;
       edit({
         product_url: draft.product_url,

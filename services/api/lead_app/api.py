@@ -37,13 +37,14 @@ from .auth import auth_mode, public_origin
 from .auth import router as auth_router
 from .browser_pilot import router as browser_pilot_router
 from .community_growth import GrowthConfig
-from .config import STATE, env, model_config
+from .config import ROOT, STATE, env, model_config
 from .connection_control import LoginInput
 from .conversions import router as conversion_router
 from .creative_pipeline import router as creative_router
 from .db import all_rows, audit, one, record, require_agent, tx
 from .events import router as event_router
 from .growth.views import router as growth_router
+from .local_executor_api import router as local_executor_router
 from .operating_playbooks import router as playbook_router
 from .operating_workspace import router as operations_router
 from .ops import router as ops_router
@@ -80,9 +81,18 @@ app.include_router(playbook_router)
 app.include_router(creative_router)
 app.include_router(operations_router)
 app.include_router(growth_router)
+app.include_router(local_executor_router)
 app.include_router(browser_pilot_router)
 app.include_router(admin_router)
 app.include_router(advanced_admin_router)
+
+
+@app.get("/api/executor/download")
+def download_local_executor():
+    package = ROOT / "services/local-executor/lead-local-executor.tgz"
+    if not package.is_file():
+        raise HTTPException(503, "本版本的本机连接器安装包尚未就绪")
+    return FileResponse(package, media_type="application/gzip", filename="lead-local-executor.tgz")
 
 
 @app.middleware("http")
@@ -284,6 +294,17 @@ class AgentSetupEdit(AgentSetupProfile):
 
 @app.post("/api/agents/setup/analyze")
 async def analyze_website(body: website_brief.Website, request: Request):
+    from . import local_executor
+    if local_executor.enabled():
+        from .local_executor_client import activity_jobs, execution_context
+        key = "website:" + current_tenant() + ":" + str(body.request_id or hashlib.sha256(body.product_url.encode()).hexdigest())
+        async def continue_analysis():
+            context = execution_context.set({"key": key, "session_key": key})
+            try:
+                return await website_brief.analyze(body.product_url)
+            finally:
+                execution_context.reset(context)
+        return await activity_jobs.step(key, continue_analysis)
     async def disconnected():
         while (await request.receive())["type"] != "http.disconnect":
             pass

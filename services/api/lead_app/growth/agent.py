@@ -188,6 +188,15 @@ def build_context(aid, trigger_refs=None):
         "Current contradictory evidence wins; verify changing facts only when needed. "
         "Missing or inapplicable memory does not block work or new channels.")
     context["command_schemas"] = {"experiment.create":ExperimentSpec.model_json_schema(),"task.create":TaskSpec.model_json_schema()}
+    from .. import local_executor
+    if local_executor.enabled(aid):
+        # Native Codex owns context compaction. Business references remain facts,
+        # and complete documents are available through its scoped MCP tools.
+        context["execution"] = {"provider": "codex", "model": "gpt-6.1-sol", "effort": "medium",
+            "budget_policy": "Native account entitlements; no additional Lead model-token cap."}
+        context["working_budget"] = 10_000_000
+        context["context_key"] = digest({k: v for k, v in context.items() if k not in ("now", "budget")})
+        return context
     if context["product"]:
         context["product"] = {**context["product"],"description":clip(context["product"]["description"],3000),
             "source_refs":context["product"].get("source_refs",[])[:2]}
