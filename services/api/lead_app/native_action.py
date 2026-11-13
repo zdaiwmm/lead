@@ -68,7 +68,9 @@ class NativeAction(NativeTask):
                 self.action=execution_action(c,frozen)
             self.phase('start_baseline')
             await self.baseline()
-            self.lease.update(action=self.action,claim=self.claim)
+            # The full SQL claim stays on this controller. Keep the canonical
+            # Task claim that already owns the page and its derived frame roles.
+            self.lease.update(action=self.action)
         self.actor.native_runtime.pages[self.lease['target_id']]['action_controller']=self
         self.phase('sdk_ready')
         return await self.descriptor()
