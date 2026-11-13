@@ -5,7 +5,7 @@ import time
 
 from .browser_execution import origin, validate_method
 from .db import one, tx
-from .native_method_errors import MethodFactError
+from .native_method_errors import SELECTOR_ERROR_CODES, MethodFactError
 from .native_method_facts import inspect_editor
 from .native_research import NativeResearchPage
 from .research import account_read_origins
@@ -51,13 +51,16 @@ class NativeTask:
             progress['fragments']=progress.get('fragments',0)+1
             c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,native_progress}',%s) WHERE id=%s",(j(progress),self.task_id))
 
-    def note_correction(self):
+    def note_correction(self,error=None):
         from .db import j
-        self.fragment_failures+=1
         with tx(self.actor.aid) as c:
             task=one(c,'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE',(self.task_id,))
             progress=(task['result'] or {}).get('runtime',{}).get('native_progress',{})
             progress['corrections']=progress.get('corrections',0)+1
+            # Only typed selector facts in the canonical discovery task use
+            # the existing total-eight budget. Other failures keep one repair.
+            if not (_discovery_task(task) and isinstance(error,MethodFactError) and error.code in SELECTOR_ERROR_CODES):
+                self.fragment_failures+=1
             if self.fragment_failures>=2:
                 progress['stopped_reason']='one_correction_exhausted'
             c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,native_progress}',%s) WHERE id=%s",(j(progress),self.task_id))
@@ -292,9 +295,9 @@ class NativeTask:
             if operation=='tool_authorize' and not value.get('allowed'):
                 await asyncio.to_thread(self.note_correction)
             return value
-        except (ValueError,KeyError,TypeError):
+        except (ValueError,KeyError,TypeError) as error:
             if operation in ('record_method','report_receipt','tool_authorize'):
-                await asyncio.to_thread(self.note_correction)
+                await asyncio.to_thread(self.note_correction,error if operation=='record_method' else None)
             raise
 
     async def _command(self,operation,args):

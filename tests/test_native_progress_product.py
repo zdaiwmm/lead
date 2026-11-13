@@ -20,7 +20,7 @@ async def test_native_sdk_no_progress_and_one_directed_correction_are_bounded(mo
     async def bounded(context):
         aid=context['aid']
         checks={}
-        for mode,expected,reason in [('no_progress',8,None),('correction',2,'one_correction_exhausted')]:
+        for mode,expected,reason in [('no_progress',8,None),('correction',8,'active_step_limit')]:
             with tx(aid) as c:
                 targets=c.execute('SELECT * FROM lead.account_targets ORDER BY id').fetchall()
                 grants=c.execute('SELECT * FROM lead.authorization_grants ORDER BY id').fetchall()
@@ -44,12 +44,12 @@ async def test_native_sdk_no_progress_and_one_directed_correction_are_bounded(mo
                 assert progress.get('stopped_reason')==reason
                 assert c.execute('SELECT * FROM lead.account_targets ORDER BY id').fetchall()==targets
                 assert c.execute('SELECT * FROM lead.authorization_grants ORDER BY id').fetchall()==grants
-            assert progress['no_progress']>=3 if mode=='no_progress' else progress['corrections']==2
+            assert progress['no_progress']>=3 if mode=='no_progress' else progress['corrections']==8
             assert len(progress['state_hash'])==64
             checks[mode]=expected
         return checks
     result=await verify_login(monkeypatch,after_discovery=bounded)
-    assert result['action_check']=={'no_progress':8,'correction':2}
+    assert result['action_check']=={'no_progress':8,'correction':8}
 
 
 @pytest.mark.asyncio

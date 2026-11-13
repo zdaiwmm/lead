@@ -1,14 +1,17 @@
 """Seen DOM remains diagnostic during discovery
 real hard bounds still apply."""
 import ast
+import asyncio
 import hashlib
 import json
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from lead_app.native_method_errors import SELECTOR_ERROR_CODES, MethodFactError
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -24,7 +27,8 @@ def method(name,task):
         def execute(sql,values):
             task['result']['runtime']['native_progress']=values[0]
         yield SimpleNamespace(execute=execute)
-    scope={'tx':tx,'one':lambda *args:task,'j':lambda value:value}
+    scope={'tx':tx,'one':lambda *args:task,'j':lambda value:value,
+        'asyncio':asyncio,'MethodFactError':MethodFactError,'SELECTOR_ERROR_CODES':SELECTOR_ERROR_CODES}
     exec(compile(ast.fix_missing_locations(ast.Module(body=helpers+[function],type_ignores=[])),'<current-native-task>','exec'),scope)
     return scope[name]
 
@@ -98,3 +102,75 @@ def test_original_fragment_deadline_still_rejects():
     function.__globals__['time']=SimpleNamespace(monotonic=lambda:2)
     with pytest.raises(ValueError,match='native_fragment_deadline'):
         function(value)
+
+
+def commands(row,errors):
+    value=controller()
+    value.remaining_seconds=lambda:180
+    value.record_method=AsyncMock(side_effect=[*errors,{'state':'method_observed'}])
+    value._command=MethodType(method('_command',row),value)
+    value.note_correction=partial(method('note_correction',row),value)
+    return value,partial(method('command',row),value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('code',('browser_method_selector_missing','browser_method_element_ambiguous'))
+async def test_discovery_three_typed_selector_errors_preserve_fourth_valid_proposal(code):
+    row=task(no_progress=0)
+    value,command=commands(row,[MethodFactError(code) for _ in range(3)])
+    for _ in range(3):
+        with pytest.raises(MethodFactError,match=code):
+            await command('record_method',{})
+    assert value.fragment_failures==0
+    assert row['result']['runtime']['native_progress']['corrections']==3
+    assert await command('record_method',{})=={'state':'method_observed'}
+    assert value.steps==4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('discovery,error',[
+    (False,MethodFactError('browser_method_element_ambiguous')),
+    (True,MethodFactError('browser_method_permission_denied')),
+    (True,ValueError('browser_method_element_ambiguous')),
+])
+async def test_other_stage_or_nonselector_error_still_stops_after_two(discovery,error):
+    row=task(discovery,no_progress=0)
+    value,command=commands(row,[error,error])
+    for _ in range(2):
+        with pytest.raises(ValueError):
+            await command('record_method',{})
+    assert value.fragment_failures==2 and value.total_corrections==2
+    with pytest.raises(ValueError,match='native_one_correction_exhausted'):
+        await command('record_method',{})
+    assert row['result']['runtime']['native_progress']['stopped_reason']=='one_correction_exhausted'
+    assert value.steps==2
+
+
+@pytest.mark.asyncio
+async def test_discovery_selector_errors_still_reach_eight_total_and_stop_observation():
+    row=task(no_progress=0)
+    value,command=commands(row,[MethodFactError('browser_method_element_ambiguous') for _ in range(8)])
+    for _ in range(8):
+        with pytest.raises(MethodFactError):
+            await command('record_method',{})
+    assert value.fragment_failures==0 and value.total_corrections==8
+    assert row['result']['runtime']['native_progress']['corrections']==8
+    value.descriptor=AsyncMock()
+    value.verify_private_self=AsyncMock()
+    value.document=AsyncMock(return_value='current-document')
+    value.page=SimpleNamespace(evaluate=AsyncMock(return_value={'url':'https://board.test','text':'stable','fields':[]}))
+    assert (await method('observe_progress',row)(value))['stop'] is True
+    with pytest.raises(ValueError,match='native_task_progress_limit'):
+        method('start_fragment',row)(controller())
+
+
+@pytest.mark.asyncio
+async def test_discovery_authorization_denial_still_uses_two_error_budget():
+    row=task(no_progress=0)
+    value,command=commands(row,[])
+    value.authorize=AsyncMock(return_value={'allowed':False})
+    assert await command('tool_authorize',{})=={'allowed':False}
+    assert await command('tool_authorize',{})=={'allowed':False}
+    with pytest.raises(ValueError,match='native_one_correction_exhausted'):
+        await command('tool_authorize',{})
+    assert value.fragment_failures==2 and value.total_corrections==2
