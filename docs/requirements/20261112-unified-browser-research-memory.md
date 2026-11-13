@@ -956,6 +956,16 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 精简修复源`fbe985f`已集成为`373ee7c`，生产仅runner的flash/thinking/planning三项配置变化，视觉与两动作保留，Scope/owner/账号/计量等9个app文件与上一候选相同；root自己的可选context退空行继续保留。配置契约先2红4绿，改后6项通过；真实SDK/Chrome/manager双case 2项14.812秒通过，普通及每响应固定8117输入+280输出的高压例都4请求、每请求1图、认证POST1/private connected。高压非图片投影字节为9567/9654/10101/9862，对应含已用量、1024图片和1800输出的包围12391/20875/29719/37877，累计33588已知，第四次仍低于原40000；该假用量用于压力核验，不计入真实费用总账。自有DB已删、无真key或付费调用、未读B；离线证据`/Users/zhouding/ss/native-sdk-execution-config/lead agent/.state/flash-sdk-final.json`（SHA256 `655356f5abe7a3c64ed91a902bed9ba915e524c03ef6c062e11653ad2643ba81`）。正式runner blob同步为`e2b2ac55b01484bb1b110efa650c64cbf7d39795`，其余10项未变。此为后续可审查候选，不宣称C22已过，未登记或启动第九次真实试验。
 
+- 用户再明确选择“用现有45次请求／320046单位余额，再做一次完整验证，不追加额度”。旧视觉尝试计数与账本保留，另登记第九次精简视觉`30cc4dd / 6b242e27…`。A/login 4请求/12966 tokens、9.651秒、4图，输入两项→submit→inspect_self→report_connection四步均无错，fresh私有身份通过、认证POST1。discover_publish随后2请求/7077 tokens、10.345秒、2图；两次propose_method都得到固定`browser_method_selector_contract_missing`，无可用方法，原corrections=2/no_progress=2/fragments=1/one_correction_exhausted停止，C22以publish_method_not_learned正确拒绝，业务Action0、后续及B未运行。此次预算阻断未再出现。
+
+- 第九次具体接口缺口已只读核实：facts要求selectors键集合精确为publish的self_subject/editor_target/editor_body/submit，reply另加editor_parent；SDK工具仅声明dict[str,str]，description及固定hint没有这些字段名。实际提案参数未保留，不能还原模型用了哪些键，但服务端明确拒于该键集合门槛。不能把工具合同没有公开造成的失败归为模型不会使用浏览器。当前零付费修复将准确字段及语义暴露给SDK schema，后端facts/权限/原一次纠错/预算不变；核对同工具target页、identity affixes及permission参数，避免下一轮继续猜隐藏必填项。不启动第十次真实请求。
+
+- 第九次原库独立对账：2笔40000预留settled、6请求合20043 tokens、period spent20043/reserved0、unknown=false/unmeasured0；进程0、仅自身test.env模型key移除，原DB/nonce/报告全部保留。native累计57已测请求/160974 tokens，第三次另保守8位/40000未知，总扣65位/200974单位，新增授权尚余39请求/300003单位；更早80000未知和生产旧reserved未动。总直接视觉尝试计数2、当前phase已停止，automatic_paid_continuation=false。精确30cc4dd的PR43420593842/1及镜像43420594006/1通过；未合并/部署。证据`/private/tmp/mrw28/reports/native-c22-trial9-paid-stop-readback.json`。
+
+- 工具合同修复源`651184e`已集成为`10e699e`：实际SDK可见PublishMethodSelectors四项、ReplyMethodSelectors五项，extra forbid，7个原参数完整必填/长度/字段说明；target为editor_target实际目的/规则页，permission在该页读取，body明确为TEXTAREA。固定错误hint同步列精确keys。独立真实0.13.14 registry首次发现其递归model_dump后给函数传dict，原候选再调selectors.model_dump会失败；两真实execute红保留，现只兼容已验证dict传原RPC，typed schema不变。缺字段/未知字段前置拒绝，publish/reply两实际DTO均送达原manager；原A真实SDK两提案一次纠错后canonical publish方法落库，1项12.596秒、纠错恰1、无POST。32项单元/1个显式SDK环境skip通过，事实/权限/Task/Action/scope/meter与上一候选同hash，不扩允许范围。
+
+- root补充唯一一处prefix说明字面量，明示原允许的current-identity提示语族与尾部空白/冒号边界；独立AST核除这句description外与651相同，schema形状及执行未变，复用上述证据，不重复Linux全矩阵。最终限定接受`/private/tmp/vbp30/method-review-final.json`（SHA256 `b87f6a51ce7ae81e4142d3ccac31ab2cbe953a8c838380ac28f79ea52d35c5af`），实施证据`/Users/zhouding/ss/native-sdk-execution-config/lead agent/.state/method-tool-final.json`（SHA256 `ca8a36b7c7aadfea3c4cf8576f883fbe1aa7ea7595c17ce8e72a1b8145e22f15`）。正式runner blob更新为`0856644fede8685787f1b183f1a43946d65cf9e6`，其余10项未变。此为完整可审查离线修复，真实模型方法发现/发布仍未通过；未登记或启动第十次付费尝试，余额仍39请求/300003单位。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -978,7 +988,7 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | A/B机械链及八次真实尝试已执行；第六、七次A登录通过，第八次真实带图响应的两次输入正确、下次HTTP被保守输入包围拒；累计已测51请求/140931 tokens，第三次至少4请求且40000未知，保守另扣8位；B原字节保留 | C22未通过，发帖/回复/回查/B未运行；余额45请求/320046单位，一次最终视觉失败后已停，不自动再付费。当前先准备原生精简模式的零付费修复，不能以该预算阻断判模型无效；B不称严格盲测 |
+| C22 | A/B机械链及九次真实尝试；第九精简视觉登录4步无错、发现方法两次selector合同拒绝后停止，共6图/6请求/20043 tokens；累计已测57请求/160974 tokens，第三次另保守8位/40000未知；字段合同现已真实SDK离线修复，B原字节保留 | C22未通过，发帖/回复/回查/B未运行；余额39请求/300003单位，付费关闭，无第十次。不能以接入缺口判模型无效；B不称严格盲测 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |

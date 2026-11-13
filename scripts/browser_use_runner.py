@@ -245,7 +245,7 @@ async def main(data):
                     operation: Literal['publish','reply'],
                     selectors: PublishMethodSelectors | ReplyMethodSelectors,
                     self_subject_prefix: Annotated[str,Field(min_length=1,max_length=150,
-                        description='Actual current-account wording before the complete acting ID, excluding the ID itself. Propose literal wording; the server independently verifies the strong current identity.')],
+                        description='Literal observed prefix before the complete ID: signed/logged in as, posting/replying as, current account, 当前(登录)账号/账户/身份, 发布身份 or 回复身份. Preserve the actual trailing whitespace and optional :/：; an ID starting with a letter or digit needs a separating space or colon. Never include any ID characters.')],
                     self_subject_suffix: Annotated[str,Field(max_length=150,
                         description='Literal text after the complete acting ID in the current marker; use an empty string if absent. Never cut part of an ID.')],
                     permission_selector: Annotated[str,Field(min_length=1,max_length=300,
