@@ -124,6 +124,7 @@ def test_prior_request_recovered_before_new_deploy(hook, monkeypatch):
     "services/api/lead_app/app.py", "services/channel_adapters/reddit/entry.py",
     "services/channel_adapters/systemd/executor.conf.in",
     "scripts/verify_cadence_ui.py",
+    "scripts/evaluate_native_browser.py", "scripts/native_eval_seed.py",
 ))
 @pytest.mark.parametrize("unreviewed_path", ("infra/migrations/new.py", "scripts/unreviewed.py"))
 def test_deploy_path_checks_compatibility_and_skips_repeats(
