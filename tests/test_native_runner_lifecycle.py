@@ -33,7 +33,7 @@ def worker(monkeypatch, tmp_path, *, run_error=None, stop_error=None, missing_us
         def __init__(self, **kwargs):
             pass
 
-        async def start_scoped(self, scope, reader):
+        async def start_scoped(self, scope, reader, **kwargs):
             pass
 
         async def assert_fresh_observation(self):

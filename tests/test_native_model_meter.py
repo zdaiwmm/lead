@@ -114,7 +114,30 @@ def manager_known(function, usage):
     values = [node.value for node in ast.walk(caller) if isinstance(node, ast.Assign)
               and any(isinstance(target, ast.Name) and target.id == 'known' for target in node.targets)]
     assert len(values) == 1
-    return eval(compile(ast.Expression(values[0]), str(path), 'eval'), {'usage': usage})
+    from lead_app.native_model_meter import known_usage
+    return eval(compile(ast.Expression(values[0]), str(path), 'eval'), {'usage': usage,'known_usage':known_usage})
+
+
+@pytest.mark.parametrize('caller',['connect','run_task'])
+@pytest.mark.parametrize('case',['complete_zero','missing_report','started_without_usage'])
+def test_only_complete_zero_transport_receipt_can_settle_zero(caller,case):
+    usage={'entry_count':0,'request_count':0,'total_tokens':0,'total_prompt_tokens':0,
+        'total_completion_tokens':0,'unmeasured_requests':0,'billing_unknown':False,'measurement_complete':True}
+    if case=='missing_report':
+        usage.pop('measurement_complete')
+    elif case=='started_without_usage':
+        usage.update(request_count=1,billing_unknown=True,unmeasured_requests=1)
+    known=manager_known(caller,usage)
+    assert known is (case=='complete_zero')
+    path=Path(__file__).resolve().parents[1]/'services/api/lead_app/native_runner.py'
+    function=next(node for node in ast.parse(path.read_text()).body if isinstance(node,ast.AsyncFunctionDef) and node.name==caller)
+    calls=[node for node in ast.walk(function) if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=='settle'
+        and any(key.arg=='incomplete' and isinstance(key.value,ast.UnaryOp) and isinstance(key.value.operand,ast.Name)
+            and key.value.operand.id=='known' for key in node.keywords)]
+    assert len(calls)==1
+    values={key.arg:eval(compile(ast.Expression(key.value),str(path),'eval'),{'usage':usage,'known':known})
+        for key in calls[0].keywords if key.arg in ('actual','incomplete')}
+    assert values=={'actual':0 if known else None,'incomplete':not known}
 
 
 @pytest.mark.parametrize('failure', ['headers', 'body'])

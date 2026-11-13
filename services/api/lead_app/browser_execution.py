@@ -25,8 +25,10 @@ def scoped_session_class():
     from html import escape
 
     from browser_use import BrowserSession
+    from browser_use.browser.events import ScreenshotEvent
     from browser_use.browser.session_manager import SessionManager
     from browser_use.browser.watchdogs.downloads_watchdog import DownloadsWatchdog
+    from browser_use.browser.watchdogs.screenshot_watchdog import ScreenshotWatchdog
     from browser_use.dom.views import NodeType, SerializedDOMState
     from pydantic import PrivateAttr
 
@@ -121,6 +123,11 @@ def scoped_session_class():
             # it or change another task's existing browser download behavior.
             return None
 
+    class CurrentScreenshotWatchdog(ScreenshotWatchdog):
+        async def on_ScreenshotEvent(self,event:ScreenshotEvent) -> str | None:
+            capture=super().on_ScreenshotEvent
+            return await self.browser_session.current_screenshot(event,lambda:capture(event))
+
     class OwnedSessionManager(SessionManager):
         """Keep SDK startup/watchdog initialization inside the assigned scope.
 
@@ -172,6 +179,8 @@ def scoped_session_class():
         _scope_reader: object = PrivateAttr(default=None)
         _scope: dict = PrivateAttr(default_factory=dict)
         _observation: object = PrivateAttr(default=None)
+        _screenshot_enabled: bool = PrivateAttr(default=False)
+        _image_sink: object = PrivateAttr(default=None)
 
         def __setattr__(self, name, value):
             # The pinned SDK assigns its manager inside connect(), overriding
@@ -183,7 +192,30 @@ def scoped_session_class():
             if (name == '_downloads_watchdog' and isinstance(value, DownloadsWatchdog)
                     and not isinstance(value, NoDownloadsWatchdog)):
                 value = NoDownloadsWatchdog(event_bus=value.event_bus, browser_session=self)
+            if (name=='_screenshot_watchdog' and isinstance(value,ScreenshotWatchdog)
+                    and not isinstance(value,CurrentScreenshotWatchdog)):
+                value=CurrentScreenshotWatchdog(event_bus=value.event_bus,browser_session=self)
             return super().__setattr__(name, value)
+
+        async def current_screenshot(self,event,capture):
+            if self._image_sink:
+                self._image_sink(None,None)
+            if not self._screenshot_enabled or not self._lease:
+                return None
+            before=await self.live_scope()
+            try:
+                image=await capture()
+                if before!=await self.live_scope():
+                    raise ScopeViolation('scope_changed_during_screenshot')
+                if not image:
+                    return None
+                from .native_vision import checked_image
+                checked_image(image)
+                if self._image_sink:
+                    self._image_sink(image,before)
+                return image
+            except Exception:
+                return None
 
         async def refresh_assigned_scope(self):
             if not self._scope_reader:
@@ -196,7 +228,9 @@ def scoped_session_class():
             self._scope = scope
             return scope
 
-        async def start_scoped(self, lease, read_scope):
+        async def start_scoped(self, lease, read_scope, *, enable_screenshots=False,image_sink=None):
+            self._screenshot_enabled=enable_screenshots
+            self._image_sink=image_sink
             self.browser_profile = self.browser_profile.model_copy(update={
                 'permissions': [], 'accept_downloads': False, 'auto_download_pdfs': False})
             self._startup_scope = dict(lease)

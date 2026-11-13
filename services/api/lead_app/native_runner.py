@@ -4,11 +4,13 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from .budget import growth_cost_context, reserve, settle
 from .config import ROOT, STATE, env, model_reference, resolve_model
 from .db import tx, uid
 from .model_transport import validated_socket_path
+from .native_model_meter import known_usage
 from .security import internal_token
 
 
@@ -93,8 +95,7 @@ async def connect(controller,gateway_endpoint):
         (folder/'result.json').write_text(json.dumps(result,ensure_ascii=False))
         if usage.get('credential_literal_seen') or leaked_files:
             raise ValueError('connection_credential_redaction_failed')
-        known=(bool(usage.get('entry_count')) and usage.get('request_count')==usage['entry_count']
-            and not usage.get('billing_unknown') and not usage.get('unmeasured_requests'))
+        known=known_usage(usage)
         settle(aid,reservation,actual=usage.get('total_tokens') if known else None,
             details={'provider':connection['provider'],'model':model_reference(connection),'configuration_version':version,
                 'requests':usage.get('entry_count',0),'input_tokens':usage.get('total_prompt_tokens',0),
@@ -117,10 +118,28 @@ async def connect(controller,gateway_endpoint):
 def discovery_task_context(task,account,intent):
     """Original task pages and intent constraints are data, never new authority."""
     scope=intent.get('scope') or {}
-    return {'starting_urls':task['input']['spec']['payload'].get('target_urls',[]),
-        'account_origin':account['connection_origin'],'intent_scope':{
-            'target_scope':scope.get('target_scope'),'target_ids':scope.get('target_ids',[]),
-            'excluded_targets':scope.get('excluded_targets',[])}}
+    def urls(values):
+        result=[]
+        for value in values[:10] if isinstance(values,list) else []:
+            if not isinstance(value,str) or not 1<=len(value)<=2000:
+                continue
+            try:
+                parsed=urlsplit(value)
+                if parsed.scheme not in ('http','https') or not parsed.hostname:
+                    continue
+                host='['+parsed.hostname+']' if ':' in parsed.hostname else parsed.hostname
+                netloc=host+(':'+str(parsed.port) if parsed.port else '')
+                projected=urlunsplit((parsed.scheme,netloc,parsed.path,'',''))
+                if projected not in result:
+                    result.append(projected)
+            except ValueError:
+                continue
+        return result
+    scope_kind=scope.get('target_scope')
+    return {'starting_urls':urls(task['input']['spec']['payload'].get('target_urls',[])),
+        'account_origin':next(iter(urls([account.get('connection_origin')])),'') ,'intent_scope':{
+            'target_scope':scope_kind if scope_kind in ('authenticated_permitted_targets','existing_grants') else None,
+            'target_ids':urls(scope.get('target_ids',[])),'excluded_targets':urls(scope.get('excluded_targets',[]))}}
 
 
 async def run_task(controller,gateway_endpoint,*,kind,goal):
@@ -169,8 +188,7 @@ async def run_task(controller,gateway_endpoint,*,kind,goal):
         folder.mkdir(parents=True,exist_ok=True,mode=0o700)
         (folder/'result.json').write_text(json.dumps(result,ensure_ascii=False))
         usage=result.get('usage') or {}
-        known=(bool(usage.get('entry_count')) and usage.get('request_count')==usage['entry_count']
-            and not usage.get('billing_unknown') and not usage.get('unmeasured_requests'))
+        known=known_usage(usage)
         settle(aid,reservation,actual=usage.get('total_tokens') if known else None,
             details={'provider':model['provider'],'model':model_reference(model),'configuration_version':version,
                 'requests':usage.get('entry_count',0),'purpose':'native_'+kind},incomplete=not known)

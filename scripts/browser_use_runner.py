@@ -86,6 +86,7 @@ async def main(data):
     folder = Path(data["workdir"])
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     from lead_app.native_sdk_trace import SafeStepTrace
+    from lead_app.native_vision import IMAGE_MODEL, supported_model
     step_trace=SafeStepTrace(folder/'safe-step-trace.json')
     tools = Tools()
     for name in list(tools.registry.registry.actions):
@@ -93,9 +94,10 @@ async def main(data):
             tools.registry.exclude_action(name)
     assert set(tools.registry.registry.actions) == {"done"}
     latest = {}
+    image_model=IMAGE_MODEL if data.get('native_scope') and supported_model(data.get('model')) else None
     meter = ModelCallMeter(max_requests=data.get('max_requests',8),
         max_total_tokens=data.get('max_total_tokens',0), max_output_tokens=data.get('max_output_tokens',1800),
-        sensitive_data=data.get('sensitive_data'))
+        sensitive_data=data.get('sensitive_data'),image_model=image_model)
     provider_usage = meter.provider_usage
     unmeasured_requests = meter.unmeasured_requests
     provider_requests = meter.provider_requests
@@ -106,7 +108,8 @@ async def main(data):
     def diagnostics(stage):
         (folder/'transport-status.json').write_text(json.dumps({'stage':stage,
             'requests_started':len(provider_requests),'responses_received':len(provider_responses),
-            'measured_responses':len(provider_usage),'credential_literal_seen':bool(secret_seen)}))
+            'measured_responses':len(provider_usage),'credential_literal_seen':bool(secret_seen),
+            'vision_images_sent':meter.vision_images_sent}))
 
     meter.diagnostics = diagnostics
 
@@ -194,7 +197,11 @@ async def main(data):
             browser = scoped_session_class()(cdp_url=native_scope['cdp_url'],headers=native_scope['headers'],
                         keep_alive=True,enable_default_extensions=False,
                         permissions=[],accept_downloads=False,auto_download_pdfs=False)
-            await browser.start_scoped(native_scope,live_scope)
+            def image_sink(image,proof):
+                async def current():
+                    return proof==await browser.live_scope()
+                meter.approve_image(image,current if image else None)
+            await browser.start_scoped(native_scope,live_scope,enable_screenshots=bool(image_model),image_sink=image_sink)
             diagnostics('native_scope_bound')
             tools = guarded_tools(browser,authorize,sensitive_data=data.get('sensitive_data'))
             if data.get('native_kind')=='connection':
@@ -249,7 +256,7 @@ async def main(data):
             sensitive_data=data.get("sensitive_data"),
             browser=browser,
             tools=tools,
-            use_vision=False,
+            use_vision=bool(image_model),
             include_attributes=observation_attributes,
             use_thinking=bool(native_scope),
             flash_mode=not bool(native_scope),
@@ -265,6 +272,10 @@ async def main(data):
             available_file_paths=[],
             calculate_cost=False,
         )
+        if image_model:
+            # Pinned SDK disables all DeepSeek vision before checking model
+            # capabilities. Restore only this instance's verified Flash route.
+            agent.settings.use_vision=True
         diagnostics('agent_initialized')
         class PersonStepRequired(Exception):
             pass
@@ -319,6 +330,8 @@ async def main(data):
             "trace": step_trace.summary(),
             "text": (history.final_result() or "") if history and not failure_code else 'The current bounded fragment stopped before another model call.',
             "usage": {
+                "measurement_complete":True,
+                "vision_images_sent":meter.vision_images_sent,
                 "total_prompt_tokens": sum(u["prompt_tokens"] for u in provider_usage),
                 "total_completion_tokens": sum(
                     u["completion_tokens"] for u in provider_usage

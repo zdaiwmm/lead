@@ -25,7 +25,7 @@ from native_browser_fixture import BoardState, NativeBoard
 
 
 async def verify_login(
-    monkeypatch, *, mode="login", owner_hook=None, after_discovery=None
+    monkeypatch, *, mode="login", owner_hook=None, after_discovery=None, model_transport=None
 ):
     from lead_app import native_runner
 
@@ -48,6 +48,10 @@ async def verify_login(
                 }
             )
             request = json.loads(raw)
+            if mode.startswith('vision_'):
+                model_calls[-1]['image_parts']=sum(1 for message in request.get('messages',[]) for part in
+                    (message.get('content') if isinstance(message.get('content'),list) else [])
+                    if isinstance(part,dict) and part.get('type')=='image_url')
             if mode.startswith('batch_'):
                 parameters=request.get('tools',[{}])[0].get('function',{}).get('parameters',{})
                 properties=parameters.get('properties',{})
@@ -279,7 +283,7 @@ async def verify_login(
             elif step == 4 and (mode != "owner_otp" or workflow.get("allow_identity")):
                 action = {"report_connection": {"subject_selector": "#subject"}}
             actions=[action]
-            if mode.startswith('batch_') and workflow['kind']=='login':
+            if (mode.startswith('batch_') or mode.startswith('vision_')) and workflow['kind']=='login':
                 fields={}
                 for line in lines:
                     marker=re.search(r'\[(\d+)\]',line)
@@ -296,11 +300,11 @@ async def verify_login(
                         {'guarded_input':{'index':fields['password'],'text':'<secret>saved_password</secret>','clear':True}}]
                     if mode=='batch_navigation':
                         actions[0]={'guarded_navigate':{'url':board.origin+'/login?fresh=1'}}
-                elif mode=='batch_login' and step==1 and 'submit' in fields:
+                elif mode in ('batch_login','vision_login') and step==1 and 'submit' in fields:
                     actions=[{'guarded_click':{'index':fields['submit']}}]
-                elif mode=='batch_login' and step==2:
+                elif mode in ('batch_login','vision_login') and step==2:
                     actions=[{'inspect_self':{}}]
-                elif mode=='batch_login' and step==3:
+                elif mode in ('batch_login','vision_login') and step==3:
                     actions=[{'report_connection':{'subject_selector':'#subject'}}]
                 else:
                     actions=[{'done':{'success':False,'text':'Controlled batch boundary diagnostic completed.'}}]
@@ -327,7 +331,7 @@ async def verify_login(
                 {
                     "id": "synthetic-only",
                     "object": "chat.completion",
-                    "model": "fixture-transport",
+                    "model": request.get('model','fixture-transport'),
                     "choices": [
                         {
                             "index": 0,
@@ -366,7 +370,7 @@ async def verify_login(
     monkeypatch.setattr(
         native_runner,
         "resolve_model",
-        lambda _: {
+        lambda _: model_transport(f'http://127.0.0.1:{model_server.server_port}') if model_transport else {
             "provider": "deepseek",
             "key": "synthetic-transport-only",
             "model": "fixture-transport",
