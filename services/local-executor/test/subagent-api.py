@@ -7,13 +7,12 @@ from uuid import UUID
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-
-from lead_app import local_executor, model
+from lead_app import model
 from lead_app.config import model_config
 from lead_app.db import all_rows, one, tx
 from lead_app.local_executor_api import router
 from lead_app.local_executor_client import execution_context, run_model
+from pydantic import BaseModel
 
 agent_id = str(UUID(os.environ["LEAD_CONSUMER_AGENT_ID"]))
 marker = os.environ["LEAD_SUBAGENT_MARKER"]
