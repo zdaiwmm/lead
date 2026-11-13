@@ -511,7 +511,8 @@ async def observation(runtime, scope, page):
 
 
 async def needs_review(controller):
-    if not controller.lease or not controller.page or (controller.lease.get('auth_flow') or {}).get('popup_target'):
+    flow=(controller.lease or {}).get('auth_flow') or {}
+    if not controller.lease or not controller.page or flow.get('popup_target') and not flow.get('completed'):
         return False
     facts, _ = await root_facts(controller.runtime, controller.lease, controller.page)
     with tx(controller.actor.aid) as c:
