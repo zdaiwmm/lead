@@ -385,6 +385,11 @@ def events(bearer, epoch, entries):
                 accepted.append(item["id"])
                 continue
             method, params = item["method"], item.get("params") or {}
+            thread, turn = _thread_values(params)
+            if method in {"request/started", "result"}:
+                if (thread and request.get("thread_id") and thread != request["thread_id"]
+                        or turn and request.get("turn_id") and turn != request["turn_id"]):
+                    raise ValueError("executor_result_conflict")
             if method == "result":
                 if params.get("state") not in TERMINAL:
                     raise ValueError("executor_result_invalid")
@@ -397,13 +402,18 @@ def events(bearer, epoch, entries):
             c.execute("""INSERT INTO lead.local_executor_events(tenant_id,agent_id,request_id,event_id,event_hash,method,params)
                 VALUES(%s,%s,%s,%s,%s,%s,%s)""", (claims["tenant_id"], claims["agent_id"], request["id"],
                                                    item["id"], fingerprint, method, j(params)))
-            thread, turn = _thread_values(params)
-            c.execute("""UPDATE lead.local_executor_requests SET thread_id=coalesce(%s,thread_id),
-                turn_id=coalesce(%s,turn_id),updated_at=now() WHERE id=%s""", (thread, turn, request["id"]))
+            # Native child threads and later turns remain inspectable events,
+            # but cannot replace this immutable business request's primary IDs.
+            identity_event = method in {"request/started", "result"}
+            primary = not request.get("thread_id") or not thread or thread == request["thread_id"]
+            c.execute("""UPDATE lead.local_executor_requests SET thread_id=coalesce(thread_id,%s),
+                turn_id=coalesce(turn_id,%s),updated_at=now() WHERE id=%s""",
+                (thread if identity_event and primary else None,
+                 turn if identity_event and primary else None, request["id"]))
             if method == "command/ack":
                 c.execute("""UPDATE lead.local_executor_commands SET acknowledged_at=coalesce(acknowledged_at,now())
                     WHERE request_id=%s AND id=%s""", (request["id"], params.get("command_id")))
-            elif method == "thread/tokenUsage/updated":
+            elif method == "thread/tokenUsage/updated" and primary:
                 c.execute("UPDATE lead.local_executor_requests SET usage=%s WHERE id=%s",
                           (j(params.get("tokenUsage") or params), request["id"]))
             elif method == "result":

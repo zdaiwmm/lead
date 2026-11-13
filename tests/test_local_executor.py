@@ -93,6 +93,39 @@ def test_event_replay_conflict_and_usage_snapshots(growth_agent):
         executor.events(device["token"], 1, [{**event, "params": {"changed": True}}])
 
 
+def test_child_and_unrelated_turn_events_preserve_primary_request_identity(growth_agent):
+    device = connected(growth_agent)
+    request = executor.submit(growth_agent, "root-events", payload(), session_key="root-events")
+
+    def event(method, params):
+        return {"id": str(uuid4()), "request_id": str(request["id"]), "method": method, "params": params}
+
+    executor.events(device["token"], 1, [
+        event("request/started", {"thread_id": "root-thread"}),
+        event("turn/started", {"threadId": "root-thread", "turn": {"id": "unproven-turn"}}),
+    ])
+    pending = executor.request_status(growth_agent, request["id"])
+    assert (pending["thread_id"], pending["turn_id"]) == ("root-thread", None)
+    executor.events(device["token"], 1, [
+        event("request/started", {"thread_id": "root-thread", "turn_id": "root-turn"}),
+        event("thread/tokenUsage/updated", {"threadId": "root-thread", "tokenUsage": {"total": {"totalTokens": 100}}}),
+        event("thread/started", {"thread": {"id": "child-thread"}}),
+        event("turn/started", {"threadId": "child-thread", "turn": {"id": "child-turn"}}),
+        event("thread/tokenUsage/updated", {"threadId": "child-thread", "tokenUsage": {"total": {"totalTokens": 999}}}),
+        event("turn/started", {"threadId": "root-thread", "turn": {"id": "unrelated-turn"}}),
+    ])
+    state = executor.request_status(growth_agent, request["id"])
+    assert (state["thread_id"], state["turn_id"]) == ("root-thread", "root-turn")
+    assert state["usage"]["total"]["totalTokens"] == 100
+    with tx(growth_agent) as c:
+        assert one(c, "SELECT count(*) AS n FROM lead.local_executor_events WHERE request_id=%s", (request["id"],))["n"] == 8
+    with pytest.raises(ValueError, match="executor_result_conflict"):
+        executor.events(device["token"], 1, [event("result", {"state": "completed", "thread_id": "root-thread", "turn_id": "unrelated-turn"})])
+    executor.events(device["token"], 1, [event("result", {
+        "state": "completed", "thread_id": "root-thread", "turn_id": "root-turn", "output": {"original": True}})])
+    assert executor.request_status(growth_agent, request["id"])["state"] == "completed"
+
+
 def test_unknown_result_never_reissues_run_or_marks_business_task(growth_agent):
     device = connected(growth_agent)
     request = executor.submit(growth_agent, "lost-ack", payload(), session_key="lost-ack")

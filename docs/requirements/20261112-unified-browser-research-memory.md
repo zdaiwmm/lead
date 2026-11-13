@@ -1128,7 +1128,7 @@ Multica官方主线固定为[`773569db3ab53e304f2d08310621f1b15be393f0`](https:/
 
 ### 23.3 分阶段与检查点
 
-- [ ] P0：固定协议/工具契约及故障测试，设备与登录能力探测。
+- [x] P0：固定协议/工具契约及故障测试，设备与登录能力探测。
 - [ ] P1：Lead目标→真实Codex研究/决策/内容→A原Task/Action发布→独立回执；同时验证追加、中断、关前端、进程重启与命令防重。P1不冒称全产品迁完或C22通过。
 - [ ] P2：A回复、B陌生布局、unknown只读回查；19入口及key门槛全部迁移；无服务器模型key矩阵。
 - [ ] P3：原生压缩/记忆边界、并行账号、断网/休眠/取消晚到回执、旧库迁移与回退；精确候选检查、main完整验证、同轮产物、正式部署与独立回读。
@@ -1140,3 +1140,12 @@ Multica官方主线固定为[`773569db3ab53e304f2d08310621f1b15be393f0`](https:/
 主负责人负责模型消费者、生命周期、产品集成、真实闭环和发布；连接器、持久后端和浏览器工具各自独立任务目录/分支实施，按固定接口顺序汇合，不共写核心文件。纯工程验证使用专用隔离库，不连接默认库或生产数据。PR62旧verify失败为外部Ubuntu镜像连通性检查超时，不能沿用旧绿放行；最终精确head仍核全部必需检查。
 
 已查GitHub最近生产请求7728622792为7940fbef、状态success（2026-11-12），仅证明该次回传；实施期间仍需核实际运行版本/在途发布，不把GitHub历史当现场版本。
+
+### 23.5 集成验证进度（仍未发布）
+
+- 本机真实官方 Codex→Lead 请求已验证实时搜索、严格结构化输出、原线程进程重启续接、steer 与 interrupt；连接器 WAL/outbox、未知 start ACK、原 marker/turn 对账、每项目后台服务、权限审批与图像 MCP 均有工程回归。原生主线程及子Agent配置 Sol/medium，不新增模型 token/步数/180秒分片窗口。
+- 实际19个 `run_model` 消费者接入同桥接，API Agent/模型预留退出 Codex 路径；旧模式仅用于既有未迁项目，不静默回退。官网首次原 Draft 因严格 JSON schema 缺少 additionalProperties:false 被官方拒绝，原失败请求 `066151d1-d8db-4a46-b698-fc0014c42fa2` 和原始错误保留，未自动重发。17d0146 改用 OpenAI3.40.0 公共 strict helper；DecisionProposal 的动态 Command.payload 用严格 JSON 字符串信封可逆传输，完整原 schema 随请求提供，解码后仍过原 Pydantic/业务校验，不关闭动态键。旧 frozen payload 保留原传输。
+- 修复后独立新 fixture 真实跑通官网分析→同 draftID 确认、原 decision Task/claim→DecisionProposal→accept_commands 创建 experiment+research Task、原 content Task→ContentDraft→content_items 与3项来源声明核验；actions0、模型 API reservations/usage_events0。官网原线程单次 `thread/compact/start` 产生 contextCompaction，随后同线程无任何工具的续问仍识别原产品与 about URL。4请求/3独立线程报告累计211656 tokens（官网线程96307、decision52731、content62618），只取每线程末次快照，不重复加官网旧快照；压缩没有独立增量证据，不估算金额。证据 `/private/tmp/lead-codex-product-consumers-strict-20261114`，旧失败独立保留。
+- 新 Codex C22 的 A 六阶段全部通过：登录、发布发现、原 Action 发帖与独立回执、回复发现、原回复与精确父帖回执、真实丢 ACK 后同一 unknown Action 只读回查（POST0、attempt1）。A 原证据不因后续 B 修复重跑。B 先发现私有稳定 AccountID 与当前 username 不同命名空间，原双源身份校验正确拒绝；通用 inspect_self 返回已观察当前主体和 namespace、固定纠错反馈穿透 worker IPC，机械正反实测原登录 POST1。新 B fixture 登录已通过，发布方法发现因未能核验 shadow DOM 编辑器目标而首失败停，保留原 Task/native 请求、POST0，正在核查成熟选择器能力，不加入 B 特定配方。
+- 工程证据分开留存：218项定向发布/镜像/桥接/浏览器适配、前端 typecheck、16项连接器/真实 MCP 进程测试与 build；隔离真实 PostgreSQL 85 passed/1环境skip，覆盖新设备/成员权限/预算与来源/业务生命周期/迁移。另有真实 Temporal 单槽释放、worker restart 丢内存重建同 claim/request（仅1条 run）、模式切换仍原归属、history replay；长 pending 的 continue-as-new 保持原 claim/job/tick 正在收尾。旧本机试跑缺 Temporal、Camoufox外部下载及缺 scripts 打包的环境失败保留，未计作产品通过。
+- 生产只读核验应用与 Telegram/Reddit 均为7940fbef、schema0031、安全点空闲且无未知 Action、没有在途切换，备份/恢复点可用。0034采用原统一浏览器升级入口从0031/0033可加性迁移，保存原列与权限/任务/Action/费用对账、克隆演练与恢复；本机连接器包须同轮 CI、同SHA REVISION，发布工具精确 blobs 冻结后才能放行。最终 PR 检查、main完整验证、工具安装、应用及两个执行器切换、本机安装与项目启用、独立回读尚未完成。
