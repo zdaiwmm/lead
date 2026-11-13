@@ -48,13 +48,18 @@ async def test_actual_sdk_method_feedback_allows_one_bounded_correction(monkeypa
         safe={'requests':len(context['model_calls'])-before,'trace':trace,'worker_success':worker['success'],
             'usage':worker['usage'],'state':row['state'],'corrections':row['result']['runtime']['native_progress']['corrections'],
             'target_count':len(targets),'method_stored':any('publish' in t['verified_permissions'].get('browser_methods',{}) for t in targets),
-            'literal_in_method_workdir':secret_seen,'feedback_seen':[r.get('method_feedback_code_seen',False) for r in context['model_calls'][before:]]}
+            'literal_in_method_workdir':secret_seen,'feedback_seen':[r.get('method_feedback_code_seen',False) for r in context['model_calls'][before:]],
+            'selector_schemas':[r['method_selector_schemas'] for r in context['model_calls'][before:]]}
         (STATE/'method-feedback-product.json').write_text(json.dumps(safe,indent=2))
         assert safe['feedback_seen']==[False,True]
         assert safe['requests']==2 and safe['corrections']==1
         assert trace['steps'][0]['outcomes']==[{'status':'error','code':'browser_method_element_ambiguous'}]
         assert safe['method_stored'] and safe['worker_success'] and safe['state']=='succeeded'
         assert safe['target_count']==1 and not secret_seen
+        expected={frozenset(('self_subject','editor_target','editor_body','submit')),
+            frozenset(('self_subject','editor_target','editor_body','submit','editor_parent'))}
+        assert all({frozenset(row['required']) for row in shapes}==expected
+            and all(row['extra_forbidden'] for row in shapes) for shapes in safe['selector_schemas'])
         return safe
 
     monkeypatch.setattr(account_profiles,'native_available',lambda:True)

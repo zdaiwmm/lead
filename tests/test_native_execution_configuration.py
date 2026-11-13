@@ -1,7 +1,7 @@
 """Native SDK settings and discovery data stay inside existing authority."""
 import ast
 from pathlib import Path
-from typing import Literal, get_args, get_type_hints
+from typing import Literal, get_args
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
@@ -27,11 +27,9 @@ def test_native_agent_uses_flash_with_optional_vision_and_two_action_batches(ima
 
 def test_method_operation_schema_is_the_existing_explicit_enum():
     node=next(node for node in ast.walk(runner_tree()) if isinstance(node,ast.AsyncFunctionDef) and node.name=='propose_method')
-    node.decorator_list=[]
-    node.body=[ast.Pass()]
     namespace={'Literal':Literal}
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[node],type_ignores=[])),'<tool>','exec'),namespace)
-    annotation=get_type_hints(namespace['propose_method'])['operation']
+    annotation=eval(compile(ast.Expression(next(arg.annotation for arg in node.args.args if arg.arg=='operation')),
+        '<operation-type>','eval'),namespace)
     assert get_args(annotation)==('publish','reply')
     adapter=TypeAdapter(annotation)
     assert adapter.validate_python('publish')=='publish' and adapter.validate_python('reply')=='reply'

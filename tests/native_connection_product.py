@@ -49,6 +49,22 @@ async def verify_login(
                 }
             )
             request = json.loads(raw)
+            if mode=='method_feedback':
+                shapes=[]
+                def selector_shapes(node):
+                    if isinstance(node,dict):
+                        keys=set(node.get('properties',{}))
+                        base={'self_subject','editor_target','editor_body','submit'}
+                        if keys in (base,base|{'editor_parent'}):
+                            shapes.append({'required':sorted(node.get('required',[])),
+                                'extra_forbidden':node.get('additionalProperties') is False})
+                        for value in node.values():
+                            selector_shapes(value)
+                    elif isinstance(node,list):
+                        for value in node:
+                            selector_shapes(value)
+                selector_shapes(request.get('tools',[]))
+                model_calls[-1]['method_selector_schemas']=shapes
             if mode.startswith('vision_'):
                 model_calls[-1]['image_parts']=sum(1 for message in request.get('messages',[]) for part in
                     (message.get('content') if isinstance(message.get('content'),list) else [])

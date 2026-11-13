@@ -10,11 +10,30 @@ import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import httpx
 from browser_use import ActionResult, Agent, Browser, ChatDeepSeek, ChatOpenAI, Tools
 from lead_app.native_model_meter import ModelBillingUnknown, ModelCallMeter
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class PublishMethodSelectors(BaseModel):
+    """Exactly the existing publish selector contract; proposals are not authority."""
+    model_config=ConfigDict(extra='forbid')
+    self_subject: str=Field(min_length=1,max_length=300,
+        description='CSS for the unique visible current acting-account marker, outside posts or quotations. SDK [n] is not CSS.')
+    editor_target: str=Field(min_length=1,max_length=300,
+        description='CSS for the actual destination A[href] link in the editor; its resolved href must equal target_url.')
+    editor_body: str=Field(min_length=1,max_length=300,
+        description='CSS for the one editable TEXTAREA body field in the observed ordinary-member POST form, not an input or contenteditable node.')
+    submit: str=Field(min_length=1,max_length=300,
+        description='CSS for the actual enabled submit control belonging to that same editor form.')
+
+
+class ReplyMethodSelectors(PublishMethodSelectors):
+    editor_parent: str=Field(min_length=1,max_length=300,
+        description='CSS for the actual canonical parent A[href] link on this reply page. Never supply a hidden parent ID.')
 
 
 @dataclass
@@ -219,12 +238,26 @@ async def main(data):
                         return ActionResult(is_done=True,success=True,extracted_content='The current self account was independently verified.')
                     return ActionResult(error='The current self account is not verified.')
             elif data.get('native_kind')=='discovery':
-                @tools.action('Propose the observed ordinary-member text editor and explicit automation permission. operation must be exactly publish or reply. Selectors and quoted rules are independently checked against the current DOM; this never submits a post.')
-                async def propose_method(target_url: str,operation: Literal['publish','reply'],selectors: dict[str,str],self_subject_prefix: str,
-                                         self_subject_suffix: str,permission_selector: str,permission_quote: str):
+                @tools.action('Propose the observed ordinary-member text editor and explicit automation permission. operation is exactly publish or reply. Publish selectors have exactly self_subject, editor_target, editor_body, submit; reply adds editor_parent. Use observed CSS, never SDK [n] references. All fields, current identity and rules are independently checked; this never submits a post.')
+                async def propose_method(
+                    target_url: Annotated[str,Field(min_length=1,max_length=2000,
+                        description='Actual destination URL from editor_target on the original account origin, without a fragment. Its page supplies the permission rules; it need not equal the current editor URL or starting URL.')],
+                    operation: Literal['publish','reply'],
+                    selectors: PublishMethodSelectors | ReplyMethodSelectors,
+                    self_subject_prefix: Annotated[str,Field(min_length=1,max_length=150,
+                        description='Actual current-account wording before the complete acting ID, excluding the ID itself. Propose literal wording; the server independently verifies the strong current identity.')],
+                    self_subject_suffix: Annotated[str,Field(max_length=150,
+                        description='Literal text after the complete acting ID in the current marker; use an empty string if absent. Never cut part of an ID.')],
+                    permission_selector: Annotated[str,Field(min_length=1,max_length=300,
+                        description='CSS for visible first-party rules on the target_url page, not a post, quotation or editable content.')],
+                    permission_quote: Annotated[str,Field(min_length=20,max_length=3000,
+                        description='Exact observed rule text in permission_selector establishing ordinary-member permission for this operation and browser automation, without unmet approval conditions.')],
+                ):
                     await browser.assert_fresh_observation()
+                    # Pinned SDK validates nested models, then passes model_dump dictionaries.
+                    selector_values=selectors.model_dump() if isinstance(selectors,BaseModel) else selectors
                     observed=await manager('record_method',{'target_url':target_url,'operation':operation,
-                        'selectors':selectors,'self_subject_prefix':self_subject_prefix,'self_subject_suffix':self_subject_suffix,
+                        'selectors':selector_values,'self_subject_prefix':self_subject_prefix,'self_subject_suffix':self_subject_suffix,
                         'permission_selector':permission_selector,'permission_quote':permission_quote})
                     return ActionResult(is_done=True,success=True,extracted_content=json.dumps(observed))
             elif data.get('native_kind')=='action':
