@@ -13,7 +13,6 @@ from uuid import UUID
 from .browser_execution import canonical_numeric_id, origin, safe_parent_field
 from .native_method_errors import SELECTOR_ERROR_CODES, MethodFactError
 
-_IDENTITY_PREFIX = re.compile(r'^(?:(?:signed|logged)\s+in\s+as|posting\s+as|replying\s+as|current\s+account|当前(?:登录)?(?:账号|账户|身份)|发布身份|回复身份)\s*[:：]?\s*$', re.I)
 _DYNAMIC = re.compile(r'^(?:_?csrf(?:[_-]?token|middlewaretoken)?|_?nonce)$', re.I)
 _CREDENTIAL = re.compile(r'(?:password|secret|credential|authorization|session|token|csrf|nonce|api[_-]?key|authenticity)', re.I)
 _DANGEROUS = re.compile(r'(?:^|[_-])(?:admin|moderator|role|privilege|permission|grant|delete|remove|destroy|ban|invite|join|follow|like|share|scope)(?:$|[_-])', re.I)
@@ -256,20 +255,13 @@ async def _inspect_editor(page, proposal, *, account_id, binding_version, extern
         raise MethodFactError('browser_method_permission_page_changed')
     selectors=proposal.get('selectors')
     needed=['self_subject','editor_target','editor_body','submit']+(['editor_parent'] if operation=='reply' else [])
+    # Legacy identity hints are not evidence. The existing strong DOM observer
+    # derives the actual selector and affixes below, including fresh rechecks.
+    if isinstance(selectors,dict) and 'self_subject' not in selectors:
+        selectors={'self_subject':'',**selectors}
     if not isinstance(selectors,dict) or set(selectors)!=set(needed):
         raise MethodFactError('browser_method_selector_contract_missing')
-    nodes=await _nodes(page,selectors,needed)
-    prefix=proposal.get('self_subject_prefix','')
-    suffix=proposal.get('self_subject_suffix','')
-    if (not isinstance(prefix,str) or not isinstance(suffix,str) or len(prefix)>150 or len(suffix)>150
-            or not _IDENTITY_PREFIX.fullmatch(prefix) or not prefix
-            or prefix[-1].isalnum() and external_account_id[0].isalnum()
-            or suffix and suffix[0].isalnum() and external_account_id[-1].isalnum()):
-        raise MethodFactError('browser_method_identity_semantics_missing')
-    self_text=(await nodes['self_subject'].inner_text()).strip()
-    quoted=await nodes['self_subject'].evaluate("node=>{const excluded='article,[role=article],blockquote,q,[contenteditable]:not([contenteditable=false])';return !!node.closest(excluded)||!!node.querySelector(excluded)}")
-    if quoted:
-        raise MethodFactError('browser_method_identity_changed')
+    nodes=await _nodes(page,selectors,[name for name in needed if name!='self_subject'])
     from .native_identity_facts import inspect_current_identity
     identity_root=await page.evaluate_handle('document.documentElement')
     resources.push_async_callback(identity_root.dispose)

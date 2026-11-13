@@ -75,3 +75,28 @@ def test_discovery_prompt_url_projection_omits_url_secrets_and_malformed_scope_v
     assert result=={'starting_urls':['https://board.test/home'],'account_origin':'https://board.test',
         'intent_scope':{'target_scope':None,'target_ids':['https://board.test/home'],'excluded_targets':[]}}
     assert 'private' not in str(result)
+
+
+def test_method_identity_hints_are_optional_without_relaxing_observed_editor_fields():
+    from pydantic import BaseModel, ConfigDict, Field
+
+    classes=[node for node in runner_tree().body if isinstance(node,ast.ClassDef)
+        and node.name in ('PublishMethodSelectors','ReplyMethodSelectors')]
+    scope={'BaseModel':BaseModel,'ConfigDict':ConfigDict,'Field':Field}
+    exec(compile(ast.Module(body=classes,type_ignores=[]),'<selector-contract>','exec'),scope)
+    for name,parent in [('PublishMethodSelectors',False),('ReplyMethodSelectors',True)]:
+        cls=scope[name]
+        selectors={'editor_target':'a[href]','editor_body':'textarea','submit':'button[type=submit]'}
+        if parent:
+            selectors['editor_parent']='a[rel~=canonical]'
+        accepted=cls.model_validate(selectors)
+        assert accepted.model_dump()=={**selectors,'self_subject':''}
+        assert set(cls.model_json_schema()['required'])==set(selectors)
+        for invalid in ({**selectors,'unknown':'a'}, {key:value for key,value in selectors.items() if key!='submit'},
+                {**selectors,'self_subject':'x'*301}):
+            with pytest.raises(ValidationError):
+                cls.model_validate(invalid)
+    tool=next(node for node in ast.walk(runner_tree()) if isinstance(node,ast.AsyncFunctionDef) and node.name=='propose_method')
+    defaults=dict(zip([arg.arg for arg in tool.args.args][-len(tool.args.defaults):],tool.args.defaults))
+    assert {name:ast.literal_eval(defaults[name]) for name in ('self_subject_prefix','self_subject_suffix')}=={
+        'self_subject_prefix':'','self_subject_suffix':''}

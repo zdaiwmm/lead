@@ -28,7 +28,7 @@ METHOD_ERROR_HINTS = {
     'browser_method_permission_unestablished': 'Unconditional ordinary-member permission for this action and browser automation is not established.',
     'browser_method_request_origin_changed': 'The observed form request leaves the original account origin. Do not extend scope.',
     'browser_method_scope_missing': 'The original method-discovery scope is incomplete. Stop and retain the original task.',
-    'browser_method_selector_contract_missing': 'For publish, selectors must contain exactly self_subject, editor_target, editor_body, submit. For reply, include exactly those four plus editor_parent. Each value is observed CSS, never an SDK [n] reference; do not add other keys.',
+    'browser_method_selector_contract_missing': 'For publish, selectors require editor_target, editor_body, submit. For reply, also include editor_parent. Optional self_subject is a legacy hint; the server derives current identity independently. Required editor selectors are observed CSS, never SDK [n] references; do not add other keys.',
     'browser_method_selector_missing': 'Use a bounded CSS selector for an actually observed element; SDK numbered references are not CSS.',
     'browser_method_sensitive_or_privileged_field': 'The form contains a sensitive or privileged field. Do not treat it as a member publishing form.',
     'browser_method_target_changed': 'The selected actual target link does not match the proposed target. Reobserve it.',

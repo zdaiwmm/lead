@@ -55,12 +55,12 @@ async def test_actual_sdk_method_feedback_allows_one_bounded_correction(monkeypa
         assert safe['feedback_seen']==[False,True]
         assert safe['requests']==2 and safe['corrections']==1
         assert trace['steps'][0]['outcomes']==[{'status':'error','code':'browser_method_element_ambiguous',
-            'selector_issues':[{'field':'self_subject','issue':'not_found'},{'field':'submit','issue':'not_found'}]}]
+            'selector_issues':[{'field':'submit','issue':'not_found'}]}]
         assert safe['method_stored'] and safe['worker_success'] and safe['state']=='succeeded'
         assert safe['target_count']==1 and not secret_seen
-        assert safe['feedback_fields_seen']==[[],['self_subject','submit']]
-        expected={frozenset(('self_subject','editor_target','editor_body','submit')),
-            frozenset(('self_subject','editor_target','editor_body','submit','editor_parent'))}
+        assert safe['feedback_fields_seen']==[[],['submit']]
+        expected={frozenset(('editor_target','editor_body','submit')),
+            frozenset(('editor_target','editor_body','submit','editor_parent'))}
         assert all({frozenset(row['required']) for row in shapes}==expected
             and all(row['extra_forbidden'] for row in shapes) for shapes in safe['selector_schemas'])
         return safe

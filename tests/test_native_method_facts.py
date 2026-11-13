@@ -134,7 +134,7 @@ async def test_quote_must_be_from_the_current_observed_rule_element(editor):
 
 async def test_identity_in_an_article_is_not_current_account_evidence(editor):
     page,proposal,kwargs,_,_=editor
-    await page.locator('main').evaluate("main=>{const article=document.createElement('article');article.innerHTML='<p>Signed in as fixture-member</p>';main.append(article)}")
+    await page.locator('main').evaluate("main=>{main.querySelector(':scope > p').remove();const article=document.createElement('article');article.innerHTML='<p>Signed in as fixture-member</p>';main.append(article)}")
     proposal['selectors']['self_subject']='article p'
     proposal['self_subject_suffix']=''
     with pytest.raises(ValueError,match='identity'):
@@ -165,7 +165,7 @@ async def test_unrelated_permission_page_and_ambiguous_selectors_are_rejected(ed
     with pytest.raises(ValueError,match='permission'):
         await inspect_editor(page,proposal,permission_page=permission,**kwargs)
     ambiguous=deepcopy(proposal)
-    ambiguous['selectors']['self_subject']='p'
+    ambiguous['selectors']['editor_body']='p'
     with pytest.raises(ValueError):
         await inspect_editor(page,ambiguous,**kwargs)
 

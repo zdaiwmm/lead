@@ -21,8 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class PublishMethodSelectors(BaseModel):
     """Exactly the existing publish selector contract; proposals are not authority."""
     model_config=ConfigDict(extra='forbid')
-    self_subject: str=Field(min_length=1,max_length=300,
-        description='CSS for the unique visible current acting-account marker, outside posts or quotations. SDK [n] is not CSS.')
+    self_subject: str=Field(default='',max_length=300,
+        description='Optional compatibility hint only. Leave empty or omit it; the server derives and verifies the unique current acting-account marker, independently of this hint. Never supply an account ID.')
     editor_target: str=Field(min_length=1,max_length=300,
         description='CSS for the actual destination A[href] link in the editor; its resolved href must equal target_url.')
     editor_body: str=Field(min_length=1,max_length=300,
@@ -238,20 +238,20 @@ async def main(data):
                         return ActionResult(is_done=True,success=True,extracted_content='The current self account was independently verified.')
                     return ActionResult(error='The current self account is not verified.')
             elif data.get('native_kind')=='discovery':
-                @tools.action('Propose the observed ordinary-member text editor and explicit automation permission. operation is exactly publish or reply. Publish selectors have exactly self_subject, editor_target, editor_body, submit; reply adds editor_parent. Use observed CSS, never SDK [n] references. All fields, current identity and rules are independently checked; this never submits a post.')
+                @tools.action('Propose the observed ordinary-member text editor and explicit automation permission. operation is exactly publish or reply. Publish requires observed CSS editor_target, editor_body, submit; reply also requires editor_parent. self_subject and prefix/suffix are optional legacy hints and may be omitted; the server independently derives the unique current identity. Use observed CSS for the required editor/rule fields, never SDK [n] references. Editor facts, identity and rules are independently checked; this never submits a post.')
                 async def propose_method(
                     target_url: Annotated[str,Field(min_length=1,max_length=2000,
                         description='Actual destination URL from editor_target on the original account origin, without a fragment. Its page supplies the permission rules; it need not equal the current editor URL or starting URL.')],
                     operation: Literal['publish','reply'],
                     selectors: PublishMethodSelectors | ReplyMethodSelectors,
-                    self_subject_prefix: Annotated[str,Field(min_length=1,max_length=150,
-                        description='Literal observed prefix before the complete ID: signed/logged in as, posting/replying as, current account, 当前(登录)账号/账户/身份, 发布身份 or 回复身份. Preserve the actual trailing whitespace and optional :/：; an ID starting with a letter or digit needs a separating space or colon. Never include any ID characters.')],
-                    self_subject_suffix: Annotated[str,Field(max_length=150,
-                        description='Literal text after the complete acting ID in the current marker; use an empty string if absent. Never cut part of an ID.')],
                     permission_selector: Annotated[str,Field(min_length=1,max_length=300,
                         description='CSS for visible first-party rules on the target_url page, not a post, quotation or editable content.')],
                     permission_quote: Annotated[str,Field(min_length=20,max_length=3000,
                         description='Exact observed rule text in permission_selector establishing ordinary-member permission for this operation and browser automation, without unmet approval conditions.')],
+                    self_subject_prefix: Annotated[str,Field(max_length=150,
+                        description='Optional compatibility hint; may be omitted. The server derives the actual complete current-account prefix from unique strong DOM facts, never from this hint.')]='',
+                    self_subject_suffix: Annotated[str,Field(max_length=150,
+                        description='Optional compatibility hint; may be omitted. The server derives the actual complete current-account suffix from unique strong DOM facts, never from this hint.')]='',
                 ):
                     await browser.assert_fresh_observation()
                     # Pinned SDK validates nested models, then passes model_dump dictionaries.
