@@ -168,3 +168,21 @@ async def test_old_task_without_a_payload_keeps_generic_discovery():
     value.snapshot=lambda:(task,account,intent)
     result=await function(value,{'operation':'publish','target_url':'https://board.test/home','permission_selector':'rules'})
     assert result['operation']=='publish' and inspect.await_count==1
+
+
+@pytest.mark.parametrize('desired',(None,'publish','reply'))
+def test_discovery_goal_distinguishes_editor_and_rules_without_private_account_detour(desired):
+    tree=ast.parse((ROOT/'services/api/lead_app/browser.py').read_text())
+    function=next(node for node in ast.walk(tree) if isinstance(node,ast.AsyncFunctionDef) and node.name=='discover_account_targets')
+    call=next(node for node in ast.walk(function) if isinstance(node,ast.Call)
+        and isinstance(node.func,ast.Name) and node.func.id=='run_task')
+    expression=next(keyword.value for keyword in call.keywords if keyword.arg=='goal')
+    goal=eval(compile(ast.Expression(expression),'<actual-discovery-goal>','eval'),{'desired':desired})
+    assert 'The editor page and rules page may differ.' in goal
+    assert 'return to the required editor page before calling propose_method' in goal
+    assert 'server independently opens target_url to recheck its rules' in goal
+    assert 'server independently verifies the current acting identity' in goal
+    assert 'Read your current private account' not in goal
+    assert 'If the page does not provide' not in goal
+    assert all(hidden not in goal for hidden in ('self_subject','prefix','suffix'))
+    assert 'Never type into forms, publish, reply, log in, join, follow or change settings.' in goal

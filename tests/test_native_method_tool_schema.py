@@ -82,7 +82,7 @@ def test_only_observable_parameters_are_shown_and_legacy_bounds_remain_runtime_c
             TypeAdapter(fields[name]).validate_python('x'*151)
     assert 'target_url page' in properties['permission_selector']['description']
     assert (properties['permission_quote']['minLength'],properties['permission_quote']['maxLength'])==(20,3000)
-    assert all(key in description for key in PUBLISH|{'editor_parent'})
+    assert all(key in description for key in (PUBLISH-{'self_subject'})|{'editor_parent'})
 
 
 @pytest.mark.skipif(__import__('os').environ.get('LEAD_NATIVE_PRODUCT_TESTS')!='1',
@@ -132,3 +132,10 @@ async def test_actual_sdk_registry_routes_exact_dtos_through_original_manager():
             'manager_operation_names':[row['operation'] for row in received],
             'manager_selector_keys':[sorted(row['args']['selectors']) for row in received],
             'missing_unknown_denied_before_rpc':4},indent=2))
+
+
+def test_proposal_tool_explains_separate_rules_page_without_hidden_identity_hints():
+    _,description=proposal_tool()
+    assert 'rules may be on a different page' in description
+    assert 'return to the editor before proposing' in description
+    assert all(hidden not in description for hidden in ('self_subject','prefix','suffix'))
