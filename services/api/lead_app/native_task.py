@@ -216,6 +216,9 @@ class NativeTask:
         if self.steps>20 or self.corrections>=3 or self.total_corrections>=8:
             raise ValueError('native_task_progress_limit')
         await self.descriptor()
+        from .native_frame_roles import readonly_node
+        if readonly_node(self.lease,args.get('node') or {}):
+            return {'allowed':False,'reason':'This approved public frame can only be read.'}
         name,values=args.get('name'),args.get('values') or {}
         if name=='scroll':
             return {'allowed':True}

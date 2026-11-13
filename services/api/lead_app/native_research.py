@@ -198,8 +198,11 @@ class NativeResearchPage(ResearchPage):
         if name == 'navigate':
             url = public_url(values.get('url',''))
             await self.actor.forward_proxy.validate_url(url)
-            return {'allowed':origin(url) in {origin(item) for item in scope['origins']},'url':url}
+            return {'allowed':origin(url) in {origin(item) for item in self.lease['origins']},'url':url}
         node = args.get('node') or {}
+        from .native_frame_roles import readonly_node
+        if readonly_node(self.lease,node):
+            return {'allowed':False,'reason':'This approved public frame can only be read.'}
         if name != 'click' or node.get('target_id') not in scope['targets']:
             return {'allowed':False,'reason':'This research task only reads the assigned page.'}
         # Read current native node facts ourselves; SDK/model-supplied labels
@@ -218,7 +221,7 @@ class NativeResearchPage(ResearchPage):
                 return {'allowed':False}
             url = public_url(urljoin(gate.targets[sessions[0]]['url'],attrs.get('href','')))
             await self.actor.forward_proxy.validate_url(url)
-            return {'allowed':origin(url) in {origin(item) for item in scope['origins']},'url':url}
+            return {'allowed':origin(url) in {origin(item) for item in self.lease['origins']},'url':url}
         except (KeyError,ValueError):
             return {'allowed':False}
 

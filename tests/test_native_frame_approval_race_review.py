@@ -27,15 +27,30 @@ async def test_approval_rechecks_original_dom_after_awaited_safety_checks(monkey
     writes, installed = [], []
 
     class Node:
-        async def evaluate(self, script, url):
-            installed.append((frame['resource_url'], url))
-            frame['resource_url'] = url
+        async def element_handle(self, **kwargs):
+            return self
+
+        async def dispose(self):
+            pass
+
+        async def evaluate(self, script, args):
+            expected, _ = args
+            assert frame['resource_url'] == expected['url']
+            installed.append((frame['resource_url'], expected['url']))
+            frame.update(sandbox='', credentialless=True, referrerpolicy='no-referrer')
+
+    class Root:
+        async def dispose(self):
+            pass
 
     class Page:
         url = parent
 
         async def evaluate(self, script):
             return {'parent_url': parent, 'supported': True, 'secure': True, 'frames': [copy.deepcopy(frame)]}
+
+        async def evaluate_handle(self, script):
+            return Root()
 
         def locator(self, selector):
             assert selector == 'iframe[src]'

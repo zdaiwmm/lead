@@ -82,6 +82,8 @@ class NativeConnection:
 
     async def prepare_owner_input(self,page,body):
         """Freeze one actually submitted person form before Chrome pauses it."""
+        from .native_frame_roles import guard_owner_input
+        await guard_owner_input(self,page,body)
         flow=(self.lease or {}).get('auth_flow') or {}
         if page is self.page and body.kind=='click' and (not flow or flow.get('completed')):
             from .native_auth_flow import popup_destination, reserve
@@ -159,6 +161,9 @@ class NativeConnection:
                 self.lease.update(control_mode='automatic',challenge_version=connection['challenge_version'],
                     input_seq=connection['input_seq'],task_generation=task['input'].get('task_generation'),
                     claim={'attempt_token':runtime.get('attempt_token')})
+                for role in self.lease.get('frame_roles',[]):
+                    if role['task_id']==self.task_id and role['task_generation']==task['input'].get('task_generation'):
+                        role['claim']=dict(self.lease['claim'])
                 await self.advance_auth_flow()
                 return await self.descriptor()
         url=connection['connection_data'].get('site_url')
@@ -198,7 +203,8 @@ class NativeConnection:
         flow=(self.lease or {}).get('auth_flow') or {}
         if flow.get('popup_target') and not flow.get('completed'):
             return True
-        return bool(await person_challenge(self.page))
+        from .native_frame_roles import needs_review
+        return bool(await person_challenge(self.page)) or await needs_review(self)
 
     async def refresh_challenge(self,*,force=False,settling=False):
         from .connection_control import refresh_owner_challenge
@@ -282,6 +288,9 @@ class NativeConnection:
 
     async def authorize(self,args):
         await self.descriptor()
+        from .native_frame_roles import readonly_node
+        if readonly_node(self.lease,args.get('node') or {}):
+            return {'allowed':False,'reason':'This approved public frame can only be read.'}
         name,values,node=args.get('name'),args.get('values') or {},args.get('node') or {}
         if name=='scroll':
             return {'allowed':True}
@@ -427,8 +436,21 @@ class NativeConnection:
         return self.remember_observation(self.observation,expected)
 
     async def command(self,operation,args):
+        if operation=='read_dependencies':
+            from .native_frame_roles import candidates
+            return await candidates(self)
+        if operation=='read_dependency_decision':
+            from .native_frame_roles import decide
+            return await decide(self,args)
         if operation=='owner_status':
-            return await self.refresh_challenge()
+            from .native_frame_roles import candidates, needs_review
+            _,connection,_=await asyncio.to_thread(self.snapshot)
+            if connection['control_mode']=='owner' and 'read_dependencies' in connection['connection_data']:
+                await candidates(self)
+            result=await self.refresh_challenge()
+            if connection['control_mode']=='owner' and 'read_dependencies' not in connection['connection_data'] and await needs_review(self):
+                await candidates(self)
+            return result
         if operation=='preflight':
             await self.descriptor()
             return {'owner_required':await self.person_only_challenge()}

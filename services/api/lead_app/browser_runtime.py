@@ -107,6 +107,8 @@ class NativeNetworkGate:
         self.scripts={}
         self.worker_versions={}
         self.worker_versions_by_page={}
+        self.worker_registrations={}
+        self.network_sequence=0
         self.documents={}
         self.authorize = authorize
         self.claim = claim
@@ -122,6 +124,7 @@ class NativeNetworkGate:
         self.initialized = set()
         self.roots = {}
         self.network = {}
+        self.response_metadata={}
         self.changed = asyncio.Event()
         self.context_id = None
         self.ready = False
@@ -187,6 +190,8 @@ class NativeNetworkGate:
                     self.initialized.discard(event['sessionId'])
                     self.changed.set()
                 elif method == 'Network.requestWillBeSent' and session in self.targets:
+                    self.network_sequence+=1
+                    event['_lead_sequence']=self.network_sequence
                     self.network[(event['requestId'], session)] = event
                     root=self.owners.get(session)
                     if root in self.roots:
@@ -195,6 +200,15 @@ class NativeNetworkGate:
                     # Request correlation is bounded and never persists permission.
                     if len(self.network) > 4096:
                         self.network.pop(next(iter(self.network)))
+                    self.changed.set()
+                elif method=='ServiceWorker.workerRegistrationUpdated':
+                    for registration in event['registrations']:
+                        self.worker_registrations[registration['registrationId']]=registration
+                elif method=='Network.responseReceivedExtraInfo' and session in self.targets:
+                    self.response_metadata[(event['requestId'],session)]={'status':event['statusCode'],
+                        'sets_cookie':any(name.lower()=='set-cookie' for name in event['headers']) or bool(event.get('blockedCookies'))}
+                    if len(self.response_metadata)>4096:
+                        self.response_metadata.pop(next(iter(self.response_metadata)))
                     self.changed.set()
                 elif method=='ServiceWorker.workerVersionUpdated':
                     ranks={'new':0,'installing':1,'installed':2,'activating':3,'activated':4,'redundant':5}
@@ -390,7 +404,7 @@ class NativeNetworkGate:
             expected_context=scope.get('probe_context_id') if scope and scope.get('kind')=='identity_probe' else self.context_id
             if not expected_context or target.get('browserContextId') != expected_context:
                 raise ValueError('request_context_unmanaged')
-            request = {**event['request'],'_native_network':{'session':session,'network_id':event.get('networkId'),
+            request = {**event['request'],'_native_network':{'session':session,'network_id':event.get('networkId'),'frame_id':event.get('frameId'),
                        'worker_body_verified':bool(event.get('_lead_worker_body_verified'))}}
             if request.get('hasPostData') and 'postData' not in request:
                 raise ValueError('request_body_unavailable')
@@ -399,12 +413,34 @@ class NativeNetworkGate:
             decision = await self.authorize(scope, target, request)
             if not decision or decision.get('kind') not in ('read', 'authentication', 'action'):
                 raise ValueError('request_scope_denied')
+            if event.get('responseStatusCode') is not None:
+                response_meta=self.response_metadata.get((event.get('networkId'),session)) or {}
+                if decision.get('public_frame') and not response_meta:
+                    # Fetch may omit filtered Set-Cookie headers. Only the raw
+                    # extra-info of this exact managed request proves absence.
+                    deadline=asyncio.get_running_loop().time()+.5
+                    while not response_meta and asyncio.get_running_loop().time()<deadline:
+                        self.changed.clear()
+                        with contextlib.suppress(TimeoutError):
+                            await asyncio.wait_for(self.changed.wait(),max(.001,deadline-asyncio.get_running_loop().time()))
+                        response_meta=self.response_metadata.get((event.get('networkId'),session)) or {}
+                if decision.get('public_frame') and (event['responseStatusCode'] not in (200,204)
+                        or response_meta.get('status')!=event['responseStatusCode']
+                        or response_meta.get('sets_cookie')
+                        or any(header['name'].lower()=='set-cookie' for header in event.get('responseHeaders',[]))):
+                    await decision['refuse_response'](event['responseStatusCode'])
+                    raise ValueError('public_frame_response_refused')
+                return await self.send('Fetch.continueResponse',{'requestId':event['requestId']})
             if decision['kind'] != 'action':
                 if decision['kind'] == 'authentication' and (not scope or not scope.get('connection_ref') or target['type'] == 'service_worker'):
                     raise ValueError('connection_role_not_owned')
                 if not self.token:
                     raise ValueError('control_lost_before_continue')
-                return await self.send('Fetch.continueRequest', {'requestId': event['requestId']})
+                headers={key:value for key,value in request.get('headers',{}).items()
+                    if key.lower() not in ('cookie','authorization','proxy-authorization','referer')}
+                return await self.send('Fetch.continueRequest', {'requestId': event['requestId'],
+                    **({'headers':[{'name':key,'value':value} for key,value in headers.items()],
+                        'interceptResponse':True} if decision.get('public_frame') else {})})
             decision['sender_frame']=event.get('frameId')
             # Current permission checks and request claim are one original DB
             # transaction. A prior claim returns False: only reconcile the action.
@@ -474,6 +510,7 @@ class PersistentRuntime:
         self.slots = asyncio.Semaphore(2)
         self.internal_slots = asyncio.Semaphore(2)
         self.pages = {}
+        self.frame_role_locks={}
         self.probes={}
         self.identity_options={}
 
@@ -576,6 +613,9 @@ class PersistentRuntime:
             return None
         if scope:
             await asyncio.to_thread(self.current_scope, scope)
+            if origin(request['url']) not in {origin(value) for value in scope['origins']}:
+                from .native_frame_roles import request as frame_request
+                return await frame_request(self,scope,target,request)
             from .native_auth_flow import authorize as authorize_auth_flow
             if scope.get('auth_flow'):
                 flow=scope['auth_flow']
@@ -692,6 +732,11 @@ class PersistentRuntime:
         return None
 
     def current_scope(self, scope):
+        if scope.get('frame_roles'):
+            document=self.gate.documents.get(scope['target_id'])
+            current=[role for role in scope['frame_roles'] if role['document']==document]
+            if len(current)!=len(scope['frame_roles']):
+                scope['frame_roles']=current
         from .channel_contracts import ExecutionRef
         from .db import one, tx
         from .execution_routes import endpoint
@@ -785,6 +830,9 @@ class PersistentRuntime:
                 if not parent or any(parent['scope'].get(key)!=scope.get(key) for key in
                         ('task_id','account_id','binding_version','control_version','intent_revision')):
                     raise ValueError('browser_internal_parent_changed')
+            if scope.get('frame_roles'):
+                from .native_frame_roles import canonical_roles
+                canonical_roles(c,self,scope)
             return row
 
     async def claim_request(self, scope, target, request, decision):
@@ -833,6 +881,7 @@ class PersistentRuntime:
             raise ValueError('browser_control_unavailable')
         scope=dict(scope)
         if internal_parent:
+            scope.pop('frame_roles',None)
             scope['internal_parent']=internal_parent
         await asyncio.to_thread(self.current_scope,scope)
         if origin(url) not in {origin(value) for value in scope['origins']}:
@@ -883,10 +932,13 @@ class PersistentRuntime:
             raise ValueError('page_lease_missing')
         scope = entry['scope']
         await asyncio.to_thread(self.current_scope,scope)
+        from .native_frame_roles import observation
+        origins=await observation(self,scope,entry['page']) if (scope.get('account_id') and not entry.get('internal')
+            and (scope.get('frame_roles') or len(entry['page'].frames)>1)) else scope['origins']
         targets = {info['targetId']:target for session,info in self.gate.targets.items()
                    if self.gate.owners.get(session) == target and (info['type']!='page' or info['targetId']==target)}
         return {'task_id':scope['task_id'],'generation':scope['generation'],'target_id':target,
-                'origins':scope['origins'],'targets':targets,
+                'origins':origins,'targets':targets,
                 **{key:scope[key] for key in ('connection_ref','control_mode','challenge_version') if key in scope}}
 
     async def yield_page(self,target):
@@ -896,6 +948,7 @@ class PersistentRuntime:
             (self.internal_slots if entry.get('internal') else self.slots).release()
 
     async def release_page(self, target):
+        self.frame_role_locks.pop(target,None)
         for child,entry in list(self.pages.items()):
             if entry['scope'].get('internal_parent')==target:
                 await self.release_page(child)

@@ -174,6 +174,7 @@ def connection_reply(row,account_id,platform,*,native=False):
     return {'takeover_id':row['id'],'account_id':account_id,'platform':platform,
             'status':'connected' if row.get('completed_account_id') else 'pending',
             'automatic_connection':native,'control_mode':row['control_mode'],
+            'can_review_read_dependencies':bool(native and row['control_mode']=='owner' and row.get('state')=='active' and row['expires_at']>utcnow()),
             'challenge_version':row['challenge_version'],'owner_action':row['connection_data'].get('owner_action'),
             'expires_at':row['expires_at'],'managed_target_start':False,'automation':False}
 
@@ -256,6 +257,8 @@ async def execute_account(aid, row, data):
                 wait.escalation = "当前可见账号名与原绑定不同，尚不能证明是改名还是换号。如更换账号，请解除原绑定或连接另一个账号；原暂停与权限保持原状。"
                 return WorkResult(outcome="waiting",wait=wait)
             raise
+        from .native_frame_roles import finalize
+        await asyncio.to_thread(finalize,aid,data.takeover_id,account_id)
         return WorkResult(outcome="completed", output={"account_id": account_id, "connection_proof": observation.evidence_refs})
     wait.reason = observation.status
     if observation.status in ("challenge", "ambiguous"):

@@ -93,6 +93,9 @@ class NativeAction(NativeTask):
             await self.actor.native_runtime.release_page(scope['target_id'])
 
     async def authorize(self,args):
+        from .native_frame_roles import readonly_node
+        if readonly_node(self.lease,args.get('node') or {}):
+            return {'allowed':False,'reason':'This approved public frame can only be read.'}
         self.phase('authorize_'+args['name'] if args.get('name') in ('input','click','navigate','scroll') else 'authorize_refused')
         if self.reconcile or args.get('name') in ('navigate','scroll'):
             decision=await super().authorize(args)

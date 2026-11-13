@@ -1202,15 +1202,66 @@ async def refresh_native_owner(aid, connection, *, write=False):
 
 @app.get("/api/agents/{aid}/connections/{takeover}")
 async def connection_status(aid: UUID, takeover: UUID):
+    from .growth.contracts import utcnow
     await refresh_native_owner(aid, takeover)
     with tx(str(aid)) as c:
         require_agent(c, str(aid))
-        session = one(c, "SELECT state,purpose,completed_account_id,control_mode,challenge_version,expires_at,connection_data->>'owner_action' owner_action FROM lead.takeover_sessions WHERE id=%s", (takeover,))
+        session = one(c, """SELECT t.state,t.purpose,t.completed_account_id,t.control_mode,t.challenge_version,t.expires_at,
+            t.connection_data->>'owner_action' owner_action,p.provider FROM lead.takeover_sessions t
+            JOIN lead.browser_profiles p ON p.id=t.profile_id WHERE t.id=%s""", (takeover,))
         if not session:
             raise HTTPException(404)
         return {"status": "connected" if session["completed_account_id"] else session["state"],
                 "account_id": session["completed_account_id"],
+                'can_review_read_dependencies':bool(session['provider']=='chromium' and session['purpose']=='login'
+                    and session['state']=='active' and session['control_mode']=='owner' and session['expires_at']>utcnow()),
                 **{key:session[key] for key in ("control_mode","challenge_version","owner_action","expires_at")}}
+
+
+class ReadDependencyDecision(BaseModel):
+    model_config={'extra':'forbid'}
+    challenge_version: int = Field(ge=1)
+    candidate_id: str = Field(pattern=r'^[a-f0-9]{64}$')
+    decision: Literal['approve','refuse']
+
+
+async def read_dependency_command(aid,connection,operation,args):
+    from .account_connection import rpc
+    from .growth.contracts import utcnow
+    from .native_frame_roles import public_reply
+    with tx(str(aid)) as c:
+        require_agent(c,str(aid),True)
+        row=one(c,"""SELECT t.* FROM lead.takeover_sessions t JOIN lead.browser_profiles p ON p.id=t.profile_id
+            WHERE t.id=%s AND t.purpose='login' AND t.state='active' AND t.control_mode='owner'
+            AND t.expires_at>now() AND p.provider='chromium'""",(connection,))
+        if not row or args.get('challenge_version',row['challenge_version'])!=row['challenge_version']:
+            raise HTTPException(409,'原连接或确认步骤已变化，请刷新后重试')
+    try:
+        await rpc(str(aid),row['profile_id'],'native/command',{'run_id':str(connection),
+            'command_id':secrets.token_hex(16),'operation':operation,'args':args},timeout=15)
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code==409:
+            raise HTTPException(409,'页面来源或本人步骤已变化，请刷新后重试') from None
+        raise HTTPException(503,'暂时无法核对原页面，请稍后重试') from None
+    except (httpx.HTTPError,OSError):
+        raise HTTPException(503,'暂时无法核对原页面，请稍后重试') from None
+    with tx(str(aid)) as c:
+        require_agent(c,str(aid),True)
+        current=one(c,'SELECT * FROM lead.takeover_sessions WHERE id=%s',(connection,))
+        if (not current or current['state']!='active' or current['control_mode']!='owner' or current['expires_at']<=utcnow()
+                or current['challenge_version']!=row['challenge_version']):
+            raise HTTPException(409,'原连接或本人步骤已变化，请刷新后重试')
+        return public_reply(current,current['connection_data'].get('read_dependencies',[]))
+
+
+@app.get('/api/agents/{aid}/connections/{connection}/read-dependencies')
+async def read_dependencies(aid: UUID,connection: UUID):
+    return await read_dependency_command(aid,connection,'read_dependencies',{})
+
+
+@app.post('/api/agents/{aid}/connections/{connection}/read-dependencies')
+async def decide_read_dependency(aid: UUID,connection: UUID,body: ReadDependencyDecision):
+    return await read_dependency_command(aid,connection,'read_dependency_decision',body.model_dump())
 
 
 @app.get("/api/agents/{aid}/browser/screenshot")
@@ -1334,6 +1385,11 @@ class ConnectionControl(BaseModel):
 async def connection_control(aid: UUID, connection: UUID, body: ConnectionControl):
     if body.action == 'resume':
         await refresh_native_owner(aid, connection, write=True)
+        with tx(str(aid)) as c:
+            current=one(c,'SELECT connection_data FROM lead.takeover_sessions WHERE id=%s',(connection,))
+            if current and any(source.get('state')!='approved' or source.get('challenge_version')!=body.challenge_version
+                    for source in current['connection_data'].get('read_dependencies',[])):
+                raise HTTPException(409,'嵌入页面仍未获准公开只读访问；请核对来源或取消当前连接')
     from .connection_control import transition
     result=transition(str(aid),connection,body.challenge_version,'automatic',cancel=body.action=='cancel')
     from .growth.runtime import wake_connection

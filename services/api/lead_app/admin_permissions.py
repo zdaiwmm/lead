@@ -165,6 +165,8 @@ def workbench_permission(method, path):
         return None
     if path.endswith("/browser/screenshot"):
         return "accounts.manage"
+    if re.fullmatch(r'/api/agents/[^/]+/connections/[^/]+/read-dependencies',path):
+        return 'accounts.manage'
     if method == "GET":
         if path.endswith("/export"):
             return "agents.edit"

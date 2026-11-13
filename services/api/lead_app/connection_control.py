@@ -68,9 +68,13 @@ def transition(aid, connection, expected_version, mode, *, reason=None, cancel=F
         if mode=='automatic' and row['automatic_attempts']>=3:
             raise ValueError('connection_attempt_limit')
         version=row['challenge_version']+1
+        dependencies=row['connection_data'].get('read_dependencies',[])
+        if mode=='automatic':
+            dependencies=[{**source,**({'automatic_phase':version} if source.get('state')=='approved'
+                and source.get('challenge_version')==expected_version else {})} for source in dependencies]
         c.execute('''UPDATE lead.takeover_sessions SET control_mode=%s,challenge_version=%s,input_seq=input_seq+1,
             connection_data=connection_data || %s WHERE id=%s''',
-            (mode,version,j({'owner_action':str(reason)[:500] if reason else None}),connection))
+            (mode,version,j({'owner_action':str(reason)[:500] if reason else None,'read_dependencies':dependencies}),connection))
         return {'state':'active','control_mode':mode,'challenge_version':version,'input_seq':row['input_seq']+1}
 
 
