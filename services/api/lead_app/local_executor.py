@@ -108,14 +108,15 @@ def bound(aid, *, task_id=None, key=None, connection=None):
 
 def create_pairing(aid):
     from .auth import public_origin
+    from .local_executor_identity import capture
 
     aid = str(aid)
     device_id = str(uuid4())
     expires = _now()+timedelta(minutes=5)
-    code = _token("pair", tenant_id=current_tenant(), agent_id=aid, device_id=device_id,
-                  nonce=secrets.token_urlsafe(24), expires=int(expires.timestamp()))
     with tx(aid) as c:
         require_agent(c, aid, True)
+        code = _token("pair", tenant_id=current_tenant(), agent_id=aid, device_id=device_id,
+                      owner=capture(c, aid), nonce=secrets.token_urlsafe(24), expires=int(expires.timestamp()))
         c.execute("""INSERT INTO lead.local_executor_devices(id,tenant_id,agent_id,pairing_hash,pairing_expires_at)
             VALUES(%s,%s,%s,%s,%s)""", (device_id, current_tenant(), aid, _digest(code), expires))
         audit(c, aid, "executor.pairing_created", {"device_id": device_id})
@@ -124,15 +125,18 @@ def create_pairing(aid):
 
 
 def pair(code, name, platform, capabilities):
+    from .local_executor_identity import require_current
+
     claims = _claims(code, "pair")
     with tenant_scope(claims["tenant_id"], None), tx(claims["agent_id"]) as c:
         require_agent(c, claims["agent_id"], True)
+        require_current(c, claims.get("owner"), claims["agent_id"])
         device = one(c, "SELECT * FROM lead.local_executor_devices WHERE id=%s FOR UPDATE", (claims["device_id"],))
         if (not device or device["state"] != "pairing" or device["pairing_hash"] != _digest(code)
                 or device["pairing_expires_at"] <= _now()):
             raise ValueError("pairing_unavailable")
         bearer = _token("device", tenant_id=claims["tenant_id"], agent_id=claims["agent_id"],
-                        device_id=claims["device_id"], nonce=secrets.token_urlsafe(32),
+                        device_id=claims["device_id"], owner=claims["owner"], nonce=secrets.token_urlsafe(32),
                         expires=int(time.time())+30*86400)
         c.execute("""UPDATE lead.local_executor_devices SET state='active',name=%s,platform=%s,
             capabilities=%s,token_hash=%s,pairing_hash=NULL,pairing_expires_at=NULL,last_seen_at=now() WHERE id=%s""",
@@ -170,6 +174,9 @@ def revoke(aid, device_id):
 
 
 def _device(c, claims, bearer, epoch=None):
+    from .local_executor_identity import require_current
+
+    require_current(c, claims.get("owner"), claims["agent_id"])
     device = one(c, "SELECT * FROM lead.local_executor_devices WHERE id=%s FOR UPDATE", (claims["device_id"],))
     if (not device or device["state"] != "active" or device["token_hash"] != _digest(bearer)
             or str(device["agent_id"]) != claims["agent_id"]):
