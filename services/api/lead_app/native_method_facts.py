@@ -69,14 +69,19 @@ def _member_assistant_action(context,operation):
     A later clause about manual work, or instructions about publishing, cannot
     extend a reading grant. Ambiguous prose remains an unestablished method.
     """
-    grant=r'\bmembers?\s+(?:may|can)\s+use\s+(?:an?\s+)?authorized\s+browser\s+(?:automation|assistant(?:\s+or\s+browser\s+automation)?)\b\s+to\s+([^.!?。！？;]{1,220})'
+    grant=r'\bmembers?\s+(?:may|can)\s+use\s+(?:an?\s+)?authorized\s+browser\s+(?:automation|assistant(?:\s+or\s+browser\s+automation)?)\b\s+to\s+([^.!?。！？]+)'
     verb=r'(?:publish|post)' if operation=='publish' else r'(?:reply|respond)'
     for match in re.finditer(grant,context,re.I):
-        purpose=re.split(r'\b(?:but|while|whereas|however|although|except|yet|(?:or|and)\s+(?:members?\s+)?(?:may|can))\b',match[1],maxsplit=1,flags=re.I)[0]
+        full=match[1]
+        # Inspect the full sentence before removing an explicitly optional
+        # manual alternative. Never discard a restrictive "but"/"must" tail.
+        if len(full)>500 or re.search(r'\b(?:but|while|whereas|however|although|except|yet|must|shall|required|only|solely|exclusively|have\s+to|need\s+to)\b',full,re.I):
+            continue
+        purpose=re.split(r';\s*(?:members?\s+)?(?:may|can)\s+also\b|,\s*or\s+(?:members?\s+)?(?:may|can)\b',full,maxsplit=1,flags=re.I)[0]
         if re.search(r'\b(?:manual(?:ly)?|by\s+hand|read[ -]?only|about|regarding|how\s+to)\b',purpose,re.I):
             continue
         if any(re.match(r'\s*(?:also\s+)?(?:to\s+)?'+verb+r'\b',part,re.I)
-                for part in re.split(r',|\b(?:and|or)\b',purpose)):
+                for part in re.split(r',|\b(?:and|or)\b',purpose.split(';',1)[0])):
             return True
     return False
 
