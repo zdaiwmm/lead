@@ -41,13 +41,42 @@ METHOD_ERROR_HINTS = {
 }
 
 
+SELECTOR_FIELDS=('self_subject','editor_target','editor_body','submit','editor_parent','permission_selector')
+SELECTOR_ISSUES=frozenset(('invalid_selector','not_found','not_unique','not_visible'))
+SELECTOR_ERROR_CODES=frozenset(('browser_method_selector_missing','browser_method_element_ambiguous'))
+
+
+def safe_selector_issues(value):
+    """Project bounded, fixed enums only; never copy selector strings or detail."""
+    if not isinstance(value,(list,tuple)) or len(value)>len(SELECTOR_FIELDS):
+        return []
+    result=[]
+    for row in value:
+        if not isinstance(row,dict):
+            continue
+        field,issue=row.get('field'),row.get('issue')
+        if (isinstance(field,str) and field in SELECTOR_FIELDS
+                and isinstance(issue,str) and issue in SELECTOR_ISSUES
+                and not any(item['field']==field for item in result)):
+            result.append({'field':field,'issue':issue})
+    return result
+
+
 class MethodFactError(ValueError):
     """Keep the original message and expose only one fixed, allowlisted code."""
-    def __init__(self,code):
+    def __init__(self,code,*,selector_issues=None):
         if not isinstance(code,str) or code not in METHOD_ERROR_HINTS:
             raise ValueError('unrecognized_method_error_code')
         self.code=code
+        self.selector_issues=safe_selector_issues(selector_issues) if code in SELECTOR_ERROR_CODES else []
         super().__init__(code)
+
+
+def method_error_metadata(error):
+    if not isinstance(error,MethodFactError) or error.code not in SELECTOR_ERROR_CODES:
+        return {}
+    issues=safe_selector_issues(getattr(error,'selector_issues',None))
+    return {'selector_issues':issues} if issues else {}
 
 
 def method_rpc_feedback(operation,status,payload):
@@ -58,4 +87,8 @@ def method_rpc_feedback(operation,status,payload):
     if not isinstance(code,str):
         return None
     hint=METHOD_ERROR_HINTS.get(code) or IDENTITY_ERROR_HINTS.get(code)
-    return code+': '+hint if hint else None
+    if not hint:
+        return None
+    issues=safe_selector_issues(payload.get('selector_issues')) if code in SELECTOR_ERROR_CODES else []
+    suffix=' Selector issues: '+', '.join(row['field']+'='+row['issue'] for row in issues)+'.' if issues else ''
+    return code+': '+hint+suffix

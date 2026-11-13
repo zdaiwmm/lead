@@ -11,7 +11,7 @@ from urllib.parse import urljoin, urlsplit
 from uuid import UUID
 
 from .browser_execution import canonical_numeric_id, origin, safe_parent_field
-from .native_method_errors import MethodFactError
+from .native_method_errors import SELECTOR_ERROR_CODES, MethodFactError
 
 _IDENTITY_PREFIX = re.compile(r'^(?:(?:signed|logged)\s+in\s+as|posting\s+as|replying\s+as|current\s+account|当前(?:登录)?(?:账号|账户|身份)|发布身份|回复身份)\s*[:：]?\s*$', re.I)
 _DYNAMIC = re.compile(r'^(?:_?csrf(?:[_-]?token|middlewaretoken)?|_?nonce)$', re.I)
@@ -35,13 +35,33 @@ def _url(value, base=None):
     return result
 
 
-async def _node(page, selector):
+async def _node(page, selector, *, field=None):
     if not isinstance(selector,str) or not 1<=len(selector)<=300:
-        raise MethodFactError('browser_method_selector_missing')
+        raise MethodFactError('browser_method_selector_missing',selector_issues=[{'field':field,'issue':'invalid_selector'}])
     node=page.locator(selector)
-    if await node.count()!=1 or not await node.is_visible():
-        raise MethodFactError('browser_method_element_ambiguous')
+    count=await node.count()
+    if count!=1:
+        raise MethodFactError('browser_method_element_ambiguous',
+            selector_issues=[{'field':field,'issue':'not_found' if count==0 else 'not_unique'}])
+    if not await node.is_visible():
+        raise MethodFactError('browser_method_element_ambiguous',selector_issues=[{'field':field,'issue':'not_visible'}])
     return node
+
+
+async def _nodes(page,selectors,names):
+    nodes,issues={},[]
+    first=None
+    for name in names:
+        try:
+            nodes[name]=await _node(page,selectors[name],field=name)
+        except MethodFactError as error:
+            if error.code not in SELECTOR_ERROR_CODES:
+                raise
+            first=first or error
+            issues.extend(error.selector_issues)
+    if first:
+        raise MethodFactError(first.code,selector_issues=issues)
+    return nodes
 
 
 def _permission(context, quote, operation):
@@ -238,7 +258,7 @@ async def _inspect_editor(page, proposal, *, account_id, binding_version, extern
     needed=['self_subject','editor_target','editor_body','submit']+(['editor_parent'] if operation=='reply' else [])
     if not isinstance(selectors,dict) or set(selectors)!=set(needed):
         raise MethodFactError('browser_method_selector_contract_missing')
-    nodes={name:await _node(page,selectors[name]) for name in needed}
+    nodes=await _nodes(page,selectors,needed)
     prefix=proposal.get('self_subject_prefix','')
     suffix=proposal.get('self_subject_suffix','')
     if (not isinstance(prefix,str) or not isinstance(suffix,str) or len(prefix)>150 or len(suffix)>150
@@ -258,7 +278,7 @@ async def _inspect_editor(page, proposal, *, account_id, binding_version, extern
         raise MethodFactError('browser_method_identity_changed')
     prefix,suffix=current['self_subject_prefix'],current['self_subject_suffix']
     selectors={**selectors,'self_subject':current['acting_subject_selector']}
-    nodes['self_subject']=await _node(page,selectors['self_subject'])
+    nodes['self_subject']=await _node(page,selectors['self_subject'],field='self_subject')
     self_text=(await nodes['self_subject'].inner_text()).strip()
     if self_text!=(prefix+external_account_id+suffix).strip():
         raise MethodFactError('browser_method_identity_changed')
@@ -299,7 +319,7 @@ async def _inspect_editor(page, proposal, *, account_id, binding_version, extern
     facts=await _form_facts(nodes['editor_body'],nodes['submit'])
     request=_request(facts,page_url=page_url,expected_origin=expected_origin,operation=operation,
                      parent_url=parent,external_account_id=external_account_id,parent_identifier=parent_identifier)
-    permission=await _node(permission_page,proposal.get('permission_selector'))
+    permission=await _node(permission_page,proposal.get('permission_selector'),field='permission_selector')
     quote=proposal.get('permission_quote')
     if not isinstance(quote,str) or not 20<=len(quote)<=3000:
         raise MethodFactError('browser_method_permission_quote_missing')

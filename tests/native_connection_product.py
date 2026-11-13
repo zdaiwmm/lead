@@ -113,6 +113,9 @@ async def verify_login(
             model_calls[-1]['identity_feedback_code_seen']='identity_element_ambiguous' in text
             if mode=='method_feedback':
                 model_calls[-1]['method_feedback_code_seen']='browser_method_element_ambiguous' in text
+                model_calls[-1]['method_feedback_fields_seen']=[name for name in
+                    ('self_subject','editor_target','editor_body','submit','editor_parent','permission_selector')
+                    if name+'=not_found' in text]
             if mode in ('selector_bookmark','identity_empty_hints'):
                 model_calls[-1]['private_css_id_visible']=bool(__import__('re').search(r'''\bid\s*=\s*["']?subject\b''',text))
             if mode.startswith('identity_inferred'):
@@ -286,6 +289,7 @@ async def verify_login(
                     if mode=='method_feedback':
                         if step==0:
                             action['propose_method']['selectors']['self_subject']='#missing-observed-current-subject'
+                            action['propose_method']['selectors']['submit']='#missing-observed-submit'
                         elif not model_calls[-1]['method_feedback_code_seen']:
                             action={'done':{'success':False,'text':'Controlled feedback was not available.'}}
             elif step in (0, 1):

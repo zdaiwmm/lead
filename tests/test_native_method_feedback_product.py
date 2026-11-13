@@ -49,6 +49,7 @@ async def test_actual_sdk_method_feedback_allows_one_bounded_correction(monkeypa
             'usage':worker['usage'],'state':row['state'],'corrections':row['result']['runtime']['native_progress']['corrections'],
             'target_count':len(targets),'method_stored':any('publish' in t['verified_permissions'].get('browser_methods',{}) for t in targets),
             'literal_in_method_workdir':secret_seen,'feedback_seen':[r.get('method_feedback_code_seen',False) for r in context['model_calls'][before:]],
+            'feedback_fields_seen':[r.get('method_feedback_fields_seen',[]) for r in context['model_calls'][before:]],
             'selector_schemas':[r['method_selector_schemas'] for r in context['model_calls'][before:]]}
         (STATE/'method-feedback-product.json').write_text(json.dumps(safe,indent=2))
         assert safe['feedback_seen']==[False,True]
@@ -56,6 +57,7 @@ async def test_actual_sdk_method_feedback_allows_one_bounded_correction(monkeypa
         assert trace['steps'][0]['outcomes']==[{'status':'error','code':'browser_method_element_ambiguous'}]
         assert safe['method_stored'] and safe['worker_success'] and safe['state']=='succeeded'
         assert safe['target_count']==1 and not secret_seen
+        assert safe['feedback_fields_seen']==[[],['self_subject','submit']]
         expected={frozenset(('self_subject','editor_target','editor_body','submit')),
             frozenset(('self_subject','editor_target','editor_body','submit','editor_parent'))}
         assert all({frozenset(row['required']) for row in shapes}==expected
