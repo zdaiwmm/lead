@@ -1,8 +1,11 @@
 """Filesystem cutover, mount identity and lost-status regression cases (no production data)."""
 
 import importlib
+import io
+import json
 import stat
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -1438,6 +1441,46 @@ def test_unified_unfrozen_schema_runtime_never_releases(hook,monkeypatch):
     monkeypatch.setattr(hook,'UNIFIED_BROWSER_FILES',{'scripts/browser_namespace.py':'UNFROZEN'})
     with pytest.raises(hook.Refused,match='not frozen'):
         hook.reviewed_unified_browser('/mirror','b'*40,{'scripts/browser_namespace.py'})
+
+
+def test_local_executor_package_requires_exact_revision_and_safe_members(hook, monkeypatch, tmp_path):
+    root = tmp_path / 'sealed'
+    folder = root / 'services/local-executor'
+    folder.mkdir(parents=True)
+    package = folder / 'lead-local-executor.tgz'
+    monkeypatch.setattr(hook, 'image', lambda sha: root)
+    sha = 'b' * 40
+    def write(revision=sha, malicious=False):
+        files = {'package/REVISION': revision, 'package/package.json': json.dumps({
+            'name': '@lead/local-executor', 'bin': {'lead-executor': './dist/cli.js'}}),
+            'package/dist/cli.js': '#!/usr/bin/env node\n'}
+        with tarfile.open(package, 'w:gz') as output:
+            for name, text in files.items():
+                data = text.encode()
+                item = tarfile.TarInfo(name)
+                item.size = len(data)
+                output.addfile(item, io.BytesIO(data))
+            if malicious:
+                item = tarfile.TarInfo('package/dist/redirect')
+                item.type = tarfile.SYMTYPE
+                item.linkname = '/etc/passwd'
+                output.addfile(item)
+    write()
+    hook.verify_local_executor_package(sha)
+    write('a' * 40)
+    with pytest.raises(hook.Refused, match='revision'):
+        hook.verify_local_executor_package(sha)
+    write(malicious=True)
+    with pytest.raises(hook.Refused, match='member'):
+        hook.verify_local_executor_package(sha)
+
+
+def test_codex_release_requires_explicit_source_inventory(hook):
+    assert 'infra/migrations/sql/0034_local_executor.sql' in hook.UNIFIED_BROWSER_FILES
+    assert 'apps/web/next.config.ts' in hook.UNIFIED_BROWSER_FILES
+    assert 'services/local-executor/package-lock.json' in hook.UNIFIED_BROWSER_FILES
+    assert 'services/local-executor/src/runner.ts' in hook.UNIFIED_BROWSER_FILES
+    assert 'services/local-executor/src/arbitrary.ts' not in hook.UNIFIED_BROWSER_FILES
 
 
 def test_ambiguous_cutover_journals_refuse(hook,monkeypatch):

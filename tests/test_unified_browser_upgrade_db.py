@@ -99,3 +99,58 @@ def test_unified_release_refuses_legacy_functions_even_with_additive_tables(upgr
         # migration. A native-browser cutover needs the newer receipt contract.
         assert c.execute(release.growth_schema_query()).fetchone()[0] is True
         assert c.execute(release.unified_schema_query()).fetchone()[0] is False
+
+
+def test_codex_upgrade_preserves_existing_unified_business_evidence(upgrade_database):
+    helper, target = upgrade_database
+    upgrade(target, target='0033_unified_browser')
+    aid = uuid4()
+    with psycopg.connect(**target) as c:
+        c.execute("INSERT INTO lead.agents(id,tenant_id,name,desired_state,control_version) VALUES(%s,%s,'existing unified app','paused',9)", (aid,TENANT))
+        c.execute("""INSERT INTO lead.agent_revisions(tenant_id,agent_id,revision,provider,model_ref,prompt_version,toolset_version,output_schema_version)
+            VALUES(%s,%s,1,'fixture','fixture','fixture','fixture','fixture')""", (TENANT,aid))
+        c.execute("""INSERT INTO lead.experiences(tenant_id,agent_id,extraction_key,kind,problem,conclusion)
+            VALUES(%s,%s,'original','research','existing evidence','preserve the original conclusion')""", (TENANT,aid))
+        c.execute("""INSERT INTO lead.research_allowances(tenant_id,connection_ref,period_key,unit,limit_units,reserved_units,spent_units)
+            VALUES(%s,'original','period','provider',100,40,30)""", (TENANT,))
+    def connect(name):
+        assert name == target['dbname']
+        return psycopg.connect(**target)
+    columns = helper.column_inventory(connect, target['dbname'])
+    assert {'experiences','research_allowances'} <= set(columns)
+    before = helper.data_inventory(connect, target['dbname'], columns)
+    upgrade(target)
+    helper.assert_unchanged(before, helper.data_inventory(connect, target['dbname'], columns))
+    # An application rollback must also retain newly created transport facts.
+    columns = helper.column_inventory(connect, target['dbname'])
+    assert {'local_executor_requests','local_executor_events'} <= set(columns)
+
+
+def test_transport_schema_rejects_weakened_keys_policies_and_privileges(upgrade_database):
+    _, target = upgrade_database
+    release = importlib.import_module('home_systemd_release')
+    upgrade(target)
+    query = release.local_executor_schema_query()
+    mutations = (
+        "ALTER TABLE lead.local_executor_devices DISABLE ROW LEVEL SECURITY",
+        "ALTER TABLE lead.local_executor_commands NO FORCE ROW LEVEL SECURITY",
+        "ALTER POLICY agent_scope ON lead.local_executor_devices USING(true) WITH CHECK(true)",
+        "CREATE POLICY unexpected_allow ON lead.local_executor_devices USING(true)",
+        "ALTER TABLE lead.local_executor_requests DROP CONSTRAINT local_executor_requests_tenant_id_agent_id_device_id_fkey",
+        "ALTER TABLE lead.local_executor_requests DROP CONSTRAINT local_executor_requests_tenant_id_agent_id_request_key_key",
+        "ALTER TABLE lead.local_executor_commands DROP CONSTRAINT local_executor_commands_kind_check",
+        "ALTER TABLE lead.local_executor_requests DISABLE TRIGGER ALL",
+        "REVOKE INSERT ON lead.local_executor_devices FROM lead_runtime",
+        "GRANT DELETE ON lead.local_executor_events TO lead_runtime",
+        "UPDATE public.lead_migration_version SET version_num='0033_unified_browser'",
+    )
+    with psycopg.connect(**target) as c:
+        assert c.execute(query).fetchone()[0] is True
+        assert c.execute(release.unified_schema_query()).fetchone()[0] is True
+        for statement in mutations:
+            c.execute('SAVEPOINT transport_guard')
+            c.execute(statement)
+            assert c.execute(query).fetchone()[0] is False, statement
+            c.execute('ROLLBACK TO SAVEPOINT transport_guard')
+            c.execute('RELEASE SAVEPOINT transport_guard')
+            assert c.execute(query).fetchone()[0] is True

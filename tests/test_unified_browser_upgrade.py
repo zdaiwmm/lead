@@ -81,6 +81,16 @@ def test_original_action_controls_and_routes_are_not_excluded(upgrade):
         upgrade.assert_unchanged(before,{**before,'actions':[1,'unknown-hash']})
 
 
+def test_codex_upgrade_only_admits_reviewed_additive_baselines(upgrade):
+    assert upgrade.GOAL == '0034_local_executor'
+    assert upgrade.validate_baseline(['0031_growth_runtime']) == '0031_growth_runtime'
+    assert upgrade.validate_baseline(['0033_unified_browser']) == '0033_unified_browser'
+    for versions in ([], ['0030_fault_isolation'], ['0034_local_executor'], ['unknown'],
+                     ['0031_growth_runtime', '0033_unified_browser']):
+        with pytest.raises(ValueError, match='starting schema'):
+            upgrade.validate_baseline(versions)
+
+
 def test_finish_retains_hold_until_independent_readback(upgrade,tmp_path,monkeypatch):
     sha='b'*40
     pending=tmp_path/'unified-browser-cutover.pending'

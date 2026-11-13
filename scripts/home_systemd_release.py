@@ -13,6 +13,7 @@ import re
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from contextlib import contextmanager
@@ -1070,7 +1071,7 @@ FAULT_ISOLATION_FILES = {'scripts/fault_isolation_upgrade.py': '6fa2986893c3d1db
 def fault_schema_query():
     return """SELECT
         (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN
-            (ARRAY['0030_fault_isolation'],ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'])
+            (ARRAY['0030_fault_isolation'],ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'])
         AND (SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity)
              FROM pg_class WHERE oid IN (to_regclass('lead.runtime_issues'),to_regclass('lead.ui_revisions')))
         AND (SELECT count(*)=4 FROM pg_policies WHERE schemaname='lead'
@@ -1115,7 +1116,7 @@ GROWTH_RUNTIME_FILES = {'scripts/growth_runtime_upgrade.py': '5a98672c797361272a
 
 
 def growth_schema_query():
-    return """SELECT (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN (ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'])
+    return """SELECT (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN (ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'])
         AND (SELECT count(*)=3 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class WHERE oid IN
             (to_regclass('lead.growth_experiments'),to_regclass('lead.account_operating_intents'),to_regclass('lead.profile_execution_routes')))
         AND (SELECT count(*)=6 FROM pg_policies WHERE schemaname='lead'
@@ -1196,9 +1197,41 @@ UNIFIED_BROWSER_FILES = {
 }
 
 
-def unified_schema_query():
+LOCAL_EXECUTOR_FILES = frozenset(('services/local-executor/.gitignore',
+ 'services/local-executor/README.md',
+ 'services/local-executor/package-lock.json',
+ 'services/local-executor/package.json',
+ 'services/local-executor/src/capabilities.ts',
+ 'services/local-executor/src/cli.ts',
+ 'services/local-executor/src/daemon.ts',
+ 'services/local-executor/src/launchd.ts',
+ 'services/local-executor/src/mcp.ts',
+ 'services/local-executor/src/rpc.ts',
+ 'services/local-executor/src/runner.ts',
+ 'services/local-executor/src/store.ts',
+ 'services/local-executor/src/transport.ts',
+ 'services/local-executor/src/types.ts',
+ 'services/local-executor/test/cli.test.ts',
+ 'services/local-executor/test/integration-api.py',
+ 'services/local-executor/test/integration-control.ts',
+ 'services/local-executor/test/integration.ts',
+ 'services/local-executor/test/mcp.test.ts',
+ 'services/local-executor/test/runtime.test.ts',
+ 'services/local-executor/test/transport.test.ts',
+ 'services/local-executor/tsconfig.json'))
+UNIFIED_BROWSER_FILES.update({path: "UNFROZEN" for path in LOCAL_EXECUTOR_FILES})
+UNIFIED_BROWSER_FILES.update({
+    "infra/migrations/versions/0034_local_executor.py": "UNFROZEN",
+    "infra/migrations/sql/0034_local_executor.sql": "UNFROZEN",
+    "apps/web/next.config.ts": "UNFROZEN",
+    "scripts/unified_browser_upgrade.py": "UNFROZEN",
+    "scripts/build_home_image.sh": "UNFROZEN",
+})
+
+
+def browser_schema_query():
     return "SELECT ("+growth_schema_query().removeprefix("SELECT ")+""" )
-        AND (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0033_unified_browser']
+        AND (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN (ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'])
         AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.growth_complete_connection(uuid,uuid,uuid,bigint,bigint,bigint,jsonb,text,jsonb)') AND prosecdef AND md5(prosrc)='fe6c839637f14db267c2b0dae12b6eef')
         AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.growth_receipt_valid(uuid)') AND prosecdef AND md5(prosrc)='f868f71708e1cdcd167aac21b3a43630')
         AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.growth_confirm_publication(uuid)') AND prosecdef AND md5(prosrc)='4e4b9df37d438d1232deba642c577e93')
@@ -1239,6 +1272,84 @@ def unified_schema_query():
     """
 
 
+def local_executor_schema_query():
+    """Exact additive transport keys and RLS; no production facts are sampled."""
+    return """SELECT
+        (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0034_local_executor']
+        AND (SELECT count(*)=5 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class
+            WHERE relnamespace='lead'::regnamespace AND relname IN ('local_executor_devices','local_executor_projects',
+                'local_executor_requests','local_executor_commands','local_executor_events'))
+        AND (SELECT count(*)=10 AND bool_and(polcmd='*' AND polroles=ARRAY[0::oid] AND
+            CASE polname
+              WHEN 'agent_scope' THEN polpermissive AND md5(pg_get_expr(polqual,polrelid))='3e0c5a9d5892e92b7636fe01c2340832'
+                AND md5(pg_get_expr(polwithcheck,polrelid))='3e0c5a9d5892e92b7636fe01c2340832'
+              WHEN 'member_scope' THEN NOT polpermissive AND md5(pg_get_expr(polqual,polrelid))='ba49c86007a3518c764dfc9790c67b50'
+                AND md5(pg_get_expr(polwithcheck,polrelid))='ba49c86007a3518c764dfc9790c67b50'
+              ELSE false END) FROM pg_policy
+            WHERE polrelid IN (to_regclass('lead.local_executor_devices'),to_regclass('lead.local_executor_projects'),
+                to_regclass('lead.local_executor_requests'),to_regclass('lead.local_executor_commands'),to_regclass('lead.local_executor_events')))
+        AND (SELECT count(*)=22 FROM pg_constraint WHERE convalidated
+            AND (conindid=0 OR EXISTS(SELECT FROM pg_index WHERE indexrelid=conindid AND indisunique AND indisvalid AND indisready))
+            AND (conrelid,conname,md5(pg_get_constraintdef(oid))) IN (
+            ('lead.local_executor_commands'::regclass,'local_executor_commands_kind_check','7704c55ae6424857a322dd140d4c0b0c'),
+            ('lead.local_executor_commands'::regclass,'local_executor_commands_pkey','4c6419b3704337bbfe50f018842a9ad3'),
+            ('lead.local_executor_commands'::regclass,'local_executor_commands_tenant_id_agent_id_request_id_comma_key','c23f1b0177643c131288608b0515bfa8'),
+            ('lead.local_executor_commands'::regclass,'local_executor_commands_tenant_id_agent_id_request_id_fkey','f8bd293d1a3855cb11c2b2c9ebe4b053'),
+            ('lead.local_executor_devices'::regclass,'local_executor_devices_epoch_check','542480a8da1ec524fa52b99f57b19ee8'),
+            ('lead.local_executor_devices'::regclass,'local_executor_devices_pkey','4c6419b3704337bbfe50f018842a9ad3'),
+            ('lead.local_executor_devices'::regclass,'local_executor_devices_state_check','8047b4af23b864dd84d9c178112b1c05'),
+            ('lead.local_executor_devices'::regclass,'local_executor_devices_tenant_id_agent_id_fkey','03af99f687a8794aaae4a68c0b96058b'),
+            ('lead.local_executor_devices'::regclass,'local_executor_devices_tenant_id_agent_id_id_key','6309755b4f041a54136c3df39beb5874'),
+            ('lead.local_executor_events'::regclass,'local_executor_events_pkey','d21c800fdf017e9de072dd72b98ea446'),
+            ('lead.local_executor_events'::regclass,'local_executor_events_tenant_id_agent_id_request_id_fkey','f8bd293d1a3855cb11c2b2c9ebe4b053'),
+            ('lead.local_executor_projects'::regclass,'local_executor_projects_mode_check','601fb6282b6d3e461e0f30e3c7448f04'),
+            ('lead.local_executor_projects'::regclass,'local_executor_projects_pkey','f34326dabef8749613ed9f8abb497019'),
+            ('lead.local_executor_projects'::regclass,'local_executor_projects_tenant_id_agent_id_device_id_fkey','b6920ea1bc091fd7bec91856e4910a8f'),
+            ('lead.local_executor_projects'::regclass,'local_executor_projects_tenant_id_agent_id_fkey','03af99f687a8794aaae4a68c0b96058b'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_pkey','4c6419b3704337bbfe50f018842a9ad3'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_state_check','fd2d500fc858b1c1402e822d3389e28c'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_tenant_id_agent_id_device_id_fkey','b6920ea1bc091fd7bec91856e4910a8f'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_tenant_id_agent_id_fkey','03af99f687a8794aaae4a68c0b96058b'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_tenant_id_agent_id_id_key','6309755b4f041a54136c3df39beb5874'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_tenant_id_agent_id_request_key_key','5bf052683cf55aff8667edc520c5d5d1'),
+            ('lead.local_executor_requests'::regclass,'local_executor_requests_tenant_id_agent_id_task_id_fkey','262a2148e4eef17c00764e401acdc4c7')))
+        AND NOT EXISTS(SELECT FROM pg_trigger t JOIN pg_constraint c ON c.oid=t.tgconstraint
+            WHERE c.contype='f' AND t.tgenabled<>'O' AND c.conrelid IN
+                (to_regclass('lead.local_executor_devices'),to_regclass('lead.local_executor_projects'),
+                to_regclass('lead.local_executor_requests'),to_regclass('lead.local_executor_commands'),to_regclass('lead.local_executor_events')))
+        AND (SELECT bool_and(has_table_privilege('lead_runtime',oid,'SELECT')
+            AND has_table_privilege('lead_runtime',oid,'INSERT') AND has_table_privilege('lead_runtime',oid,'UPDATE')
+            AND NOT has_table_privilege('lead_runtime',oid,'DELETE'))
+            FROM pg_class WHERE relnamespace='lead'::regnamespace AND relname IN ('local_executor_devices','local_executor_projects',
+                'local_executor_requests','local_executor_commands','local_executor_events'))
+    """
+
+
+def unified_schema_query():
+    return "SELECT ("+browser_schema_query().removeprefix("SELECT").strip()+") AND ("+local_executor_schema_query().removeprefix("SELECT").strip()+")"
+
+
+def verify_local_executor_package(sha):
+    """Inspect the same immutable image's package without extracting or running it."""
+    root = image(sha)
+    package = root/'services/local-executor/lead-local-executor.tgz'
+    require(package.is_file() and package.resolve() == package, 'local executor package unavailable or redirected')
+    with tarfile.open(package, 'r:gz') as archive:
+        members = archive.getmembers()
+        names = [member.name for member in members]
+        require(len(names) == len(set(names)), 'duplicate local executor package member')
+        for member in members:
+            path = Path(member.name)
+            require(not path.is_absolute() and '..' not in path.parts and path.parts and path.parts[0] == 'package'
+                    and (member.isfile() or member.isdir()), 'unsafe local executor package member')
+        for name in ('package/REVISION','package/package.json','package/dist/cli.js'):
+            require(name in names and archive.getmember(name).isfile(), 'local executor package member missing')
+        require(archive.extractfile('package/REVISION').read().decode().strip() == sha, 'local executor package revision differs')
+        metadata = json.load(archive.extractfile('package/package.json'))
+        require(metadata.get('name') == '@lead/local-executor' and metadata.get('bin',{}).get('lead-executor') == './dist/cli.js',
+                'local executor package identity differs')
+
+
 def reviewed_unified_browser(mirror,sha,extra):
     paths=extra.intersection(UNIFIED_BROWSER_FILES)
     if not paths:
@@ -1252,6 +1363,8 @@ def reviewed_unified_browser(mirror,sha,extra):
     program=('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(unified_schema_query())+'))')
     require(run('/usr/bin/python3','-IB','-c',program)=='t','unified-browser schema is not ready')
     require(unified_cutover_pending(sha),'unified-browser cutover hold is missing')
+    if paths.intersection(LOCAL_EXECUTOR_FILES):
+        verify_local_executor_package(sha)
     return paths
 
 
@@ -1266,6 +1379,7 @@ def verify_unified_cutover(sha):
     require(site.is_file(),'existing node database verifier required')
     program=('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(unified_schema_query())+'))')
     require(run('/usr/bin/python3','-IB','-c',program)=='t','unified-browser schema is not ready')
+    verify_local_executor_package(sha)
     require(current()==sha and unified_cutover_pending(sha),'cutover changed during verification')
 
 

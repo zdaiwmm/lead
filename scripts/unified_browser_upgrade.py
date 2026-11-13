@@ -20,7 +20,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BASELINE = '0031_growth_runtime'
-GOAL = '0033_unified_browser'
+BASELINES = (BASELINE, '0033_unified_browser')
+GOAL = '0034_local_executor'
 STORE = Path('/srv/lead-prod-vault/lead-git-releases')
 LIVE = Path('/srv/lead-prod-vault/lead-home-live')
 TOOLS = Path('/usr/local/lib/lead-home-release')
@@ -30,6 +31,14 @@ PRESERVED_TABLES = (
     'action_attempts','content_items','budget_reservations','usage_events','tasks',
     'growth_experiments','account_operating_intents','profile_execution_routes','browser_profiles',
 )
+ADDITIVE_TABLES = ('experiences', 'research_allowances', 'local_executor_devices',
+    'local_executor_projects', 'local_executor_requests', 'local_executor_commands', 'local_executor_events')
+
+
+def validate_baseline(versions):
+    if len(versions) != 1 or versions[0] not in BASELINES:
+        raise ValueError('Unexpected starting schema')
+    return versions[0]
 
 
 def run(*args, **kwargs):
@@ -89,7 +98,10 @@ def verify_approval(sha, archive, *, get=public_api, started=False):
 
 def column_inventory(connect, name):
     with connect(name) as c:
-        return {table:[r[0] for r in c.execute("SELECT attname FROM pg_attribute WHERE attrelid=%s::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum",('lead.'+table,))] for table in PRESERVED_TABLES}
+        tables = list(PRESERVED_TABLES)
+        tables.extend(table for table in ADDITIVE_TABLES
+                      if c.execute('SELECT to_regclass(%s)', ('lead.'+table,)).fetchone()[0])
+        return {table:[r[0] for r in c.execute("SELECT attname FROM pg_attribute WHERE attrelid=%s::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum",('lead.'+table,))] for table in tables}
 
 
 def data_inventory(connect, name, columns):
@@ -98,7 +110,7 @@ def data_inventory(connect, name, columns):
     result={}
     with connect(name) as c:
         c.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
-        for table in PRESERVED_TABLES:
+        for table in columns:
             # Only a fixed table inventory and the previously attested actual
             # column identifiers enter SQL; no business values are printed.
             fields=sql.SQL(',').join(sql.Identifier(k) for k in columns[table])
@@ -201,7 +213,8 @@ def main():
                 or run('git','hash-object','--no-filters',path)!=blob):
             raise ValueError('Upgrade source drift')
     required=set(scripts)|{'infra/migrations/versions/0032_research_memory.py','infra/migrations/sql/0032_research_memory.sql',
-        'infra/migrations/versions/0033_unified_browser.py','infra/migrations/sql/0033_unified_browser.sql'}
+        'infra/migrations/versions/0033_unified_browser.py','infra/migrations/sql/0033_unified_browser.sql',
+        'infra/migrations/versions/0034_local_executor.py','infra/migrations/sql/0034_local_executor.sql'}
     if not required<=listed:
         raise ValueError('Upgrade source manifest is incomplete')
     sys.path[:0]=[str(source/'scripts')]
@@ -222,8 +235,7 @@ def main():
         with connect(name) as c:
             return [r[0] for r in c.execute('SELECT version_num FROM public.lead_migration_version')]
     def migrate(name,columns,before):
-        if version(name)!=[BASELINE]:
-            raise ValueError('Unexpected starting schema')
+        validate_baseline(version(name))
         os.environ['LEAD_DB_NAME']=name
         upgrade({**options,'dbname':name},target=GOAL,roles=True)
         if version(name)!=[GOAL]:
@@ -239,8 +251,7 @@ def main():
         base['atomic_private'](path,data,previous=dump)
     pg=site['pg']/'lib/postgresql/18/bin'
     if args.phase=='rehearse':
-        if version('lead')!=[BASELINE]:
-            raise ValueError('Rehearsal requires the original schema')
+        baseline=validate_baseline(version('lead'))
         if not dump.exists():
             partial=stage/'pre-unified-browser.partial'
             subprocess.run([pg/'pg_dump','-Fc','--file',partial,'lead'],env=env,check=True)
@@ -251,6 +262,8 @@ def main():
             try:
                 admin.execute(sql.SQL('REVOKE CONNECT ON DATABASE {} FROM PUBLIC').format(sql.Identifier(name)))
                 subprocess.run([pg/'pg_restore','--exit-on-error','-d',name,dump],env=env,check=True)
+                if validate_baseline(version(name)) != baseline:
+                    raise ValueError('Original backup baseline differs')
                 columns=column_inventory(connect,name)
                 before=data_inventory(connect,name,columns)
                 with base['drill_role_connections'](name,options):
@@ -267,7 +280,7 @@ def main():
         with dump.open('rb') as stream:
             digest=hashlib.file_digest(stream,'sha256').hexdigest()
         write(proof,json.dumps({'sha':args.sha,'old':args.old,'dump_sha256':digest,
-            'columns':columns,'config_sha256':hashlib.sha256(config_before).hexdigest(),
+            'baseline':baseline,'columns':columns,'config_sha256':hashlib.sha256(config_before).hexdigest(),
             'role_transport':'isolated-db-admin-login-with-verified-restricted-role'}).encode())
         print('Restored backup additive schema and unchanged original authority verified',flush=True)
         return
@@ -303,6 +316,8 @@ def main():
             raise ValueError('Previous migration did not reach goal; hold retained for inspection')
         if journal.exists():
             raise ValueError('Migration journal exists without original start record')
+        if validate_baseline(version('lead')) != expected.get('baseline'):
+            raise ValueError('Rehearsed starting schema differs; hold retained for inspection')
         if hashlib.sha256(config_before).hexdigest()!=expected['config_sha256']:
             raise ValueError('Node configuration changed since rehearsal')
         run(TOOLS/'home_systemd_release.py','verify',args.old)
