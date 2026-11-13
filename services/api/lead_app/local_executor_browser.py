@@ -57,8 +57,9 @@ def browser_tools(kind):
                 'Exact observed rule text establishing ordinary-member permission for this operation and browser automation, without unmet approval conditions.'},
         }, ('target_url','operation','selectors','permission_selector','permission_quote')))
     elif kind == 'action':
+        from .native_receipt_errors import SELECTOR_DESCRIPTIONS
         tools.append(_tool('report_receipt', 'Report CSS value selectors of the actual resulting receipt. Original identity, body, parent and uniqueness are independently checked.', {
-            'selectors':{'type':'object','properties':{name:string for name in ('author','body','url','parent')},
+            'selectors':{'type':'object','properties':{name:{**string,'minLength':1,'maxLength':300,'description':description} for name,description in SELECTOR_DESCRIPTIONS.items()},
                 'required':['author','body','url'],'additionalProperties':False}}, ('selectors',)))
     elif kind != 'research':
         raise ValueError('executor_browser_kind_unsupported')
@@ -258,6 +259,7 @@ async def _worker():
     from .browser_execution import guarded_tools, scoped_session_class
     from .native_identity_errors import identity_rpc_feedback
     from .native_method_errors import method_rpc_feedback
+    from .native_receipt_errors import receipt_rpc_feedback
 
     logging.disable(logging.CRITICAL)
     output = sys.stdout
@@ -277,7 +279,7 @@ async def _worker():
                 body=response.json()
             except ValueError:
                 body=None
-            feedback = identity_rpc_feedback(operation,409,body) or method_rpc_feedback(operation,409,body)
+            feedback = identity_rpc_feedback(operation,409,body) or method_rpc_feedback(operation,409,body) or receipt_rpc_feedback(operation,409,body)
             if feedback:
                 raise ToolFeedbackError(feedback)
         response.raise_for_status()

@@ -459,7 +459,18 @@ class NativeAction(NativeTask):
         before=await self.document()
         receipt=await self.read_receipt(self.page,selectors)
         if not receipt or before!=await self.document():
-            raise ValueError('browser_receipt_unproved')
+            from .native_receipt_errors import (
+                ReceiptFactError,
+                diagnose_receipt_selectors,
+            )
+            if before!=await self.document():
+                raise ReceiptFactError('receipt_document_changed')
+            _,account,_=await asyncio.to_thread(self.snapshot)
+            code=await diagnose_receipt_selectors(self.page,selectors,body=self.action['intent']['body'],
+                author=account['external_account_id'],parent=self.action['intent'].get('parent_url') if self.action['type']=='reply' else None)
+            if before!=await self.document():
+                code='receipt_document_changed'
+            raise ReceiptFactError(code)
         with tx(self.actor.aid) as c:
             attempt=one(c,'SELECT * FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1',(self.action_id,))
         baseline=attempt['observation'].get('browser_baseline',{})
