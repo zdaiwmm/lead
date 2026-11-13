@@ -116,7 +116,8 @@ class NativeAction(NativeTask):
                 const authorSubject=node=>{
                     const article=node.closest('article,[role=article]'),address=node.closest('address');
                     if(!article||!address||address.parentElement!==article||!visible(node)||
-                        node.closest('blockquote,q,pre,code,template,form,[contenteditable]:not([contenteditable=false])')||
+                        article.parentElement?.closest('article,[role=article]')||
+                        node.closest('blockquote,q,pre,code,template,form,[itemprop=articleBody],[contenteditable]:not([contenteditable=false])')||
                         address.querySelectorAll('a').length!==1||article.querySelectorAll('address').length!==1)return null;
                     for(let prior=address.previousElementSibling;prior;prior=prior.previousElementSibling)
                         if(!/^H[1-6]$/.test(prior.tagName))return null;
