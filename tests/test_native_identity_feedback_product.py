@@ -71,3 +71,26 @@ async def test_server_identity_facts_bridge_split_sdk_text_without_model_affix_g
         assert result['account']['external_account_id'] is None
     else:
         assert result['task_state']=='succeeded' and result['account']['state']=='connected'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode',['selector_bookmark','identity_empty_hints'])
+async def test_sdk_bookmark_as_css_cannot_crash_identity_or_replace_private_proof(monkeypatch,mode):
+    from lead_app import account_profiles
+    from lead_app.config import STATE
+    from native_connection_product import verify_login
+
+    monkeypatch.setattr(account_profiles,'native_available',lambda:True)
+    result=await verify_login(monkeypatch,mode=mode)
+    calls=result['synthetic_model_diagnostics']
+    evidence={'task_state':result['task_state'],'account_state':result['account']['state'],
+        'worker_result_present':True,'actions':[row['action'] for row in calls],
+        'private_css_id_visible':any(row.get('private_css_id_visible') for row in calls),
+        'private_self_observed':any(row['path']=='/account' for row in result['oracle']['requests']),
+        'usage':result['usage'],'privacy':result['privacy']}
+    (STATE/(mode+'-product.json')).write_text(json.dumps(evidence,indent=2))
+    assert result['task_state']=='succeeded' and result['account']['state']=='connected'
+    assert evidence['private_css_id_visible'] and evidence['private_self_observed']
+    assert result['usage']['request_count']==5 and not result['usage']['billing_unknown']
+    assert result['privacy']=={'literal_in_model_request':False,'literal_in_workdir':False}
+    assert result['oracle']['posts']==[]

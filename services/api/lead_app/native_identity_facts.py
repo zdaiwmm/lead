@@ -126,6 +126,12 @@ def _selector(value):
 
 async def _node(page, selector):
     _selector(selector)
+    valid=await page.evaluate('''selector=>{
+        try {document.querySelector(selector);return true;}
+        catch(error){if(error instanceof DOMException&&error.name==='SyntaxError')return false;throw error;}
+    }''',selector)
+    if not valid:
+        raise IdentityFactError('identity_selector_invalid')
     node = page.locator(selector)
     if await node.count() != 1 or not await node.is_visible():
         raise IdentityFactError('identity_element_ambiguous')

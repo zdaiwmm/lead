@@ -382,13 +382,17 @@ class NativeConnection:
         from .native_identity_facts import inspect_current_identity, inspect_self_entry
         _,_,account=await asyncio.to_thread(self.snapshot)
         try:
-            facts=await inspect_self_entry(self.page,link_selector=args.get('self_link_selector'),
-                subject_selector=args.get('acting_subject_selector'),subject_prefix=args.get('self_subject_prefix',''),
-                subject_suffix=args.get('self_subject_suffix',''),connection_origin=account['connection_origin'])
-            facts.update(acting_subject_selector=args['acting_subject_selector'],self_subject_prefix=args['self_subject_prefix'],
-                self_subject_suffix=args.get('self_subject_suffix',''))
+            absent=all(args.get(name) in (None,'') for name in ('self_link_selector','acting_subject_selector','self_subject_prefix','self_subject_suffix'))
+            if absent:
+                facts=await inspect_current_identity(self.page,connection_origin=account['connection_origin'])
+            else:
+                facts=await inspect_self_entry(self.page,link_selector=args.get('self_link_selector'),
+                    subject_selector=args.get('acting_subject_selector'),subject_prefix=args.get('self_subject_prefix',''),
+                    subject_suffix=args.get('self_subject_suffix',''),connection_origin=account['connection_origin'])
+                facts.update(acting_subject_selector=args['acting_subject_selector'],self_subject_prefix=args['self_subject_prefix'],
+                    self_subject_suffix=args.get('self_subject_suffix',''))
         except IdentityFactError as error:
-            if error.code not in ('identity_value_missing','identity_subject_invalid','identity_current_self_unestablished','identity_current_subject_semantics_missing'):
+            if absent or error.code not in ('identity_value_missing','identity_subject_invalid','identity_current_self_unestablished','identity_current_subject_semantics_missing','identity_selector_invalid'):
                 raise
             facts=await inspect_current_identity(self.page,connection_origin=account['connection_origin'])
         href=facts['self_url']

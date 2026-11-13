@@ -27,14 +27,15 @@ def test_original_identity_affix_failure_keeps_its_code_and_valueerror_contract(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('operation',['inspect_self','report_connection'])
-async def test_actual_manager_passes_only_allowlisted_identity_feedback(operation):
+@pytest.mark.parametrize('code',['identity_value_missing','identity_selector_invalid'])
+async def test_actual_manager_passes_only_allowlisted_identity_feedback(operation,code):
     secret='synthetic-private-body-must-not-be-forwarded'
     async def server(request):
-        return httpx.Response(409,json={'code':'identity_value_missing','detail':secret,'password':secret})
+        return httpx.Response(409,json={'code':code,'detail':secret,'password':secret})
     async with httpx.AsyncClient(transport=httpx.MockTransport(server)) as client:
         with pytest.raises(Exception) as caught:
             await manager(client)(operation,{'self_subject_suffix':' (absent)'})
-    assert 'identity_value_missing' in str(caught.value)
+    assert code in str(caught.value)
     assert secret not in str(caught.value)
 
 

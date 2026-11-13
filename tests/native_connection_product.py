@@ -59,6 +59,8 @@ async def verify_login(
                     )
             text = "\n".join(parts)
             model_calls[-1]['identity_feedback_code_seen']='identity_element_ambiguous' in text
+            if mode in ('selector_bookmark','identity_empty_hints'):
+                model_calls[-1]['private_css_id_visible']=bool(__import__('re').search(r'''\bid\s*=\s*["']?subject\b''',text))
             if mode.startswith('identity_inferred'):
                 lines=[line for line in text.splitlines() if line.strip().startswith('Signed in as') or '<a ' in line and ('rel=me' in line or 'rel="me"' in line)]
                 model_calls[-1]['current_dom_lines']=[line.replace(board.state.username,'saved_username').replace(board.state.password,'saved_password')[:500] for line in lines[-4:]]
@@ -194,11 +196,13 @@ async def verify_login(
                 action = {
                     "inspect_self": {
                         "self_link_selector": "a[rel~=me]",
-                        "acting_subject_selector": "#missing-observed-element" if mode=='identity_feedback' else "main > p",
+                        "acting_subject_selector": "#missing-observed-element" if mode=='identity_feedback' else "*[57]" if mode=='selector_bookmark' else "main > p",
                         "self_subject_prefix": "Signed in as ",
                         "self_subject_suffix": " (absent)" if mode=='identity_feedback' or mode.startswith('identity_inferred') else " · Your account settings",
                     }
                 }
+                if mode=='identity_empty_hints':
+                    action={'inspect_self':{}}
             elif step==4 and mode=='identity_feedback':
                 if model_calls[-1]['identity_feedback_code_seen']:
                     action={'inspect_self':{'self_link_selector':'a[rel~=me]',

@@ -220,3 +220,31 @@ async def test_private_identity_value_must_be_visible_including_ancestor_opacity
             await inspect_private_subject(page,subject_selector='#subject')
     else:
         assert (await inspect_private_subject(page,subject_selector='#subject'))['subject']=='member-A'
+
+
+@pytest.mark.parametrize('where',['subject','link','private'])
+async def test_invalid_css_is_a_content_free_identity_error(common_page,where):
+    from lead_app.native_identity_facts import (
+        inspect_private_subject,
+        inspect_self_entry,
+    )
+    page,_,_=common_page
+    await page.set_content('<p id=current>Signed in as member-A</p><a id=self rel=me href=/account>Settings</a><p>Account ID: <strong id=subject>member-A</strong></p>')
+    with pytest.raises(ValueError) as caught:
+        if where=='private':
+            await inspect_private_subject(page,subject_selector='*[57]')
+        else:
+            await inspect_self_entry(page,link_selector='*[57]' if where=='link' else '#self',
+                subject_selector='*[57]' if where=='subject' else '#current',subject_prefix='Signed in as ',connection_origin=ORIGIN)
+    assert getattr(caught.value,'code',None)=='identity_selector_invalid'
+    assert '*[57]' not in str(caught.value)
+
+
+async def test_closed_page_is_not_reclassified_as_invalid_css(common_page):
+    from lead_app.native_identity_facts import _node
+    from playwright.async_api import Error
+    page,_,_=common_page
+    await page.close()
+    with pytest.raises(Error) as caught:
+        await _node(page,'p')
+    assert getattr(caught.value,'code',None) is None

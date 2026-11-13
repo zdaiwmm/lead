@@ -2,6 +2,7 @@
 
 IDENTITY_ERROR_HINTS = {
     'identity_selector_missing': 'Choose a valid selector for an actually observed identity element.',
+    'identity_selector_invalid': 'SDK numbered references such as [n] are not CSS selectors. Use an actually observed CSS id or attribute; current-self hints may be omitted for independent server verification.',
     'identity_element_ambiguous': 'The selector must identify exactly one visible observed element.',
     'identity_subject_invalid': 'The selected value is not one account ID or handle. Recheck the observed field and its literal prefix and suffix.',
     'identity_affix_invalid': 'Provide bounded literal prefix and suffix strings from the observed element.',
