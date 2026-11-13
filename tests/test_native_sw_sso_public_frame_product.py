@@ -10,7 +10,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,12 +42,11 @@ async def test_original_sso_owner_public_frame_and_worker_actions_share_one_inst
     from lead_app.forward_proxy import BrowserForwardProxy
     from lead_app.growth.runtime import advance, finish
     from lead_app.growth.tools import AccountInput
-    from lead_app.native_action import NativeAction
     from lead_app.native_frame_roles import readonly_node
     from lead_app.native_task import NativeTask
     from lead_app.security import internal_token, token
 
-    requests, visibility, roles, decisions, auth_events, action_phases, evidence = [], [], [], [], [], [], {}
+    requests, visibility, roles, decisions, auth_events, evidence = [], [], [], [], [], {}
 
     class PublicDocument(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -154,38 +152,6 @@ async def test_original_sso_owner_public_frame_and_worker_actions_share_one_inst
         return result
 
     monkeypatch.setattr(NativeTask, 'descriptor', descriptor)
-
-    def action_phase(controller, operation, error=None):
-        scope = controller.lease or {}
-        claim = scope.get('claim') or {}
-        row = {'operation': operation, 'error_type': type(error).__name__ if error else None,
-            'value_error_code': str(error) if isinstance(error, ValueError) and re.fullmatch(r'[a-z_]{1,100}', str(error)) else None,
-            'task_present': bool(controller.task_id), 'generation_present': scope.get('task_generation') is not None,
-            'target_present': bool(scope.get('target_id') in controller.runtime.pages),
-            'role_claims': [{'equals_scope': role.get('claim') == scope.get('claim'),
-                'attempt_token_equal': (role.get('claim') or {}).get('attempt_token') == claim.get('attempt_token')}
-                for role in scope.get('frame_roles', [])]}
-        try:
-            with tx(controller.actor.aid) as c:
-                task = one(c, "SELECT result#>>'{runtime,native_phase}' AS phase FROM lead.tasks WHERE id=%s", (controller.task_id,))
-            row['phase'] = task['phase'] if task and re.fullmatch(r'[a-z_]{1,100}', task['phase'] or '') else None
-        except Exception as observer_error:
-            row['observer_error_type'] = type(observer_error).__name__
-        action_phases.append(row)
-
-    def observed_action(operation, original):
-        async def call(controller, *args, **kwargs):
-            try:
-                result = await original(controller, *args, **kwargs)
-            except Exception as error:
-                action_phase(controller, operation, error)
-                raise
-            action_phase(controller, operation)
-            return result
-        return call
-
-    for operation in ('start', 'descriptor', 'baseline'):
-        monkeypatch.setattr(NativeAction, operation, observed_action(operation, getattr(NativeAction, operation)))
     original_authorize = PersistentRuntime.authorize_request
     auth_paths = {'/sso/start', '/authorize', '/session/complete'}
 
@@ -397,7 +363,6 @@ async def test_original_sso_owner_public_frame_and_worker_actions_share_one_inst
             source_gets=len(requests), readonly_task_ids=sorted({row['task_id'] for row in roles}))
     finally:
         evidence.update(requests=requests, model_visibility=visibility, roles=roles, decisions=decisions, auth_events=auth_events,
-            action_phases=action_phases,
             variant_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             static_document_sha256=hashlib.sha256(PUBLIC_DOCUMENT.encode()).hexdigest(),
             original_composition_sha256=hashlib.sha256(Path(composition.__file__).read_bytes()).hexdigest(),
