@@ -274,7 +274,9 @@ async def discover(aid, row):
         account = one(c, "SELECT * FROM lead.social_accounts WHERE id=%s", (account_id,))
     observed = await rpc(aid, account["profile_id"], "account/discover", {"platform": account["platform"], "account_id": str(account_id),
         'task_id':str(row['id']),
-        "target_urls":row["input"]["spec"]["payload"].get("target_urls",[])})
+        "target_urls":row["input"]["spec"]["payload"].get("target_urls",[]),
+        **({'desired_operation':row['input']['spec']['payload']['desired_operation']}
+           if row['input']['spec']['payload'].get('desired_operation') is not None else {})})
     targets = await asyncio.to_thread(derive_targets,aid,account,observed.get('targets',[])[:20])
     if not targets and observed.get('continuation'):
         return WorkResult(outcome='waiting',checkpoint=observed['continuation'],

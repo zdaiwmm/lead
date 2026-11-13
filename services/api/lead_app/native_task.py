@@ -241,6 +241,9 @@ class NativeTask:
         operation=args['operation']
         if operation not in ('publish','reply') or origin(target) not in {origin(url) for url in self.lease['origins']}:
             raise MethodFactError('method_discovery_scope_changed')
+        desired=task['input']['spec'].get('payload',{}).get('desired_operation')
+        if desired is not None and operation!=desired:
+            raise MethodFactError('method_discovery_operation_mismatch')
         excluded=intent['scope'].get('excluded_targets',[])
         if target in excluded or intent['scope'].get('target_scope')=='existing_grants' and target not in intent['scope'].get('target_ids',[]):
             raise MethodFactError('target_not_permitted')

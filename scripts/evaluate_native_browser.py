@@ -441,7 +441,7 @@ class NativeCase:
                 raise AcceptanceStop('wrong_or_unproven_private_subject')
             actor = await browser.gateway.get(self.aid, account['profile_id'])
             await actor.connection_pages[str(self.pending['takeover_id'])].reconcile()
-            work = self.submit('account', 'discover', {'target_urls': [self.site.target_url]})
+            work = self.submit('account', 'discover', {'target_urls': [self.site.target_url], 'desired_operation': 'publish'})
             learned = await self.perform('discover_publish', work)
             targets = learned['output'].get('targets', [])
             if len(targets) != 1 or targets[0].get('operation') != 'publish':
@@ -451,7 +451,7 @@ class NativeCase:
             await self.perform('publish', work)
             self.report['stages'][-1]['receipt'] = await self.confirmed(work, evidence['publish'])
             parent = self.report['stages'][-1]['receipt']['url']
-            work = self.submit('account', 'discover', {'target_urls': [parent]})
+            work = self.submit('account', 'discover', {'target_urls': [parent], 'desired_operation': 'reply'})
             learned = await self.perform('discover_reply', work)
             if len(learned['output'].get('targets', [])) != 1 or learned['output']['targets'][0].get('operation') != 'reply':
                 raise AcceptanceStop('reply_method_not_learned')

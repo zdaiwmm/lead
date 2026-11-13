@@ -1321,6 +1321,7 @@ async def observe_account(aid: UUID, body: OpenRequest):
 
 class DiscoverRequest(OpenRequest):
     target_urls: list[str] = Field(default_factory=list,max_length=10)
+    desired_operation: Literal['publish','reply'] | None = None
     task_id: UUID | None = None
 
 
@@ -1344,15 +1345,21 @@ async def discover_account_targets(aid: UUID, body: DiscoverRequest):
                 "responsibility":"product","platform":account["platform"]}]}
     if actor.native_runtime:
         from .execution_routes import endpoint, resolve
-        from .native_runner import run_task
+        from .native_runner import discovery_task_context, run_task
         from .native_task import NativeTask
         if not body.task_id:
             raise ValueError('native_discovery_current_task_required')
         controller=actor.task_pages.setdefault(str(body.task_id),NativeTask(actor,body.task_id))
         async with controller.operation_lock:
             try:
+                task,task_account,task_intent=await asyncio.to_thread(controller.snapshot)
+                desired=discovery_task_context(task,task_account,task_intent).get('desired_operation')
+                if body.desired_operation is not None and body.desired_operation!=desired:
+                    from .native_method_errors import MethodFactError
+                    raise MethodFactError('method_discovery_operation_mismatch')
                 fragment=await run_task(controller,endpoint(resolve(aid,profile_id=account['profile_id'])),kind='discovery',goal=
-                    'Read your current private account and find a permitted ordinary-member text publishing or reply form. '
+                    f'Read your current private account and find a permitted ordinary-member text {desired or "publishing or reply"} form. '
+                    f'Desired discovery operation: {desired or "publish or reply (general discovery)"}. '
                     'Navigate using observed links only. Never type into forms, publish, reply, log in, join, follow or change settings. '
                     'Find explicit membership rules permitting this member action and automated browser tools. '
                     'Call propose_method with actual current DOM selectors self_subject/editor_target/editor_body/submit '

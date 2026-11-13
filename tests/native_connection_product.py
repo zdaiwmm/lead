@@ -111,6 +111,10 @@ async def verify_login(
             if mode.startswith('batch_'):
                 model_calls[-1]['discovery_context_seen']=all(key in text for key in ('starting_urls','account_origin','intent_scope'))
             model_calls[-1]['identity_feedback_code_seen']='identity_element_ambiguous' in text
+            if mode=='operation_feedback':
+                model_calls[-1]['desired_reply_context_seen']='"desired_operation": "reply"' in text
+                model_calls[-1]['desired_reply_goal_seen']='Desired discovery operation: reply.' in text
+                model_calls[-1]['operation_feedback_seen']='method_discovery_operation_mismatch' in text
             if mode=='method_feedback':
                 model_calls[-1]['method_feedback_code_seen']='browser_method_element_ambiguous' in text
                 model_calls[-1]['method_feedback_fields_seen']=[name for name in
@@ -258,17 +262,21 @@ async def verify_login(
                 elif step == 1:
                     action = {"report_connection": {"subject_selector": "#subject"}}
             elif workflow["kind"] == "discovery":
+                operation_probe=mode=='operation_feedback' and workflow.get('desired_operation')=='reply'
                 if step == 0 and mode!='method_feedback':
                     action = {
                         "guarded_navigate": {
-                            "url": workflow.get("editor_url") or board.origin + "/home"
+                            "url": board.origin+'/home' if operation_probe else workflow.get("editor_url") or board.origin + "/home"
                         }
                     }
-                elif step == 1 or mode=='method_feedback' and step==0:
+                elif operation_probe and step==2:
+                    action={'guarded_navigate':{'url':workflow['editor_url']}}
+                elif step == 1 or mode=='method_feedback' and step==0 or operation_probe and step==3:
+                    proposed_operation='publish' if operation_probe and step==1 else workflow.get('operation','publish')
                     action = {
                         "propose_method": {
                             "target_url": board.origin + "/home",
-                            "operation": workflow.get("operation", "publish"),
+                            "operation": proposed_operation,
                             "selectors": {
                                 "self_subject": "main > p",
                                 "editor_target": "#editor-target",
@@ -282,7 +290,7 @@ async def verify_login(
                             "Automated browser tools are permitted for these member actions. You have no administrator privileges.",
                         }
                     }
-                    if workflow.get("operation") == "reply":
+                    if proposed_operation == "reply":
                         action["propose_method"]["selectors"]["editor_parent"] = (
                             "#editor-parent"
                         )
@@ -521,7 +529,7 @@ async def verify_login(
         probe_checks = None
         discovery = None
         action_check = None
-        if mode == "login" and result.outcome == "completed":
+        if mode in ('login','operation_feedback') and result.outcome == "completed":
             actor = await browser.gateway.get(
                 aid, task["input"]["spec"]["payload"]["profile_id"]
             )

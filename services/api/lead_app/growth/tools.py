@@ -106,6 +106,7 @@ class AccountInput(Contract):
     profile_id: UUID | None = None
     connection_account_id: UUID | None = None
     target_urls: list[str] = Field(default_factory=list,max_length=10)
+    desired_operation: Literal['publish','reply'] | None = None
 
 
 class ObserveInput(Contract):

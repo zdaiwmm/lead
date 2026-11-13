@@ -375,7 +375,8 @@ def accept_commands(aid, proposal, decision_task_id=None,*,business_snapshot=Non
 
                             from .contracts import utcnow
                             refs.append(submit_work(c,aid,TaskSpec(kind="account",purpose="discover",account_id=command.account_id,
-                                payload={"target_urls":urls},review_at=utcnow()+timedelta(hours=2))))
+                                payload={"target_urls":urls,**({'desired_operation':proposed.desired_operation}
+                                    if proposed.desired_operation is not None else {})},review_at=utcnow()+timedelta(hours=2))))
                             audit(c, aid, "growth.target_proposed", command.payload)
                     response = {"group": key, "task_refs": refs,
                                 "experiment_id": str(experiment["id"]) if experiment else None}

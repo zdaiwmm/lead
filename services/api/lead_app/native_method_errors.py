@@ -36,6 +36,7 @@ METHOD_ERROR_HINTS = {
     'browser_method_url_missing': 'Use a bounded actual observed URL for the original method scope.',
     'method_discovery_task_required': 'Only the original account-discovery task may record this method.',
     'method_discovery_scope_changed': 'The proposed operation or target is outside the original discovery scope. Do not extend it.',
+    'method_discovery_operation_mismatch': 'This task requires the desired_operation in the original server context. Propose only that operation; learning publish does not complete a reply discovery task, or vice versa.',
     'target_not_permitted': 'The original intent does not permit this target. Do not bypass that restriction.',
     'method_document_changed': 'The document changed during method inspection. Obtain a fresh observation.',
 }

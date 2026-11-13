@@ -136,7 +136,12 @@ def discovery_task_context(task,account,intent):
                 continue
         return result
     scope_kind=scope.get('target_scope')
-    return {'starting_urls':urls(task.get('input',{}).get('spec',{}).get('payload',{}).get('target_urls',[])),
+    payload=task.get('input',{}).get('spec',{}).get('payload',{})
+    desired=payload.get('desired_operation')
+    if desired is not None and desired not in ('publish','reply'):
+        raise ValueError('method_discovery_scope_changed')
+    return {'starting_urls':urls(payload.get('target_urls',[])),
+        **({'desired_operation':desired} if desired is not None else {}),
         'account_origin':next(iter(urls([account.get('connection_origin')])),'') ,'intent_scope':{
             'target_scope':scope_kind if scope_kind in ('authenticated_permitted_targets','existing_grants') else None,
             'target_ids':urls(scope.get('target_ids',[])),'excluded_targets':urls(scope.get('excluded_targets',[]))}}
