@@ -127,8 +127,7 @@ def test_evaluation_requests_exact_outcomes_for_both_discovery_stages():
     assert sorted(value.value for value in desired if isinstance(value,ast.Constant))==['publish','reply']
 
 
-@pytest.mark.parametrize('desired',(None,'reply'))
-def test_target_propose_retains_the_validated_optional_task_operation(desired):
+def proposed_task(payload):
     from datetime import datetime, timedelta, timezone
     model=definition('services/api/lead_app/growth/tools.py','AccountInput',
         namespace={'Contract':Contract,'Field':Field,'Literal':Literal,'UUID':UUID})
@@ -136,14 +135,28 @@ def test_target_propose_retains_the_validated_optional_task_operation(desired):
     branch=next(node for node in ast.walk(tree) if isinstance(node,ast.If)
         and isinstance(node.test,ast.Compare) and isinstance(node.test.comparators[0],ast.Constant)
         and node.test.comparators[0].value=='target.propose')
-    payload={'target_urls':['https://board.test/thread/17'],**({'desired_operation':desired} if desired else {})}
-    values={'command':SimpleNamespace(account_id='account',payload=payload),'c':object(),'aid':'agent',
-        'refs':[],'one':lambda *args:{'platform':'web'},'AccountInput':model,'target_url':lambda platform,url:url,
+    values={'__name__':'lead_app.growth.store','__package__':'lead_app.growth',
+        'command':SimpleNamespace(account_id='account',payload=payload),'c':object(),'aid':'agent',
+        'refs':[],'one':lambda *args:{'platform':'web','provider':'chromium','connection_origin':'https://board.test'},
+        'AccountInput':model,'target_url':lambda platform,url:url,'origin':origin,
         'TaskSpec':lambda **kwargs:kwargs,'submit_work':lambda c,aid,spec:spec,'audit':lambda *args:None,
         'utcnow':lambda:datetime.now(timezone.utc),'timedelta':timedelta}
     code=ast.Module(body=[node for node in branch.body if not isinstance(node,(ast.Import,ast.ImportFrom))],type_ignores=[])
     exec(compile(ast.fix_missing_locations(code),'<actual-target-propose-branch>','exec'),values)
-    assert values['refs'][0]['payload']==payload
+    return values['refs'][0]
+
+
+@pytest.mark.parametrize('desired',(None,'reply'))
+def test_target_propose_retains_the_validated_optional_task_operation(desired):
+    payload={'target_urls':['https://board.test/thread/17'],**({'desired_operation':desired} if desired else {})}
+    assert proposed_task(payload)['payload']==payload
+
+
+@pytest.mark.parametrize('url',('https://other.test/thread/17','javascript:alert(1)',
+    'https://user:secret@board.test/thread/17','https://board.test/'+('x'*2000)))
+def test_native_web_candidate_cannot_expand_the_account_navigation_origin(url):
+    with pytest.raises(ValueError):
+        proposed_task({'target_urls':[url],'desired_operation':'reply'})
 
 
 @pytest.mark.asyncio

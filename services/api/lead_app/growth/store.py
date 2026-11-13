@@ -366,9 +366,16 @@ def accept_commands(aid, proposal, decision_task_id=None,*,business_snapshot=Non
                                 raise ValueError("account_scope")
                             from ..adapters.catalog import target_url
                             from .tools import AccountInput
-                            account = one(c,"SELECT platform FROM lead.social_accounts WHERE id=%s",(command.account_id,))
+                            account = one(c,"""SELECT a.platform,a.connection_origin,p.provider FROM lead.social_accounts a
+                                LEFT JOIN lead.browser_profiles p ON p.id=a.profile_id WHERE a.id=%s""",(command.account_id,))
                             proposed = AccountInput.model_validate(command.payload)
-                            urls = [target_url(account["platform"],url) for url in proposed.target_urls]
+                            if account['platform']=='web' and account.get('provider')=='chromium':
+                                from ..browser_execution import origin
+                                urls=list(proposed.target_urls)
+                                if any(not 1<=len(url)<=2000 or origin(url)!=origin(account['connection_origin']) for url in urls):
+                                    raise ValueError('target_not_permitted')
+                            else:
+                                urls = [target_url(account["platform"],url) for url in proposed.target_urls]
                             if not urls:
                                 raise ValueError("target_candidates_required")
                             from datetime import timedelta
