@@ -932,6 +932,12 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - `8c927b2`（源`33130e0`）补方法事实安全反馈，独立窄审接受：32个facts/4个controller显式常量改typed ValueError，原str不变；SDK只在409且record_method返回固定Method/原Identity白名单code+hint，未知code/status/operation、原body/detail/selector均不透。trace仅投影相同固定code。主集成独立归一raise/import后确认facts及整个NativeTask AST与旧版完全相等，门槛、来源/权限、进展及一次修正计数未改。实际A-onlySDK先12.293秒红（http409且下一请求没有反馈），后1项12.799秒绿：错误提案→下一请求确见固定element-ambiguous code→一次正确修正→原target/method落库，corrections1，方法worker2条known假HTTP、字面凭据false；不反推第六次原409分支。39项反馈及24项旧A DOM共63项19.831秒通过；旧DOM原启动缺headless-shell的24环境setup错误留存，后仅在私有测试副本加fullChrome channel一处重跑24，应用/断言不改，不冒称仓库原测试字节已跑；正式CI仍安装默认Chromium并运行原测试。主集成108项/2项Linux skip、184项交付合同、Ruff及889文件扫描通过；正式runner blob仅更新为`d4b33c76…6c6b05`，另10项不变。第七次尚未付费，累计余额56/355280不变。
 
+- 第七次真实尝试`b33ee3a / 53b6d773…`仍未通过C22：A/login 7请求/18655 tokens、13.253秒，fresh私有身份与原Task succeeded、认证POST1；安全反馈使模型在缺密码submit被拒后补密码并完成身份验证。随后discover_publish 3请求/8182 tokens、11.908秒，固定反馈`method_discovery_scope_changed`后出现一次未分类输出错误，原no_progress=3/corrections=1/fragments=1触发bounded_progress_stop、targets空。未保留提案参数，不能断言具体是operation还是目标origin不符。两笔40000预留settled、合10请求/26837 tokens、period spent26837/reserved0、unknown=false/unmeasured0、业务Action0；发帖/回复/回查/B均未运行。原库、nonce、报告和前六轮失败保留，进程0、仅本测试env模型key移除。native累计已测50请求/132534 tokens，第三次另保守8请求位/40000未知，累计扣58位/172534单位；新增授权余额46请求/328443单位，更早80000未知预留与生产旧reserved均未动。精确b33ee3a的PR检查43405331721/1、镜像检查43405331636/1通过，未合并/发布。
+
+- 用户明确质疑配置及SDK强制关视觉，并要求评价长期实验成果。结论分开记录：工程机械链有进展，真实模型仅登录通过，尚不足以上线。实际browser-use 0.13.14构造器按模型名含deepseek强制`use_vision=False`，现官方Flash已支持图像；该兼容限制可在已知支持的单实例内修正，不改共享SDK或伪装模型名。另SDK即使visionFalse仍会采集截图、现有文本脱敏不覆盖像素，不能仅翻开配置。当前整合原manager/page内存截图脱敏、SDK采集前安全截口、原frame/owner/scope门槛及图像费用上界；同时关闭flash精简模式、启用原SDK决策/规划、每步最多2动作且逐动作重验，不提高每片8请求/40000单位/1800输出限制。上述为进行中方案，尚不称视觉或隐私验证通过。
+
+- 负责人据本次反馈收紧执行：停止纯文字付费试验；实际脱敏图进入SDK、像素隐私/动态竞态、作用域与预算边界完成离线证据及独立核验后，才在现有余额内登记一次集成视觉完整验证。本地未入库的freeze/prepare/execute三层闸门已要求精确源码的完整视觉证明并限一次启动，当前continuation_authorized=false、视觉尝试数0；失败后不自动追加付费轮次、不合并发布，向用户报告具体失败和后续选择。旧累计授权、已失败账本与未知预留均不重置。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -947,14 +953,14 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C01–C03 | `test_native_connection_product`、身份DOM及实际Connection/Task/Research消费者：pending认证、原Task终态、私有self及当前acting subject | 不能以公开主页/旧Cookie/保存凭据代替真实身份；陌生布局模型判断待C22 |
 | C04–C05 | OTP原挑战、QR/nonce/文档换版、旧输入409、取消/due、真实Chrome重启与fresh-self/一次原认证恢复 | QR检测和版本控制不代表扫码或硬件passkey协议已实测；Cookie能否恢复受站点持久策略限制 |
 | C06–C10 | 实例/出口cohort与live fence、不同账号实际重叠、同Action重复RPC仅一次执行、认证占用及两槽准入 | 旧Profile不迁移；原作用域和当前控制/绑定/会话代次始终有效，不推广任意跨站权限 |
-| C11–C12 | A/B不同布局完整六原Task机械链路、普通成员规则和catalog通用消费者均已实际运行 | 真实模型A首登录阶段未完成私有身份验证，后续/B未运行，不能称陌生网站迁移能力已通过 |
+| C11–C12 | A/B不同布局完整六原Task机械链路、普通成员规则和catalog通用消费者均已实际运行；真实模型第六、七次A登录完成fresh私有身份验证 | 真实模型方法发现未通过，发帖/回复/回查/B未运行，不能称陌生网站迁移能力已通过 |
 | C13 | 原SDK输入自动保存与Enter提前发送均源站0，随后正常submit唯一确认；DOM/父帖/完整正文核对 | 无法事前建立完整请求事实的控件仍为局部能力缺口 |
 | C14 | 原unknown在暂停下只读回查，同作者旧帖拒绝，新原帖确认；effective method SQL投影及首次promotion；同SW更新/重放组合续原Action确认 | 不承诺任意站点外部恰好一次；原intent、grant及attempt1保留，禁止重新发送 |
 | C15–C16 | 无进展/一次修正、时钟/reload/来回滚动反例，8次有效进展后原Task checkpoint→15秒Wait/due→新claim续片；真实方法修正及owner交还竞态 | 不因事件或恢复提示直接视为资源恢复proof，不重置期限、累计费用和失败次数 |
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | A/B机械链及六次真实尝试已执行；第六A登录通过、方法提案HTTP409后无可用方法停止；已测40请求/105697tokens结算，第三次至少4请求且40000单位未知，保守另扣8请求位；B原字节保留 | C22未通过，实际发帖/回复/回查/B未运行；累计余额56请求/355280单位，先补方法安全反馈并离线验证再登记，B不称严格盲测，既有经营反例不重复付费 |
+| C22 | A/B机械链及七次真实尝试已执行；第六、七次A登录通过，第七次方法scope固定拒绝后无进展停止；已测50请求/132534 tokens结算，第三次至少4请求且40000单位未知，保守另扣8请求位；B原字节保留 | C22未通过，实际发帖/回复/回查/B未运行；累计余额46请求/328443单位，停止文字付费重试，离线核验视觉候选后仅一次完整验证，失败不自动再付费；B不称严格盲测，既有经营反例不重复付费 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
