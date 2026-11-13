@@ -201,7 +201,10 @@ jobs:
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
           image_root=$(mktemp -d /tmp/lead-image-root.XXXXXX)
-          trap 'if mountpoint -q "$image_root"; then sudo umount "$image_root"; fi; rmdir "$image_root"' EXIT
+          runtime_verifier=$(mktemp /tmp/lead-runtime-verifier.XXXXXX.py)
+          trap 'if mountpoint -q "$image_root"; then sudo umount "$image_root"; fi; rmdir "$image_root"; rm -f "$runtime_verifier"' EXIT
+          install -m 0444 ../../scripts/build_browser_runtime.py "$runtime_verifier"
+          cmp ../../scripts/build_browser_runtime.py "$runtime_verifier"
           sudo mount -o loop,ro,nodev,nosuid "$RUNNER_TEMP/lead.squashfs" "$image_root"
           sudo setpriv --reuid=65534 --regid=65534 --clear-groups /usr/bin/python3 -IB - "$image_root" "$GITHUB_SHA" <<'PY'
           import os
@@ -217,14 +220,17 @@ jobs:
           compile(launcher.read_bytes(), str(launcher), "exec")
           print("Exact release image root, REVISION and executor source are readable by non-root")
           PY
-          sudo setpriv --reuid=65534 --regid=65534 --clear-groups "$(command -v python)" -IB - "$PWD/../../scripts/build_browser_runtime.py" "$image_root/services/browser-runtime" "$GITHUB_SHA" <<'PY'
+          sudo setpriv --reuid=65534 --regid=65534 --clear-groups "$(command -v python)" -IB - "$runtime_verifier" "$image_root/services/browser-runtime" "$GITHUB_SHA" <<'PY'
           import json
+          import os
           import runpy
           import sys
           from pathlib import Path
 
-          builder = runpy.run_path(sys.argv[1])
           runtime = Path(sys.argv[2])
+          assert os.getuid() == 65534 and os.getgid() == 65534
+          os.chdir(runtime)
+          builder = runpy.run_path(sys.argv[1])
           manifest = json.loads((runtime / "manifest.json").read_text())
           assert manifest["sha"] == sys.argv[3]
           assert builder["inventory"](runtime) == manifest["files"]
