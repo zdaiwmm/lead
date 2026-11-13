@@ -292,6 +292,8 @@ class NativeConnection:
 
     async def authorize(self,args):
         await self.descriptor()
+        if getattr(self,'local_executor_verification_only',False) and args.get('name') in ('input','click'):
+            return {'allowed':False,'reason':'The original credential form was already submitted. This continuation only verifies the existing authenticated session.'}
         from .native_frame_roles import readonly_node
         if readonly_node(self.lease,args.get('node') or {}):
             return {'allowed':False,'reason':'This approved public frame can only be read.'}
@@ -411,7 +413,8 @@ class NativeConnection:
             'self_subject_suffix':facts['self_subject_suffix']}
         await self.page.goto(href,wait_until='domcontentloaded',timeout=30000)
         await self.descriptor()
-        return {'state':'self_surface_opened','url':self.page.url}
+        return {'state':'self_surface_opened','url':self.page.url,
+            'acting_subject':facts['acting_subject'],'namespace':account['platform']}
 
     async def report_identity(self,args):
         await self.descriptor()
@@ -446,7 +449,8 @@ class NativeConnection:
         await self.descriptor()
         subject=observed['subject']
         if self.self_entry.get('acting_subject') and subject!=self.self_entry['acting_subject']:
-            raise ValueError('private_self_and_acting_subject_disagree')
+            from .native_identity_errors import IdentityFactError
+            raise IdentityFactError('identity_private_current_subject_mismatch')
         if not self.lease.get('authentication_dispatched') and subject!=account.get('external_account_id'):
             raise ValueError('self_surface_not_authenticated')
         href=self.self_entry['url']

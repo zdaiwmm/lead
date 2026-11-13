@@ -124,6 +124,124 @@ async def test_basic_public_read_evidence_does_not_require_advanced_research(mon
     read.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_new_connection_claim_continues_original_thread_without_credential_resubmission(monkeypatch):
+    from contextlib import contextmanager
+
+    from lead_app import db, local_executor
+
+    submitted=[]
+    @contextmanager
+    def transaction(*args):
+        yield SimpleNamespace(execute=lambda *args:None)
+    monkeypatch.setattr(db,'tx',transaction)
+    monkeypatch.setattr(local_executor,'submit',lambda aid,key,payload,**kw:submitted.append((key,payload,kw)) or {'id':'continued-request'})
+    async def status(*args):
+        return {'state':'completed','result':{'output':'identity needs correction'}}
+    monkeypatch.setattr(adapter,'_request_status',status)
+    task={'input':{'task_generation':2},'result':{'runtime':{'attempt_token':'new-original-claim'}}}
+    controller=SimpleNamespace(actor=SimpleNamespace(aid='a',profile={'id':'p'}),task_id='original-task',
+        local_executor_request_id='old-request',local_executor_context={'attempt_token':'old-original-claim'},
+        local_executor_worker=None,lease={'control_version':7,'authentication_dispatched':True},
+        self_entry={'url':'https://fixture.test/private','acting_subject':'current.handle'},
+        start=AsyncMock(),snapshot=lambda:(task,{},{}),person_only_challenge=AsyncMock(return_value=False),
+        observe_current=AsyncMock(return_value=None),credentials=AsyncMock(side_effect=AssertionError('do not unseal or resend credentials')),
+        page=SimpleNamespace(url='https://fixture.test/private'))
+    result=await adapter.run(controller,'https://gateway','connection','Verify original account')
+    assert result['executor_pending'] and result['executor_request_id']=='continued-request'
+    _,payload,_=submitted[0]
+    assert payload['session_key']=='browser:original-task:2'
+    assert payload['tool_context']['attempt_token']=='new-original-claim'
+    assert payload['tool_context']['auth_verification_only'] is True
+    assert 'browser_input' not in {tool['name'] for tool in payload['tools']}
+    assert 'already submitted' in payload['input']
+    controller.credentials.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_private_subject_mismatch_has_fixed_actionable_feedback_without_weakening_proof(monkeypatch):
+    from lead_app import native_identity_facts
+    from lead_app.native_connection import NativeConnection
+    from lead_app.native_identity_errors import IdentityFactError, identity_rpc_feedback
+
+    page=SimpleNamespace(url='https://fixture.test/private')
+    runtime=SimpleNamespace(acquire_page=AsyncMock(return_value={'target_id':'fresh'}),
+        pages={'fresh':{'page':page}},release_page=AsyncMock())
+    controller=NativeConnection.__new__(NativeConnection)
+    controller.actor=SimpleNamespace(aid='a',session='original-browser',native_runtime=runtime)
+    controller.connection_id='original-connection'
+    controller.page=page
+    controller.self_entry={'url':page.url,'acting_subject':'current.handle'}
+    controller.lease={'target_id':'original-page','authentication_dispatched':True}
+    controller.descriptor=AsyncMock()
+    controller.snapshot=lambda:({}, {'challenge_version':1,'input_seq':1}, {'binding_version':1})
+    observed={'subject':'different-stable-id','value_prefix':'','value_suffix':'','evidence':{'label':'Account ID'}}
+    monkeypatch.setattr(native_identity_facts,'inspect_private_subject',AsyncMock(return_value=observed))
+    with pytest.raises(IdentityFactError) as caught:
+        await controller.report_identity({'subject_selector':'#actually-observed-id'})
+    assert caught.value.code=='identity_private_current_subject_mismatch'
+    feedback=identity_rpc_feedback('report_connection',409,{'code':caught.value.code})
+    assert 'current' in feedback and 'private' in feedback
+    assert 'different-stable-id' not in feedback
+    runtime.release_page.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_matching_private_subject_still_requires_fresh_second_source(monkeypatch):
+    from contextlib import contextmanager
+
+    from lead_app import native_connection, native_identity_facts
+    from lead_app.native_connection import NativeConnection
+
+    writes=[]
+    @contextmanager
+    def transaction(*args):
+        yield SimpleNamespace(execute=lambda *args:writes.append(args))
+    monkeypatch.setattr(native_connection,'tx',transaction)
+    page=SimpleNamespace(url='https://fixture.test/private')
+    fresh=SimpleNamespace(url=page.url)
+    runtime=SimpleNamespace(acquire_page=AsyncMock(return_value={'target_id':'fresh'}),
+        pages={'fresh':{'page':fresh}},release_page=AsyncMock())
+    controller=NativeConnection.__new__(NativeConnection)
+    controller.actor=SimpleNamespace(aid='a',session='original-browser',native_runtime=runtime)
+    controller.connection_id='original-connection'
+    controller.page=page
+    controller.self_entry={'url':page.url,'selector':'a[rel=me]','acting_subject':'current.handle'}
+    controller.lease={'target_id':'original','challenge_version':1,'authentication_dispatched':True}
+    controller.descriptor=AsyncMock()
+    controller.snapshot=lambda:({}, {'challenge_version':1,'input_seq':1}, {'binding_version':1,'platform':'web'})
+    controller.remember_observation=lambda observed,expected:observed
+    observed={'subject':'current.handle','value_prefix':'','value_suffix':'','evidence':{'label':'Username'}}
+    inspect=AsyncMock(return_value=observed)
+    monkeypatch.setattr(native_identity_facts,'inspect_private_subject',inspect)
+    value=await controller.report_identity({'subject_selector':'#observed-current-handle'})
+    assert value['status']=='authenticated'
+    assert value['operating_subject']=={'namespace':'web','external_id':'current.handle','id_kind':'handle'}
+    assert inspect.await_count==2
+    assert inspect.await_args_list[0].args[0] is page
+    assert inspect.await_args_list[1].args[0] is fresh
+    assert len(writes)==1
+
+
+@pytest.mark.asyncio
+async def test_inspect_self_returns_server_observed_subject_and_namespace(monkeypatch):
+    from lead_app import native_identity_facts
+    from lead_app.native_connection import NativeConnection
+
+    controller=NativeConnection.__new__(NativeConnection)
+    controller.page=SimpleNamespace(url='https://fixture.test/home',goto=AsyncMock())
+    controller.descriptor=AsyncMock()
+    controller.snapshot=lambda:({}, {}, {'connection_origin':'https://fixture.test','platform':'web'})
+    controller.page.goto.side_effect=lambda url,**kwargs:setattr(controller.page,'url',url)
+    monkeypatch.setattr(native_identity_facts,'inspect_current_identity',AsyncMock(return_value={
+        'self_url':'https://fixture.test/private','self_link_selector':'a[rel=me]','acting_subject':'current.handle',
+        'acting_subject_selector':'#current','self_subject_prefix':'Signed in as ','self_subject_suffix':''}))
+    observed=await controller.inspect_self({})
+    assert observed['acting_subject']=='current.handle'
+    assert observed['namespace']=='web'
+    assert controller.self_entry['acting_subject']==observed['acting_subject']
+
+
 def test_codex_controller_does_not_inherit_old_agent_fragment_limits():
     from lead_app.native_task import NativeTask
     actor=SimpleNamespace(native_runtime=None)

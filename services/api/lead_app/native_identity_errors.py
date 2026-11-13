@@ -16,6 +16,7 @@ IDENTITY_ERROR_HINTS = {
     'identity_private_affix_unsupported': 'The private field affixes must describe an actual account-ID, username or handle label.',
     'identity_private_field_ambiguous': 'The selected private self field is ambiguous or unsupported. Do not use public authors or editable login values.',
     'identity_private_field_semantics_missing': 'The selected private field lacks an explicit account-ID, username or handle label.',
+    'identity_private_current_subject_mismatch': 'The private field value must match the server-observed current subject from inspect_self in the same namespace. If the page has a different stable account ID and a username/handle, select the private field matching that observed current subject. Never infer an alias or change the account.',
 }
 
 

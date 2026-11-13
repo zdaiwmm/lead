@@ -32,7 +32,7 @@ def browser_tools(kind):
         tools.extend([
             _tool('inspect_self', 'Open the observed current self link. CSS hints are optional; the server verifies current identity and its rel=me link.',
                 {name:string for name in ('self_link_selector','acting_subject_selector','self_subject_prefix','self_subject_suffix')}),
-            _tool('report_connection', 'Report the observed value CSS selector of the actual private account ID or handle; the server verifies it.',
+            _tool('report_connection', 'Report the private value CSS selector matching the server-observed acting_subject and namespace returned by inspect_self. A different stable Account ID is not interchangeable with that username/handle; the server independently verifies both sources.',
                 {'subject_selector':string}, ('subject_selector',)),
         ])
     elif kind == 'discovery':
@@ -78,10 +78,19 @@ async def run(controller, gateway_endpoint, kind, goal):
     if reference:
         row = await _request_status(aid, reference)
         state = row['state']
-        if state in ('completed','failed','interrupted','execution_unknown','canceled'):
+        previous=getattr(controller,'local_executor_context',None)
+        current=(await asyncio.to_thread(controller.snapshot))[0] if kind=='connection' and previous else None
+        attempt=((current or {}).get('result') or {}).get('runtime',{}).get('attempt_token')
+        continued=(state in ('completed','failed','interrupted','execution_unknown','canceled') and previous
+            and attempt and attempt!=previous.get('attempt_token'))
+        if continued:
+            await close(controller)
+            controller.local_executor_request_id=None
+        elif state in ('completed','failed','interrupted','execution_unknown','canceled'):
             return {'engine':'codex','executor_pending':False,'executor_request_id':reference,
                 'execution_state':state,'success':state=='completed','output':row.get('output', (row.get('result') or {}).get('output'))}
-        return {'engine':'codex','executor_pending':True,'executor_request_id':reference}
+        else:
+            return {'engine':'codex','executor_pending':True,'executor_request_id':reference}
     from .local_executor import submit
     controller.local_executor = True
     await controller.start()
@@ -100,7 +109,10 @@ async def run(controller, gateway_endpoint, kind, goal):
         observed = await controller.observe_current()
         if observed and observed.get('status') == 'authenticated':
             return observed
-        credentials = await controller.credentials()
+        controller.local_executor_verification_only=bool(controller.lease.get('authentication_dispatched')
+            and getattr(controller,'self_entry',None))
+        context['auth_verification_only']=controller.local_executor_verification_only
+        credentials = {} if controller.local_executor_verification_only else await controller.credentials()
         if not credentials and not controller.lease.get('authentication_dispatched'):
             return await controller.handoff('请在原窗口完成登录资料或本人验证。')
         controller.local_executor_credentials = {'saved_'+name:value for name,value in (credentials or {}).items()}
@@ -115,6 +127,9 @@ async def run(controller, gateway_endpoint, kind, goal):
         'Never bypass tools using another browser or network request; never repeat an external submission. '
         'A CAPTCHA, OTP, passkey or scan requires the owner. Stop and explain that condition.',
         'model':'gpt-6.1-sol','effort':'medium','tools':browser_tools(kind),'tool_context':context}
+    if context.get('auth_verification_only'):
+        payload['input']='The original credential form was already submitted. Only inspect and verify this existing authenticated session. Never input or submit credentials again. '+goal
+        payload['tools']=[item for item in payload['tools'] if item['name'] not in ('browser_input','browser_click')]
     if kind == 'discovery':
         from .native_runner import discovery_task_context
         payload['input'] += '\nOriginal task data: '+json.dumps(discovery_task_context(task,account,controller.snapshot()[2]),ensure_ascii=False)
