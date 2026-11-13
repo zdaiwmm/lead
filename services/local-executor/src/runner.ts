@@ -311,11 +311,13 @@ export class Runner {
         ...(cursor ? { cursor } : {}),
       });
       for (const turn of page.data || []) {
-        const match =
-          turn.id === record.turn_id ||
-          JSON.stringify(turn.items || []).includes(
-            "[lead_request:" + record.id + "]",
-          );
+        // Once known, the native turn ID is authoritative. Later conversation
+        // turns may quote an old request marker without belonging to it.
+        const match = record.turn_id
+          ? turn.id === record.turn_id
+          : JSON.stringify(turn.items || []).includes(
+              "[lead_request:" + record.id + "]",
+            );
         if (!match) continue;
         this.store.update(record.id, { turn_id: turn.id });
         if (turn.status === "inProgress") {
