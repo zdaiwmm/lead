@@ -413,7 +413,7 @@ def events(bearer, epoch, entries):
             if method == "command/ack":
                 c.execute("""UPDATE lead.local_executor_commands SET acknowledged_at=coalesce(acknowledged_at,now())
                     WHERE request_id=%s AND id=%s""", (request["id"], params.get("command_id")))
-            elif method == "thread/tokenUsage/updated" and primary:
+            elif method == "thread/tokenUsage/updated" and request.get("thread_id") and thread == request["thread_id"]:
                 c.execute("UPDATE lead.local_executor_requests SET usage=%s WHERE id=%s",
                           (j(params.get("tokenUsage") or params), request["id"]))
             elif method == "result":

@@ -82,6 +82,15 @@ def test_poll_repeats_until_durable_ack_and_restart_fences_old_epoch(growth_agen
 def test_event_replay_conflict_and_usage_snapshots(growth_agent):
     device = connected(growth_agent)
     request = executor.submit(growth_agent, "tokens", payload(), session_key="tokens")
+    executor.events(device["token"], 1, [
+        {"id": "tokens:unproven-child", "request_id": str(request["id"]), "method": "thread/tokenUsage/updated",
+         "params": {"threadId": "child-thread", "tokenUsage": {"total": {"totalTokens": 999}}}},
+        {"id": "tokens:no-thread", "request_id": str(request["id"]), "method": "thread/tokenUsage/updated",
+         "params": {"tokenUsage": {"total": {"totalTokens": 888}}}},
+    ])
+    assert not executor.request_status(growth_agent, request["id"])["usage"]
+    executor.events(device["token"], 1, [{"id": "tokens:root", "request_id": str(request["id"]),
+        "method": "request/started", "params": {"thread_id": "thr-one"}}])
     event = {"id": "tokens:one", "request_id": str(request["id"]), "method": "thread/tokenUsage/updated",
              "params": {"threadId": "thr-one", "tokenUsage": {"total": {"totalTokens": 100}}}}
     executor.events(device["token"], 1, [event, event])
