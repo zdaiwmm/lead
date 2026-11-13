@@ -123,10 +123,13 @@ class NativeTask:
             return task,account,intent
 
     async def start(self,url=None):
+        from .native_worker_controller import refresh_page_controller
+
         self.remaining_seconds()
         task,account,intent=await asyncio.to_thread(self.snapshot)
         if self.lease:
             await self.descriptor()
+            await refresh_page_controller(self.runtime,self.lease['target_id'])
             return await self.descriptor()
         with tx(self.actor.aid) as c:
             origins=account_read_origins(c,account['id'],account['binding_version'])
@@ -148,6 +151,7 @@ class NativeTask:
         await self.actor.forward_proxy.validate_url(url)
         self.lease=await self.actor.native_runtime.acquire_page(scope,url)
         self.page=self.actor.native_runtime.pages[self.lease['target_id']]['page']
+        await refresh_page_controller(self.runtime,self.lease['target_id'])
         if resume and resume.get('execution_ref')==self.actor.native_runtime.execution_ref:
             await self.page.evaluate('point=>scrollTo(point[0],point[1])',resume.get('scroll',[0,0]))
         return await self.descriptor()

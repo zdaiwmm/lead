@@ -141,7 +141,10 @@ class NativeAction(NativeTask):
         return {'allowed':bool(allowed),'reason':'Only the current original action body and submit control are authorized.'}
 
     async def prepare_submit(self):
+        from .native_worker_controller import refresh_page_controller
+
         await self.descriptor()
+        await refresh_page_controller(self.runtime,self.lease['target_id'])
         before=await self.document()
         _,account,_=await asyncio.to_thread(self.snapshot)
         method=self.action['intent']['browser_method']
