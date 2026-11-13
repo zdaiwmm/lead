@@ -11,7 +11,7 @@ _ACTIONS=('guarded_input','guarded_click','guarded_scroll','guarded_navigate','i
     'observe_public_page','inspect_public_element','scroll_public_page')
 _SCOPE_CODES=frozenset(('element_no_longer_observed','document_changed_reobserve_before_action',
     'stale_or_foreign_node','node_target_changed','navigation_out_of_scope','observation_out_of_scope',
-    'scope_changed_during_observation','scope_no_longer_current'))
+    'scope_changed_during_observation','scope_no_longer_current','authorized_body_confirmation_unavailable'))
 _MESSAGES={
     'Use exactly one approved saved credential placeholder.':('denied','credential_placeholder_mismatch'),
     'Use the approved saved credential placeholder for this observed field.':('denied','credential_placeholder_denied'),
@@ -28,6 +28,7 @@ _MESSAGES={
     'Model token envelope reached':('error','model_token_envelope'),
     'The prior model request has unmeasured usage; reconcile its original reservation.':('error','model_billing_unknown'),
     'Credential redaction boundary rejected the model request':('error','credential_redaction'),
+    'body_matches_authorized=false. The current editor does not contain the complete authorized body.':('error','authorized_body_not_present'),
 }
 
 

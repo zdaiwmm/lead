@@ -217,7 +217,10 @@ class NativeAction(NativeTask):
             allowed=False
         if allowed and args.get('name')=='click':
             await self.prepare_submit()
-        return {'allowed':bool(allowed),'reason':'Only the current original action body and submit control are authorized.'}
+        decision={'allowed':bool(allowed),'reason':'Only the current original action body and submit control are authorized.'}
+        if allowed and args.get('name')=='input':
+            decision['input_role']='original_action_body'
+        return decision
 
     async def receipt_link_decision(self,args):
         decision=await super().authorize(args)

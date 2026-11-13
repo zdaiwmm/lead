@@ -130,6 +130,26 @@ async def verify_login(
                 ):
                     candidates.append((int(index[1]), "\n".join(lines[line_number:line_number+3])))
             step = workflow["step"]
+            if workflow['kind']=='action' and workflow.get('input_feedback_probe'):
+                model_calls[-1].update(
+                    editor_value_matches_authorized=workflow.get('editor_value_matches_authorized'),
+                    textarea_value_visible_in_dom=any(workflow['body'] in line for _,line in candidates if '<textarea' in line.lower()),
+                    body_confirmation_seen='body_matches_authorized=true' in text,
+                    native_typed_text_echo_seen=any('Typed' in line and workflow['body'] in line for line in lines))
+                images=[part['image_url']['url'] for message in request['messages'] for part in
+                    (message.get('content') if isinstance(message.get('content'),list) else [])
+                    if part.get('type')=='image_url']
+                model_calls[-1]['image_parts']=len(images)
+                if images and workflow.get('editor_box'):
+                    import base64
+                    import io
+
+                    from PIL import Image
+                    box=workflow['editor_box']
+                    image=Image.open(io.BytesIO(base64.b64decode(images[0].split(',',1)[1]))).convert('RGB')
+                    crop=image.crop((int(box['x'])+3,int(box['y'])+3,
+                        int(box['x']+box['width'])-3,int(box['y']+box['height'])-3))
+                    model_calls[-1]['editor_dark_pixels']=sum(max(pixel)<150 for pixel in crop.getdata())
             workflow["step"] += 1
             action = {
                 "done": {

@@ -361,6 +361,36 @@ def scoped_session_class():
     return ScopedSession
 
 
+async def authorized_body_matches(session,node,text):
+    """Read only equality on the already-authorized native textarea node."""
+    before=await session.live_scope()
+    try:
+        target=await session.cdp_client_for_node(node)
+        resolved=await target.cdp_client.send.DOM.resolveNode(
+            params={'backendNodeId':node.backend_node_id},session_id=target.session_id)
+        identifier=resolved.get('object',{}).get('objectId')
+        if not identifier:
+            raise ScopeViolation('authorized_body_confirmation_unavailable')
+        try:
+            result=await target.cdp_client.send.Runtime.callFunctionOn(params={
+                'objectId':identifier,'functionDeclaration':
+                    "function(expected){return this.isConnected&&this.tagName==='TEXTAREA'&&this.value===expected;}",
+                'arguments':[{'value':text}],'returnByValue':True},session_id=target.session_id)
+        finally:
+            await target.cdp_client.send.Runtime.releaseObject(
+                params={'objectId':identifier},session_id=target.session_id)
+        if before!=await session.live_scope():
+            raise ScopeViolation('scope_changed_during_observation')
+        value=result.get('result',{}).get('value')
+        if result.get('exceptionDetails') or type(value) is not bool:
+            raise ScopeViolation('authorized_body_confirmation_unavailable')
+        return value
+    except ScopeViolation:
+        raise
+    except Exception:
+        raise ScopeViolation('authorized_body_confirmation_unavailable') from None
+
+
 def guarded_tools(session, authorize, *, sensitive_data=None):
     """Wrap only tested native tools, using distinct names to prevent SDK overwrite.
 
@@ -403,6 +433,16 @@ def guarded_tools(session, authorize, *, sensitive_data=None):
         result = await native.registry.execute_action(name, values, browser_session=session,
                                                       sensitive_data=sensitive_data)
         await session.live_scope()
+        if (name=='input' and decision.get('input_role')=='original_action_body'
+                and isinstance(result,ActionResult) and not result.error):
+            matches=await authorized_body_matches(session,node,values['text'])
+            message=('body_matches_authorized=true. The current editor contains the complete authorized body.' if matches else
+                'body_matches_authorized=false. The current editor does not contain the complete authorized body.')
+            result.extracted_content=message
+            result.long_term_memory=message
+            result.metadata={**(result.metadata or {}),'body_matches_authorized':matches}
+            if not matches:
+                result.error=message
         return result
 
     @exposed.action('Navigate the assigned page within the current task scope.')
