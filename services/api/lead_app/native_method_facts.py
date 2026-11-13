@@ -49,6 +49,14 @@ def _permission(context, quote, operation):
     if not quote or _text(quote) not in normalized:
         raise ValueError('browser_method_permission_quote_missing')
     for sentence in re.split(r'[.!?。！？\n]',context):
+        # A local rule can qualify the preceding permission in its next sentence.
+        for requirement in re.finditer(r'\b(?:approval|authorization|permission|consent)\b.{0,100}?\b(?:required|needed|necessary|mandatory)\b',sentence,re.I):
+            waived=re.search(r'\bnot\s+(?:required|needed|necessary|mandatory)$',requirement.group(),re.I)
+            waived=waived or re.search(r'\bno(?:\s+(?:prior|administrator|administrative|owner|moderator|additional))*\s+$',sentence[:requirement.start()],re.I)
+            if not waived:
+                raise ValueError('browser_method_permission_denied')
+        if re.search(r'\b(?:must|need\s+to|have\s+to)\s+(?:obtain|receive|get|have|secure)\b.{0,100}\b(?:approval|authorization|permission|consent)\b',sentence,re.I):
+            raise ValueError('browser_method_permission_denied')
         topic=re.search(r'\b(?:automat\w*|bots?|publish\w*|post(?:s|ing)?|repl\w*)\b|自动(?:化|工具)|机器人|发布|发帖|回复',sentence,re.I)
         denied=re.search(r"\b(?:no|not|never|prohibit\w*|forbidden|disallow\w*|disabled|banned|cannot|can't)\b|仅限管理员|禁止|不允许|不得|不能",sentence,re.I)
         privileged=re.search(r'\bonly\s+(?:administrators?|moderators?|owners?)\b',sentence,re.I)
@@ -177,6 +185,28 @@ _BOOKMARK = r'''proof=>{
 }'''
 
 
+_PERMISSION_SOURCE = r'''node=>{
+ const excluded='article,[role=article],blockquote,q,pre,code,textarea,input,select,[contenteditable]:not([contenteditable=false])';
+ if(node.closest(excluded))return null;
+ const read=root=>{
+   if(root.closest(excluded))return null;
+   const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),parts=[];
+   let item,count=0,length=0;
+   while(item=walker.nextNode()){
+     if(++count>2000)return null;
+     const parent=item.parentElement;
+     if(!parent||parent.closest(excluded+',script,style,template,[hidden],[inert]'))continue;
+     const style=getComputedStyle(parent),range=document.createRange();range.selectNodeContents(item);
+     if(style.display==='none'||style.visibility!=='visible'||style.opacity==='0'||!Array.from(range.getClientRects()).some(r=>r.width>0&&r.height>0))continue;
+     length+=item.data.length;if(length>12000)return null;
+     parts.push(item.data);
+   }
+   return parts.join(' ');
+ };
+ return {text:read(node),context:read(node.closest('section,[role=region],aside,fieldset')||node.parentElement||node)};
+}'''
+
+
 async def inspect_editor(page, proposal, *, account_id, binding_version, external_account_id,
                          connection_origin, operation, evidence_ref, permission_page=None):
     async with AsyncExitStack() as resources:
@@ -260,10 +290,13 @@ async def _inspect_editor(page, proposal, *, account_id, binding_version, extern
     quote=proposal.get('permission_quote')
     if not isinstance(quote,str) or not 20<=len(quote)<=3000:
         raise ValueError('browser_method_permission_quote_missing')
-    actual=await permission.inner_text()
+    permission_source=await permission.evaluate(_PERMISSION_SOURCE)
+    if not permission_source or permission_source['text'] is None or permission_source['context'] is None:
+        raise ValueError('browser_method_permission_source_invalid')
+    actual=permission_source['text']
     if _text(quote) not in _text(actual):
         raise ValueError('browser_method_permission_quote_missing')
-    context=await permission.evaluate("node=>(node.closest('section,[role=region],aside,fieldset')||node.parentElement||node).innerText")
+    context=permission_source['context']
     if len(context)>12000:
         raise ValueError('browser_method_permission_context_ambiguous')
     _permission(context,quote,operation)
@@ -277,8 +310,7 @@ async def _inspect_editor(page, proposal, *, account_id, binding_version, extern
             or operation=='reply' and (await canonicals.count()!=canonical_count
                 or canonical_count==1 and await canonicals.get_attribute('href')!=canonical_href)
             or bookmark_facts is not None and await bookmark.evaluate(_BOOKMARK)!=bookmark_facts
-            or await permission.inner_text()!=actual
-            or await permission.evaluate("node=>(node.closest('section,[role=region],aside,fieldset')||node.parentElement||node).innerText")!=context):
+            or await permission.evaluate(_PERMISSION_SOURCE)!=permission_source):
         raise ValueError('browser_method_document_changed')
     return {'version':'native-browser-v1','account_id':account_id,'binding_version':binding_version,
             'target_url':target,'self_url':page_url,'operations':[operation],'role':'ordinary_member',

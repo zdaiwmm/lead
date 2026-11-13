@@ -229,6 +229,11 @@ async def test_semantic_address_byline_belongs_to_actual_receipt_article(common_
     ('Ordinary members can publish posts and reply, including through authorized browser automation.',True),
     ('You are an ordinary member. Members may use authorized browser automation to read. Members can reply manually.',False),
     ('You are an ordinary member. Members may use authorized browser automation to publish and reply if an administrator approves.',False),
+    ('You are an ordinary member. Members may use authorized browser automation to publish and reply. Administrator approval is required before doing so.',False),
+    ('You are an ordinary member. Members may use authorized browser automation to publish and reply. Prior consent is necessary.',False),
+    ('You are an ordinary member. Members may use authorized browser automation to publish and reply. You must obtain administrator permission first.',False),
+    ('You are an ordinary member. Members may use authorized browser automation to publish and reply. No prior administrator approval is required.',True),
+    ('You are an ordinary member. Members may use authorized browser automation to publish and reply. Approval is not required.',True),
 ])
 async def test_authorized_member_automation_is_explicit_current_permission(common_page,rule,allowed):
     page,context,_=common_page
@@ -236,6 +241,22 @@ async def test_authorized_member_automation_is_explicit_current_permission(commo
     await kwargs['permission_page'].locator('#rules').evaluate('(node,text)=>node.innerText=text',rule)
     proposal['permission_quote']=rule
     if allowed:
+        assert (await inspect_editor(page,proposal,**kwargs))['platform_permission']['state']=='approved'
+    else:
+        with pytest.raises(ValueError):
+            await inspect_editor(page,proposal,**kwargs)
+
+
+@pytest.mark.parametrize('container',['section','article','blockquote','editable','textarea'])
+@pytest.mark.parametrize('selected',['rule','main'])
+async def test_platform_permission_cannot_be_borrowed_from_ugc_or_its_ancestor(common_page,container,selected):
+    page,context,_=common_page
+    proposal,kwargs,_=await editor(page,context)
+    tag='div' if container=='editable' else container
+    attribute=' contenteditable=true' if container=='editable' else ''
+    await kwargs['permission_page'].set_content('<main><'+tag+' id=rules'+attribute+'>'+RULES+'</'+tag+'></main>')
+    proposal['permission_selector']='#rules' if selected=='rule' else 'main'
+    if container=='section':
         assert (await inspect_editor(page,proposal,**kwargs))['platform_permission']['state']=='approved'
     else:
         with pytest.raises(ValueError):
