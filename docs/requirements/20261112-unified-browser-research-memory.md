@@ -920,6 +920,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - `159d155`/`b6ef6a1`（源`e7d478c`/`1275571`）完成本次离线修复并交叉窄审：原生CSS SyntaxError只转固定无值code，页面关闭/导航/取消等不吞；连接全空提示直接重核完整唯一strong-current，显式歧义/origin/doc/拆ID仍拒，私有字段继续实际CSS及fresh-network exact proof。SDK接口允许省略提示，明确数字观察编号不是CSS。runner对执行/清理异常导出失败及原meter，不输出异常正文；清理有2秒界且取消传播，不补造缺失usage。旧真实SDK假响应红例7.24秒同样4started/4responses/3measured且无result，支持可复现症状，不能还原原付费worker未保存的具体异常。最终精确prompt/app及runner两例真实SDK14.464秒通过：错误数字selector与空参数各5假HTTP，均原Task succeeded/connected、私有self、结果/完整计量及正常退出、凭据双false；实际私有值元素id元数据可见，不靠保存用户名或泄露value。47项真实DOM、13项反馈通过；主集成114项/31.21秒、13项需专用Linux产品环境skip，另184项交付合同通过，全静态及881文件凭据扫描通过。正式runner冻结blob仅该项更新为`ee306bac…f1533`、其余10项不变；原第三次40000 unknown及保守扣额不变，新真实尝试尚未开始。
 
+- 第四次真实尝试`b5d9b54 / 67ac7d76…`在A/login按约停止：8请求/21478 reported tokens（20549输入/929输出，14720缓存为输入子集）、16.763秒，最终worker结果和原usage均完整、unknown=false/unmeasured0，40000预留settled、period spent21478/reserved0。认证POST0、业务Action0，Task waiting_user，A后续/B均未运行。worker最终错误仅留下三条request-limit、text空、history steps12；不能把本地12步当12实际请求，也不能据无operation字段的200 telemetry推断模型选了什么。先补不含文本/值/selector/URL/私密异常的有界动作/错误码投影，停止无诊断付费尝试，不凭猜测放宽登录门禁。原DB/nonce/报告、前三次失败及第三次unknown保留，进程0、本轮测试env模型key已移除。native已测23请求/60767 tokens，另第三次保守8位/40000未知，累计扣31请求位/100767单位；新增授权余额现73请求/400210单位，不追加额度。精确head的PR快速CI`43392358229/1`通过；镜像检查`43392358234/1`在未改脚本的公开InRelease TLS连接前置5秒超时，签名/apt未执行，只读诊断留证并仅重试该失败检查，仍须核实际结果。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -942,7 +944,7 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | A/B机械链及三次真实A首登录停止已执行；15请求/39289tokens已结算，第三次至少4请求且40000单位未知，保守另扣8请求位；B原字节保留 | C22未通过，A后续/B未运行；累计余额81请求/421688单位，先离线修复/验证再重新登记，B不称严格盲测，既有经营反例不重复付费 |
+| C22 | A/B机械链及四次真实A首登录停止已执行；23请求/60767tokens已结算，第三次至少4请求且40000单位未知，保守另扣8请求位；B原字节保留 | C22未通过，A后续/B未运行；累计余额73请求/400210单位，先补安全动作诊断/离线验证再登记，B不称严格盲测，既有经营反例不重复付费 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
