@@ -2023,13 +2023,13 @@ async def community_cycle(aid, rpc, selection=None, *, supported_operations=None
         error = None
         context_token = None
         try:
-            from . import local_executor
-            if local_executor.enabled(aid) and task:
-                from .local_executor_client import execution_context
+            from .local_executor_client import execution_context, uses_native
+            native = uses_native(aid, task_id=str(task["id"]) if task else None)
+            if native and task:
                 context_token = execution_context.set({"key": "community:" + str(task["id"]),
                     "task_id": str(task["id"]), "session_key": "community:" + str(task["id"])})
             operation = invoke_model(*args, **kwargs)
-            return await operation if local_executor.enabled(aid) else await asyncio.wait_for(operation, timeout=60)
+            return await operation if native else await asyncio.wait_for(operation, timeout=60)
         except Exception as exc:
             error = type(exc).__name__
             raise

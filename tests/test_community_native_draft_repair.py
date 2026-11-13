@@ -1,8 +1,11 @@
 """Real Task/request persistence with a fake external native model only."""
+import ast
 import asyncio
 import hashlib
+import inspect
 import json
 from contextlib import asynccontextmanager, suppress
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -244,4 +247,87 @@ async def test_an_old_unscoped_counter_cannot_skip_an_unproven_native_round(comm
     with pytest.raises(ValueError, match="draft_repair_scope_changed"):
         await check(aid, task, native.invoke)
     assert saved(aid, task) == before
+    assert requests(aid) == []
+
+
+def actual_cycle_model_wrapper(aid, task, invoke_model, wait_for):
+    """Bind the actual production closures without executing unrelated browser steps."""
+    cycle = ast.parse(inspect.getsource(community.community_cycle)).body[0]
+    closures = [node for node in cycle.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in {"save_timing", "run_model"}]
+    assert {node.name for node in closures} == {"save_timing", "run_model"}
+    factory = ast.FunctionDef(name="bind", args=ast.arguments(posonlyargs=[], args=[
+        ast.arg(arg=name) for name in ("aid", "task", "invoke_model")], kwonlyargs=[],
+        kw_defaults=[], defaults=[]), body=[*closures, ast.Return(value=ast.Name(id="run_model", ctx=ast.Load()))],
+        decorator_list=[])
+    namespace = {**community.__dict__, "asyncio": SimpleNamespace(to_thread=asyncio.to_thread, wait_for=wait_for)}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[factory], type_ignores=[])), community.__file__, "exec"), namespace)
+    return namespace["bind"](aid, task, invoke_model)
+
+
+async def no_native_timeout(operation, *, timeout):
+    operation.close()
+    raise AssertionError("native community wrapper entered a short timeout")
+
+
+async def test_actual_wrapper_replays_bound_native_pending_after_mode_is_disabled(community_agent):
+    aid = str(community_agent)
+    task = task_for(aid)
+    native = Native(aid, task, [GOOD], paused=True)
+    wrapper = actual_cycle_model_wrapper(aid, task, model.run_model, no_native_timeout)
+    kwargs = {"agent_id": aid, "short_request": True, "purpose": "conversation", "call_key": "wrapper-repair"}
+    async with native.running():
+        work = asyncio.create_task(wrapper(community.ReplyRevision, {"draft": INITIAL}, **kwargs))
+        original = (await wait_requests(aid, 1))[0]
+        work.cancel()
+        with suppress(asyncio.CancelledError):
+            await work
+        local_executor.set_mode(aid, "legacy")
+        assert not local_executor.enabled(aid) and local_executor.bound(aid, task_id=str(task["id"]))
+        native.ready.set()
+        result = await wrapper(community.ReplyRevision, {"draft": "changed observation"}, **kwargs)
+        assert result.body == GOOD
+        assert [row["id"] for row in requests(aid)] == [original["id"]]
+        assert original["session_key"] == "community:" + str(task["id"])
+        assert original["request_key"] == "community:" + str(task["id"]) + ":ReplyRevision:conversation:wrapper-repair"
+        assert str(original["task_id"]) == str(task["id"])
+        assert execution_context.get() is None
+
+
+async def test_actual_wrapper_freezes_native_route_once_before_invocation(community_agent):
+    aid = str(community_agent)
+    task = task_for(aid)
+    Native(aid, task, [])
+
+    def invoke(output, prompt, **kwargs):
+        local_executor.set_mode(aid, "legacy")
+
+        async def result():
+            context = execution_context.get()
+            assert context["task_id"] == str(task["id"])
+            assert context["key"] == context["session_key"] == "community:" + str(task["id"])
+            return output(body=GOOD)
+        return result()
+
+    wrapper = actual_cycle_model_wrapper(aid, task, invoke, no_native_timeout)
+    assert (await wrapper(community.ReplyRevision, {}, agent_id=aid)).body == GOOD
+    assert execution_context.get() is None
+
+
+async def test_actual_wrapper_keeps_legacy_timeout_without_native_task_context(community_agent):
+    aid = str(community_agent)
+    task = task_for(aid)
+    timeouts = []
+
+    async def timed(operation, *, timeout):
+        timeouts.append(timeout)
+        return await asyncio.wait_for(operation, timeout=timeout)
+
+    async def legacy(output, prompt, **kwargs):
+        assert execution_context.get() is None
+        return output(body=GOOD)
+
+    wrapper = actual_cycle_model_wrapper(aid, task, legacy, timed)
+    assert (await wrapper(community.ReplyRevision, {}, agent_id=aid)).body == GOOD
+    assert timeouts == [60]
     assert requests(aid) == []
