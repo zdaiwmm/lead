@@ -942,6 +942,12 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 最终视觉验证以实际`vision_images_sent`计数确认请求确有当前页面图像，不再称sanitized或宣称像素隐私。freeze的必需证明同步取消pixel privacy，记录用户本次取舍；仅保留实际SDK图像序列化、原逐动作作用域、预算边界和独立核验。一次最终真实验证的收敛承诺及失败即停继续适用，当前仍未发起新的真实模型请求。
 
+- 直接视觉候选已集成：配置源`e951401`、视觉源`7ca790b`，root集成为`fbaeb9e`/`b0a20b4`，无mask/broker或新增三controller/ControlBridge路径。仅官方DeepSeek Flash实例恢复视觉；原SDK当前页面截图前后使用原live_scope，关闭视觉不采图。原SDK完整决策/规划、最多两动作及逐动作重验已在实际SDK四例中覆盖，未把规划字段当真实进展。两次真实SDK/Chrome/原数据库登录离线正例各4次loopback假模型请求、认证POST1且完成私有身份绑定，实际image parts与vision_images_sent匹配；不调用真实模型，不据此声称能力提升。
+
+- 独立源`7ed461c`只新增测试，固定8个SDK消费者源码hash与core`7ca790b`及root`58c608b`一致：实际SDK0.13.14/Chrome/官方模型名和URL形状，经HTTPX MockTransport发1请求/1张当前页图，当前页色区72638像素、另一任务页色区0；视觉关闭实际parent截图调用0、state/cache均空；另一任务、撤回origin、foreign iframe均拒，两原页仍存活。两个canary页不是C22站点A/B。13项HTTPX图像/预算/未知边界0.16秒通过；同轮只对新增图像编码采用官方每图最多1024 tokens加文字/JSON保守字节上界，原8请求/40000单位/1800输出不变。SDK追加纯user规划提示后图像不再位于消息最后一项的兼容阻断已修，只要求唯一user图与本次PNG/hash及当前scope。独立接受证据`/private/tmp/vbp30/review-final.json`（SHA256 `bb863e8970fe8582aed850cc69a97afe9588ac1ed76cf621af63a35d41388d38`）；没有pixel隐私或真实模型能力通过的声明。
+
+- root集成时117项相关检查通过/2项Linux条件skip，新增可选发现上下文使两例旧路由消费者因缺input报错；可选投影退空后，受影响caller与配置15项0.60秒通过，原server snapshot/授权不变。另19项升级/发布、161项CI/节点发布合同通过，全静态及894文件扫描通过；11个正式冻结blob全部匹配，runner更新为`56c860688b0a663513436ae4ff66f6c916b9dee1`。独立接受该两行收尾；已有假模型工程证据按实际未变源码/输入复用，主线完整CI仍待C22通过后按正式流程执行。下一步只登记一次直接视觉真实验证，余额仍46请求/328443单位；截至此条记录没有新增付费请求。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
