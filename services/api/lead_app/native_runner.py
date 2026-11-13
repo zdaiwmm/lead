@@ -58,6 +58,7 @@ async def connect(controller,gateway_endpoint):
         script=ROOT/'scripts/browser_use_runner.py'
         packaged=Path(env().get('LEAD_BROWSER_RUNTIME_DIR') or packaged)
     payload={'native_scope':scope,'native_kind':'connection','native_goal':
+        f'This bounded fragment has at most {min(8,settings["max_model_requests"])} model requests. Use each fresh observation; avoid repeating a successful credential input unless current feedback shows it is still incomplete. '
         'Sign in only on this current connection page. Use only the supplied saved_username and saved_password placeholders for observed first-party credential fields. '
         'If an owner SSO flow already returned, only observe and verify the current self identity; never submit credentials to an identity provider. '
         'A filled password is masked; do not repeatedly refill it. Submit the actual login form once. '

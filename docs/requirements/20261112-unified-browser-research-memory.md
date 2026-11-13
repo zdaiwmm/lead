@@ -926,6 +926,8 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - 第五次真实尝试`6be2809 / 4f687c58…`在A/login按约停止：8请求/21586 tokens（20473输入/1113输出，15360缓存为输入子集）、15.799秒，原最终worker/usage完整、unknown=false/unmeasured0，40000预留settled、period spent21586/reserved0；认证POST0、业务Action0、Task waiting_user，A后续/B未运行。有界trace完整12步且无写失败：前两步input编号3、click5后有未分类错误，再出现不支持控件/失效编号及多次input；末四条本地request-limit不计新增请求。不能据跨观察的相同编号认定同一DOM节点或具体漏填字段。下一步只在A-only真实SDK离线核对字段/占位符和表单提交就绪反馈，不猜测或放宽授权。原库/nonce/报告、进程0、本测试env模型key已移除；native已测31请求/82353 tokens，第三次另保守8位/40000未知，累计扣39位/122353单位，新增授权余额65请求/378624单位。更早80000未知预留未动。精确`6be2809`的快速CI`43396696986/1`及镜像CI`43396697132/1`均通过，原镜像代码未改，两轮超时证据保留；不把PR检查当main完整应用放行。
 
+- `0dfadf3`/`4036d32`/`ffe5b0e`（源`ad233f9`/`d854847`/`ebbbf29`）关闭已复现的原生表单反馈缺口：A-only真实SDK中，bare及secret-tag用户名都正确替换；重复填用户名后缺密码的submit原返回ok但没有POST。现真正submit空密码给固定无值拒绝；required/format校验遵守[HTML提交语义](https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#form-submission-algorithm)，尊重form/submitter的novalidate，普通typebutton继续/显密步骤保留。仅读空值与validity布尔，不触发invalid事件、不选填字段；原request gate/SQL/owner/SSO/授权不变。两实际SDK红→2绿15.211秒，每例7假HTTP、原私有self/connected/双literal false；其后的novalidate/typebutton收窄按未变标准submit输入复用该SDK证据，分别以30项4.755秒和新增显密focused2项1.073秒实测覆盖，先前4红及准备按钮2红保留，不称最后source重跑了SDK全链。主集成91项/2项专用环境skip、最新请求入口16项/11项Linux条件skip、Ruff及886文件扫描通过；runner blob仍16fb499，11项正式冻结均不变。另仅在连接goal显示同一min(8,配置值)请求上限及按当前反馈避免重复输入，未改硬上限/计费/重试。此为离线修复，不能反推第五次究竟漏填哪字段；第六次尚未付费，余额65/378624不变。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
