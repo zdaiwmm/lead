@@ -84,6 +84,8 @@ async def main(data):
     logging.disable(logging.CRITICAL)
     folder = Path(data["workdir"])
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    from lead_app.native_sdk_trace import SafeStepTrace
+    step_trace=SafeStepTrace(folder/'safe-step-trace.json')
     tools = Tools()
     for name in list(tools.registry.registry.actions):
         if name != "done":
@@ -272,10 +274,12 @@ async def main(data):
                 raise BoundedProgressStop()
             if native_scope and data.get('native_kind') in ('discovery','action') and len(provider_requests)>=int(data.get('max_requests',8)):
                 raise FragmentBudgetStop()
+        async def after_step(_agent):
+            step_trace.capture(_agent.history)
         history=None
         failure_code=None
         try:
-            history = await agent.run(max_steps=max(1, min(20 if data.get("native_kind") in ('connection','discovery','action') else 6, int(data.get("max_steps", 6)))),on_step_start=before_step)
+            history = await agent.run(max_steps=max(1, min(20 if data.get("native_kind") in ('connection','discovery','action') else 6, int(data.get("max_steps", 6)))),on_step_start=before_step,on_step_end=after_step)
             if native_scope and data.get('native_kind') not in ('connection','discovery','action'):
                 await command('read')
         except ModelBillingUnknown:
@@ -294,6 +298,7 @@ async def main(data):
             # Exception text can contain page content or credentials.
             failure_code='native_agent_failed'
         finally:
+            step_trace.capture(getattr(agent,'history',None) or history)
             if native_scope:
                 try:
                     browser._intentional_stop=True
@@ -304,6 +309,7 @@ async def main(data):
             "success": bool(not failure_code and history and history.is_successful()),
             "failure_code": failure_code,
             "fragment_exhausted": fragment_exhausted,
+            "trace": step_trace.summary(),
             "text": (history.final_result() or "") if history and not failure_code else 'The current bounded fragment stopped before another model call.',
             "usage": {
                 "total_prompt_tokens": sum(u["prompt_tokens"] for u in provider_usage),

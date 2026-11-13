@@ -48,6 +48,8 @@ async def verify_login(
                 }
             )
             request = json.loads(raw)
+            if mode=='trace_probe':
+                model_calls[-1]['trace_in_model_prompt']=b'safe-step-trace' in raw
             parts = []
             for message in request.get("messages", []):
                 value = message.get("content")
@@ -83,7 +85,23 @@ async def verify_login(
                     "success": True,
                 }
             }
-            if workflow["kind"] in ("no_progress","clock","reload","scroll_cycle","fragment"):
+            if mode=='trace_probe':
+                if step==0:
+                    action={'guarded_input':{'index':999999,'text':'saved_username','clear':True}}
+                elif step in (1,2,3):
+                    field='password' if step==3 else 'username'
+                    matches=[index for index,line in candidates if re.search(r"(?:name|type)=[\"\']?"+field+r"\b",line,re.I)]
+                    if matches:
+                        action={'guarded_input':{'index':matches[-1],'text':'unapproved-placeholder' if step==1 else 'saved_'+field,'clear':True}}
+                elif step==4:
+                    matches=[index for index,line in candidates if '<button' in line.lower()]
+                    if matches:
+                        action={'guarded_click':{'index':matches[-1]}}
+                elif step==5:
+                    action={'inspect_self':{}}
+                elif step==6:
+                    action={'report_connection':{'subject_selector':'#subject'}}
+            elif workflow["kind"] in ("no_progress","clock","reload","scroll_cycle","fragment"):
                 action={"guarded_scroll":{"down":step%2==0 if workflow["kind"]=="scroll_cycle" else True,"pages":100 if workflow["kind"]=="scroll_cycle" else 1}}
             elif workflow["kind"] == "correction":
                 action={"propose_method":{"target_url":board.origin+"/home","operation":"publish",
