@@ -173,7 +173,7 @@ async def test_final_visual_trial_requires_actual_images_before_another_stage(
         usage = {'request_count': 1, 'entry_count': 1, 'total_tokens': 20,
             'billing_unknown': False, 'unmeasured_requests': 0}
         if images is not None:
-            usage['sanitized_images_sent'] = images
+            usage['vision_images_sent'] = images
         (folder/'result.json').write_text(json.dumps({'usage': usage}))
         completed.append('discover_publish')
         return {'outcome': 'completed'}

@@ -250,8 +250,8 @@ class NativeCase:
         if not seed and (not workers or sum(row['usage'].get('total_tokens', 0) for row in workers) > 40000):
             raise AcceptanceStop('missing_or_excess_usage:' + name)
         if self.require_visual and not seed and any(
-                type(row['usage'].get('sanitized_images_sent')) is not int
-                or not 1 <= row['usage']['sanitized_images_sent'] <= row['usage'].get('request_count', 0)
+                type(row['usage'].get('vision_images_sent')) is not int
+                or not 1 <= row['usage']['vision_images_sent'] <= row['usage'].get('request_count', 0)
                 for row in workers):
             raise AcceptanceStop('visual_image_missing_or_invalid:' + name)
         if sum(row['requests'] for row in self.report['stages']) > 48:
