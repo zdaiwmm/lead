@@ -1,6 +1,6 @@
 # Lead 统一浏览器执行与研究经验复用最小方案
 
-版本 V9，2026-11-12。实施接续中：已取得真实数据库、Linux原Task登录/发布/回复/未知回查、研究恢复及经验复用的增量证据；跨站读取权限、后台脚本完整组合、真实模型陌生页和正式交付仍待验收。第1–21节保留方案阶段证据，本次授权与实施状态以第22节为准。当前未发起生产发布，实号试点未授权。
+版本 V9，2026-11-12。实施接续中：真实数据库、Linux原Task登录/发布/回复/未知回查、研究恢复与经验复用，以及同实例跨站公开帧/SSO/SW/断控完整组合已有工程证据；真实模型陌生页和正式交付仍待验收。第1–21节保留方案阶段证据，本次授权与实施状态以第22节为准。当前未发起生产发布，实号试点未授权。
 
 目标：用户提供产品、连接账号后，一个经营 Agent 持续使用研究工具、通用浏览器和历史经验，自主推进有界获客实验。“账号已连接”必须意味着真实浏览器登录及身份核验已完成。新渠道不以专用适配器为前置；多渠道可以同时操作，不能靠轮流切换一个 current_tab 冒充并发。
 
@@ -886,11 +886,13 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - `6563e2f`（源`fc97d526`）补齐已独立确认的只读消费者合同：只从服务器验证的原Action冻结身份查找原owner来源，当前Task/claim/实例/路由仍由原门禁核对；不向scope添加普通business account字段，暂停/业务grant撤销不重挂running意图。来源撤回/过期/错Action/旧身份/旧claim仍拒，拒绝响应亦按原source_proof持久撤回；normal来源逻辑和发送链不变。真实DB直接消费者59绿、1显式浏览器跳过，预留及usage均0；主负责人逐行核对接受，实际DOM/CDP部分仍须完整组合。
 - `e1feedc`（源`94e93ba`）通过同版本SDK启动失败对照确认清理缺口：有stop约0.45秒退出，无stop在原ScopeViolation后仍有eventservice/reconnect等待至25秒监督终止。ScopedSession.start_scoped现仅在失败/取消时先intentional_stop，再有界stop并原样抛原异常；正常Agent finally不变，runner及部署冻结blob未改。实际SDK七种合同通过，无显式stop的真实Chrome原语修后0.44896秒自行退出、两原页面仍存活；独立按固定0.13.14源码核对stop(force=False)/keep_alive语义接受。没有真实模型、DB或完整组合调用；两项集成后的唯一完整组合正在固定输入上复验，C22仍仅草案。
 
+- `e1feedc`的原同输入完整组合首次全绿：实际Linux 1项70.758秒，真实SSO两次owner交还/API精确批准/fresh私有身份、公开文本实际SDK观察、正常发布confirmed/源POST1、NoAck unknown/源总POST2、SW v2与双重放源0、同原Task/Action/attempt1回查confirmed、C33单独断gate后的TLS/partial clean EOF全部通过。两Action最终各attempt1且confirmed，原intent/grants全行未改；公开源7次GET的Cookie/Referer均无，回查首个假模型调用也观察到公开marker。11次受控模型HTTP无凭据literal，5份预留settled/unknown0；这是隔离假模型工程证据，不算C22。原无foreign的报告常量保留，新外层同实例与实际源站证据证明本轮foreign组合，不改旧报告字面来冒充通过。核心作者再次明确未读B源码、页面或配方，现冻结generic producer，后续由协调者独立适配B并精确预注册；首个付费失败/等待/未知账单即停止全部后续阶段。
+
 ### 22.2 尚未放行与部署约束
 
-D1/D2主要执行链已有机械产品证据，跨站读取权限及后台脚本完整组合尚未闭合，不能因此开启共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
+D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
 
-本次采用同SHA应用镜像中的`services/browser-runtime/`承载固定SDK依赖、Chromium与由唯一scripts源复制的运行脚本，复用既有current/services只读挂载；不开放宿主/公网CDP，不另装生产框架，不依赖未经核实的旧控制管道。完整组合、真实DB权限/claim/恢复、陌生布局、模型语义、账号界面、正式迁移/回退演练及精确PR/main必需CI尚待完成。最终部署须复用同SHA成功run/attempt产物并独立回读，当前没有提交任何生产发布请求。
+本次采用同SHA应用镜像中的`services/browser-runtime/`承载固定SDK依赖、Chromium与由唯一scripts源复制的运行脚本，复用既有current/services只读挂载；不开放宿主/公网CDP，不另装生产框架，不依赖未经核实的旧控制管道。已有工程证据按实际不变输入复用；陌生布局真实模型、正式备份克隆迁移/回退演练及精确PR/main必需CI尚待完成。最终部署须复用同SHA成功run/attempt产物并独立回读，当前没有提交任何生产发布请求。
 
 ### 22.3 当前验收对账（尚未最终放行）
 
@@ -908,12 +910,12 @@ D1/D2主要执行链已有机械产品证据，跨站读取权限及后台脚本
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | 预注册与双域名源站隔离合同、真实SDK消息属性、费用未知停止、六任务机械消费者已验证 | 最终producer尚未冻结；真实模型A/B及可选经营反例尚未运行，首个失败停止全部后续付费阶段 |
+| C22 | 预注册与双域名源站隔离合同、真实SDK消息属性、费用未知停止、六任务机械消费者已验证；generic producer现冻结，作者未读B | 真实模型A/B尚未运行，首个失败停止全部后续付费阶段；既有经营反例不重复付费 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
 | C28 | 现有SW脚本/HttpOnly维护、POST读取及当前controller更新已取证；测试侧fresh订阅后正常/NoAck各唯一发送 | 正式订阅、SW版本更新后并发重放及原unknown回查已有产品证据；C33尾段亦已完成，先前测试侧fresh仍不计产品修复 |
 | C29 | 实际一层/嵌套/晚到OOPIF观察点击、撤权在SDK采集前拒绝，另一页继续，恢复后fresh重新附着 | 显式服务端范围工程证据；产品跨站来源批准仍待C30，不能从iframe.src自行授信 |
-| C30 | 两种SSO入口、实际opener/callback、同实例代理；新owner公开frame批准→opaque隔离→resume/freshself→新Task SDK读取正例 | 31c权限/隔离/响应/竞态已固定并独立接受；同一实例SSO+foreign静态frame+SW正常/NoAck及原回查连续正例待完成 |
+| C30 | 权限/隔离/响应/竞态独立证据及e1feedc同实例70.758秒完整绿：SSO、owner公开frame批准、opaque读取、SW正常/NoAck、原回查与C33 | 证明受控静态公开frame组合；不推广任意嵌套、动态身份依赖或真实平台准入 |
 | C31–C32 | 原Network/Fetch正文关联、worker当前版本/target替换拒绝、旧认证/错误callback/危险字段源站0 | 正式fresh、版本更新后重放/原回查已取证；C33断控尾段亦已通过，仍不用同URL脚本或全局投影代替当前归属 |
 | C33–C34 | 实际整个管理器三切点SIGKILL、TLS EOF/新连接拒绝、原Action恢复只回查；实际proxy关闭活动CONNECT/未完整header通过 | Chrome与同SW仍活、仅断gate控制的连续组合已通过；生产唯一出口/父链按正式独立回读核验 |
