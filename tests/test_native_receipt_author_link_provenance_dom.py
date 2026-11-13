@@ -133,6 +133,19 @@ async def test_ugc_fake_author_cannot_hide_a_second_actual_matching_receipt(comm
     assert second in visited and state["action_state"] == "unknown"
 
 
+async def test_embedded_article_inside_an_explicit_user_body_cannot_supply_author_provenance(common_page, monkeypatch):  # noqa: F811
+    url = ORIGIN + "/members/new-author"
+    markup = ('<article><h2>Entry</h2><div itemprop="articleBody">'
+        '<article><h3>User-supplied markup</h3><address>By '
+        f'<a href="{url}">member-A</a></address>'
+        '<p><a rel="bookmark" href="/records/55">Embedded permalink</a></p></article></div>'
+        '<p><a rel="bookmark" href="/records/55">Permalink</a></p></article>')
+    controller, _, state, _, _, _, _, _ = await author_receipts(common_page, monkeypatch, author_markup=markup)
+    with pytest.raises(ValueError, match="browser_receipt_candidate_unproved"):
+        await controller.report_receipt({"selectors": SELECTORS})
+    assert state["action_state"] == "unknown"
+
+
 @pytest.mark.parametrize("html", [
     "<main>There is no receipt article.</main>",
     "<title>Member profile</title><main><h1>Member profile</h1><p>Member: another-member</p></main>",
