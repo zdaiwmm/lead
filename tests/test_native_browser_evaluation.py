@@ -28,6 +28,36 @@ def test_prereg_freezes_namespace_dependencies_and_transitive_site_sources():
     assert draft['provider_credential_sha256'] is None
 
 
+def test_prereg_validation_in_fresh_no_site_python(tmp_path):
+    """The real -S entry must not depend on imports already loaded by pytest."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from scripts.evaluate_native_browser import plan, private_write, sha
+
+    adapter = tmp_path/'standalone_adapter.py'
+    adapter.write_text("raise AssertionError('Validation must not execute the adapter')\n")
+    config = {'model': {'provider': 'fixture', 'model': 'fixture', 'base_url': 'http://127.0.0.1'},
+        'sites': [{'adapter': 'standalone_adapter:create'}]}
+    private = tmp_path/'registered.json'
+    private_write(private, config)
+    prereg = plan()
+    prereg.update(state='frozen', model=config['model'], private_config_sha256=sha(private.read_bytes()),
+        site_adapter_sha256={'standalone_adapter:create': sha(adapter.read_bytes())})
+    registered = tmp_path/'prereg.json'
+    private_write(registered, prereg)
+    source = Path(__file__).resolve().parents[1]/'scripts/evaluate_native_browser.py'
+    program = ("import pathlib,sys\nsource=pathlib.Path(sys.argv[1])\n"
+        "namespace={'__file__':str(source),'__name__':'isolated_prereg'}\n"
+        "exec(compile(source.read_text(),str(source),'exec'),namespace)\n"
+        "namespace['validate_prereg'](sys.argv[2],sys.argv[3],sys.argv[4])\n")
+    result = subprocess.run([sys.executable, '-S', '-c', program, str(source), str(registered),
+        str(private), sha(registered.read_bytes())], cwd=tmp_path,
+        env={**os.environ, 'PYTHONPATH': str(tmp_path)}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.asyncio
 async def test_changed_provider_credential_stops_before_any_task_or_browser(monkeypatch,tmp_path):
     from lead_app import config, domain

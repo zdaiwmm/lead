@@ -8,7 +8,7 @@ model responses or credentials are embedded in the paid executor.
 import argparse
 import asyncio
 import hashlib
-import importlib
+import importlib.util
 import json
 import os
 import stat

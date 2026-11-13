@@ -900,6 +900,9 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 
 - B机械链第三轮1项50.265秒通过，固定产品`da95069`及未改公共NativeCase、B源`6badeffc…731e1a`、私有协议adapter`88b8e2cb…fb3f7`，只含上述两处私有Fake修正。六原Task的请求数为6/2/3/2/4/3，共20，各片均在8请求/40000单位/180秒内；六预留均settled、凭据literal均false，真实模型API0。原zero-model seed以实际SDK输入/点击造成唯一POST和unknown，随后同Task/Action/attempt1回查confirmed且新增POST0；最终三帖与登录合四POST，三回执均有原SQL有效性、独立source及实际DOM核验。红1/红2原库与unknown保留，成功测试独立库/进程按原约定清理。后续只在全新独立DB/runtime执行真实C22，不带Fake配方；产品与`da95069`间的文档提交不改变任何相关输入。
 
+- 最终候选`6faea4e`在250项源码、原B机械证据、实际运行包/适配器与预注册对账后准备独立C22库；付费前窄审补私有guard：重算实际helper、SDK Python完整集合、Chromium和依赖版本，不只信manifest字节。正常包通过、仅改本轮helper副本被拒、恢复原字节且无执行标记的正负证据已保存。A生命周期仅提取原SiteA/create_a定义，与实际3.12 parser AST完全等值；A dry_model及B私有recipe均物理排除，原未执行空库/凭据文件已清理，未动既有unknown账本。
+- 首次注册命令`6faea4e / 9284f118…`在`validate_prereg`阶段因干净`-S`进程未显式导入`importlib.util`而停止，尚未进入execute_registered、创建Agent/Task或启动model worker。独立原库实查agents/tasks/actions/attempts/reservations/usage全部0、worker结果0，模型API0；原nonce/失败日志保留，仅删除本轮空库和私有model env。新增全新`-S`子进程预检先复现同一AttributeError，再补显式标准库导入后本文件5项通过/2项需实际Linux产品环境故skip；NativeCase与execute_registered的AST完全未变，不重跑已有效的机械链。后续须按修正源重新冻结和注册、先验证实际Linux命令预检，再启动尚未发生的真实付费阶段；不清旧标记或将预检失败冒称付费验收结果。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
