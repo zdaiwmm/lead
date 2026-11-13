@@ -14,15 +14,14 @@ From this directory:
 npm ci
 npm run build
 node dist/cli.js status
-node dist/cli.js pair --url https://your-lead-host --code CODE_FROM_LEAD
-node dist/cli.js run
+node dist/cli.js pair --profile PROJECT_UUID --url https://your-lead-host --code CODE_FROM_LEAD --install
 ```
 
-For macOS background operation, first place this package at a stable installation path, then run `node dist/cli.js install`. This installs only the user's `com.lead.local-executor` LaunchAgent, starts it, and retains the pairing and request records. `uninstall` stops that LaunchAgent and removes its plist without deleting request state. Closing the Lead browser does not stop it. Sleep, shutdown and OS logout suspend execution until the device returns.
+Install the released archive at a stable private path before pairing. The command copied from Lead includes the project profile and `--install`, which pairs and starts a project-specific macOS user LaunchAgent. Projects keep separate pairing, workspaces, request records and background services. `node dist/cli.js uninstall --profile PROJECT_UUID` stops only that service without deleting its state. Closing the Lead browser does not stop it. Sleep, shutdown and OS logout suspend execution until the device returns. For foreground operation omit `--install` and use `node dist/cli.js run --profile PROJECT_UUID`.
 
-`--state /absolute/private/path` selects an alternate local state directory. The default is `~/.lead/executor`. Use `LEAD_CODEX_BINARY=/absolute/path/to/codex` when launchd cannot find the installed CLI; install captures that path and the current PATH. `LEAD_CODEX_MEMORIES=1` enables native Codex memories for these processes, with Sol for extraction and consolidation; it does not edit global configuration. Review the native memory store's scope before enabling it for unrelated workspaces. This flag does not promise a separate background-memory effort setting.
+`--profile PROJECT_UUID` selects `~/.lead/executors/PROJECT_UUID`; commands without a profile retain the original `~/.lead/executor` default. `--state /absolute/private/path` selects an explicit alternate private directory. Use `LEAD_CODEX_BINARY=/absolute/path/to/codex` when launchd cannot find the installed CLI; install captures that path and the current PATH. `LEAD_CODEX_MEMORIES=1` enables native Codex memories for these processes, with Sol for extraction and consolidation; it does not edit global configuration. Review the native memory store's scope before enabling it for unrelated workspaces. This flag does not promise a separate background-memory effort setting.
 
-`npm pack` produces a package with built runtime and the official MCP SDK runtime dependencies. Install the released archive at a stable private location. Pairing and LaunchAgent installation are explicit commands, never package lifecycle scripts.
+`npm pack` produces a package with built runtime and the official MCP SDK runtime dependencies. Release CI embeds its exact SHA as `REVISION`; Lead serves that same archive from the authenticated `/api/executor/download` endpoint. Capability status reports that revision alongside the actual installed Codex version. Pairing and LaunchAgent installation are explicit commands, never package lifecycle scripts.
 
 ## Runtime and recovery
 
@@ -42,7 +41,7 @@ Every run gets a request-bound MCP stdio server; it exposes only that request's 
 - `POST /executor/v1/events`: `{epoch,events:[{id,request_id,method,params}]}` → `{accepted:[event_id],epoch}`. Only accepted IDs leave the outbox.
 - `POST /executor/v1/tools`: `{epoch,request_id,name,arguments}` → an MCP tool result.
 
-Run command payload: `{session_key,input,instructions,output_schema?,model?,effort?,tools?,tool_context?,web_search?}`. The supported model/effort are Sol/medium. `tools` are standard MCP descriptors `{name,description,inputSchema}`. Task and account authority are resolved by Lead, not by these arguments. Server paths cannot select local working directories.
+Run command payload: `{session_key,input,instructions,output_schema?,model?,effort?,tools?,tool_context?,web_search?}`. The supported model/effort are Sol/medium. `tools` are standard MCP descriptors `{name,description,inputSchema}`. Task and account authority are resolved by Lead, not by these arguments. Server paths cannot select local working directories. Lead retains the original Pydantic result schema separately: closed results use the SDK's strict schema, while contracts with dynamic dictionaries use a strict `result_json` string envelope and the unchanged business validator after decoding. Frozen older requests retain their original transport.
 
 Commands are `run`, `steer` (`payload.input`), `interrupt`, or `respond` (`payload.id`, `payload.result`). `command/ack` marks durable receipt. The final `result` event carries `{state,output,thread_id,turn_id}`, with state `completed`, `failed`, `interrupted`, or `execution_unknown`. Native thread/item/turn and usage events are forwarded independently. Token usage is a snapshot, not a bill.
 

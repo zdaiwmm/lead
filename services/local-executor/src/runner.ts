@@ -196,6 +196,8 @@ export class Runner {
           )
         ) {
           await this.reconcile(record, rpc, finish);
+          if (record.cancel_requested && record.state === "running")
+            await rpc.request("turn/interrupt", { threadId: record.thread_id, turnId: record.turn_id });
           await done;
           return;
         }
@@ -340,8 +342,8 @@ export class Runner {
     const record = this.store.request(command.request_id),
       active = this.active.get(command.request_id);
     if (!record) throw new Error("request_not_active");
+    if (command.kind === "interrupt") this.store.update(record.id, { cancel_requested: true });
     if (command.kind === "interrupt" && (!active || !record.turn_id)) {
-      this.store.update(record.id, { cancel_requested: true });
       this.store.data.controls.push(command.id);
       this.store.save();
       this.store.event(record.id, "command/ack", { command_id: command.id });

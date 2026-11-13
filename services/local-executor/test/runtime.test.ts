@@ -76,6 +76,30 @@ test("interrupting a queued request never starts its model turn", async (t) => {
   assert.equal(store.request("cancel-before-start")?.state, "interrupted");
   assert.equal(rpc.calls.filter(c => c.method === "turn/start").length, 0);
 });
+test("an offline interrupt survives restart and cancels only the reconciled original turn", async (t) => {
+  const store = setup(t), rpc = new FakeRpc();
+  store.begin("offline-cancel", payload);
+  store.update("offline-cancel", { thread_id: "thread-1", turn_id: "original-turn", state: "running" });
+  await new Runner(store).command({ id: "cancel-offline", request_id: "offline-cancel", kind: "interrupt", payload: {} });
+  rpc.request = async function(method: string, params: any) {
+    this.calls.push({ method, params });
+    if (method === "thread/turns/list") return { data: [{ id: "original-turn", status: "inProgress", items: [] }], nextCursor: null };
+    if (method === "turn/interrupt") this.listener("turn/completed", {
+      threadId: "thread-1", turn: { id: "original-turn", status: "interrupted", items: [] },
+    });
+    return {};
+  };
+  const restored = new Store(store.folder), runner = new Runner(restored, () => rpc as any);
+  const work = runner.command({ id: "resume", request_id: "offline-cancel", kind: "run", payload });
+  await Promise.race([work, new Promise(resolve => setTimeout(resolve, 100))]);
+  await runner.close();
+  await work;
+  const interrupts = rpc.calls.filter(c => c.method === "turn/interrupt");
+  assert.equal(interrupts.length, 1);
+  assert.equal(interrupts[0].params.turnId, "original-turn");
+  assert.equal(rpc.calls.filter(c => c.method === "turn/start").length, 0);
+  assert.equal(restored.request("offline-cancel")?.state, "interrupted");
+});
 test("run persists original thread, explicit Sol medium and parsed result; replay does not run twice", async (t) => {
   const store = setup(t),
     rpc = new FakeRpc();
