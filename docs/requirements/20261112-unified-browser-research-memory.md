@@ -1129,7 +1129,7 @@ Multica官方主线固定为[`773569db3ab53e304f2d08310621f1b15be393f0`](https:/
 ### 23.3 分阶段与检查点
 
 - [x] P0：固定协议/工具契约及故障测试，设备与登录能力探测。
-- [ ] P1：Lead目标→真实Codex研究/决策/内容→A原Task/Action发布→独立回执；同时验证追加、中断、关前端、进程重启与命令防重。P1不冒称全产品迁完或C22通过。
+- [x] P1：Lead目标→真实Codex研究/决策/内容→A原Task/Action发布→独立回执；同时验证追加、中断、关前端、进程重启与命令防重。P1不冒称全产品迁完或C22通过。
 - [ ] P2：A回复、B陌生布局、unknown只读回查；19入口及key门槛全部迁移；无服务器模型key矩阵。
 - [ ] P3：原生压缩/记忆边界、并行账号、断网/休眠/取消晚到回执、旧库迁移与回退；精确候选检查、main完整验证、同轮产物、正式部署与独立回读。
 
@@ -1149,3 +1149,13 @@ Multica官方主线固定为[`773569db3ab53e304f2d08310621f1b15be393f0`](https:/
 - 新 Codex C22 的 A 六阶段全部通过：登录、发布发现、原 Action 发帖与独立回执、回复发现、原回复与精确父帖回执、真实丢 ACK 后同一 unknown Action 只读回查（POST0、attempt1）。A 原证据不因后续 B 修复重跑。B 先发现私有稳定 AccountID 与当前 username 不同命名空间，原双源身份校验正确拒绝；通用 inspect_self 返回已观察当前主体和 namespace、固定纠错反馈穿透 worker IPC，机械正反实测原登录 POST1。新 B fixture 登录已通过，发布方法发现因未能核验 shadow DOM 编辑器目标而首失败停，保留原 Task/native 请求、POST0，正在核查成熟选择器能力，不加入 B 特定配方。
 - 工程证据分开留存：218项定向发布/镜像/桥接/浏览器适配、前端 typecheck、16项连接器/真实 MCP 进程测试与 build；隔离真实 PostgreSQL 85 passed/1环境skip，覆盖新设备/成员权限/预算与来源/业务生命周期/迁移。另有真实 Temporal 单槽释放、worker restart 丢内存重建同 claim/request（仅1条 run）、模式切换仍原归属、history replay；长 pending 的 continue-as-new 保持原 claim/job/tick 正在收尾。旧本机试跑缺 Temporal、Camoufox外部下载及缺 scripts 打包的环境失败保留，未计作产品通过。
 - 生产只读核验应用与 Telegram/Reddit 均为7940fbef、schema0031、安全点空闲且无未知 Action、没有在途切换，备份/恢复点可用。0034采用原统一浏览器升级入口从0031/0033可加性迁移，保存原列与权限/任务/Action/费用对账、克隆演练与恢复；本机连接器包须同轮 CI、同SHA REVISION，发布工具精确 blobs 冻结后才能放行。最终 PR 检查、main完整验证、工具安装、应用及两个执行器切换、本机安装与项目启用、独立回读尚未完成。
+
+### 23.6 候选冻结与最后复验
+
+- 原生子Agent真实验证完成：Lead请求409f0d6c、主thread01a1d669-9e48-7073-9bfb-24e29fb8f51c及子thread01a1d669-c1d3-7e20-9008-4c4991b1f8de；主子实际thread/read、两份rollout turn_context均为Sol/medium。子Agent只读取随机标记与7本蓝色笔记本的本地fixture，主Agent正确汇总，无浏览或发送。原生子线程事件完整保留，后端主指针不被替换；父67073、子43430 token快照单列，不当金额、不默认相加。完整证据 `/private/tmp/lead-codex-product-subagent-20261114/final-summary.json`；自有API/隧道/进程均已关闭，原DB、线程与失败保留。
+- 完成首项目入口、19消费者、独立成员权限及短Activity集成。最终连接器21项测试/构建通过，包含已知turn精确ID、未知turn原userMessage前缀marker、ACK前完成与历史快照前完成双向竞态、离线取消、MCP图像、设备epoch；canonical `request/started` 仅在ACK/历史证明后建立主指针，原生raw事件不能改指针，usage仅明确主thread更新。最新隔离PG协议50 passed/1环境skip；发布/镜像/桥接202项和旧A DOM/浏览器适配48项通过。Temporal长pending/旧Run接管13项、旧工作流回归13项、9段旧历史Replay通过，已清理全部自有测试服务/临时库。
+- B新暴露的通用问题已分别修复并保留原失败：私有ID与当前username命名空间的固定纠错反馈；新MCP字段说明补齐、去除A特定页面标签要求；明确authorized browser assistant/or browser automation许可绑定实际操作列表。独立审查先复现“助手只读但写入手动”及but尾句误放行，修复为保留完整限制句、仅剥明确可选手动从句。最终5拒绝/4可选正例专项复核接受，parser/适配77项、实际B HTTP/Chrome DOM及反例61项通过，不放宽身份/权限/表单/父帖/正文/回执。
+- B六阶段机械链已对真实Chrome、规则页与编辑器分离、实际publish/reply POST及独立DOM回执、真实丢ACK后同Action/attempt1只读确认全部通过（回查POST0）。最后B真实模型复验以新fixture原工具机械身份setup接同device给官方daemon，阶段报告明确标注机械login与后5个真实模型阶段；复用之前未变身份源码的真实B登录证据，不宣称新fixture续旧Task、不重发旧Action。结果以原[PR62](https://github.com/zdaiwmm/lead/pull/62)交付栏持续对账。
+- 正式源文件已固定42个Git blob，连接器明确清单28个文件，未知路径继续拒绝；真实npm pack 3669成员通过安全结构、包名/bin和精确REVISION检查。此本地包仅验证布局，生产仍只用精确main成功run/attempt产物。a9ff553先行PR快速检查43494525050/1及镜像入口检查43494525032/1通过，最终head仍须全部必需检查；合并后精确main才执行完整应用验证，不用PR结果放行业务。
+- 只读发布交接位于 `/private/tmp/lead-codex-release-readonly-20261114/handoff.md`：已核现场仍7940/0031、历史reserved51246原样、零在途/维护/unknown。按同轮工具安装、精确main源与镜像独立挂载、备份克隆演练、保护审批原ZIP、迁移hold、正式应用切换、Telegram→Reddit各自置备/登记、finalize和独立回读执行；Telegram旧计划的expected.selector只按当次实际前态留原字节刷新，不改账号、凭据、出口或权限。
+- 生产项目配对必须真实owner在 `https://shui.click` 生成，本环境没有已连接浏览器，不能伪造OIDC或从DB造会话。软件部署、同SHA本机包安装及实际Codex能力检查可以先完成；项目启用依赖一次真实owner配对。后续精确main SHA、CI run/attempt、部署请求/独立回读与配对状态记录在同一PR交付栏，不为状态文案更换已经冻结的应用产物。
