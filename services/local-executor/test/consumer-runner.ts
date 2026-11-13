@@ -68,6 +68,21 @@ try {
     if (current.job?.state === "completed") {
       assert.equal(current.billing.reservations, 0);
       assert.equal(current.billing.usage_events, 0);
+      if (phase === "recall") {
+        const recall = current.requests.find((row: any) =>
+          row.request_key.startsWith("consumer-recall:"),
+        );
+        const website = current.requests.find((row: any) =>
+          row.request_key.startsWith("consumer-website:"),
+        );
+        assert.ok(recall && website);
+        assert.equal(recall.thread_id, website.thread_id);
+        const nonConversationItems = current.events.filter((event: any) =>
+          event.request_id === recall.id && event.method === "item/started" &&
+          !["userMessage", "agentMessage", "reasoning", "plan", "contextCompaction"].includes(event.params.item?.type),
+        );
+        assert.deepEqual(nonConversationItems, [], "recall must use the compacted conversation without browsing or tools");
+      }
       const usageByThread = new Map<string, any>();
       for (const row of current.requests)
         if (row.thread_id && row.usage)
