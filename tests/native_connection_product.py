@@ -81,7 +81,7 @@ async def verify_login(
                 approved=checked_image(images[0].removeprefix('data:image/png;base64,'))[0] if images else None
                 units,count,_=request_projection(raw,image_model=IMAGE_MODEL,approved_image=approved)
                 model_calls[-1].update(projection_units=units,nonimage_bytes=units-count*IMAGE_TOKENS)
-            if mode.startswith(('batch_','vision_')) or mode=='operation_feedback':
+            if mode.startswith(('batch_','vision_')) or mode in ('operation_feedback','navigation_progress'):
                 parameters=request.get('tools',[{}])[0].get('function',{}).get('parameters',{})
                 properties=parameters.get('properties',{})
                 def operation_enum(node):
@@ -111,7 +111,7 @@ async def verify_login(
             if mode.startswith('batch_'):
                 model_calls[-1]['discovery_context_seen']=all(key in text for key in ('starting_urls','account_origin','intent_scope'))
             model_calls[-1]['identity_feedback_code_seen']='identity_element_ambiguous' in text
-            if mode=='operation_feedback':
+            if mode in ('operation_feedback','navigation_progress'):
                 model_calls[-1]['image_parts']=sum(1 for message in request.get('messages',[]) for part in
                     (message.get('content') if isinstance(message.get('content'),list) else [])
                     if isinstance(part,dict) and part.get('type')=='image_url')
@@ -266,7 +266,10 @@ async def verify_login(
                     action = {"report_connection": {"subject_selector": "#subject"}}
             elif workflow["kind"] == "discovery":
                 operation_probe=mode=='operation_feedback' and workflow.get('desired_operation')=='reply'
-                if step == 0 and mode!='method_feedback':
+                navigation_probe=mode=='navigation_progress' and workflow.get('desired_operation')=='reply'
+                if navigation_probe and (step<4 or workflow.get('navigation_variant')=='loop'):
+                    action={'guarded_navigate':{'url':board.origin+'/home' if step%2==0 else workflow['editor_url']}}
+                elif step == 0 and mode!='method_feedback':
                     action = {
                         "guarded_navigate": {
                             "url": board.origin+'/home' if operation_probe else workflow.get("editor_url") or board.origin + "/home"
@@ -274,7 +277,7 @@ async def verify_login(
                     }
                 elif operation_probe and step==2:
                     action={'guarded_navigate':{'url':workflow['editor_url']}}
-                elif step == 1 or mode=='method_feedback' and step==0 or operation_probe and step==3:
+                elif step == 1 or mode=='method_feedback' and step==0 or operation_probe and step==3 or navigation_probe and step==4:
                     proposed_operation='publish' if operation_probe and step==1 else workflow.get('operation','publish')
                     action = {
                         "propose_method": {
@@ -388,7 +391,7 @@ async def verify_login(
                 'next_goal':'Complete the assigned bounded task.','current_plan_item':0,
                 'plan_update':['Complete the controlled assigned task.'] if step==0 else None,
                 'action':actions}
-            if mode.startswith(('batch_','vision_')) or mode=='operation_feedback':
+            if mode.startswith(('batch_','vision_')) or mode in ('operation_feedback','navigation_progress'):
                 output={key:value for key,value in output.items() if key in properties}
             content = json.dumps(output)
             tool = request.get("tools", [{"function": {"name": "AgentOutput"}}])[0][
@@ -532,7 +535,7 @@ async def verify_login(
         probe_checks = None
         discovery = None
         action_check = None
-        if mode in ('login','operation_feedback') and result.outcome == "completed":
+        if mode in ('login','operation_feedback','navigation_progress') and result.outcome == "completed":
             actor = await browser.gateway.get(
                 aid, task["input"]["spec"]["payload"]["profile_id"]
             )
