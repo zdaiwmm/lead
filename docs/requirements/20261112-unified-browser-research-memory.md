@@ -903,6 +903,12 @@ V8正常SW/OOPIF/SSO组合及旧反例继续有效于其固定输入；本轮三
 - 最终候选`6faea4e`在250项源码、原B机械证据、实际运行包/适配器与预注册对账后准备独立C22库；付费前窄审补私有guard：重算实际helper、SDK Python完整集合、Chromium和依赖版本，不只信manifest字节。正常包通过、仅改本轮helper副本被拒、恢复原字节且无执行标记的正负证据已保存。A生命周期仅提取原SiteA/create_a定义，与实际3.12 parser AST完全等值；A dry_model及B私有recipe均物理排除，原未执行空库/凭据文件已清理，未动既有unknown账本。
 - 首次注册命令`6faea4e / 9284f118…`在`validate_prereg`阶段因干净`-S`进程未显式导入`importlib.util`而停止，尚未进入execute_registered、创建Agent/Task或启动model worker。独立原库实查agents/tasks/actions/attempts/reservations/usage全部0、worker结果0，模型API0；原nonce/失败日志保留，仅删除本轮空库和私有model env。新增全新`-S`子进程预检先复现同一AttributeError，再补显式标准库导入后本文件5项通过/2项需实际Linux产品环境故skip；NativeCase与execute_registered的AST完全未变，不重跑已有效的机械链。后续须按修正源重新冻结和注册、先验证实际Linux命令预检，再启动尚未发生的真实付费阶段；不清旧标记或将预检失败冒称付费验收结果。
 
+- 真实C22首阶段已在`f964b39 / a889946a…`运行并触发预定停止：A/login 8次实际DeepSeek-flash请求、15.355秒、20977 reported tokens（19813输入/1164输出，12800缓存包含在输入内），原40000预留已settled、usage20977、period spent20977/reserved0，billing_unknown=false/unmeasured0。货币cost=null且无公布费率，不能称零费用或推算金额。源认证POST仅1，business Action0；模型到登录后home，但inspect_self三次仅见HTTP409，未读私有self/未report_connection，明确拒造身份，Task waiting_user。因此C22不通过，A后续和B全部未运行，没有重试。原DB/nonce/报告保留，本轮进程0，移除仅本测试env中的模型key；停止记录同时拦截prepare/execute，已实测在任何remote调用前拒绝。旧80000未知预留及生产3笔历史reserved均未动。
+- 独立语义/费用复核固定A报告SHA256`39eab751…ea2e324`：认可模型未伪称身份成功，不能从409推出未保存的selector/校验分支。中间transport-status measured_responses=7与最终result entries8不同，只用最终result和实际账本核八条计量，不把快照当最终计费凭证。代码链已明确身份普通ValueError无.code，middleware把英文原因屏蔽，SDK raise_for_status又只给通用409；正在离线补固定白名单typed身份错误及安全RPC反馈，不改身份/唯一性/affix许可，不声称能保证下轮模型通过。按原“首付费失败即停”约定，新的真实模型轮次需在可审核离线修复完成后取得新一轮限额授权；原部署授权保留，当前仍不合并/部署未通过C22的候选。
+
+- `c6adc9b`（源`b3aae40`）完成离线修复：原身份parser的完整AST在仅还原异常类型/移除新import后与前版相等；固定14种无值code/hint只供409且inspect_self/report_connection，未知/畸形code、其它操作/status及任意response detail/body不透传。11项unit及原43项身份DOM通过；实际SDK0.13.14的A-only fake 1项8.060秒，故意坏suffix→下一实际请求含identity_value_missing→修正→私有self/report→原Task succeeded/connected，6假HTTP、认证POST1/posts0、凭据双literal false，6执行源码hash与主集成一致。独立窄审接受，只证明错误反馈链可用，不改原8paid失败或保证模型下轮通过。runner新blob`bb4a76b6…a8495b`已按精确字节刷新11项部署冻结中的唯一对应项，另10项不变；主集成201项反馈/发布契约/升级/运行包回归、全静态及879文件凭据扫描通过。
+- 用户随后明确回答“允许新一轮限额验证”：新增仅A/B测试页、最多96次模型请求/480000 token及保守预留单位、首失败仍停，真实社媒/C24及经营反例不执行；原8次/20977 tokens及旧80000未知预留均保留，总账不归零。原合并部署授权继续有效。新源码需另冻结/另prereg/新空库及运行目录，保留首次paid原库/nonce/失败结果，不重用原连接任务或清除停止证据。
+
 ### 22.2 尚未放行与部署约束
 
 D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械产品证据；C22和正式交付仍待完成，当前尚未放行共享生产。现生产服务只有应用Playwright1.62.0/websockets17.3，缺browser-use/cdp-use/Chromium运行时；固定SDK需要独立依赖，不能混入主应用环境。ROOT/scripts仍是旧bin挂载，镜像含scripts不意味着正在运行的服务使用它。
@@ -918,14 +924,14 @@ D1/D2主要执行链与跨站读取权限/后台脚本完整组合已有机械�
 | C01–C03 | `test_native_connection_product`、身份DOM及实际Connection/Task/Research消费者：pending认证、原Task终态、私有self及当前acting subject | 不能以公开主页/旧Cookie/保存凭据代替真实身份；陌生布局模型判断待C22 |
 | C04–C05 | OTP原挑战、QR/nonce/文档换版、旧输入409、取消/due、真实Chrome重启与fresh-self/一次原认证恢复 | QR检测和版本控制不代表扫码或硬件passkey协议已实测；Cookie能否恢复受站点持久策略限制 |
 | C06–C10 | 实例/出口cohort与live fence、不同账号实际重叠、同Action重复RPC仅一次执行、认证占用及两槽准入 | 旧Profile不迁移；原作用域和当前控制/绑定/会话代次始终有效，不推广任意跨站权限 |
-| C11–C12 | A/B不同布局完整六原Task机械链路、普通成员规则和catalog通用消费者均已实际运行 | 两个不同域名/布局的真实模型验收未运行，不能称陌生网站迁移能力已通过 |
+| C11–C12 | A/B不同布局完整六原Task机械链路、普通成员规则和catalog通用消费者均已实际运行 | 真实模型A首登录阶段未完成私有身份验证，后续/B未运行，不能称陌生网站迁移能力已通过 |
 | C13 | 原SDK输入自动保存与Enter提前发送均源站0，随后正常submit唯一确认；DOM/父帖/完整正文核对 | 无法事前建立完整请求事实的控件仍为局部能力缺口 |
 | C14 | 原unknown在暂停下只读回查，同作者旧帖拒绝，新原帖确认；effective method SQL投影及首次promotion；同SW更新/重放组合续原Action确认 | 不承诺任意站点外部恰好一次；原intent、grant及attempt1保留，禁止重新发送 |
 | C15–C16 | 无进展/一次修正、时钟/reload/来回滚动反例，8次有效进展后原Task checkpoint→15秒Wait/due→新claim续片；真实方法修正及owner交还竞态 | 不因事件或恢复提示直接视为资源恢复proof，不重置期限、累计费用和失败次数 |
 | C17 | 不同账号及同账号独立unknown读取/新写入真实源区间重叠；同意图仍回原Task，两个Action各attempt1 | readonly由canonical Action状态判定，legacy/认证/同号两写继续排他 |
 | C18–C19 | provider来源/缺失/分页/计量、跨项目额度与配置发布锁序、停用/收紧/轮换0请求，未知账单停止后续HTTP | 固定响应不代表供应商实时可用；此前80000真实调用未知预留保留，不能释放或算作已消费 |
 | C20–C21 | 经验检索/公开投影/撤销/反证/超限不阻塞；真实单例primary1、8380 reported token且settled，独立语义局限已记录 | 该单例不是通用经营能力或获客成果证明，不重复付费运行旧27轮 |
-| C22 | 预注册与双域名源站隔离合同、真实SDK消息属性、费用未知停止、A/B六任务机械链已验证；通用合同及权限反例已修复，B原字节保留 | 真实模型A/B仍0；重新冻结/预注册后执行，B不再称严格盲测，首个付费失败即停；既有经营反例不重复付费 |
+| C22 | A/B机械链、冻结/实际Linux预检与首付费失败停止均已执行；真实A login8请求/20977tokens后waiting_user，账本已结算且未伪造身份，B原字节保留 | C22未通过，A后续/B未运行；先完成安全错误反馈离线修复，再取得新轮限额授权；B不称严格盲测，既有经营反例不重复付费 |
 | C23 | 真实DB/RLS、原Task/Action/grant、费用、恢复、现有直接消费者、真实React界面定向证据 | 最终精确PR检查、main完整CI、同轮打包及应用/两渠道独立回读待完成 |
 | C24 | 未运行实号业务试点 | 本次未授权；触达、到站与核心业务成果均不作工程通过结论 |
 | C25–C27 | fresh账户读取错主体拒绝、SW旧私有self缓存反例；真实outbox/Temporal恢复扇出/幂等/期限，still_blocked界面保持受阻 | 不用匿名HTTP证明账户浏览器恢复，不将probe任务成功当业务能力恢复 |
