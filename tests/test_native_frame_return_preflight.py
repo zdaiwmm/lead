@@ -16,6 +16,9 @@ from lead_app.native_connection import NativeConnection
 def returned_connection(monkeypatch):
     from lead_app import native_challenges, native_frame_roles, native_runner
 
+    # This seam exercises the retained SDK preflight, not executor routing or SQL.
+    monkeypatch.setattr(native_runner, 'local_executor_enabled', lambda *_args, **_kwargs: False)
+
     def build(*, sso, foreign):
         home = 'https://board.fixture/home'
         callback = 'https://board.fixture/session/complete?ticket=synthetic'
