@@ -139,6 +139,8 @@ PR #26 新增 `httpx2` 后，家庭节点共享解释器须已经由节点维护
 
 该适配只监听有随机Basic认证的loopback HTTP代理，TLS仅允许精确官方主机 `auth.openai.com`、`chatgpt.com`、`api.openai.com` 的443端口。嗅探将实际目标重写为允许的SNI；CONNECT名称和SNI不同时连接到官方SNI，不保留原任意目标。IP目标、无SNI、非TLS、其他域名/端口和UDP默认拒绝，保留官方证书校验。项目明确选择后才安装 `lead-codex-egress.conf` 为该实例的drop-in；必需环境缺失或代理格式不符即停止，不静默直连。官方CLI自身须实际支持并开启 `features.respect_system_proxy`，原生命令的代理继承单独配置和实测，不能限制为只可访问模型域名。真实二进制的认证/路由拒绝矩阵、降权、故障恢复、权限隔离和精确main CI通过后才安装，再用官方只读请求核出口；配置解析通过不表示可登录或账号有权限。
 
+实际systemd259.5的seccomp启动路径会移除未列Ambient的SETUID，即使BoundingSet保留它；本模板只在root读取阶段显式保留该能力。降到网络用户后，固定prctl/capset调用清空Ambient及I/P/E，再验证四类能力全零才执行Xray；调用失败即停止，不能忽略继承能力或删除隔离设置来启动。验收读取实际Xray进程的UID/GID、Groups与四类cap，不能只看unit的root启动包装身份。临时unit必须核同一隔离配置的SIGKILL自动恢复、明确stop不自动重启及再次start，并独立清理。
+
 每个项目使用独立 `~/.lead/executors/<UUID>`；macOS 使用 LaunchAgent，已置备的 Linux 服务器使用上述 systemd 项目实例。网页关闭不终止执行；执行设备关机或离线时，业务保留原请求等待恢复。设备更换不会自动迁移旧会话，未知发送必须在原线程和原 Action 对账。解除连接立即撤销设备权限；成员角色、项目范围和能力在每次设备请求重新核验。配对启用该项目的新任务设备执行，已固定的旧任务继续按原归属完成；未配对的已有项目保留原配置，不静默代用 API 模型。
 
 长模型等待通过短 Temporal Activity 轮询，原请求与线程持久化；业务取消阻止新工具提交并中断原 turn，进程关闭仅等待原请求恢复。原生压缩由 Codex 执行。原生长期记忆可通过本机 `LEAD_CODEX_MEMORIES=1` 启用并由后台安装保留；它沿用本人的原 Codex home，不修改全局设置，启用前核对跨项目记忆范围。经营事实、可撤销经验、账号归属和外部回执仍由 Lead 保存。
