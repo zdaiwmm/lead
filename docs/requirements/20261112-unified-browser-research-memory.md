@@ -1203,3 +1203,13 @@ PR64合并为b7f4068d2bc19f1a4b76302469a1f1f19d83521b，精确main CI43530615586
 专项已收口：原19个native失败逐项具备passing证据。首4项139.52秒；其余首批19绿/5失败中的3项为旧frame seam占位UUID路由，明确原SDK lane后6项预检通过。SW机械诊断跳过正式NativeTask.start，改调用其已有同manager-page控制关系刷新，真实1项8.17秒通过，原session_maintenance/search、重复刷新/越权写/结束授权断言全保留。崩溃fixture原两个cookie确为session-only；仅该场景服务器显式持久化，读自己profile的SQLite核domain/name/path/expiry/persistent已落盘且PID argv未变后才SIGKILL，重启比同原token并fresh私有验证两账户，旧epoch拒绝及public survivor保留。真实Chrome与10项helper共11 passed/37.82秒；默认HTTP仍session-only，本机HTTP/helper/frame合21 passed/3.19秒。各轮独立DB均finally drop，既有19绿和core4按未变默认行为复用，不再重复。
 
 评估12项实际隔离PG通过，默认selected_cases公共行为仍原9组各3次、memory仅显式1次，新增缺flag/生产库名lead的实际拒绝且不进入夹具写入；不改CLI或guard。research recovery的官方CI精确库名同步lead_ci，其余仓库/runner/workspace/host/port/Temporal/production/私有文件条件保持拒绝，受控代码契约验证不冒充GitHub现场。最终修补为PR65，仅CI、测试和记录，业务/依赖/发布工具字节与b7一致，0新增付费模型或生产操作。33处原F及首次专项失败全部保留；准确最终head、精确main完整CI、产物与正式发布状态继续写同PR交付栏。
+
+### 23.11 六阶段用例的外部运行包环境
+
+PR65在精确a68a73b全部必需快检通过后合并bf363459db6a432796a57de8bbb65273304214ff。完整CI43537669277/attempt1通过frontend和namespace，backend为1397 passed/1 skipped后在test_a_six_tasks_and_zero_model_unknown_seed的begin→open首次失败：HTTP400；failfast保留了完整trace，未进入该case的模型或业务发送。此前旧前序失败已在该轮通过，不能据此替代整套应用证明；verified拒绝、工具包未构建，没有发布。
+
+排查发现CI实际同轮运行包在RUNNER_TEMP、由LEAD_BROWSER_RUNTIME_DIR指定；该用例没有像其他native产品用例一样声明执行通道，而native_available只看ROOT/services/browser-runtime/manifest.json。原独立验证在ROOT放过诊断链接，与此CI输入不同。现以该轮真实原镜像中的manifest/SDK/Chrome、精确bf Git树，在ROOT无任何运行包文件或链接的外部目录环境复现并取实际400 body/provider，再做最小测试修补。失败候选原ZIP仅用于隔离诊断，不作为发布证明；产品、运行包探测、模型路由、权限和回执逻辑保持，具体红绿结果与后续精确main仍在同PR交付栏记。
+
+最小补正已完成：仅用例按实际config.env读取原manifest并要求native_smoke=True，然后声明该用例既定native lane，不改产品native_available。实际原ZIP核digest/REVISION后只解runtime；11920文件路径/大小/SHA均与manifest一致，非root解压的umask077仅改变mode，在自己诊断目录恢复原mode后，原bf verify及SDK/Chrome smoke全绿，manifest未改、ROOT包始终不存在。原自然负例确实误入Camoufox，却因本地缺fpgen数据先500；只替代legacy初始化的窄seam使用真实DB/provider与原begin/open取得400“未知频道”，不把它称为原CI的完整自然重现。
+
+真实外部bundle下boundary→six-task共2 passed/56.84秒，两次开头native_available均false，各自声明lane后open200且profile为native-shared/chromium，无跨用例泄漏。原6阶段requests=[5,2,3,2,3,2]、17次明确fake SDK请求、机械unknown seed请求/预留0，以及3份独立DOM回执均通过。最终读取config.env的路径与该轮os.environ值相同，主体证据按未变输入复用，不重复整条流程。三次独立DB均drop，自己解压的大文件清理，原失败、seam证据及manifest摘要保留；0新增真实模型或生产操作。准确后续PR/main/CI及正式交付仍记PR交付栏。
