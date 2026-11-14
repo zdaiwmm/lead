@@ -784,6 +784,7 @@ async def verify_login(
             "discovery": discovery.model_dump(mode="json") if discovery else None,
             "usage": worker["usage"],
             "agent_id": aid,
+            "connection_id": str(pending["takeover_id"]),
             "result": result.model_dump(mode="json"),
             "account": final,
             "billing": usage,

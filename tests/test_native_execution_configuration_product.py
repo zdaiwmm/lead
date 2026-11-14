@@ -73,10 +73,10 @@ async def test_actual_sdk_two_action_batch_and_boundaries(monkeypatch,mode):
         return {'calls':len(context['model_calls'])-calls}
 
     result=await verify_login(monkeypatch,mode=mode,owner_hook=after_login)
-    folder=next((STATE/'browser-use-runs').glob('connection-*'))
+    folder=STATE/'browser-use-runs'/('connection-'+result['connection_id'])
     trace=json.loads((folder/'safe-step-trace.json').read_text())
     posts=len([r for r in result['oracle']['requests'] if r['method']=='POST'])
-    safe={'mode':mode,'actions':actions,'trace':trace,'usage':result['usage'],'posts':posts,
+    safe={'connection_id':result['connection_id'],'mode':mode,'actions':actions,'trace':trace,'usage':result['usage'],'posts':posts,
         'owner_changed':owner_changed,'account_state':result['account']['state'],
         'privacy':result['privacy'],'sdk_contracts':[r['sdk_contract'] for r in result['synthetic_model_diagnostics']],
         'discovery_context_seen':[r['discovery_context_seen'] for r in result['synthetic_model_diagnostics']]}
