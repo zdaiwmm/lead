@@ -308,7 +308,9 @@ def load_credential():
     with os.fdopen(descriptor, "rb") as source:
         info = os.fstat(source.fileno())
         require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
-            and info.st_uid in (0, os.geteuid()) and not info.st_mode & 0o077)
+            and info.st_uid in (0, os.geteuid())
+            and stat.S_IMODE(info.st_mode) in (0o400, 0o440)
+            and (not info.st_mode & 0o040 or info.st_gid in (0, os.getegid())))
         return decode_frame(source.read(65537))
 
 

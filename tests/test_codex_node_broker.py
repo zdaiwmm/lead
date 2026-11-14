@@ -4,11 +4,13 @@ import io
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 import threading
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -138,6 +140,29 @@ def test_node_epoch_failure_keeps_its_global_error_code(monkeypatch):
     with pytest.raises(broker.BrokerError) as raised:
         client("/executor/v2/nodes/poll", {})
     assert raised.value.code == "executor_node_epoch_changed"
+
+
+@pytest.mark.parametrize("mode,owner,group,allowed", [
+    (0o440, 0, 0, True), (0o400, 58942, 58942, True),
+    (0o440, 58942, 58942, True), (0o444, 0, 0, False),
+    (0o460, 0, 0, False), (0o440, 0, 974, False), (0o400, 974, 0, False),
+])
+def test_systemd_credential_read_mask_allows_only_root_or_service_group(monkeypatch, tmp_path, mode, owner, group, allowed):
+    path = tmp_path / "fake-credential.json"
+    path.write_text('{"synthetic":true}')
+    with path.open("rb") as fixture:
+        with monkeypatch.context() as patch:
+            patch.setenv("CREDENTIALS_DIRECTORY", "/run/credentials/lead-codex-node.service")
+            patch.setattr(broker.os, "open", lambda *_: os.dup(fixture.fileno()))
+            patch.setattr(broker.os, "fstat", lambda _: SimpleNamespace(st_mode=stat.S_IFREG | mode,
+                st_uid=owner, st_gid=group, st_nlink=1))
+            patch.setattr(broker.os, "geteuid", lambda: 58942)
+            patch.setattr(broker.os, "getegid", lambda: 58942)
+            if allowed:
+                assert broker.load_credential() == {"synthetic": True}
+            else:
+                with pytest.raises(broker.BrokerError):
+                    broker.load_credential()
 
 
 def test_duplicate_keys_and_oversized_frames_are_rejected():
