@@ -2,6 +2,8 @@
 import http.client
 import importlib.util
 import os
+import threading
+import time
 from urllib.parse import urlencode, urlsplit
 
 import pytest
@@ -182,3 +184,75 @@ def test_chromium_sso_popup_returns_to_main_wrong_opener_and_auth_endpoint_reuse
     posts = [r for r in snapshot['requests'] if r['method'] == 'POST' and r['path'] == '/posts']
     assert len(posts) == 2 and posts[0]['nonce'] == posts[1]['nonce']
     assert site.password not in repr(snapshot)
+
+
+@pytest.fixture
+def activation_overlaps_navigation(request, monkeypatch):
+    """Activate the real worker while the first /home navigation is uncommitted."""
+    boundary = fixture_class()
+    original = boundary._handler
+    home_seen, activated = threading.Event(), threading.Event()
+    timeline = {}
+
+    def make_handler(site):
+        handler = original(site)
+        get = handler.do_GET
+
+        def scheduled_get(connection):
+            path = urlsplit(connection.path).path
+            if path == '/cache/rules':
+                timeline['cache_waited_for_home'] = home_seen.wait(5)
+            elif path == '/home':
+                timeline['home_request'] = time.monotonic()
+                home_seen.set()
+                timeline['home_waited_for_activation'] = activated.wait(5)
+                timeline['home_response'] = time.monotonic()
+            get(connection)
+        handler.do_GET = scheduled_get
+        return handler
+
+    monkeypatch.setattr(boundary, '_handler', make_handler)
+    site, browser, context = request.getfixturevalue('chromium_site')
+    sessions = []
+
+    def watch_page(page):
+        session = context.new_cdp_session(page)
+        sessions.append(session)
+        def version_updated(params):
+            if any(item.get('scriptURL') == site.origin() + '/sw.js' and item.get('status') == 'activated'
+                   for item in params.get('versions', [])):
+                timeline.setdefault('worker_activated', time.monotonic())
+                activated.set()
+        session.on('ServiceWorker.workerVersionUpdated', version_updated)
+        session.send('ServiceWorker.enable')
+    context.on('page', watch_page)
+    try:
+        yield site, browser, context, timeline
+    finally:
+        home_seen.set()
+        activated.set()
+        for session in sessions:
+            session.detach()
+
+
+def test_activated_worker_claims_document_committed_after_initial_activation(activation_overlaps_navigation):
+    site, _, context, timeline = activation_overlaps_navigation
+    context.add_init_script("window.__initial_boundary_control = {url: location.href, controller: navigator.serviceWorker?.controller?.scriptURL ?? null};")
+    refresh_workers = []
+    context.on('request', lambda item: refresh_workers.append(item.service_worker)
+               if urlsplit(item.url).path == '/session/refresh' else None)
+    page = context.new_page()
+    browser_sign_in(site, page)
+    assert timeline['cache_waited_for_home'] and timeline['home_waited_for_activation']
+    assert timeline['home_request'] < timeline['worker_activated'] <= timeline['home_response']
+    assert page.evaluate('window.__initial_boundary_control') == {'url': site.origin() + '/home', 'controller': None}
+    assert page.evaluate('navigator.serviceWorker.controller.scriptURL') == site.origin() + '/sw.js'
+    assert page.evaluate("fetch('/sw/synthetic').then(response => response.text())") == 'Background synthetic note'
+    assert page.evaluate("fetch('/cache/rules').then(response => response.text())") == 'Members may post and reply.'
+    assert sum(row['path'] == '/cache/rules' for row in site.oracle()['requests']) == 1
+    assert not any(row['path'] == '/sw/synthetic' for row in site.oracle()['requests'])
+    page.get_by_role('button', name='Refresh membership', exact=True).click()
+    page.get_by_text('Membership refreshed', exact=True).wait_for()
+    assert site.oracle()['counts']['refreshes'] == site.oracle()['counts']['logins'] == 1
+    assert sum(row['path'] == '/home' for row in site.oracle()['requests']) == 1
+    assert len(refresh_workers) == 1 and refresh_workers[0] is not None
