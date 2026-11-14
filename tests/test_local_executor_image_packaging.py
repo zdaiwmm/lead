@@ -28,6 +28,7 @@ def mini_package(runtime_fixture, tmp_path):
     checkout, _, runtime = runtime_fixture
     for name in ("services/api/lead_app/config.py", "services/local-executor/package.json",
                  "apps/web/app/page.tsx", "infra/home-browser-frames/frame-live.cjs",
+                 "infra/local-executor/lead-codex@.service",
                  "scripts/backup.py", "infra/alembic.ini", "infra/compose.yaml", "infra/migrations/env.py"):
         path = checkout/name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,3 +96,4 @@ def test_linux_packaging_consumes_full_connector_without_rg(mini_package, tmp_pa
     assert subprocess.check_output(["unsquashfs", "-cat", str(image), "REVISION"], text=True) == sha+"\n"
     packed = subprocess.check_output(["unsquashfs", "-cat", str(image), "services/local-executor/lead-local-executor.tgz"])
     assert packed == connector.read_bytes(), "the image must retain the same validated package bytes"
+    assert subprocess.check_output(["unsquashfs", "-cat", str(image), "infra/local-executor/lead-codex@.service"]) == b"fixture\n"

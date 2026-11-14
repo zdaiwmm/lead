@@ -1,0 +1,33 @@
+[Unit]
+Description=Lead Codex executor for project %i
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/var/lib/lead-codex/.lead/executors/%i/state.json
+
+[Service]
+Type=exec
+User=lead-codex
+Group=lead-codex
+WorkingDirectory=/var/lib/lead-codex
+Environment=HOME=/var/lib/lead-codex
+Environment=CODEX_HOME=/var/lib/lead-codex/.codex
+Environment=LEAD_CODEX_BINARY=/opt/lead-codex/codex/bin/codex
+Environment=PATH=/opt/lead-codex/node/bin:/opt/lead-codex/codex/bin:/usr/local/bin:/usr/bin:/bin
+UnsetEnvironment=OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN LEAD_EXECUTOR_TOKEN HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+ExecStart=/opt/lead-codex/node/bin/node /opt/lead-codex/connector/dist/cli.js run --profile %i
+UMask=0077
+# Ordinary disconnects retry inside the connector. A 401/409 or other explicit
+# exit must remain stopped: automatic exit-code retries could steal an epoch.
+Restart=on-abnormal
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=60
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/lead-codex
+InaccessiblePaths=-/srv/lead-prod-vault -/etc/lead-home-release -/run/lead-home -/run/lead-executor
+
+[Install]
+WantedBy=multi-user.target

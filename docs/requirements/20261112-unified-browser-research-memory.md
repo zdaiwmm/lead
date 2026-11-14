@@ -1288,3 +1288,21 @@ manager测试child原命令使用API虚拟环境解释器加-S，关闭site后CI
 本人Mac已安装同S9原封包，包SHA256为`6179d578e283bdc28e9a89e6d763bc31badf3a2ad9551b62b7911745da0adf6d`，Node `24.14.1`、官方CLI `codex-cli 0.167.0-alpha.4.1`；实际能力报告ChatGPT ready=true，列出`gpt-6.1-sol`、支持`medium`，输入text+image及multi-agent v2。此为真实安装和能力检查，未启动模型turn。当前paired=false、pending=0，不能据CLI ready声称Lead项目已启用或业务任务已经运行。
 
 软件部署后的本人页面检查仍有具体阻断：`06:15:38Z`新的CUA回读为apps/browsers空，系统明确返回“Mac locked; automatic unlock could not unlock it”。已请求本人手动解锁，尚未收到回复；后续须在真实owner页面生成配对并核实项目设备状态，未伪造OIDC、会话或配对。当前结论为“软件生产交付已完成，项目启用待本人解锁与真实owner配对”，不写整项全部完成，不扩大实号社媒业务范围。
+
+### 23.18 mijiu-server 执行端（2026-11-14，本次授权实施中）
+
+用户要求新会话在 mijiu-server 部署 Codex CLI，使自主运营不依赖 Mac 在线，并询问账号授权；本次授权覆盖该服务器执行端安装、必要接入、项目配对和验证。沿用 ChatGPT 登录、Sol/medium；先完成不需要本人登录的安装准备，到官方本人授权时通知。没有无关环境、真实社媒发布、DNS/公网入口修改或旧任务迁移授权。
+
+规则和起点为 GitHub 实时 main `c635d3b491b84e1a30384dd98e94abc9ee498134`；共享目录 HEAD `d887831` 的原改动全部保留。原生工具创建独立目录 `lead-server-codex/lead agent`，分支 `codex/server-codex-executor-20261114`。实际 SSH 主机确认 mijiu-server、Ubuntu26.04.1/x86-64、维护用户具备既有 sudo；原应用 selector 仍 S9，既有服务不重发。独立只读核验聚焦 Linux 安装顺序、环境、代次和原请求归属，主负责人唯一写主机。
+
+实施与验收：
+
+- [x] 核原服务/用户、安装与调用入口，读官方认证及 Context7；固定既有 MCP1.32.2、Node>=24、已验证官方 CLI0.167.0-alpha.4.1，不追随 registry 最新0.169.0。
+- [x] 固定普通用户 + root管理systemd，复用原封连接器run，不改应用协议；配对省略macOS的--install，服务先验再激活。unit/镜像打包与运营流程单一内容源同PR。
+- [ ] 本地定向检查、精确PR head快检、合并后的本次main Application CI及同轮包；主机配置按application分类，不用docs/tool绿色放行，原S9应用不重切。
+- [ ] 官方Node24.14.1/CLI0.167.0-alpha.4.1、原S9包SHA/REVISION及普通用户权限独立回读；unit由本次main同轮产物安装。
+- [ ] 合成unit/脱离SSH/SIGKILL同state恢复/子进程清理/断网outbox保留恢复/业务路径拒读。复用未变连接器原thread/unknown/取消回归，不将夹具称为真实模型。
+- [ ] 本人官方device-auth、真实account/model/list、真实owner配对和原在途归属核验；必要无社媒合成模型及恢复检查。
+- [ ] 回填同需求/DELIVERY_BACKLOG实际SHA/CI、安装、启动、路由、授权/配对与限制，分别报告未完成项。
+
+服务器DNS将shui.click解析到公网入口；TLS校验0、HTTP200，一次页面total1.385秒。pair/poll/events/tools全部使用binding.url，本次保留公网HTTPS，不承诺消除该往返或OpenAI网络/推理耗时。30天配对token与epoch提交后丢响应的人工恢复边界见运维说明，不自动忽略401/409或重发旧任务。

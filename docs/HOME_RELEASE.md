@@ -121,7 +121,19 @@ PR #26 新增 `httpx2` 后，家庭节点共享解释器须已经由节点维护
 
 登录 Lead 后通过 `/api/executor/download` 下载该版本安装包，在已有 Node24 和官方 Codex CLI 的本人电脑安装 `npm install -g ~/Downloads/lead-local-executor.tgz`。在项目「本机 Codex」生成并执行连接指令；指令包含项目 UUID、短期配对码和 `--install`，配对后启动独立用户后台服务。原 Codex 登录保持在本机，连接器不读取、复制或上传认证文件。状态报告真实 CLI、ChatGPT 权益、Sol/medium 和连接器 SHA；安装成功与真实模型/业务验证分别记录。
 
-每个项目使用独立 `~/.lead/executors/<UUID>` 和 LaunchAgent。网页关闭不终止执行；电脑休眠或离线时，业务保留原请求等待恢复。设备更换不会自动迁移旧会话，未知发送必须在原线程和原 Action 对账。解除连接立即撤销设备权限；成员角色、项目范围和能力在每次设备请求重新核验。配对启用该项目的新任务本机执行，已固定的旧任务继续按原归属完成；未配对的已有项目保留原配置，不静默代用 API 模型。
+### Linux 专用执行服务器
+
+服务器使用 `infra/local-executor/lead-codex@.service`，由管理员管理系统服务，实际以无 sudo、无业务组权限的固定普通用户 `lead-codex` 执行。私有 home 为 `/var/lib/lead-codex`（0700），Codex 凭据只由官方 CLI 保存在该用户的 `.codex`；项目状态仍按原 UUID 分目录。Node、官方 Codex 与已验证连接器分别置于 root 持有、执行用户不可改写的 `/opt/lead-codex/{node,codex,connector}`。不可复用业务服务用户、Mac auth/state 或浏览器资料。
+
+首次置备先核服务器身份、服务和线上版本，固定官方 Node/Codex 版本与下载摘要，核已放行连接器原包的 SHA/REVISION。本次复用未改源码的 S9 原封连接器；新增 unit 则在独立 PR、精确主线 CI 和产物通过后，从本次同轮镜像 `infra/local-executor/` 安装，两个产物分别留证；原应用不因安装执行端重新切换。配对前以合成 HTTP/RPC 夹具核验普通用户、相同环境、unit 解析、脱离 SSH、进程崩溃恢复、outbox 断网保留与恢复，以及业务路径不可读；夹具不构成真实登录或模型验证。
+
+官方登录在同一用户和环境运行 `codex login --device-auth`，由本人在 CLI 给出的官方页面确认。若账户要求，先在 ChatGPT Security 启用 device-code login。不要索取密码、二次验证码，不复制认证缓存，不静默改 API key。实际 `login status` 及连接器 `status` 确认 ChatGPT、Sol/medium 后，再由真实 Lead owner 生成配对码。服务器配对必须**去掉网页命令中的 `--install`**：该参数当前只支持 macOS，且后端配对会立即启用设备。运行 `/opt/lead-codex/node/bin/node /opt/lead-codex/connector/dist/cli.js pair --profile PROJECT_UUID --url https://shui.click --code OWNER_CODE`，然后启动事先核验的 `lead-codex@PROJECT_UUID.service`；登录、能力检查和配对均使用该用户的相同 HOME/CODEX_HOME/PATH。配对码不进仓库或公开记录。配对前核原设备和原在途请求；新服务器只接新的未固定请求，旧请求沿原设备，不能改写 device/thread 或重放。
+
+服务通过 `multi-user.target` 自启，`KillMode=control-group` 处理子进程，`UMask=0077`；普通断网由连接器重试，信号异常退出由 systemd 恢复。显式错误退出（特别 401/409）保持停止，不能自动循环抢代次。新实例 poll 已提交 epoch 而响应丢失时，现有协议可能安全停止并需要人工核原设备/线程；不能宣称所有切点自动恢复。Lead 配对 bearer 现存有效期为30天，和 ChatGPT 登录自动刷新分开核验，到期须本人重新配对，原请求不得迁移。执行用户没有业务库、部署凭据、浏览器/CDP 权限，工具仍走原请求的 Lead 身份和项目校验，不新增原生模型 token、步数或运行时长限制。
+
+`binding.url` 决定 pair/poll/events/tools 全部请求目的地；同机执行不等于本地连接。部署时记录实际 DNS、TLS、目标 IP 与请求耗时；保留 HTTPS、身份和项目权限，不为减少延迟改成未审阅的 loopback 通道。模型仍需访问 OpenAI 网络。
+
+每个项目使用独立 `~/.lead/executors/<UUID>`；macOS 使用 LaunchAgent，已置备的 Linux 服务器使用上述 systemd 项目实例。网页关闭不终止执行；执行设备关机或离线时，业务保留原请求等待恢复。设备更换不会自动迁移旧会话，未知发送必须在原线程和原 Action 对账。解除连接立即撤销设备权限；成员角色、项目范围和能力在每次设备请求重新核验。配对启用该项目的新任务设备执行，已固定的旧任务继续按原归属完成；未配对的已有项目保留原配置，不静默代用 API 模型。
 
 长模型等待通过短 Temporal Activity 轮询，原请求与线程持久化；业务取消阻止新工具提交并中断原 turn，进程关闭仅等待原请求恢复。原生压缩由 Codex 执行。原生长期记忆可通过本机 `LEAD_CODEX_MEMORIES=1` 启用并由后台安装保留；它沿用本人的原 Codex home，不修改全局设置，启用前核对跨项目记忆范围。经营事实、可撤销经验、账号归属和外部回执仍由 Lead 保存。
 
