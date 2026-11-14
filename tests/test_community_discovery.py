@@ -112,6 +112,8 @@ async def test_short_model_request_has_no_hidden_transport_retry_and_closes(
 ):
     from lead_app import admin_settings
 
+    # This fake client verifies the retained API transport, not project routing.
+    monkeypatch.setattr("lead_app.local_executor_client.uses_native", lambda *a, **k: False)
     captured = {}
     settings = admin_settings.ModelSettings(default_model="fixture").model_dump()
     monkeypatch.setattr(

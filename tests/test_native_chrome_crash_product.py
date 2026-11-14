@@ -9,7 +9,10 @@ import copy
 import json
 import os
 import signal
+import sqlite3
 import sys
+import time
+from contextlib import closing
 from datetime import timedelta
 from pathlib import Path
 
@@ -50,8 +53,33 @@ def parent_chain(pid):
     return chain
 
 
+def committed_session_hosts(storage, cookies):
+    """Read only this fresh fixture profile; never print cookie values."""
+    expected = {item['domain']: item for item in cookies}
+    for database in (Path(storage)/'Default/Cookies', Path(storage)/'Default/Network/Cookies'):
+        if not database.is_file():
+            continue
+        try:
+            with closing(sqlite3.connect(database.as_uri()+'?mode=ro', uri=True, timeout=0)) as connection:
+                rows = connection.execute("""SELECT host_key,path,has_expires,is_persistent,expires_utc,value,encrypted_value
+                    FROM cookies WHERE name='board_session'""").fetchall()
+        except sqlite3.Error:
+            continue
+        proved = set()
+        for host, path, has_expiry, persistent, expiry, value, encrypted in rows:
+            cookie = expected.get(host)
+            if (cookie and path == cookie['path'] and has_expiry and persistent and expiry > 0
+                    and abs(expiry/1_000_000-11_644_473_600-cookie['expires']) < 1
+                    and (value == cookie['value'] if value else bool(encrypted))):
+                proved.add(host)
+        if proved == set(expected):
+            return proved
+    return set()
+
+
 @pytest.mark.asyncio
 async def test_real_chrome_fault_isolates_public_and_revalidates_shared_recovery(monkeypatch):
+    import native_connection_product as helper
     from lead_app import account_profiles, browser
     from lead_app.browser_tools import BrowserTools
     from lead_app.db import all_rows, one, tx, uid
@@ -63,6 +91,11 @@ async def test_real_chrome_fault_isolates_public_and_revalidates_shared_recovery
 
     assert sys.platform == 'linux' and os.environ.get('LEAD_NETWORK_NAMESPACE') == '1'
     monkeypatch.setattr(account_profiles, 'native_available', lambda: True)
+    original_board = helper.NativeBoard
+    def persistent_board(state, **kwargs):
+        state.persistent_session = True
+        return original_board(state, **kwargs)
+    monkeypatch.setattr(helper, 'NativeBoard', persistent_board)
 
     async def check(context):
         aid, actor = context['aid'], context['actor']
@@ -151,6 +184,23 @@ async def test_real_chrome_fault_isolates_public_and_revalidates_shared_recovery
             before_lease = one(connection, 'SELECT * FROM lead.profile_leases WHERE profile_id=%s', (actor.profile['id'],))
         assert before_session['state'] == 'ready' and before_session['epoch'] == old_epoch
         assert before_lease['state'] == 'held' and before_lease['epoch'] == old_epoch
+        sites = (context['board'], context['boards']['93.184.215.15'])
+        session_cookies = [cookie for site in sites for cookie in await actor.context.cookies(site.origin)
+                           if cookie['name'] == 'board_session']
+        assert len(session_cookies) == 2
+        assert all(cookie['expires'] > time.time() for cookie in session_cookies)
+        # Each fresh host issued exactly one token. Require its persistent SQLite
+        # row before the crash, then compare the exact restored token below.
+        assert all(len(site.state.sessions) == 1 for site in sites)
+        for cookie, site in zip(session_cookies, sites, strict=True):
+            original_token = cookie['value'] in site.state.sessions
+            assert original_token
+        async with asyncio.timeout(45):
+            while not committed_session_hosts(storage, session_cookies):
+                await asyncio.sleep(.05)
+        committed_hosts = sorted(committed_session_hosts(storage, session_cookies))
+        assert committed_hosts == sorted(cookie['domain'] for cookie in session_cookies)
+        assert command_line(chrome_pid) == chrome_argv
         os.kill(chrome_pid, signal.SIGKILL)
 
         def database_state():
@@ -187,6 +237,7 @@ async def test_real_chrome_fault_isolates_public_and_revalidates_shared_recovery
             'lease_state': lease['state'], 'lease_epoch': lease['epoch'], 'old_epoch_invalid': epoch_invalid,
             'pages_closed': [page.is_closed() for page in pages], 'scope_errors': scope_errors,
             'authority_errors': authority_errors, 'forward_token_revoked': runtime.forward_token() is None,
+            'persistent_cookie_hosts_committed_before_kill': committed_hosts,
             'new_model_requests': len(context['model_calls'])-before_model}
         print('CHROME_CRASH_DIAGNOSTICS ' + json.dumps(diagnostics, sort_keys=True))
         assert diagnostics['runtime_closed'] and diagnostics['actor_disconnected'], diagnostics
@@ -210,6 +261,12 @@ async def test_real_chrome_fault_isolates_public_and_revalidates_shared_recovery
         # and persistent storage. Never write session, epoch, cookie or health.
         replacement = await browser.gateway.get(aid, actor.profile['id'])
         recovered = replacement.native_runtime
+        for cookie in session_cookies:
+            restored = [item for item in await replacement.context.cookies() if
+                        item['domain'] == cookie['domain'] and item['name'] == cookie['name'] and item['path'] == cookie['path']]
+            assert len(restored) == 1
+            original_token = restored[0]['value'] == cookie['value']
+            assert original_token
         new_exit = (recovered.execution_ref, recovered.transport_endpoint,
                     recovered.network_stamp, recovered.profile_exit, replacement.forward_proxy.upstream)
         recovery = {'new_actor': replacement is not actor, 'same_storage': str((replacement.folder/'storage').resolve()) == storage,

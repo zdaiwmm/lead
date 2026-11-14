@@ -31,6 +31,7 @@ async def test_connection_session_keeps_sw_cache_and_nonpublication_posts(monkey
     from lead_app.forward_proxy import BrowserForwardProxy
     from lead_app.growth.runtime import advance
     from lead_app.native_connection import NativeConnection
+    from lead_app.native_worker_controller import refresh_page_controller
     from lead_app.security import token
     from native_browser_boundary_fixture import BoundarySite
     from native_connection_product import verify_login
@@ -240,6 +241,11 @@ async def test_connection_session_keeps_sw_cache_and_nonpublication_posts(monkey
                     refresh_attempted=False, phase='current ConnectionRef/session; SW bootstrap unresolved')
                 print('NATIVE_BOUNDARY_BOOTSTRAP_DIAGNOSTICS ' + json.dumps(snapshot, sort_keys=True))
                 raise AssertionError('service_worker_not_ready', snapshot) from error
+            # This Connection diagnostic bypasses NativeTask.start. Produce the
+            # same fresh manager-page controller facts before its mechanical click.
+            worker_proof = await refresh_page_controller(actor.native_runtime, controller.lease['target_id'])
+            assert worker_proof and worker_proof['page_target_id'] == controller.lease['target_id']
+            snapshot['worker_controller'] = worker_proof
             cache_before = source_count('GET', '/cache/rules')
             synthetic = await page.evaluate("fetch('/sw/synthetic').then(response=>response.text())")
             cache = await page.evaluate("fetch('/cache/rules').then(response=>response.text())")

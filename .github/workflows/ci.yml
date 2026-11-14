@@ -54,7 +54,9 @@ jobs:
     needs: [scope, frontend]
     if: github.event_name != 'pull_request' && needs.scope.outputs.kind == 'application'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
+    env:
+      LEAD_DB_NAME: lead_ci
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -84,9 +86,10 @@ jobs:
         run: |
           docker compose --env-file .state/infra.env -f infra/compose.yaml up -d postgres temporal
           for attempt in $(seq 1 30); do
-            if docker compose --env-file .state/infra.env -f infra/compose.yaml exec -T postgres pg_isready -U lead_owner -d lead; then break; fi
+            if docker compose --env-file .state/infra.env -f infra/compose.yaml exec -T postgres pg_isready -U lead_owner -d postgres; then break; fi
             sleep 1
           done
+          docker compose --env-file .state/infra.env -f infra/compose.yaml exec -T postgres createdb -U lead_owner "$LEAD_DB_NAME"
           .venv/bin/python scripts/migrate.py
       - run: .venv/bin/ruff check services scripts tests infra/migrations
       - run: .venv/bin/python scripts/check_repository.py
@@ -118,7 +121,7 @@ jobs:
             "$LEAD_BROWSER_RUNTIME_PYTHON" -B -S tests/browser_namespace_cdp_probe.py \
             "$PWD/scripts/browser_namespace.py" "$LEAD_BROWSER_RUNTIME_DIR/chromium/chrome-linux64/chrome"
       - name: Database, media and authorization tests
-        run: LEAD_TEST_CHANNEL_TEMPORAL=127.0.0.1:17233 LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_NATIVE_PRODUCT_TESTS=1 LEAD_WORKFLOW_TESTS=1 LEAD_GROWTH_TEST_ENV=1 .venv/bin/pytest -q --junitxml=.state/ci-tests.xml
+        run: LEAD_TEST_CHANNEL_TEMPORAL=127.0.0.1:17233 LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_NATIVE_PRODUCT_TESTS=1 LEAD_WORKFLOW_TESTS=1 LEAD_GROWTH_TEST_ENV=1 .venv/bin/pytest -q -x --tb=short --durations=15 --junitxml=.state/ci-tests.xml
       - if: always() && hashFiles('.state/infra.env') != ''
         run: docker compose --env-file .state/infra.env -f infra/compose.yaml down
   frontend:

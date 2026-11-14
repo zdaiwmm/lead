@@ -92,10 +92,13 @@ def test_community_sources_skip_generic_navigation(href, name, follow):
 
 @pytest.mark.asyncio
 async def test_discovery_network_blocks_telegram_and_message_aggregators():
+    import asyncio
+
     from lead_app.research import ResearchPage
 
     class Actor:
         aid = "fixture"
+        lock = asyncio.Lock()
 
         async def route(self, route):
             route.passed = True

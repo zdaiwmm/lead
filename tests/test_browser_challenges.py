@@ -45,6 +45,7 @@ def handoff(monkeypatch):
         session=uid(),
         profile=one_profile(aid),
         disconnected=False,
+        native_runtime=None,
         lock=asyncio.Lock(),
         touch=lambda: None,
     )

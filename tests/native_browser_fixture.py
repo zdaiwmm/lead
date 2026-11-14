@@ -27,6 +27,7 @@ class BoardState:
     sessions: dict = field(default_factory=dict)
     pending: dict = field(default_factory=dict)
     lock: object = field(default_factory=threading.Lock)
+    persistent_session: bool = False
 
 
 class NativeBoard:
@@ -60,7 +61,8 @@ class NativeBoard:
                 if location:
                     self.send_header('Location', location)
                 if cookie:
-                    self.send_header('Set-Cookie', cookie+'; HttpOnly; SameSite=Lax; Path=/')
+                    persistence = '; Max-Age=3600' if board.state.persistent_session else ''
+                    self.send_header('Set-Cookie', cookie+'; HttpOnly; SameSite=Lax; Path=/'+persistence)
                 self.end_headers()
                 self.wfile.write(raw)
 
@@ -78,6 +80,8 @@ class NativeBoard:
                 path = self.record()
                 subject = self.subject()
                 if path == '/login':
+                    if subject:
+                        return self.send(303, location='/home')
                     return self.page('Sign in', '<h1>Sign in to your account</h1><form method="post" action="/session">'
                         '<label>Account<input name="username" autocomplete="username" required></label>'
                         '<label>Password<input name="password" type="password" autocomplete="current-password" required></label>'

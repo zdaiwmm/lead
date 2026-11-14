@@ -81,7 +81,7 @@ def isolated_services():
         assert Path(os.environ['GITHUB_WORKSPACE']).resolve() == ROOT
         assert STATE == ROOT / '.state' and (STATE / 'infra.env').is_file()
         assert env().get('LEAD_DEPLOYMENT_MODE') != 'production'
-        assert db['host'] == '127.0.0.1' and db['dbname'] == 'lead' and db['port'] == 55432
+        assert db['host'] == '127.0.0.1' and db['dbname'] == 'lead_ci' and db['port'] == 55432
         assert address == '127.0.0.1:17233'
     else:
         manifest = read_manifest(STATE.parent)

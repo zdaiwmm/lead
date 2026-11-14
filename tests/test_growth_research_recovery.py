@@ -117,7 +117,7 @@ async def test_resumed_old_dns_failure_keeps_the_episode_and_remains_probeable(g
 
 async def test_research_assessment_provider_recovers_original_research(growth_agent,monkeypatch):
     new_work(growth_agent)
-    monkeypatch.setattr(config,'any_model_configured',lambda:True)
+    monkeypatch.setattr(config,'any_model_configured',lambda agent_id=None:True)
     async def fetch(url,**kwargs):
         return {'url':url,'title':'Original request','text':'Independent makers need a way to compare quote line items without retyping them.','links':[]}
     async def failed(*args,**kwargs):

@@ -45,7 +45,7 @@ async def test_new_source_is_not_learning_without_question_relevant_quoted_findi
     from lead_app.growth import tools
     from lead_app.growth.contracts import ExperimentSpec
     from lead_app.growth.store import create_experiment
-    monkeypatch.setattr(config,"any_model_configured",lambda:True)
+    monkeypatch.setattr(config,"any_model_configured",lambda agent_id=None:True)
     async def fetch(url,**kwargs):
         return {"url":url,"title":"Unrelated source","text":"This source describes the weather and does not answer the quote comparison question.","links":[]}
     async def assess(output,*args,**kwargs):

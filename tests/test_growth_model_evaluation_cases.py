@@ -32,6 +32,26 @@ def test_invalid_selection_stops_before_model_work(evaluation,case,repetitions):
         evaluation.selected_cases(case,repetitions)
 
 
+@pytest.mark.parametrize('test_flag,database',[(None,'lead_ci'),('1','lead')])
+def test_memory_fixture_rejects_missing_opt_in_or_production_database(evaluation,monkeypatch,test_flag,database):
+    from lead_app import config
+    from lead_app.growth import tools
+
+    if test_flag is None:
+        monkeypatch.delenv('LEAD_GROWTH_TEST_ENV',raising=False)
+    else:
+        monkeypatch.setenv('LEAD_GROWTH_TEST_ENV',test_flag)
+    monkeypatch.setenv('LEAD_DB_NAME',database)
+    assert config.database_kwargs(owner=True)['dbname']==database
+
+    def no_fixture_write(*args,**kwargs):
+        pytest.fail('A rejected evaluation must not write synthetic fixture data')
+
+    monkeypatch.setattr(tools,'_remember',no_fixture_write)
+    with pytest.raises(ValueError,match='requires an isolated verification database'):
+        evaluation.seed_memory_counterevidence('00000000-0000-0000-0000-000000000000','quote')
+
+
 async def test_memory_case_retrieves_old_experience_and_records_real_context_and_receipts(evaluation,tmp_path,monkeypatch):
     from datetime import timedelta
 
