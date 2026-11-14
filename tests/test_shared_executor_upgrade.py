@@ -279,3 +279,38 @@ def test_site_catalog_is_never_an_owner_alias_or_unvalidated_sql_literal(modules
     monkeypatch.setattr(hook, 'SHARED_EXECUTOR_SITE_CATALOG_MD5', site, raising=False)
     with pytest.raises(hook.Refused, match='site catalog.*not frozen'):
         hook.shared_executor_schema_query()
+
+
+@pytest.mark.parametrize('fault', [None, 'blob', 'catalog', 'verifier', 'package'])
+def test_shared_proxy_requires_exact_source_live_schema_and_same_image(modules, tmp_path, monkeypatch, fault):
+    hook, _ = modules
+    monkeypatch.setattr(hook, 'TOOLS', tmp_path)
+    if fault != 'verifier':
+        (tmp_path / 'home_live_maintenance.py').write_text('# synthetic verifier')
+    calls, packages = [], []
+    def run(*args, **kw):
+        calls.append(args)
+        if args[0] == 'git':
+            return '0' * 40 if fault == 'blob' else hook.SHARED_EXECUTOR_PROXY_BLOB
+        return 'f' if fault == 'catalog' else 't'
+    def package(sha):
+        packages.append(sha)
+        if fault == 'package':
+            raise hook.Refused('package revision differs')
+    monkeypatch.setattr(hook, 'run', run)
+    monkeypatch.setattr(hook, 'verify_local_executor_package', package)
+    extra = {'apps/web/next.config.ts', 'infra/unreviewed.conf'}
+    fn = getattr(hook, 'reviewed_shared_executor_proxy', None)
+    assert callable(fn), 'Shared v2 proxy requires an independent exact-source admission'
+    if fault:
+        with pytest.raises(hook.Refused):
+            fn('/synthetic/mirror', 'b' * 40, extra)
+        if fault != 'package':
+            assert packages == []
+    else:
+        assert fn('/synthetic/mirror', 'b' * 40, extra) == {'apps/web/next.config.ts'}
+        assert packages == ['b' * 40]
+        assert len(calls) == 2 and repr(hook.shared_executor_schema_query()) in calls[-1][-1]
+    calls.clear()
+    assert fn('/synthetic/mirror', 'b' * 40, {'infra/unreviewed.conf'}) == set()
+    assert calls == []

@@ -153,6 +153,9 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      - name: Verify executor HTTP forwarding through Next
+        if: github.event_name == 'pull_request'
+        run: node --test ../../tests/executor_web_proxy.mjs
       - name: Verify and package the local Codex connector
         working-directory: services/local-executor
         run: |
@@ -164,6 +167,11 @@ jobs:
           npm pack --pack-destination "$RUNNER_TEMP/lead-local-executor"
       - run: npm run build
         if: github.event_name != 'pull_request'
+      - name: Verify built executor HTTP forwarding through Next
+        if: github.event_name != 'pull_request'
+        env:
+          LEAD_PROXY_PRODUCTION: '1'
+        run: node --test ../../tests/executor_web_proxy.mjs
       - name: Reproduce home browser frames with synthetic images
         if: github.event_name != 'pull_request'
         run: |
