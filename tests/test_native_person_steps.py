@@ -20,7 +20,11 @@ async def connection_page():
         page = await browser.new_page()
         await page.route('**/*', lambda route: route.fulfill(body='<main></main>', content_type='text/html'))
         await page.goto('https://account.example.test/login')
-        controller = NativeConnection.__new__(NativeConnection)
+        controller = NativeConnection(
+            SimpleNamespace(aid='00000000-0000-0000-0000-000000000001'),
+            '00000000-0000-0000-0000-000000000002',
+            '00000000-0000-0000-0000-000000000003',
+        )
         controller.page = page
         try:
             yield controller, page
@@ -86,8 +90,10 @@ async def test_connection_runner_hands_off_before_credentials_or_model_for_a_cur
     from lead_app import native_runner
     controller, page = connection_page
     await page.set_content('<main><h1>Use your passkey</h1><p>Confirm this sign-in with your device.</p></main>')
-    controller.actor = SimpleNamespace(aid='00000000-0000-0000-0000-000000000001')
     handoffs = []
+    def legacy_route(aid, *, task_id):
+        assert aid == controller.actor.aid and task_id == controller.task_id
+        return False
     async def start():
         return {'challenge_version': 1}
     async def handoff(reason):
@@ -97,6 +103,7 @@ async def test_connection_runner_hands_off_before_credentials_or_model_for_a_cur
         raise AssertionError('Current person-only verification must precede credentials and model work')
     controller.start, controller.handoff = start, handoff
     controller.observe_current = controller.credentials = forbidden
+    monkeypatch.setattr(native_runner, 'local_executor_enabled', legacy_route)
     monkeypatch.setenv('LEAD_DEPLOYMENT_MODE', 'development')
     result = await native_runner.connect(controller, 'http://127.0.0.1:1')
     assert result == {'status': 'waiting_owner'} and len(handoffs) == 1
