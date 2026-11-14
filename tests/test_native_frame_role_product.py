@@ -3,10 +3,12 @@
 import asyncio
 import hashlib
 import io
+import json
 import os
 import threading
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import httpx
 import pytest
@@ -19,10 +21,10 @@ pytestmark = pytest.mark.skipif(os.environ.get('LEAD_NATIVE_PRODUCT_TESTS') != '
 @pytest.mark.parametrize('conflict', [False, True, 'response_cookie'])
 async def test_original_owner_confirms_one_isolated_public_frame(monkeypatch, conflict):
     import native_connection_product as bootstrap
-    from lead_app import api, browser, network_namespace
+    from lead_app import account_profiles, api, browser, network_namespace
     from lead_app.account_connection import execute_account
     from lead_app.browser_runtime import NativeNetworkGate, PersistentRuntime
-    from lead_app.config import STATE
+    from lead_app.config import ROOT, STATE, env
     from lead_app.db import one, tx
     from lead_app.forward_proxy import BrowserForwardProxy
     from lead_app.growth.contracts import TaskRef, utcnow
@@ -33,6 +35,9 @@ async def test_original_owner_confirms_one_isolated_public_frame(monkeypatch, co
     from native_browser_fixture import NativeBoard
     from native_connection_product import verify_login
 
+    runtime = Path(env().get('LEAD_BROWSER_RUNTIME_DIR') or ROOT/'services/browser-runtime')
+    assert json.loads((runtime/'manifest.json').read_text())['native_smoke'] is True
+    monkeypatch.setattr(account_profiles, 'native_available', lambda: True)
     origin = 'http://93.184.215.20'
     requests = []
     model_visibility=[]

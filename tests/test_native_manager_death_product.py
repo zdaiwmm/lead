@@ -95,9 +95,41 @@ def tls_contexts(folder):
     return server, client
 
 
+@pytest.fixture(scope='module')
+def manager_death_database():
+    import psycopg
+    from lead_app.config import database_kwargs
+    from lead_app.db_pool import pool
+    from lead_app.migrations import upgrade
+    from psycopg import sql
+
+    # Module scope encloses each function's automatic profile reclamation.
+    # Neither the cut managers nor their cleanup may use the shared CI database.
+    database = 'manager_death_' + uuid4().hex
+    admin = {**database_kwargs(True), 'dbname': 'postgres', 'autocommit': True}
+    with psycopg.connect(**admin) as connection:
+        connection.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(database)))
+    own_pool = None
+    try:
+        with pytest.MonkeyPatch.context() as settings:
+            settings.setenv('LEAD_DB_NAME', database)
+            try:
+                upgrade()
+                own_pool = pool()
+                with own_pool.connection() as connection:
+                    assert connection.execute('SELECT current_database() AS name').fetchone()['name'] == database
+                yield database
+            finally:
+                if own_pool is not None:
+                    own_pool.close()
+    finally:
+        with psycopg.connect(**admin) as connection:
+            connection.execute(sql.SQL('DROP DATABASE {} WITH (FORCE)').format(sql.Identifier(database)))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('cut_stage', ['after_claim', 'before_claim', 'committed'])
-async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconciles(monkeypatch, cut_stage):
+async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconciles(monkeypatch, cut_stage, manager_death_database):
     import uvicorn
     from lead_app import account_profiles, browser, native_runner
     from lead_app.activities import browser_rpc
@@ -113,6 +145,7 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
     from native_manager_death_child import private_json
 
     assert env().get('LEAD_DB_NAME', '').startswith('manager_death_')
+    assert env()['LEAD_DB_NAME'] == manager_death_database
     assert env().get('LEAD_NETWORK_NAMESPACE') == '1'
     monkeypatch.setattr(account_profiles, 'native_available', lambda: True)
     original_handler = NativeBoard.handler
