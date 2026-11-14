@@ -1252,3 +1252,14 @@ manager测试child原命令使用API虚拟环境解释器加-S，关闭site后CI
 新增启动诊断只允许固定typed字段/有限安全token，私有boot、log及异常message不进入CI；6个纯契约/隐私用例通过，独立限定审查接受。最终同字节28bef41在正常API3.12 venv、无手工appsite的Linux上已完成两层红→依赖/API全部导入并停在专设pre-server断言的启动证明；真实三切点及outer库恢复验证进行中，结果以PR交付栏为准。系统现成3.14.4仅额外最小startup证据，不冒充精确CI3.14.10或完整API验证，不重装大环境阻塞必要修补。
 
 另一独立resident输入故障将另PR修补：原Supervisor每次首次/继续轮询均传稳定pending_cycle，managed cycle原本也依cycle_id幂等。旧两个fixture只给agent_id，新native路由提前读取既有必需字段后暴露KeyError。只补稳定且各调用独立的cycle_id、保留默认路由/参数原样/失败与阻塞不拖住其他agent等断言，不改worker产品接口。最终合并后的确定main仍须完整精确应用CI与同轮工具、镜像及连接器原包；不回退旧绿、复用失败产物或放宽断言。
+
+
+### 23.16 完整应用证明后的独立工具产物
+
+精确应用ca269d998dafc4fe3c4e012b9629eb5a7268b40e的CI43556680931/attempt1完整成功，backend/frontend/namespace/checks与Application verification均通过，原同轮image14098239278/d5a71d5a…已由正式prepare入口复核。但最后push仅包含resident测试，增量scope.tools=false使tool-bundle跳过；正式tool_release正确拒绝缺少Tool verification与测试包，不能手工伪造同轮工具包或复用原失败候选。
+
+最小CI修补：完整应用验证成功后也产出工具包，或沿原registered tools变化产包；仍要求非PR、scope成功及verified成功。9组实际条件求值覆盖App无tool变化、App有变化、Tool、Docs、PR及失败/跳过门禁；原条件1 failed/8 passed，修后相关交付/工具回归217 passed/4.33秒。只改注册CI配置、注册工具合同测试与本文/待办，现行分类为tools，合并后必须完成原Tool verification、真实Linux挂载/恢复/锁/回退及原工具打包；不缩减这些门槛，不改应用或安装工具的代码。
+
+应用继续冻结为已完整验证的ca269d及其43556680931/1原镜像、原包和后续同应用审批。维护工具另取新工具提交T的成功Tool证明及同轮lead-tools-T包，逐字节核对home_systemd_release.py仍为2af0956b04a4a5c8d9dd128e94318a2fd5f23a59285aba8d87807e7a4fb6dab0，与冻结应用所需脚本相同；42冻结项不变。现行SMALL_FIX_RELEASE明确允许独立工具证明/同轮工具包与应用证明/同轮镜像，verified_run允许main祖先，protected request仍绑定S9/R/A和title，installed工具通过candidate blob字节匹配；独立限定审查未发现T必须等于App SHA的硬约束。不是用Tool证明放行应用，也不改写原CI身份或取消已成功App候选重跑。
+
+正式操作顺序和授权范围不变，工具安装与应用切换/独立回读分开留证。生产仍7940/schema0031、无正式安装/维护/DDL/请求/切换。原大包经已认证SSH慢中继，已仅对原GitHub ZIP按HTTP原字节Range续取，已留前缀与本机独立摘要核对，完成后仍必须整包匹配GitHub digest；不是重打包。实际工具T/run、安装、审批、迁移/切换与最终回读结果记交付栏。

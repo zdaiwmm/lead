@@ -1,5 +1,6 @@
 """Scope/proof boundaries, including skipped jobs, incomplete history and mixed changes."""
 
+import ast
 import importlib
 import json
 import subprocess
@@ -169,6 +170,37 @@ def test_application_verification_is_accepted_without_repeating_full_pr_ci():
     assert release.verified_run(SHA, get=get)["id"] == 7
     with pytest.raises(ValueError, match="Tool verification"):
         release.verified_run(SHA, get=get, kind="tools")
+
+
+@pytest.mark.parametrize("kind,changed_tools,event,scope_result,verified_result,expected", [
+    ("application", False, "push", "success", "success", True),
+    ("application", True, "push", "success", "success", True),
+    ("tools", True, "push", "success", "success", True),
+    ("tools", False, "push", "success", "success", False),
+    ("docs", False, "push", "success", "success", False),
+    ("application", True, "pull_request", "success", "success", False),
+    ("application", False, "push", "failure", "success", False),
+    ("application", False, "push", "success", "failure", False),
+    ("application", False, "push", "success", "skipped", False),
+])
+def test_tool_bundle_survives_later_application_only_fixes_but_keeps_all_gates(
+        kind, changed_tools, event, scope_result, verified_result, expected):
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.load((root / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
+    expression = workflow["jobs"]["tool-bundle"]["if"]
+    values = {"github.event_name": event, "needs.scope.result": scope_result,
+              "needs.verified.result": verified_result, "needs.scope.outputs.kind": kind,
+              "needs.scope.outputs.tools": str(changed_tools).lower()}
+    for name, value in values.items():
+        expression = expression.replace(name, repr(value))
+    expression = expression.replace("always()", "True").replace("&&", "and").replace("||", "or")
+    tree = ast.parse(expression, mode="eval")
+    # Evaluate only this workflow's constant boolean condition, never calls or
+    # arbitrary repository expressions in the test process.
+    allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.Compare,
+               ast.Eq, ast.NotEq, ast.Constant)
+    assert all(isinstance(node, allowed) for node in ast.walk(tree))
+    assert eval(compile(tree, "<tool-bundle-condition>", "eval"), {"__builtins__": {}}, {}) is expected
 
 
 def test_workflow_contract_connects_scope_gate_tests_and_builds():
