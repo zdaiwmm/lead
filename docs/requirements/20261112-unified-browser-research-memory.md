@@ -1331,3 +1331,14 @@ manager测试child原命令使用API虚拟环境解释器加-S，关闭site后CI
 本次范围澄清：用户明确要求Codex作为所有项目共用的基础能力，不应逐项目重复授权/配对；本人只能用手机访问ChatGPT。服务器CLI安装与ChatGPT账号本来就共享，实际缺口是Lead仍逐项目enrollment。本次按一次服务器注册、后台派生项目范围绑定、现有及未来项目默认复用、建项前工作室分析独立作用域收敛；旧Request/Task/Device/Thread不迁移，服务身份只提供算力，不产生账号/发送权限，离线等待而非API fallback。不再要求本人选择单项目。
 
 统一接入需应用更新及增量数据库结构，不能通过隐藏配对按钮、跨项目万能device、借某项目或伪造owner/OIDC实现。现有不切App的安装授权与这一接入改造分列；先完成可审实现和验证，再确认实际应用切换/迁移。全局Node凭据须独立于Codex worker信任域，项目/工作室凭据按请求隔离，模型子进程不继承全局secret。实际CLI0.167.0-alpha.4.1的 `:workspace` 仍能读取同UID其他项目假文件；临时自定义权限（根只读、私有home拒读、当前workspace写）已验证当前文件可读、另一项目不可读、已剔除的假全局变量及host parent环境不可见，模型turn0、真实认证未读、临时目录已清理。仅该小探测不代表整套统一接入已完成隔离验收。
+
+统一接入本轮实施与范围更新：
+
+- 用户进一步明确可以不做旧数据兼容，接受之后创建新的运营Agent。本轮以新Agent自动继承服务器与空工作室建项前分析为验收重点，不迁移、改绑或重放旧Task/Request/Device/Thread；仍保留旧表RLS及不同授权来源不能互领的安全边界。
+- PR76已合入 `093e8a9ec2c8517d0bd24d181ced032cc4c5218e`，精确主线CI `43598058049/attempt1` 于14:11:44 UTC完整成功，原backend集合2625 passed/1 skipped/102 subtests，58分47秒；frontend/checks/namespace及Application verification均成功。原失败记录保留。仅这一候选的新unit获原安装授权放行；统一接入的新应用与迁移仍须自己的验证和切换授权。
+- 实施分工固定为后端Node/studio/授权与增量迁移、TS多范围worker与单请求工具bridge、主负责人Unix broker/主机服务/界面/集成。Node master使用独立supervisor UID和systemd LoadCredential，Codex worker不持有全局bearer。Unix broker核内核peer UID/PID与固定worker unit的MainPID和Invocation；连接固定原generation，重启后旧连接连hello也不能续权。每范围再核grant/device epoch；未知结果不换身份重发。
+- 主负责人11项broker边界通过，真实Linux peer测试在Mac明确跳过；连同出网及CI契约88 passed/2 skipped/94 subtests。新增一次性Linux systemd演练覆盖真实credential mount、同UID子进程拒绝、FD不继承及不同UID凭据拒读，待精确新候选CI与Linux实测。新worker接回mandatory proxy env、原check-client-env和egress依赖，supervisor的Lead HTTPS独立直连。
+- 界面沿用现有样式，设置页及新建入口显示共用服务器状态，新建不再先造项目配对；个人设备留作高级例外。类型检查/生产构建通过；合成浏览器验证就绪、离线等待、空工作室官网生成不带agent_id且无pairing/draft调用、390px手机无横向溢出。运营流程图同批更新；这些是合成界面证据，不是真实业务或账号登录。
+- 实际官方0.167.0-alpha.4.1探测发现`-P`仅sandbox子命令可用，不能放AppServer全局argv；改用`default_permissions=lead_shared`及thread/start、resume、turn/start显式permissions/never/runtimeWorkspaceRoots。另证明`mcp_servers={}`会合并保留项目自加stdio服务，单靠整表清空无效；已以CLI精确cwd强制untrusted禁用项目配置层。实际正/负对照：项目自加MCP未启动，固定Lead MCP仍启动，当前workspace读写成功、另一项目文件拒读，线程返回固定profile及never。全部使用假CODEX_HOME/假资料、模型turn0；空线程没有rollout，不能用其resume失败冒充真实线程恢复证据，留到官方授权后的最小真实调用验证。
+
+服务器当前仍仅已安装官方runtime和S9连接器，真实ChatGPT登录、统一Node注册、新应用切换及迁移未完成。093同轮原始归档14115217395正在私有缓存，摘要目标 `f5305595f556acd9fcc5796975072ec5b41355a528548ba21135b00267b8f98e`；必须完整核验并由canonical prepare回读后才安装，不能拿失败候选的旧缓存替代。本人手机可用，官方设备码尚未生成。

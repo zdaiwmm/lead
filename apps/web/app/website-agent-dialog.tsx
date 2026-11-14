@@ -6,6 +6,7 @@ import DialogPanel from "./dialog-panel";
 import LegacySetup from "./new-agent-dialog";
 import BriefReview, { emptyBrief, type Brief } from "./brief-review";
 import LocalExecutor from "./local-executor";
+import SharedExecutorStatus from "./shared-executor-status";
 
 type Props = {
   platforms: Record<string, any>[];
@@ -79,27 +80,6 @@ export default function WebsiteAgentDialog(props: Props) {
         : {}),
     });
   }
-  async function connectDraft() {
-    if (phase !== "edit") return;
-    setPhase("connect");
-    setError("");
-    // Persist the idempotency identity before creating the paused server draft.
-    saveForm({});
-    try {
-      const draft = await api("/agents/setup/draft", {
-        client_id: formRef.current.clientId,
-      });
-      if (typeof draft.id !== "string") throw Error("连接准备未完成，请重试。");
-      saveForm({ draftAgentId: draft.id });
-      setNotice("先完成本机连接，再根据官网生成资料。");
-    } catch (failure) {
-      setError(
-        failure instanceof Error ? failure.message : "连接准备未完成，请重试。",
-      );
-    } finally {
-      setPhase("edit");
-    }
-  }
   function cancel() {
     analysis.current?.abort();
     analysis.current = null;
@@ -116,20 +96,6 @@ export default function WebsiteAgentDialog(props: Props) {
     setError("");
     try {
       const current = formRef.current;
-      if (current.draftAgentId) {
-        const executor = await api(
-          `/agents/${current.draftAgentId}/executor`,
-          undefined,
-          controller.signal,
-        );
-        if (
-          !["codex", "legacy"].includes(executor.mode) ||
-          !(executor.devices || []).some(
-            (device: Record<string, any>) => device.state === "active",
-          )
-        )
-          throw Error("先连接本机 Codex，再根据官网生成。也可以直接手动填写。");
-      }
       const productUrl = brief.product_url.trim();
       const requestId =
         current.analysis?.productUrl === productUrl
@@ -189,7 +155,7 @@ export default function WebsiteAgentDialog(props: Props) {
           /密钥|凭据|模型.*配置|MODEL_NOT_CONFIGURED|not_configured/i.test(
             message,
           )
-            ? "先连接本机 Codex，再根据官网生成。也可以直接手动填写。"
+            ? "共用服务器 Codex 尚未就绪，请完成一次服务器连接后重试。也可以先手动填写。"
             : message,
         );
       }
@@ -279,26 +245,15 @@ export default function WebsiteAgentDialog(props: Props) {
         </p>
       )}
       <div className="setup-form">
-        {state.draftAgentId ? (
-          <div>
+        <SharedExecutorStatus />
+        {state.draftAgentId && (
+          <details className="advanced">
+            <summary>原草稿的个人设备设置</summary>
             <p className="muted small">
               草稿只用于连接和整理资料，确认创建前不会开始运营。
             </p>
             <LocalExecutor aid={state.draftAgentId} readOnly={false} />
-          </div>
-        ) : (
-          <div>
-            <button
-              type="button"
-              disabled={phase !== "edit"}
-              onClick={() => void connectDraft()}
-            >
-              {phase === "connect" ? "正在准备连接…" : "连接本机 Codex"}
-            </button>
-            <p className="muted small">
-              用本人已登录的 Codex 生成资料。也可以直接填写后创建。
-            </p>
-          </div>
+          </details>
         )}
         <form className="setup-form" onSubmit={(e) => e.preventDefault()}>
           <fieldset className="setup-fields" disabled={phase !== "edit"}>

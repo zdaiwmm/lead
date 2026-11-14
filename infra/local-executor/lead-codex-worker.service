@@ -1,0 +1,35 @@
+[Unit]
+Description=Lead shared Codex executor for authorized projects and studio
+Requires=lead-codex-node.socket lead-codex-egress.service
+After=lead-codex-node.socket lead-codex-egress.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=lead-codex
+Group=lead-codex
+WorkingDirectory=/var/lib/lead-codex
+Environment=HOME=/var/lib/lead-codex
+Environment=CODEX_HOME=/var/lib/lead-codex/.codex
+Environment=LEAD_CODEX_BINARY=/opt/lead-codex/codex/bin/codex
+Environment=PATH=/opt/lead-codex/node/bin:/opt/lead-codex/codex/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/lead-codex/network.env
+UnsetEnvironment=OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN LEAD_EXECUTOR_TOKEN LEAD_NODE_TOKEN NODE_USE_ENV_PROXY
+ExecStartPre=/usr/bin/python3 -I -B /opt/lead-codex-egress/egress.py check-client-env
+ExecStart=/opt/lead-codex/node/bin/node /opt/lead-codex/connector/dist/cli.js server-run --socket /run/lead-codex-node/broker.sock
+UMask=0077
+# Explicit credential/epoch exits stay stopped and preserve the original outbox.
+Restart=on-abnormal
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=60
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/lead-codex
+InaccessiblePaths=-/etc/lead-codex-node -/var/lib/lead-codex-node -/srv/lead-prod-vault -/etc/lead-home-release -/run/lead-home -/run/lead-executor
+
+[Install]
+WantedBy=multi-user.target

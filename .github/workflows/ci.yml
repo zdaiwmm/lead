@@ -283,6 +283,9 @@ jobs:
           sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/home_mount_drill.py
       - name: Independent executor systemd binding preservation drill
         run: sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/home_executor_systemd_drill.py
+      - name: Shared Codex credential and Unix peer isolation drill
+        if: needs.scope.outputs.kind == 'application'
+        run: sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/shared_codex_systemd_drill.py
       - name: Independent tool install and rollback drill
         run: sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/tool_install_drill.py
       - name: Rootless isolated transport contract

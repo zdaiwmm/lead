@@ -1,0 +1,15 @@
+[Unit]
+Description=Lead shared Codex worker broker socket
+
+[Socket]
+ListenStream=/run/lead-codex-node/broker.sock
+SocketUser=root
+SocketGroup=lead-codex
+SocketMode=0660
+DirectoryMode=0755
+Accept=no
+Service=lead-codex-node.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
