@@ -9,6 +9,7 @@ copy at SCRIPT and a separately verified official Xray 26.10.31 binary at XRAY.
 See lead-codex-egress.service for the installation contract and remaining gates.
 """
 import copy
+import ctypes
 import fcntl
 import json
 import os
@@ -235,6 +236,29 @@ def verify_drop(uid, gid):
         raise ConfigError("egress privilege drop rejected") from None
 
 
+def clear_capabilities():
+    """Clear this single-threaded wrapper's ambient and I/P/E sets after UID drop."""
+    class Header(ctypes.Structure):
+        _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+
+    class Data(ctypes.Structure):
+        _fields_ = [("effective", ctypes.c_uint32), ("permitted", ctypes.c_uint32),
+            ("inheritable", ctypes.c_uint32)]
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        libc.prctl.restype = ctypes.c_int
+        libc.capset.argtypes = [ctypes.POINTER(Header), ctypes.POINTER(Data)]
+        libc.capset.restype = ctypes.c_int
+        # PR_CAP_AMBIENT / PR_CAP_AMBIENT_CLEAR_ALL; fixed-width v3 capset ABI.
+        require(libc.prctl(47, 4, 0, 0, 0) == 0)
+        header, data = Header(0x20080522, 0), (Data * 2)()
+        require(libc.capset(ctypes.byref(header), data) == 0)
+    except Exception:
+        raise ConfigError("egress capability clear rejected") from None
+
+
 def exec_xray(config, uid, gid):
     """Replace root wrapper, never retain a root supervisor or child process."""
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -254,6 +278,7 @@ def exec_xray(config, uid, gid):
     os.setgroups([])
     os.setresgid(gid, gid, gid)
     os.setresuid(uid, uid, uid)
+    clear_capabilities()
     verify_drop(uid, gid)
     os.execve(XRAY, [XRAY, "run", "-c", "stdin:"], {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})
 

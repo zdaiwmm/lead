@@ -1,5 +1,6 @@
 """Synthetic inputs only: no real account, proxy, service or network activity."""
 import copy
+import ctypes
 import importlib.util
 import io
 import json
@@ -316,6 +317,7 @@ class LaunchTests(unittest.TestCase):
                  patch.object(egress.os, "setgroups", side_effect=lambda groups: events.append(("groups", groups))), \
                  patch.object(egress.os, "setresgid", side_effect=lambda *ids: events.append(("gid", ids)), create=True), \
                  patch.object(egress.os, "setresuid", side_effect=lambda *ids: events.append(("uid", ids)), create=True), \
+                 patch.object(egress, "clear_capabilities", side_effect=lambda: events.append("cleared"), create=True), \
                  patch.object(egress, "verify_drop", side_effect=lambda *ids: events.append("verified")), \
                  patch.object(egress.os, "execve", side_effect=lambda *args: events.append(("exec", args))):
                 egress.exec_xray(config, 987, 986)
@@ -323,13 +325,13 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(json.load(memory), config)
         self.assertEqual(events[:5], ["seal", "stdin", ("groups", []), ("gid", (986, 986, 986)),
             ("uid", (987, 987, 987))])
-        self.assertEqual(events[5], "verified")
-        self.assertEqual(events[6], ("exec", ("/opt/lead-codex-egress/xray",
+        self.assertEqual(events[5:7], ["cleared", "verified"])
+        self.assertEqual(events[7], ("exec", ("/opt/lead-codex-egress/xray",
             ["/opt/lead-codex-egress/xray", "run", "-c", "stdin:"],
             {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})))
 
     def test_exec_never_occurs_if_any_privilege_drop_fails(self):
-        for failure in ("setgroups", "setresgid", "setresuid"):
+        for failure in ("setgroups", "setresgid", "setresuid", "clear_capabilities"):
             with self.subTest(failure=failure), tempfile.TemporaryFile() as memory, \
                  patch.object(egress.os, "memfd_create", return_value=memory.fileno(), create=True), \
                  patch.object(egress.fcntl, "fcntl"), patch.object(egress.os, "dup2"), \
@@ -337,11 +339,57 @@ class LaunchTests(unittest.TestCase):
                  patch.object(egress.os, "setgroups"), \
                  patch.object(egress.os, "setresgid", create=True), \
                  patch.object(egress.os, "setresuid", create=True), \
-                 patch.object(egress.os, failure, side_effect=OSError("SECRET")), \
+                 patch.object(egress, "clear_capabilities", create=True), \
+                 patch.object(egress, "verify_drop"), \
+                 patch.object(egress if failure == "clear_capabilities" else egress.os,
+                     failure, side_effect=OSError("SECRET")), \
                  patch.object(egress.os, "execve") as execute:
                 with self.assertRaises(OSError):
                     egress.exec_xray({}, 987, 986)
                 execute.assert_not_called()
+
+    def test_clears_ambient_and_both_v3_capability_words_with_fixed_native_abi(self):
+        events = []
+
+        def prctl(*arguments):
+            self.assertEqual(arguments, (47, 4, 0, 0, 0))
+            events.append("ambient_cleared")
+            return 0
+
+        def capset(header, data):
+            self.assertEqual(ctypes.sizeof(data), 24)
+            header_words = ctypes.cast(header, ctypes.POINTER(ctypes.c_uint32 * 2)).contents
+            data_words = ctypes.cast(data, ctypes.POINTER(ctypes.c_uint32 * 6)).contents
+            self.assertEqual(list(header_words), [0x20080522, 0])
+            self.assertEqual(list(data_words), [0] * 6)
+            events.append("ipe_cleared")
+            return 0
+
+        native = SimpleNamespace(prctl=prctl, capset=capset)
+        with patch("ctypes.CDLL", return_value=native):
+            egress.clear_capabilities()
+        self.assertEqual(events, ["ambient_cleared", "ipe_cleared"])
+        self.assertEqual(prctl.restype, ctypes.c_int)
+        self.assertEqual(prctl.argtypes, [ctypes.c_int, *([ctypes.c_ulong] * 4)])
+        self.assertEqual(capset.restype, ctypes.c_int)
+        self.assertEqual(len(capset.argtypes), 2)
+
+    def test_native_capability_failures_are_fatal_and_redacted(self):
+        for operation in ("ambient", "capset", "symbol", "library"):
+            def prctl(*_args):
+                return -1 if operation == "ambient" else 0
+
+            def capset(*_args):
+                return -1 if operation == "capset" else 0
+
+            native = SimpleNamespace(prctl=prctl)
+            if operation != "symbol":
+                native.capset = capset
+            with self.subTest(operation=operation), patch("ctypes.CDLL", return_value=native,
+                    side_effect=OSError("SYNTHETIC_SECRET") if operation == "library" else None), \
+                 self.assertRaises(egress.ConfigError) as caught:
+                egress.clear_capabilities()
+            self.assertEqual(str(caught.exception), "egress capability clear rejected")
 
     def test_main_has_fixed_entrypoint_and_redacts_all_errors(self):
         for argv in [["egress.py", "--config", "/private/SECRET"], ["egress.py"]]:
