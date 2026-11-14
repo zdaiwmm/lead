@@ -314,14 +314,21 @@ async def test_first_failed_result_stops_before_a_later_task(monkeypatch):
 @pytest.mark.skipif(os.environ.get('LEAD_NATIVE_PRODUCT_TESTS') != '1', reason='Explicit isolated Linux product run required')
 @pytest.mark.asyncio
 async def test_a_six_tasks_and_zero_model_unknown_seed(monkeypatch):
+    from pathlib import Path
+
     import uvicorn
-    from lead_app import browser, domain, native_runner
-    from lead_app.config import STATE
+    from lead_app import account_profiles, browser, domain, native_runner
+    from lead_app.config import ROOT, STATE, env
     from lead_app.db import tx
     from native_browser_evaluation import create_a, dry_model
 
     from scripts.evaluate_native_browser import NativeCase, synthetic_site_transport
 
+    runtime = Path(env().get('LEAD_BROWSER_RUNTIME_DIR') or ROOT/'services/browser-runtime')
+    assert json.loads((runtime/'manifest.json').read_text())['native_smoke'] is True
+    # CI verifies the original bundle outside ROOT. This fixture explicitly
+    # selects its native lane, like the other actual SDK product tests.
+    monkeypatch.setattr(account_profiles, 'native_available', lambda: True)
     site = create_a('alpha-c22.test')
     calls = []
     model_server, state, model = dry_model(site, calls, STATE/'c22-dry-model.json')
