@@ -11,7 +11,7 @@ pytestmark=[pytest.mark.asyncio,pytest.mark.skipif(os.environ.get('LEAD_BROWSER_
     reason='Explicit isolated identity DOM verification required')]
 
 
-@pytest.mark.parametrize('kind',['nested','adjacent','nav','unicode'])
+@pytest.mark.parametrize('kind',['nested','adjacent','adjacent_label','preceding_label','nav','unicode'])
 async def test_server_extracts_full_subject_and_actual_affixes_from_unique_local_current_dom(common_page,kind):
     page,_,_=common_page
     subject='成员-甲' if kind=='unicode' else 'member-alpha'
@@ -19,6 +19,9 @@ async def test_server_extracts_full_subject_and_actual_affixes_from_unique_local
     html='<p>Signed in as <span>'+subject+'</span> · '+link+'</p>'
     if kind=='adjacent':
         html='<p>Signed in as '+subject+'</p>'+link
+    elif kind in ('adjacent_label','preceding_label'):
+        current='<p>Signed in as '+subject+' · Account settings</p>'
+        html=current+link if kind=='adjacent_label' else link+current
     elif kind=='nav':
         html='<header><nav>Signed in as '+subject+' · '+link+'</nav></header>'
     await page.set_content(html)
@@ -27,6 +30,23 @@ async def test_server_extracts_full_subject_and_actual_affixes_from_unique_local
     assert facts['self_url']==ORIGIN+'/private-self'
     assert await page.locator(facts['acting_subject_selector']).inner_text()==facts['self_subject_prefix']+subject+facts['self_subject_suffix']
     assert await page.locator(facts['self_link_selector']).count()==1
+
+
+@pytest.mark.parametrize('subject',['member-alpha','member:alpha','alpha'])
+async def test_adjacent_link_label_cannot_trim_an_identifier(common_page,subject):
+    page,_,_=common_page
+    await page.set_content('<p>Signed in as '+subject+'</p><a rel=me href=/private-self>alpha</a>')
+    facts=await inspect_current_identity(page,connection_origin=ORIGIN)
+    assert facts['acting_subject']==subject and facts['self_subject_suffix']==''
+
+
+@pytest.mark.parametrize('suffix',[' · Unproved metadata',' · Account settings and another member',
+    ' · Account settings Account settings',' (unproved) · Account settings'])
+async def test_adjacent_link_only_explains_its_exact_observed_label(common_page,suffix):
+    page,_,_=common_page
+    await page.set_content('<p>Signed in as member-alpha'+suffix+'</p><a rel=me href=/private-self>Account settings</a>')
+    with pytest.raises(ValueError):
+        await inspect_current_identity(page,connection_origin=ORIGIN)
 
 
 @pytest.mark.parametrize('kind',['distant','two_subjects','two_links','article','quote','editable','foreign','two_values','unknown_tail','ugc_ancestor','editable_ancestor','hidden_ancestor','hidden_link'])
