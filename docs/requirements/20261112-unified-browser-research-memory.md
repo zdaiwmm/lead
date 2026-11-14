@@ -1,6 +1,6 @@
 # Lead 统一浏览器执行与研究经验复用最小方案
 
-版本 V9，2026-11-12。实施接续中：真实数据库、Linux原Task登录/发布/回复/未知回查、研究恢复与经验复用，以及同实例跨站公开帧/SSO/SW/断控完整组合已有工程证据；真实模型陌生页和正式交付仍待验收。第1–21节保留方案阶段证据，本次授权与实施状态以第22节为准。当前未发起生产发布，实号试点未授权。
+版本 V9，2026-11-12；交付进度更新于2026-11-14。受控A/B分阶段工程与真实Codex模型证据已齐，应用S9、两个独立执行器及生产schema0034已完成正式交付与独立回读，原Deployment已回传success；独立工具T与本人Mac同S9包安装分别留证。真实owner配对仍待本人手动解锁Mac并进入真实页面，不能将项目启用写为已完成。第1–22节保留历史方案、失败和阶段口径，当前授权与最新交付状态以第23节、特别是第23.17节为准。实号社媒业务试点未授权。
 
 目标：用户提供产品、连接账号后，一个经营 Agent 持续使用研究工具、通用浏览器和历史经验，自主推进有界获客实验。“账号已连接”必须意味着真实浏览器登录及身份核验已完成。新渠道不以专用适配器为前置；多渠道可以同时操作，不能靠轮流切换一个 current_tab 冒充并发。
 
@@ -1240,7 +1240,7 @@ identity_layout原独立Linux复现为reauth waiting/challenge且进入owner，�
 本次窗口按实际工作量调整：前1453项精确CI已耗1046.81秒（17分26秒），后817项自有Linux连续跑1122.34秒（18分42秒），两段尚未计余下约270项、CI安装/迁移及本次恢复执行的manager/frame负向用例。原45分钟整体窗口接近已测工作量，backend改为60分钟防止完整回归因旧窗口取消；不是业务请求、模型token或原生任务时限，检查结束立即进入下一阶段，所有失败照常阻断。未缩减集合或放宽断言。
 
 
-frame/manager/TLS三文件的冻结增量独立窄审通过。真实Linux外置原S5 SDK、ROOT无runtime、单一STATE顺序frame3→manager3→composition→SW共8 passed/328.32秒：专库在三次kill场景均实际使用，原prefix与exactDB断言保留；后续composition回原outer库，专库和outer最终均drop；最后SW通过原固定TLS目录冲突点，所有原Action/attempt、只读回查、零重发及业务证据断言保留。三文件只有测试修改，Ruff/diff检查通过；独立SW补充运行与最终PR/main放行结果以交付栏为准。
+frame/manager/TLS三文件的冻结增量独立窄审通过。真实Linux外置原S5 SDK、ROOT无runtime、单一STATE顺序frame3→manager3→composition→SW共8 passed/328.32秒：专库在三次kill场景均实际使用，原prefix与exactDB断言保留；后续composition回原outer库，专库和outer最终均drop；最后SW通过原固定TLS目录冲突点，所有原Action/attempt、只读回查、零重发及业务证据断言保留。三文件只有测试修改，Ruff/diff检查通过；独立SW随后1 passed/86.31秒，自有库和进程已清理。局部证据按未变输入复用，最终精确主线证明见第23.17节。
 
 
 ### 23.15 完整回归收齐的测试启动环境与周期输入
@@ -1249,9 +1249,9 @@ frame/manager/TLS三文件的冻结增量独立窄审通过。真实Linux外置�
 
 manager测试child原命令使用API虚拟环境解释器加-S，关闭site后CI无PYTHONPATH中的手工appsite，首import uvicorn失败。即使只删-S，pytest只加到父sys.path的services/api也不会传给tests脚本child；此前Linux诊断显式appsite掩盖了该差异，不能把3.12诊断绿反推3.14 CI环境绿。精确clean环境已实证两层红：原-S缺uvicorn、仅删-S缺lead_app；最小TEST ONLY修补让API child正常初始化自身venv site，并由当前脚本定位当前repo/services/api，去除继承PYTHONPATH/PYTHONHOME。官方SDK worker原有独立CP3.12、-S和显式SDK site完全未变，API不新增browser_use。
 
-新增启动诊断只允许固定typed字段/有限安全token，私有boot、log及异常message不进入CI；6个纯契约/隐私用例通过，独立限定审查接受。最终同字节28bef41在正常API3.12 venv、无手工appsite的Linux上已完成两层红→依赖/API全部导入并停在专设pre-server断言的启动证明；真实三切点及outer库恢复验证进行中，结果以PR交付栏为准。系统现成3.14.4仅额外最小startup证据，不冒充精确CI3.14.10或完整API验证，不重装大环境阻塞必要修补。
+新增启动诊断只允许固定typed字段/有限安全token，私有boot、log及异常message不进入CI；6个纯契约/隐私用例通过，独立限定审查接受。最终同字节28bef41在正常API3.12 venv、无手工appsite的Linux上完成两层红→依赖/API全部导入并停在专设pre-server断言的启动证明，随后三真实切点、outer库恢复及6项环境/隐私回归共10 passed/138.09秒，自有数据库和进程均已清理。该局部3.12证据不替代精确CI3.14.10；后续S9完整主线CI已实际通过，见第23.17节。
 
-另一独立resident输入故障将另PR修补：原Supervisor每次首次/继续轮询均传稳定pending_cycle，managed cycle原本也依cycle_id幂等。旧两个fixture只给agent_id，新native路由提前读取既有必需字段后暴露KeyError。只补稳定且各调用独立的cycle_id、保留默认路由/参数原样/失败与阻塞不拖住其他agent等断言，不改worker产品接口。最终合并后的确定main仍须完整精确应用CI与同轮工具、镜像及连接器原包；不回退旧绿、复用失败产物或放宽断言。
+另一独立resident输入故障随后由独立PR修补：原Supervisor每次首次/继续轮询均传稳定pending_cycle，managed cycle原本也依cycle_id幂等。旧两个fixture只给agent_id，新native路由提前读取既有必需字段后暴露KeyError。只补稳定且各调用独立的cycle_id、保留默认路由/参数原样/失败与阻塞不拖住其他agent等断言，不改worker产品接口。后续精确应用S9完整CI已成功，使用其同轮镜像与连接器原包；独立工具证明按第23.16–23.17节交付，不回退旧绿、复用失败产物或放宽断言。
 
 
 ### 23.16 完整应用证明后的独立工具产物
@@ -1262,4 +1262,29 @@ manager测试child原命令使用API虚拟环境解释器加-S，关闭site后CI
 
 应用继续冻结为已完整验证的ca269d及其43556680931/1原镜像、原包和后续同应用审批。维护工具另取新工具提交T的成功Tool证明及同轮lead-tools-T包，逐字节核对home_systemd_release.py仍为2af0956b04a4a5c8d9dd128e94318a2fd5f23a59285aba8d87807e7a4fb6dab0，与冻结应用所需脚本相同；42冻结项不变。现行SMALL_FIX_RELEASE明确允许独立工具证明/同轮工具包与应用证明/同轮镜像，verified_run允许main祖先，protected request仍绑定S9/R/A和title，installed工具通过candidate blob字节匹配；独立限定审查未发现T必须等于App SHA的硬约束。不是用Tool证明放行应用，也不改写原CI身份或取消已成功App候选重跑。
 
-正式操作顺序和授权范围不变，工具安装与应用切换/独立回读分开留证。生产仍7940/schema0031、无正式安装/维护/DDL/请求/切换。原大包经已认证SSH慢中继，已仅对原GitHub ZIP按HTTP原字节Range续取，已留前缀与本机独立摘要核对，完成后仍必须整包匹配GitHub digest；不是重打包。实际工具T/run、安装、审批、迁移/切换与最终回读结果记交付栏。
+正式操作顺序和授权范围不变，工具安装与应用切换/独立回读分开留证。本节工具修补合入前的快照为生产7940/schema0031、无正式安装/维护/DDL/请求/切换；后续实际进度见第23.17节。原大包经已认证SSH慢中继，仅对原GitHub ZIP按HTTP原字节Range续取并留前缀与本机独立摘要核对；正式导入前已完成整包GitHub digest校验，没有重打包。
+
+### 23.17 正式交付、独立回读与本人设备
+
+本轮软件生产交付已完成，真实owner配对尚未完成。主负责人是本轮唯一生产写入方，原应用候选与请求不因文档收尾换版；历史失败、unknown与费用记录保留，受控A/B分阶段证据不改写为单一SHA、单次全链通过。
+
+| 环节 | 已核实事实 | 当前结果 |
+| --- | --- | --- |
+| 应用完整证明 | App S9=`ca269d998dafc4fe3c4e012b9629eb5a7268b40e`；CI `43556680931/attempt1`；backend、frontend、namespace、checks及Application verification成功 | 2563 passed、1 skipped，另8 subtests passed，3115.26秒；不是Tool证明放行应用 |
+| 独立工具交付 | Tool T=`45e5b2ba07c9e41cb736af70e5d9f532f4b15c91`；Tool CI `43562675547/attempt1`成功；同轮工具artifact `14100788447` | 正式安装`home_systemd_release.py`并独立`TOOL_READBACK_OK`；SHA256 `2af0956b04a4a5c8d9dd128e94318a2fd5f23a59285aba8d87807e7a4fb6dab0`等于S9源码，42冻结项不变，安装时应用仍B |
+| 原应用产物与源码 | S9原应用artifact `14098239278`，ZIP SHA256 `d5a71d5a77260c40c2d6b05dc632e8063ef822dd03764bab5852c0533ad8d7f8`，368083084字节；正式prepare复核原run/attempt/摘要 | attested source和候选SquashFS只读挂载完成，REVISION及包REVISION均为S9；候选挂载未被当作current切换 |
+| 备份克隆演练 | 原B=`7940fbefc93dff2c3ac8c4b43d20e07aefa88253`、schema0031；原备份恢复到专用克隆后演练0031→0034 | 演练成功；与正式生产apply分开留证 |
+| 原审批与应用请求 | 受保护审批run `43563617005/attempt1`；原ZIP凭证绑定应用Deployment `7783431394`、S9、应用CI `43556680931/attempt1` | 同一请求于`2026-11-14T06:14:11Z`回传success；未新增审批或请求，审核环境Deployment不是应用请求 |
+| 正式生产迁移 | 原stage及同一审批/请求，正式apply成功；原migration journal仍绑定S9与B | 独立回读精确head为`0034_local_executor`，backup_ready与restore_ready均true；生产DDL未因切换重试重复执行 |
+| 主应用与两个执行器 | 未改正式helper在私有进程边界诊断下完成deploy、Telegram/Reddit置备及finish，原命令exit0 | `06:11:43Z` selector切S9后正式restart原8个App角色及frame；随后主应用与两个渠道revision均独立回读为S9，核验实际PID/Invocation、只读挂载、Binding和boot receipt |
+| 原请求收尾 | 原attended operator仅finalize、verify、回报，exit0；新连接独立读取原node journal | started精确为S9，result=success、reported=success；未知结果没有通过改写marker或重发请求处理 |
+| 额外独立回读 | `06:14:22Z–06:14:30Z`每项另起SSH进程检查current、executors、verify | 三项均exit0，current与Telegram/Reddit的revision全为S9；后续新连接前后formal current均S9、8个App角色active，公网`https://shui.click/`为HTTP200且TLS验证正常 |
+| 原维护与入口恢复 | `06:15:18Z`新的独立回读：schema0034、hold_count=0、无cutover_pending | live.path与ingress.socket均active；desired_state分布draft1/paused1/running1/archived4。原poll timer保持inactive，本轮未启用旧hook/timer |
+
+前两次generic错误及当时B未激活的独立回读均保留，具体失败原因尚未证实。网络诊断分别记录默认Git同URL读取25.02秒超时、HTTP/1.1读取和后续exact fetch成功；兼容范围8项通过且remaining_extra为空。这些对照不能反推前两次deploy的根因，独立backup单元success也未用于推断当时阶段。成功的第三次原正式helper只增加本次进程的`http.version=HTTP/1.1`和私有进程边界记录，源码、工具、文件配置、固定HTTPS URL、TLS、审批和请求均未修改，原检查保持。
+
+实际切换中，首次停止旧worker超过90秒，由既有systemd流程处理；当时安全点BUSY=false。后续S9进程与最终Reddit boot均通过核验，此等待与前两次失败保留，不将CLI方案描述为零阻塞。完整执行与节点独立回报、额外SSH回读分别留存原始证明，公开记录不复制私有核心文件哈希、凭据或资料。
+
+本人Mac已安装同S9原封包，包SHA256为`6179d578e283bdc28e9a89e6d763bc31badf3a2ad9551b62b7911745da0adf6d`，Node `24.14.1`、官方CLI `codex-cli 0.167.0-alpha.4.1`；实际能力报告ChatGPT ready=true，列出`gpt-6.1-sol`、支持`medium`，输入text+image及multi-agent v2。此为真实安装和能力检查，未启动模型turn。当前paired=false、pending=0，不能据CLI ready声称Lead项目已启用或业务任务已经运行。
+
+软件部署后的本人页面检查仍有具体阻断：`06:15:38Z`新的CUA回读为apps/browsers空，系统明确返回“Mac locked; automatic unlock could not unlock it”。已请求本人手动解锁，尚未收到回复；后续须在真实owner页面生成配对并核实项目设备状态，未伪造OIDC、会话或配对。当前结论为“软件生产交付已完成，项目启用待本人解锁与真实owner配对”，不写整项全部完成，不扩大实号社媒业务范围。

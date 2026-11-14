@@ -1,6 +1,8 @@
 # lead 开发工作项和验收清单
 
-2026-11-14 应用完整放行：ca269d/CI43556680931/1成功，App原镜像已正式prepare复核。发现最后增量未改工具路径导致缺同轮工具包，23.16记录最小CI打包修补和独立Tool证明：应用继续冻结ca269d，工具T走原工具全门/同轮包且脚本2af与应用逐bytes一致；不拿Tool证明放行App，不重跑已成功业务全量。生产仍7940/0031，正式操作尚未开始。
+2026-11-14 软件生产交付已完成、真实owner配对待本人解锁：[第23.17节](requirements/20261112-unified-browser-research-memory.md#2317-正式交付独立回读与本人设备)记录App S9=`ca269d998dafc4fe3c4e012b9629eb5a7268b40e`及应用CI43556680931/1完整成功（2563P/1skip），独立Tool T=`45e5b2ba07c9e41cb736af70e5d9f532f4b15c91`及Tool CI43562675547/1、工具安装TOOL_READBACK_OK。原S9镜像/source、备份克隆演练、受保护审批43563617005/1和正式生产迁移完成；主应用与Telegram/Reddit已独立回读全为S9，精确schema0034_local_executor。原Deployment7783431394于06:14:11Z回传success，原node journal独立回读started=S9/result=success/reported=success；随后每项新SSH的current/executors/verify均exit0，8个App角色active，公网HTTPS/TLS正常且首页200，06:15:18Z回读hold0/无pending/backup+restore ready、live.path与ingress active，原poll timer未启动。两次generic未知原因及停止旧worker超过90秒的真实维护等待保留，不声称零阻塞。本人Mac同S9包、Node24.14.1和官方CLI/ChatGPT/Sol-medium能力已核，paired=false/pending0、未启动模型turn；06:15:38Z CUA确认Mac locked且自动解锁失败，已请求本人手动解锁，项目启用仍待真实owner页面配对。软件交付与项目启用分列，旧失败/unknown/费用保留，实号业务范围不扩大。
+
+2026-11-14 应用完整放行时的工具缺包快照：ca269d/CI43556680931/1成功，App原镜像已正式prepare复核。发现最后增量未改工具路径导致缺同轮工具包，23.16记录最小CI打包修补和独立Tool证明：应用继续冻结ca269d，工具T走原工具全门/同轮包且脚本2af与应用逐bytes一致；不拿Tool证明放行App，不重跑已成功业务全量。当时生产仍7940/0031、正式操作尚未开始；后续实际进度见顶部和第23.17节。
 
 2026-11-14 最新完整回归：0a4b/CI43549907876/1全套实际48分14秒，2552P/1skip/5F（manager测试子进程启动3、resident旧fixture缺cycle_id2）。23.15记录clean环境两层导入红与TEST ONLY修补；两故障独立PR，保留原切点/默认路由/不重发/隐私全部断言，真实定向复验与新combined main完整CI仍是发布前置。生产仍7940/0031、无正式工具/维护/DDL/请求；此前诊断appsite与CI差异明确，不把旧Linux绿当精确CI证明。
 
