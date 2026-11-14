@@ -9,7 +9,7 @@ import styles from "./local-executor.module.css";
 type Row = Record<string, any>;
 const terminal = new Set(["completed", "failed", "interrupted", "execution_unknown", "canceled"]);
 const labels: Record<string, string> = {
-  queued: "等待本机接收", running: "执行中", waiting_input: "需要你补充",
+  queued: "等待 Codex 接收", running: "执行中", waiting_input: "需要你补充",
   completed: "执行结束", failed: "执行未完成", interrupted: "已中断",
   execution_unknown: "正在核对原执行", canceled: "已取消",
 };

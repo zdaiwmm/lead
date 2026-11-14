@@ -1385,7 +1385,7 @@ SHARED_EXECUTOR_FILES = {
     'infra/local-executor/lead-codex-node.socket': '1c925357993bcb6e6b6fb3ca1400006edcd4b347',
     'infra/local-executor/lead-codex-worker.service': '44df0a853be5f2dc0a217484fc89e3f156f886df',
     'infra/local-executor/lead-codex@.service': '2574edb43a06ccbbd4866b0342a4e8f69be492a6',
-    'infra/local-executor/node_broker.py': '39b083a796ee4bb31c03a7484eee522e0c086e73',
+    'infra/local-executor/node_broker.py': '71f516f86a2f43090495315a8e48e446ef197030',
     'infra/migrations/sql/0032_research_memory.sql': '1cd03ca94dae3bdd3bcd11124c92bd224a9c6e15',
     'infra/migrations/sql/0033_unified_browser.sql': '2328c5a253438f1b157d24cf71f81b18075485b8',
     'infra/migrations/sql/0034_local_executor.sql': '77be5f0e80251e67020427e4b4f9947079196753',

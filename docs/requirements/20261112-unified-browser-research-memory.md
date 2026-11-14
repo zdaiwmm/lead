@@ -1341,4 +1341,13 @@ manager测试child原命令使用API虚拟环境解释器加-S，关闭site后CI
 - 界面沿用现有样式，设置页及新建入口显示共用服务器状态，新建不再先造项目配对；个人设备留作高级例外。类型检查/生产构建通过；合成浏览器验证就绪、离线等待、空工作室官网生成不带agent_id且无pairing/draft调用、390px手机无横向溢出。运营流程图同批更新；这些是合成界面证据，不是真实业务或账号登录。
 - 实际官方0.167.0-alpha.4.1探测发现`-P`仅sandbox子命令可用，不能放AppServer全局argv；改用`default_permissions=lead_shared`及thread/start、resume、turn/start显式permissions/never/runtimeWorkspaceRoots。另证明`mcp_servers={}`会合并保留项目自加stdio服务，单靠整表清空无效；已以CLI精确cwd强制untrusted禁用项目配置层。实际正/负对照：项目自加MCP未启动，固定Lead MCP仍启动，当前workspace读写成功、另一项目文件拒读，线程返回固定profile及never。全部使用假CODEX_HOME/假资料、模型turn0；空线程没有rollout，不能用其resume失败冒充真实线程恢复证据，留到官方授权后的最小真实调用验证。
 
-服务器当前仍仅已安装官方runtime和S9连接器，真实ChatGPT登录、统一Node注册、新应用切换及迁移未完成。093同轮原始归档14115217395正在私有缓存，摘要目标 `f5305595f556acd9fcc5796975072ec5b41355a528548ba21135b00267b8f98e`；必须完整核验并由canonical prepare回读后才安装，不能拿失败候选的旧缓存替代。本人手机可用，官方设备码尚未生成。
+最新实测与交付边界（2026-11-14）：
+
+- 093同轮原始归档14115217395完整368091276字节，GitHub摘要 `f5305595f556acd9fcc5796975072ec5b41355a528548ba21135b00267b8f98e` 由新SSH独立回读一致，canonical archive-only prepare复核同SHA/run/attempt/id成功。原下载变慢时仅停止匹配本任务文件的写进程；首个续传链接过期且零字节，刷新后立即续传剩余原始区间347.223秒完成，全量摘要一致。失败候选与分段记录保留，未混用旧归档。
+- 已按原授权从093原产物安装独立egress及未启动的个人模板；独立回读root文件/摘要、普通用户、业务私有路径拒读均通过。首次回读误用裸systemd模板名，改为只读查询未启动的验证实例后通过。正式egress启动并启用，实际UID973/GID967、无附加组、I/P/E/A能力全0、NNP1；官方公开认证issuer通过HTTP200/TLS验证。原App仍S9，未启动个人项目模板。
+- 本人通过手机完成一次官方授权，官方CLI返回Successfully logged in。新普通用户进程独立account/read与model/list确认ChatGPT、Sol及medium均可用；认证仅由服务器官方CLI保存，不复制Mac认证或向仓库/模型传递认证内容。随后仅1次无业务、无工具的真实Sol/medium回复匹配验证标记，关闭进程后以固定profile/never/原workspace恢复同一非空Thread并核对原Turn；恢复未发第二次模型请求，合成线程已归档，真实社媒动作0。
+- 新候选源码上传曾被自动审批拒绝，原许可仅覆盖旧公开主线；本人随后明确批准本次候选源码/合成测试在原隔离目录、独立库及临时服务验证，获新许可后才传送。原0034缺函数RED、0035配置kind CHECK及项目事务FOR SHARE行锁RLS两项实际遗漏均保留并修正，未放宽旧0034或Node/owner权限。最终独立PG18.6共享矩阵21、受影响回归119、迁移5、真实HTTP1均通过；11表/16函数catalog及7个可回滚DDL/ACL负例通过，组合shared/browser/personal verifier均true。专属PG已停止，新SSH核对9个原PID、pidfile及socket均清理。
+- 独立真实Linux服务演练首次发现LoadCredential在systemd259.5呈root:root的0440只读ACL掩码；原只准0400的校验拒绝启动。实际假凭据属性探测定位后，新增边界先红后绿，仅允许0400/0440，组读限root或supervisor组，仍拒绝worker组、写入及公开读取。修后真实凭据挂载、内核MainPID认证、同UID子进程拒绝、FD不继承、全局凭据及supervisor进程环境拒读五项全通过；仅创建固定新测试用户/路径，原失败先独立确认清理后才重验，修后亦全部清理。
+- 最终集成已含Node后端、TS worker、界面、0035固定升级入口。Root本地116项核心/桥接/broker通过（另1项Linux专属在Mac跳过），连接器36项/类型/构建通过，发布入口152项通过，前端类型/构建通过；本地初次配置缺失及Unix权限造成的环境失败保留并在合成配置/获准临时socket后重验。发布入口与60个精确blob、固定shared升级目标/私有source attestation/hold和finish恢复顺序另经窄审通过。原0034入口保留，新0035结构采用受控backup/clone/审批/维护hold，不自动执行生产DDL。
+
+统一Node正式注册、共用worker安装启用、Lead新应用切换和0035生产迁移仍未执行。新集成候选仍需精确PR head快检、获准合并后的精确main完整Application verification与同轮产物；093旧绿只放行已安装出网组件。应用切换/迁移超出原“不切现有业务应用”安装许可，待具体PR与检查就绪后一次确认；不迁移、改绑或重放旧任务，不执行真实社媒发布。
