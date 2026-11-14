@@ -1289,24 +1289,47 @@ manager测试child原命令使用API虚拟环境解释器加-S，关闭site后CI
 
 软件部署后的本人页面检查仍有具体阻断：`06:15:38Z`新的CUA回读为apps/browsers空，系统明确返回“Mac locked; automatic unlock could not unlock it”。已请求本人手动解锁，尚未收到回复；后续须在真实owner页面生成配对并核实项目设备状态，未伪造OIDC、会话或配对。当前结论为“软件生产交付已完成，项目启用待本人解锁与真实owner配对”，不写整项全部完成，不扩大实号社媒业务范围。
 
-### 23.18 mijiu-server 执行端（2026-11-14，本次授权实施中）
+### 23.18 mijiu-server 执行端（2026-11-14，本次授权已完成）
+
+**最终交付状态（2026-11-15，以下为实际回读结果）：** mijiu-server 共用 Codex 已启用，工作室默认 `managed_node`，官方 ChatGPT 登录、`gpt-6.1-sol` / `medium` 就绪。实际工作室共6个项目，其中2个活跃项目均继承默认、无单独覆盖；2个项目授权与1个独立工作室授权已由完整只读视图核实。新建及继承工作室默认的 Agent 自动复用服务器，不需逐项目配对；旧任务、device、thread 未迁移或重发。本人已批准合并并启用共用服务器能力，不再等待账号操作或项目选择。
+
+| 交付项 | 实际版本与证据 |
+| --- | --- |
+| 应用、Telegram/Reddit 执行器、共用连接器 | `3fb46ece212d4da88b9609091af4199bca20eb53`（PR81）；全部独立回读通过 |
+| 精确主线完整检查 | `43632519797/attempt2` success；2848 passed、1 skipped、102 subtests、91 warnings，实际63分22秒；前置 native 单例1 passed/13.71秒，Application verification 与工具构建/上传通过 |
+| 同轮应用原件 | `14129255791`，368128140字节，SHA256 `7d11d5febcac62b496f71e345a427226b6fdeb490fe9497577c03a73868af083`；原始Range缓存、独立SSH整包摘要、canonical prepare及只读镜像REVISION一致 |
+| 同轮工具原件及安装 | `14131551390`，44893字节，SHA256 `f6cc99e1739b1999f1f684867832843386871ee1c91b32d1443d5b575b6df683`；正式单文件入口安装Home工具 `847bc4448036b7571e8f04b778fb53b8f5eb4a0908715c86a7d12f81bf082086`，独立 `TOOL_READBACK_OK` |
+| 原保护审核与应用请求 | 审核 `43639561103/1`，原审批ZIP `14131422897` / 278字节 / SHA256 `b1865a877079122b63e74577cf3fd466fc332eda8d640da4fcf2e3b252e76bfa`；真正应用请求 `7793720681` 于 `2026-11-14T21:07:48Z` 回报success（审核环境部署另记，不混用） |
+| 数据库与维护恢复 | 精确schema `0035_shared_executor` 已在92轮正式备份、恢复演练及升级完成；3fb仅修转发，不重跑DDL，不伪造新迁移标记。最终hold0、入口与原调度恢复 |
+| 共用常驻服务 | socket、worker 已enabled/active；broker由socket激活且active。worker为专用UID974，broker为另一无登录UID972，独立内核回读NoNewPrivileges=1、进程能力为0；3674个连接器文件逐字节一致，独立出网active |
+| 登录及模型证据 | 保留本人手机官方device-auth、真实account/model/list、此前1次最小真实Sol回复及换进程恢复同一非空Thread后archive；本轮安装与启用只读能力，不追加付费模型turn或真实社媒验收 |
+
+最终修复与对账：
+
+- PR81补精确 `executor/v2/:path*`，原v1保持；真实Next开发/独立生产构建合成HTTP先红后绿，且CI主线包含生产入口验证。部署后公网无凭据检查：register空体422 JSON、node poll及scope poll/events/tools均401 JSON；没有产生登记、业务任务或模型请求。A1因镜像源TCP443连接超时在浏览器构建前失败，保留原日志后同提交完整重跑A2；不拿A1或旧候选原件发布。同main最新8项检查均属A2，额外mirror工作流无push触发，PR精确head的mirror验证已通过。
+- 应用切换后，原执行器交接因缺同版本维护hold拒绝；先回读确认应用已是3fb且无新执行器journal，再建立正式同SHA维护保护，逐个canonical provision Telegram/Reddit并登记，另起SSH在保护内核验应用与两类执行器，按原授权指纹恢复调度和入口。最后续原请求的独立回读与成功回传，没有重发应用或迁移。私有计划初次读取误要求运行绑定为0600，在任何计划写入前拒绝；改用正式 `executor_config` 的原固定路径/Root/禁止组及其他写规则后完成，未修改绑定文件权限。
+- 原92登记返回404，完整只读事实确认其过期、未激活、无凭据/instance、零授权。原pending与错误记录保留；同一runtime行锁事务核原部署、真实工作室/allowlist、状态和代次，并用owner READ ONLY全视图核零授权，受控撤销并审计，提交后独立回读，再新建一次登记。没有重发原注册、静默rotate、借用HTTP owner或扩大service的项目权限；所有实际身份、令牌与日志仅留受控节点，公开记录只有数量与工程证据。
+- 私有安装器的umask077使本应0755的公开代码子目录落为0700；首次worker在加载JS前退出、默认仍legacy且未产生工作状态。真实umask回归先红再11绿；仅把同原件manifest核定的公开程序目录恢复到原定0755，3674个文件字节不变，私有目录/凭据权限与内容不变，不读取Codex认证文件。真实UID974/972读取和Node语法检查、新SSH全树回读通过后才再次启动；564个目录得到校正，原失败与修复记录保留，没有重装重放或清理WAL。
+- 实际worker就绪后，按旧策略完整版本CAS发布共用默认；分别以新SSH核物理服务、真实policy/ready及owner只读聚合覆盖。旧过期Node已revoked且无授权；新Node的2个活跃项目和独立studio授权均成立。官方Node24.14.1、CLI0.167.0-alpha.4.1及既有账号保持，不拷贝Mac认证、不改API key、不处理旧费用或unknown。本次仅完成基础能力工程交付，不据此宣称真实业务增长或社媒发布效果。
+
+以下保留开工、隔离验证与历史阻断记录；其中“尚未执行”描述的是对应历史时点，以以上最终回读为当前状态。
 
 用户要求新会话在 mijiu-server 部署 Codex CLI，使自主运营不依赖 Mac 在线，并询问账号授权；本次授权覆盖该服务器执行端安装、必要接入、项目配对和验证。沿用 ChatGPT 登录、Sol/medium；先完成不需要本人登录的安装准备，到官方本人授权时通知。没有无关环境、真实社媒发布、DNS/公网入口修改或旧任务迁移授权。
 
 规则和起点为 GitHub 实时 main `c635d3b491b84e1a30384dd98e94abc9ee498134`；共享目录 HEAD `d887831` 的原改动全部保留。原生工具创建独立目录 `lead-server-codex/lead agent`，分支 `codex/server-codex-executor-20261114`。实际 SSH 主机确认 mijiu-server、Ubuntu26.04.1/x86-64、维护用户具备既有 sudo；原应用 selector 仍 S9，既有服务不重发。独立只读核验聚焦 Linux 安装顺序、环境、代次和原请求归属，主负责人唯一写主机。
 
-实施与验收：
+实施与验收（按后续获批共用Node方案完成）：
 
-- [x] 核原服务/用户、安装与调用入口，读官方认证及 Context7；固定既有 MCP1.32.2、Node>=24、已验证官方 CLI0.167.0-alpha.4.1，不追随 registry 最新0.169.0。
-- [x] 固定普通用户 + root管理systemd，复用原封连接器run，不改应用协议；配对省略macOS的--install，服务先验再激活。unit/镜像打包与运营流程单一内容源同PR。
-- [ ] 本地定向检查、精确PR head快检、合并后的本次main Application CI及同轮包；主机配置按application分类，不用docs/tool绿色放行，原S9应用不重切。
-- [x] 官方Node24.14.1/CLI0.167.0-alpha.4.1及已放行S9原包独立安装，专用普通用户与权限另起SSH回读通过；这部分不发布新unit。
-- [ ] 新unit须由有效主线同轮产物安装；66主线完整CI未通过，当前不安装或启用新服务。
-- [ ] 合成unit/脱离SSH/SIGKILL同state恢复/子进程清理/断网outbox保留恢复/业务路径拒读。复用未变连接器原thread/unknown/取消回归，不将夹具称为真实模型。
-- [ ] 本人官方device-auth、真实account/model/list、真实owner配对和原在途归属核验；必要无社媒合成模型及恢复检查。
-- [ ] 回填同需求/DELIVERY_BACKLOG实际SHA/CI、安装、启动、路由、授权/配对与限制，分别报告未完成项。
+- [x] 核真实安装/调用入口、原服务与权限，查询对应依赖和官方认证资料；保持官方Node24.14.1/CLI0.167.0-alpha.4.1。
+- [x] 本人官方授权及真实account/model能力确认；1次最小真实回复、同非空Thread换进程恢复与archive完成，证据独立于合成夹具。
+- [x] 共用Node后端/独立studio、TS worker与三项systemd服务、0035固定升级入口及运营流程图同源更新。
+- [x] 独立PG/HTTP、真实多UID凭据与MainPID、断网outbox/崩溃恢复/子进程及路径隔离等定向验证，保留原失败与清理证明。
+- [x] 精确PR head快检、新精确main Application完整检查、同轮原包和正式单文件工具安装、独立回读。
+- [x] 正式备份恢复演练及0035一次升级、应用/两渠道执行器真实切换、原请求成功回传、维护恢复。
+- [x] 旧过期登记锁内对账撤销、独立回读后新登记；服务先安装停止再独立核验，实际worker ready后以CAS启用共用默认。
+- [x] 物理服务、policy与真实工作室项目/studio聚合覆盖独立回读；本节及DELIVERY_BACKLOG回填实际结果，不进行真实社媒验收或旧任务迁移。
 
-服务器DNS将shui.click解析到公网入口；TLS校验0、HTTP200，一次页面total1.385秒。pair/poll/events/tools全部使用binding.url，本次保留公网HTTPS，不承诺消除该往返或OpenAI网络/推理耗时。30天配对token与epoch提交后丢响应的人工恢复边界见运维说明，不自动忽略401/409或重发旧任务。
+开工时服务器访问shui.click的TLS校验0、HTTP200，一次页面total1.385秒。本次共用Node仍通过公网HTTPS，不承诺消除网络往返或OpenAI推理耗时。旧personal_v1的30天配对token边界见运维说明；共用Node按登记的node_epoch/credential_generation核验，未知响应仍先对账，不自动忽略401/409或重发旧任务。
 
 本轮实际检查与阻断（2026-11-14）：
 
@@ -1357,7 +1380,7 @@ manager测试child原命令使用API虚拟环境解释器加-S，关闭site后CI
 - 实际部署的admin_configs属lead_owner，5个旧local_executor表属已登记home_isolated_restore_admin，迁移新对象也属该管理员；原合成catalog因此严格误拒。R1 Git fetch443超时、R2 LD环境遗漏均在建库前停止且全局角色未变；R3在受保护vault用已核公开Gitbundle与真实备份克隆，按登记连接连续0034→0035迁移两次，原列inventory及全局roles/memberships（含grantor）完全不变，9个可回滚权限/身份负例均改变摘要且回滚恢复，真实GRANT dryTx亦无残留。独立SSH确认clone不存在/连接0；不修改生产表owner、不执行生产DDL。
 - 第二exact catalog `64239613f49e124deb187afa68d32a91`仅在独立核完非owner字段、角色flags、ACL和成员关系后冻结；catalog证据SHA256 `8d207c035353958495aa56e9a5b5f68d031ecf083ca6abccb1e816a715d67063`，proof为`b71b527eafa9b4bae701a73655dc0bf83652c3e03861ac92a6aa123015c6b9c1`。原`5bb5c1b655606cf163aef47b5d57ab82`保留，原query未改、不归一或跳过未知owner。github.com实际持续超时而固定api.github.com主线ref可达，Home两入口及同轮工具安装bootstrap改共用该直接TLS/禁代理重定向的双读校验：本地main精确一致才免下载，否则仍原固定fetch，变化或失败拒绝；同轮bundle信任、目标Git字节、审批/锁/备份及独立回读保持。本地251项定向回归与Ruff通过，使用合成配置并禁止DB/网络连接；它们不替代新精确main完整验证。
 
-统一Node正式注册、共用worker安装启用、Lead新应用切换和0035生产迁移仍未执行。用户已明确“批准合并并启用共用服务器能力”，覆盖PR77、新App及0035；本次范围已获批准，待修正PR精确head快检、新精确main完整Application verification、备份恢复核验及同轮产物正式执行，无需再次确认相同范围。093旧绿只放行已安装出网组件；不迁移、改绑或重放旧任务，不执行真实社媒发布。
+当时统一Node注册、worker、新App与0035仍待执行；用户“批准合并并启用共用服务器能力”的授权覆盖该范围。后续已按本节顶部最终证据完成，不再处于待批准或待安装状态；093旧绿仅用于当时已安装出网组件。旧任务、费用与unknown保留。
 
 - 2026-11-15 正式发布进展：最终92cfb03b464aa249f621013ccd0b5d328519d334的CI43623665678/1完整成功（2843 passed、1 skipped、102 subtests），应用原ZIP14125486161摘要42866926639faa666dd386292c44ac8168310d50c275ae9542c81770fbc59e9d。保护审批43629162289及原请求7792289820成功；正式备份克隆与恢复演练通过，0035已落地，App和Telegram/Reddit执行器独立回读均为92，维护hold0且入口active，已回报success。不得重跑DDL或重发该应用请求。
 - 随后Node登记HTTP404，受控只读确认原Node仍pending、无credential/instance，默认仍legacy；原始pending与错误记录保留。根因为真实Next网页入口仅配置executor/v1，后端v2路由存在但未转发；最小修复添加executor/v2/:path*，不通配未知协议、不改变API权限。真实Next合成HTTP先红（register404）后绿，覆盖v1与5类v2入口、原POST/Bearer/body/query、409原样回传及v3不进API。Home为此精确Next blob增加独立兼容核验，仍要求实际0035完整catalog和同轮连接器原包；不伪造新迁移hold/complete。继续既有授权的精确main全量验证、工具与应用原包交付、原pending受控对账及共用默认启用；官方登录不重复、无付费模型/真实社媒验收。
