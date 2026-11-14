@@ -15,6 +15,11 @@ import { capabilities } from "./capabilities.ts";
 import { Daemon } from "./daemon.ts";
 import { post, validateUrl } from "./transport.ts";
 import { launchd, profileState } from "./launchd.ts";
+import { ServerWorker } from "./server-worker.ts";
+import { BROKER_SOCKET, UnixRpc } from "./broker-client.ts";
+import { AppServer } from "./rpc.ts";
+import { nativeArgs } from "./runner.ts";
+import { sharedCliEnvironment, sharedNativeArgs } from "./shared-runtime.ts";
 const args = process.argv.slice(2),
   command = args.shift() || "status";
 function option(name: string, fallback?: string) {
@@ -42,6 +47,25 @@ function lock(folder: string) {
   };
 }
 async function main() {
+  if (command === "server-run") {
+    if (option("socket", BROKER_SOCKET) !== BROKER_SOCKET) throw new Error("invalid_server_socket");
+    const folder = resolve(option("state", "/var/lib/lead-codex/.lead/server")!);
+    const binary = process.env.LEAD_CODEX_BINARY || "codex", memories = process.env.LEAD_CODEX_MEMORIES;
+    const environment = sharedCliEnvironment(process.env);
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, environment, { LEAD_CODEX_BINARY: binary }, memories === "1" ? { LEAD_CODEX_MEMORIES: "1" } : {});
+    // Store creates only the server root here; no personal binding is written.
+    const { mkdirSync } = await import("node:fs"); mkdirSync(folder, { recursive: true, mode: 0o700 });
+    const release = lock(folder);
+    const worker = new ServerWorker(folder, new UnixRpc(BROKER_SOCKET), { capabilities: () => capabilities(new AppServer(binary,
+      [...nativeArgs(), ...sharedNativeArgs({ home: process.env.HOME || "/var/lib/lead-codex", state: folder,
+        codexHome: process.env.CODEX_HOME || "/var/lib/lead-codex/.codex", workspace: folder })], folder, sharedCliEnvironment(process.env), true)) });
+    const stop = () => { void worker.close(); };
+    process.once("SIGTERM", stop); process.once("SIGINT", stop);
+    try { await worker.run(); }
+    finally { await worker.close(); release(); }
+    return;
+  }
   const folder = resolve(
       option(
         "state",
@@ -143,6 +167,6 @@ async function main() {
   }
 }
 main().catch((error) => {
-  console.error(String(error));
+  console.error(command === "server-run" ? "server_worker_stopped" : String(error));
   process.exitCode = 1;
 });

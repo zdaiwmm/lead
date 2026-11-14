@@ -1,12 +1,15 @@
 import { fileURLToPath } from "node:url";
 import { AppServer } from "./rpc.ts";
 import { Store } from "./store.ts";
+import { RequestBridge, type RequestLease } from "./request-bridge.ts";
+import { sharedCliEnvironment, sharedDenial, sharedNativeArgs } from "./shared-runtime.ts";
 import type {
   Command,
   Dict,
   RequestRecord,
   RpcLike,
   RunPayload,
+  ExecutorClient,
 } from "./types.ts";
 export const MODEL = "gpt-6.1-sol",
   EFFORT = "medium";
@@ -42,19 +45,27 @@ export class Runner {
   sessions = new Map<string, Promise<void>>();
   store: Store;
   factory: (payload: RunPayload, cwd: string) => RpcLike;
+  bridge?: RequestBridge;
+  client?: ExecutorClient;
+  closed = false;
   constructor(
     store: Store,
-    factory: (payload: RunPayload, cwd: string) => RpcLike = (payload, cwd) =>
-      new AppServer(
-        process.env.LEAD_CODEX_BINARY || "codex",
-        nativeArgs(process.env.LEAD_CODEX_MEMORIES === "1"),
-        cwd,
-      ),
+    factory?: (payload: RunPayload, cwd: string) => RpcLike,
+    options: { bridge?: RequestBridge; client?: ExecutorClient; stateRoot?: string } = {},
   ) {
-    this.store = store;
-    this.factory = factory;
+    this.store = store; this.bridge = options.bridge; this.client = options.client;
+    this.factory = factory || ((payload, cwd) => new AppServer(
+        process.env.LEAD_CODEX_BINARY || "codex",
+        [...nativeArgs(process.env.LEAD_CODEX_MEMORIES === "1"), ...(store.shared ? sharedNativeArgs({
+          home: process.env.HOME || "/var/lib/lead-codex", state: options.stateRoot || store.folder,
+          codexHome: process.env.CODEX_HOME || "/var/lib/lead-codex/.codex", workspace: cwd }) : [])],
+        cwd,
+        store.shared ? sharedCliEnvironment(process.env) : undefined,
+        store.shared,
+      ));
   }
   async command(command: Command) {
+    if (this.closed) return;
     if (command.kind !== "run") return this.control(command);
     const payload = command.payload as RunPayload;
     if (
@@ -91,6 +102,7 @@ export class Runner {
     }
   }
   async run(record: RequestRecord) {
+    if (this.closed) return;
     if (
       (terminal.has(record.state) && record.state !== "execution_unknown") ||
       this.active.has(record.id)
@@ -103,6 +115,7 @@ export class Runner {
     const payload = record.payload,
       cwd = this.store.workspace(payload.session_key),
       rpc = this.factory(payload, cwd);
+    let bridgeLease: RequestLease | undefined;
     let finish!: () => void;
     const done = new Promise<void>((resolve) => {
       finish = resolve;
@@ -165,6 +178,14 @@ export class Runner {
       }
     });
     rpc.onRequest((id, method, params) => {
+      if (this.store.shared) {
+        const denial = sharedDenial(method);
+        if (denial) {
+          rpc.respond(id, denial);
+          this.store.event(record.id, "server/requestDenied", { method, reason: "fixed_shared_permissions" });
+          return;
+        }
+      }
       this.store.update(record.id, {
         pending: { id, method, params },
         state: "waiting_user",
@@ -177,6 +198,11 @@ export class Runner {
         model_reasoning_effort: EFFORT,
         web_search: payload.web_search || "live",
       };
+      if (this.store.shared) { config.approval_policy = "never"; config.mcp_servers = {}; }
+      if (this.store.shared && payload.tools?.length) {
+        if (!this.bridge || !this.client) throw new Error("request_bridge_required");
+        bridgeLease = this.bridge.issue(this.store, record.id, this.client);
+      }
       if (payload.tools?.length)
         config.mcp_servers = {
           lead: {
@@ -190,9 +216,11 @@ export class Runner {
               ),
             ],
             env: {
-              LEAD_EXECUTOR_HOME: this.store.folder,
-              LEAD_EXECUTOR_REQUEST: record.id,
+              ...(bridgeLease ? bridgeLease.env : {
+                LEAD_EXECUTOR_HOME: this.store.folder, LEAD_EXECUTOR_REQUEST: record.id,
+              }),
             },
+            ...(bridgeLease ? { env_vars: [] } : {}),
             required: true,
           },
         };
@@ -201,6 +229,7 @@ export class Runner {
         await rpc.request("thread/resume", {
           threadId: thread,
           cwd,
+          ...(this.store.shared ? { permissions: "lead_shared", approvalPolicy: "never", runtimeWorkspaceRoots: [cwd] } : {}),
           model: MODEL,
           config,
           developerInstructions: payload.instructions,
@@ -219,6 +248,8 @@ export class Runner {
         const started = await rpc.request("thread/start", {
           model: MODEL,
           cwd,
+          ...(this.store.shared ? { permissions: "lead_shared", approvalPolicy: "never", runtimeWorkspaceRoots: [cwd],
+            allowProviderModelFallback: false } : {}),
           config,
           developerInstructions: payload.instructions,
           ephemeral: false,
@@ -242,6 +273,7 @@ export class Runner {
         threadId: thread,
         model: MODEL,
         effort: EFFORT,
+        ...(this.store.shared ? { permissions: "lead_shared", approvalPolicy: "never", runtimeWorkspaceRoots: [cwd] } : {}),
         clientUserMessageId: record.id,
         input: [{ type: "text", text: marker + "\n" + payload.input }],
         ...(payload.output_schema
@@ -272,6 +304,7 @@ export class Runner {
         });
       }
     } finally {
+      bridgeLease?.close();
       this.active.delete(record.id);
       await rpc.close();
     }
@@ -377,6 +410,8 @@ export class Runner {
       return;
     }
     if (!active) throw new Error("request_not_active");
+    if (this.store.shared && command.kind === "respond" && record.pending && sharedDenial(record.pending.method))
+      throw new Error("shared_permissions_forbidden");
     // Control messages have no established RPC idempotency either: persist before send.
     this.store.data.controls.push(command.id);
     this.store.save();
@@ -410,6 +445,7 @@ export class Runner {
     }
   }
   async close() {
+    this.closed = true;
     for (const { rpc, finish } of this.active.values()) {
       finish();
       await rpc.close();
