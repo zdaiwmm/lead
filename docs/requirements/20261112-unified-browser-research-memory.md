@@ -1199,3 +1199,7 @@ PR64合并为b7f4068d2bc19f1a4b76302469a1f1f19d83521b，精确main CI43530615586
 原共享测试站的/login对已登录cookie也固定显示匿名form，导致新版fresh current+private双源身份检查正确拒绝。测试站改为有效当前session实际303到已有/home，私有/account仍独立核验；首4个真实SDK输入/发布/回复/unknown回查场景通过，HTTP回归3项通过，其余映射场景继续定向核验。产品身份、权限、发送及回执逻辑不改，原失败/unknown不改写、不重放。
 
 评估程序的生产库名保护保持。原CI的隔离容器仍用lead库名，按实际配置会触发合成记忆夹具的拒绝；backend改为明确创建lead_ci并让迁移/API/测试继承该库，默认生产配置及infra不变。整组失败立即输出short traceback，成功仍执行完整集合；墙钟预算调整到45分钟，不改模型token/步数/原生turn等待限制。32项CI契约及完整Ruff/凭据检查通过；pytest实际9.2.0、pytest-asyncio1.4.1未变，Context7精确pytest9.2文档已核参数组合与测试作用域替换。最终合并精确main完整成功、同轮产物及正式发布独立回读仍待完成。
+
+专项已收口：原19个native失败逐项具备passing证据。首4项139.52秒；其余首批19绿/5失败中的3项为旧frame seam占位UUID路由，明确原SDK lane后6项预检通过。SW机械诊断跳过正式NativeTask.start，改调用其已有同manager-page控制关系刷新，真实1项8.17秒通过，原session_maintenance/search、重复刷新/越权写/结束授权断言全保留。崩溃fixture原两个cookie确为session-only；仅该场景服务器显式持久化，读自己profile的SQLite核domain/name/path/expiry/persistent已落盘且PID argv未变后才SIGKILL，重启比同原token并fresh私有验证两账户，旧epoch拒绝及public survivor保留。真实Chrome与10项helper共11 passed/37.82秒；默认HTTP仍session-only，本机HTTP/helper/frame合21 passed/3.19秒。各轮独立DB均finally drop，既有19绿和core4按未变默认行为复用，不再重复。
+
+评估12项实际隔离PG通过，默认selected_cases公共行为仍原9组各3次、memory仅显式1次，新增缺flag/生产库名lead的实际拒绝且不进入夹具写入；不改CLI或guard。research recovery的官方CI精确库名同步lead_ci，其余仓库/runner/workspace/host/port/Temporal/production/私有文件条件保持拒绝，受控代码契约验证不冒充GitHub现场。最终修补为PR65，仅CI、测试和记录，业务/依赖/发布工具字节与b7一致，0新增付费模型或生产操作。33处原F及首次专项失败全部保留；准确最终head、精确main完整CI、产物与正式发布状态继续写同PR交付栏。
