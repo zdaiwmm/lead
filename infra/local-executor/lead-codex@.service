@@ -13,7 +13,11 @@ Environment=HOME=/var/lib/lead-codex
 Environment=CODEX_HOME=/var/lib/lead-codex/.codex
 Environment=LEAD_CODEX_BINARY=/opt/lead-codex/codex/bin/codex
 Environment=PATH=/opt/lead-codex/node/bin:/opt/lead-codex/codex/bin:/usr/local/bin:/usr/bin:/bin
-UnsetEnvironment=OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN LEAD_EXECUTOR_TOKEN HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+# Optional, administrator-owned proxy settings for the official Codex client.
+EnvironmentFile=-/etc/lead-codex/network.env
+# Node's Lead transport stays on its validated binding URL; Codex uses its own
+# HTTP/system-proxy handling. No model API credential fallback is inherited.
+UnsetEnvironment=OPENAI_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN LEAD_EXECUTOR_TOKEN NODE_USE_ENV_PROXY
 ExecStart=/opt/lead-codex/node/bin/node /opt/lead-codex/connector/dist/cli.js run --profile %i
 UMask=0077
 # Ordinary disconnects retry inside the connector. A 401/409 or other explicit

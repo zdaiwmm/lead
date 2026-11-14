@@ -690,13 +690,51 @@ class PersistentRuntime:
         # exact existing action envelope is eligible, with all current scope
         # checks performed again by the original claim transaction.
         if target['type'] == 'service_worker':
+            from copy import deepcopy
+
+            def authority(lease):
+                facts = {key: lease[key] for key in (
+                    'kind', 'probe_ref', 'probe_context_id', 'probe_urls', 'target_id', 'generation',
+                    'task_id', 'task_generation', 'control_version', 'account_id', 'binding_version',
+                    'intent_revision', 'origins', 'read_urls', 'authentication_endpoints',
+                    'connection_ref', 'control_mode', 'challenge_version', 'input_seq',
+                    'internal_parent', 'reconcile_action_id', 'fragment_deadline',
+                ) if key in lease}
+                if 'claim' in lease:
+                    claim = lease['claim']
+                    facts['attempt_token'] = claim.get('attempt_token') if isinstance(claim, dict) else claim
+                if 'action' in lease:
+                    action = lease['action']
+                    facts['action'] = ({key: action.get(key) for key in ('id', 'type', 'intent')}
+                                       if isinstance(action, dict) else action)
+                return deepcopy(facts)
+
+            # Lease validation yields while private inspection pages can close.
+            # Keep exact bindings, and never lend a removed/replaced page's
+            # authority or overlook an in-place Action/permission change. Page
+            # documents/auth-flow progress and canonical frame-role pruning are
+            # runtime facts; their original validators remain authoritative.
+            bindings = tuple((key, entry, entry['scope'], authority(entry['scope']), entry.get('page'))
+                             for key, entry in self.pages.items())
+            original = {binding[0]: binding for binding in bindings}
+
+            def still_bound(binding):
+                key, entry, lease, facts, page = binding
+                return (self.pages.get(key) is entry and entry.get('scope') is lease
+                        and entry.get('page') is page and authority(lease) == facts)
+
+            def new_bindings():
+                return any(key not in original or not still_bound(original[key]) for key in self.pages)
+
             # Preserve ordinary worker network reads in its registered context,
             # but never borrow connection/authentication roles from a page.
             readers = []
-            for value in self.pages.values():
-                lease = value['scope']
+            for binding in bindings:
+                lease = binding[2]
                 try:
                     await asyncio.to_thread(self.current_scope, lease)
+                    if not still_bound(binding):
+                        continue
                     allowed = {origin(url) for url in lease['origins']}
                     auth_paths = {(origin(url),urlsplit(url).path) for url in lease.get('authentication_endpoints',[])}
                     if ((origin(request['url']),urlsplit(request['url']).path) in auth_paths):
@@ -704,9 +742,12 @@ class PersistentRuntime:
                     if origin(target['url']) in allowed and origin(request['url']) in allowed:
                         if lease.get('read_urls') and request['url'] not in lease['read_urls']:
                             continue
-                        readers.append(lease)
+                        readers.append(binding)
                 except (ValueError,KeyError):
                     continue
+            readers = [binding[2] for binding in readers if still_bound(binding)]
+            if new_bindings():
+                return None
             identities = {(item.get('account_id'),item.get('binding_version')) for item in readers}
             if request['method'] in ('GET','HEAD') and readers and len(identities) == 1:
                 return {'kind':'read'}
@@ -715,18 +756,23 @@ class PersistentRuntime:
                 if proof:=await authorize_maintenance(self,target,request):
                     return {'kind':'read','read_proof':proof}
             candidates = []
-            for value in self.pages.values():
-                lease = value['scope']
+            for binding in bindings:
+                lease = binding[2]
                 if not lease.get('action'):
                     continue
                 try:
                     await asyncio.to_thread(self.current_scope,lease)
+                    if not still_bound(binding):
+                        continue
                     if origin(target['url']) not in {origin(url) for url in lease['origins']}:
                         continue
                     match_request(lease['action']['intent']['browser_method'],request,lease['action']['intent'])
-                    candidates.append(lease)
+                    candidates.append(binding)
                 except (ValueError,KeyError):
                     continue
+            candidates = [binding[2] for binding in candidates if still_bound(binding)]
+            if new_bindings():
+                return None
             if len(candidates) == 1:
                 return {'kind':'action','action_id':str(candidates[0]['action']['id']), 'scope':candidates[0]}
         return None

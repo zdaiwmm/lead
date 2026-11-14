@@ -54,7 +54,7 @@ jobs:
     needs: [scope, frontend]
     if: github.event_name != 'pull_request' && needs.scope.outputs.kind == 'application'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       LEAD_DB_NAME: lead_ci
     steps:
@@ -121,7 +121,7 @@ jobs:
             "$LEAD_BROWSER_RUNTIME_PYTHON" -B -S tests/browser_namespace_cdp_probe.py \
             "$PWD/scripts/browser_namespace.py" "$LEAD_BROWSER_RUNTIME_DIR/chromium/chrome-linux64/chrome"
       - name: Database, media and authorization tests
-        run: LEAD_TEST_CHANNEL_TEMPORAL=127.0.0.1:17233 LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_NATIVE_PRODUCT_TESTS=1 LEAD_WORKFLOW_TESTS=1 LEAD_GROWTH_TEST_ENV=1 .venv/bin/pytest -q --tb=short --durations=15 --junitxml=.state/ci-tests.xml
+        run: LEAD_TEST_CHANNEL_TEMPORAL=127.0.0.1:17233 LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_NATIVE_PRODUCT_TESTS=1 LEAD_WORKFLOW_TESTS=1 LEAD_GROWTH_TEST_ENV=1 .venv/bin/pytest -q --maxfail=1 --tb=short --durations=15 --junitxml=.state/ci-tests.xml
       - if: always() && hashFiles('.state/infra.env') != ''
         run: docker compose --env-file .state/infra.env -f infra/compose.yaml down
   frontend:

@@ -1300,9 +1300,21 @@ manager测试child原命令使用API虚拟环境解释器加-S，关闭site后CI
 - [x] 核原服务/用户、安装与调用入口，读官方认证及 Context7；固定既有 MCP1.32.2、Node>=24、已验证官方 CLI0.167.0-alpha.4.1，不追随 registry 最新0.169.0。
 - [x] 固定普通用户 + root管理systemd，复用原封连接器run，不改应用协议；配对省略macOS的--install，服务先验再激活。unit/镜像打包与运营流程单一内容源同PR。
 - [ ] 本地定向检查、精确PR head快检、合并后的本次main Application CI及同轮包；主机配置按application分类，不用docs/tool绿色放行，原S9应用不重切。
-- [ ] 官方Node24.14.1/CLI0.167.0-alpha.4.1、原S9包SHA/REVISION及普通用户权限独立回读；unit由本次main同轮产物安装。
+- [x] 官方Node24.14.1/CLI0.167.0-alpha.4.1及已放行S9原包独立安装，专用普通用户与权限另起SSH回读通过；这部分不发布新unit。
+- [ ] 新unit须由有效主线同轮产物安装；66主线完整CI未通过，当前不安装或启用新服务。
 - [ ] 合成unit/脱离SSH/SIGKILL同state恢复/子进程清理/断网outbox保留恢复/业务路径拒读。复用未变连接器原thread/unknown/取消回归，不将夹具称为真实模型。
 - [ ] 本人官方device-auth、真实account/model/list、真实owner配对和原在途归属核验；必要无社媒合成模型及恢复检查。
 - [ ] 回填同需求/DELIVERY_BACKLOG实际SHA/CI、安装、启动、路由、授权/配对与限制，分别报告未完成项。
 
 服务器DNS将shui.click解析到公网入口；TLS校验0、HTTP200，一次页面total1.385秒。pair/poll/events/tools全部使用binding.url，本次保留公网HTTPS，不承诺消除该往返或OpenAI网络/推理耗时。30天配对token与epoch提交后丢响应的人工恢复边界见运维说明，不自动忽略401/409或重发旧任务。
+
+本轮实际检查与阻断（2026-11-14）：
+
+- PR73精确head `e9f34b95635fe1a474be214de52111eb365dc78b` 的scope/checks/frontend/verified全部成功，用户明确批准合并与本次服务器部署后合入 `66a3795ca7c27ebe244b6b91982390a13f6bc57f`。新主线CI `43572104585/attempt1` 的frontend/checks/namespace成功；backend在60分钟上限取消，55%出现一个F，继续到83%仍未汇总trace，未取得Application verification，不放行新unit。原失败和取消保留。
+- 纯collect与日志位置将F高置信映射到 `test_native_boundary_product.py::test_connection_session_keeps_sw_cache_and_nonpublication_posts`；该用例、native夹具、服务源码和依赖相对S9均未改。隔离原序邻接组实际复现SW辅助页鉴权失败，进一步确定跨await迭代页面字典和原位权限变化两项确定性缺口。提交 `3d1b065e1377660e339a6eeeda5664850b43bd43` 冻结页面集合、条目及最小权限事实，并在await后和返回前重验；新增19项覆盖原位Action/账号/代次变化及正常元数据更新，原DB/身份/最终SQL认领保持。独立审查发现的原位Action歧义已先红后绿修复；本地相关44项、CI契约41项、实际Linux新用例及原调用方21项、原序邻接组60项通过。没有改原负向断言；原始首请求owner-unresolved/controller-None现象不能全部归因于这两项缺口，精确main完整CI仍必需。
+- 隔离环境使用PG18.6、Chromium151与原66包11920文件校验；API Python3.12.3不同于CI3.14.10，单独披露。自有PG已停止，独立回读无自有socket/pid/进程，失败报告和合成数据保留。原完整CI相对S9逐段慢21–28%，预计超过60分钟，故上限改90分钟并加首失败及时汇总；验证集合和放行条件不减。浏览器源码修复是本次主线CI恢复，当前线上应用仍S9，本次服务器安装不会切换它。
+- 本地连接器21项、构建、交付/镜像52项和凭据扫描通过；实际Linux打包5项通过。临时nobody服务以合成HTTP/RPC验证断网outbox保留/恢复确认、SIGKILL同状态恢复、原session保留、旧子进程清理及401停止不循环均通过，夹具与临时unit已独立确认清理。首次验证器误读空ControlGroup的失败保留，修正后重验，不将其当作服务故障或模型证明。官方原生workspace终端在无提权保护下可读写，模型调用0。
+- 新同轮原始归档已在Mac与服务器独立核对GitHub摘要；经连接器取得原件后服务器直接HTTPS字节范围下载295.1秒，完整368083084字节逐字节摘要一致，未重打包。先前慢scp终止且部分文件未使用；取件不等于CI或安装放行。
+- 官方CLI和S9连接器单独复用其已放行应用CI `43556680931/attempt1` 安装到root持有的 `/opt/lead-codex`，未安装66的新unit。新连接实际报告Node24.14.1、CLI0.167.0-alpha.4.1、连接器S9、signed_out/paired=false/pending0；专用普通用户无附加业务组，home0700/config0600、运行文件不可写、实际TG/Reddit私有配置不可读，原App仍S9。没有复制Mac认证缓存或启用旧timer/hook。
+- 官方device-auth一次请求在签发设备码前返回403；只读官方端点进一步返回 `unsupported_country_region_territory`。尚无设备码、auth文件、本人登录、实际账号权益或项目配对；本人答复未必有现成获准出口。正在准备仅供Codex的独立、有认证loopback TLS出站适配，复用节点已知既有通道的单个客户端出站；原配置、API通道、业务服务和公网入口均不改，未启用新通道。实际路由、独立权限审查、主线CI和官方只读请求通过后才重新签发设备码。目标项目名称与真实owner配对仍待本人信息，不伪造会话或用DB造码。
+- 用户已明确批准将仅含公开已提交66源码的约39MB归档传到服务器独立复现目录，并使用独立合成数据库/浏览器；不含状态或认证文件，不修改生产服务。自动审批最初拒绝后取得这项具体授权才执行；旧实验库、未知账本和真实业务动作均未动。

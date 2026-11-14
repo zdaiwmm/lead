@@ -133,6 +133,12 @@ PR #26 新增 `httpx2` 后，家庭节点共享解释器须已经由节点维护
 
 `binding.url` 决定 pair/poll/events/tools 全部请求目的地；同机执行不等于本地连接。部署时记录实际 DNS、TLS、目标 IP 与请求耗时；保留 HTTPS、身份和项目权限，不为减少延迟改成未审阅的 loopback 通道。模型仍需访问 OpenAI 网络。
 
+需要获准代理时，管理员使用 root 持有、0600 的 `/etc/lead-codex/network.env`，只配置标准 HTTP/HTTPS/ALL_PROXY 与 NO_PROXY 变量；不在该文件放模型 API key、替换官方 issuer/base URL 或关闭 TLS。官方登录、能力检查和常驻进程须用相同网络环境。Node24 的 Lead `fetch` 不启用环境代理，仍验证原 binding HTTPS 和设备权限；此行为已用实际24.14.1与不可达假代理访问公开首页验证。代理凭据和原出站通道资料仅留受控节点，不进入仓库或公共证据。
+
+需要复用已有受控 Xray 出站时，单独使用 `infra/local-executor/egress.py` 与 `lead-codex-egress.service`，不更改原 API 通道。管理员先核既有通道归属和使用权限，固定官方26.10.31发行包及二进制摘要，建立与Codex不同的无登录网络用户；新脚本、二进制、operations与认证文件均由root持有。仅已核实的legacy源允许固定维护身份1000持有，路径及祖先权限仍逐级拒绝链接和不可信写入；不搬认证文件或私钥。包装进程读取单个窄出站后，清空附加组、实际/有效/保存UID与GID和进程能力，再以该网络用户运行Xray。源卷通过部署侧 `RequiresMountsFor=` 依赖现有挂载，不解锁卷、不重启原服务。
+
+该适配只监听有随机Basic认证的loopback HTTP代理，TLS仅允许精确官方主机 `auth.openai.com`、`chatgpt.com`、`api.openai.com` 的443端口。嗅探将实际目标重写为允许的SNI；CONNECT名称和SNI不同时连接到官方SNI，不保留原任意目标。IP目标、无SNI、非TLS、其他域名/端口和UDP默认拒绝，保留官方证书校验。项目明确选择后才安装 `lead-codex-egress.conf` 为该实例的drop-in；必需环境缺失或代理格式不符即停止，不静默直连。官方CLI自身须实际支持并开启 `features.respect_system_proxy`，原生命令的代理继承单独配置和实测，不能限制为只可访问模型域名。真实二进制的认证/路由拒绝矩阵、降权、故障恢复、权限隔离和精确main CI通过后才安装，再用官方只读请求核出口；配置解析通过不表示可登录或账号有权限。
+
 每个项目使用独立 `~/.lead/executors/<UUID>`；macOS 使用 LaunchAgent，已置备的 Linux 服务器使用上述 systemd 项目实例。网页关闭不终止执行；执行设备关机或离线时，业务保留原请求等待恢复。设备更换不会自动迁移旧会话，未知发送必须在原线程和原 Action 对账。解除连接立即撤销设备权限；成员角色、项目范围和能力在每次设备请求重新核验。配对启用该项目的新任务设备执行，已固定的旧任务继续按原归属完成；未配对的已有项目保留原配置，不静默代用 API 模型。
 
 长模型等待通过短 Temporal Activity 轮询，原请求与线程持久化；业务取消阻止新工具提交并中断原 turn，进程关闭仅等待原请求恢复。原生压缩由 Codex 执行。原生长期记忆可通过本机 `LEAD_CODEX_MEMORIES=1` 启用并由后台安装保留；它沿用本人的原 Codex home，不修改全局设置，启用前核对跨项目记忆范围。经营事实、可撤销经验、账号归属和外部回执仍由 Lead 保存。
