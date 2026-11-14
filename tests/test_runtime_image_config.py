@@ -22,6 +22,7 @@ def test_home_image_contains_runtime_dependencies_without_operator_files(tmp_pat
         "services/channel_adapters/reddit/entry.py",
         "apps/web/app/page.tsx",
         "infra/home-browser-frames/frame-live.cjs",
+        "infra/local-executor/lead-codex@.service",
         "scripts/browser_namespace.py",
         "scripts/browser_use_runner.py",
         "scripts/backup.py",

@@ -17,7 +17,7 @@ runtime_paths=(
   infra/compose.yaml
   infra/migrations
 )
-git diff --quiet "$sha" -- services apps/web infra/home-browser-frames "${runtime_paths[@]}"
+git diff --quiet "$sha" -- services apps/web infra/home-browser-frames infra/local-executor "${runtime_paths[@]}"
 test -s apps/web/.next/BUILD_ID
 test -d apps/web/node_modules/next
 # This consumes the same run/attempt's verified package; it never installs or builds.
@@ -27,7 +27,7 @@ trap 'rm -rf -- "$stage"' EXIT
 # SquashFS preserves the staging root mode; channel executors traverse it as non-root.
 chmod 0755 "$stage"
 # Runtime helpers remain under ROOT; operator tools and local credentials are excluded.
-git archive "$sha" services apps/web infra/home-browser-frames "${runtime_paths[@]}" | tar -x -C "$stage"
+git archive "$sha" services apps/web infra/home-browser-frames infra/local-executor "${runtime_paths[@]}" | tar -x -C "$stage"
 test ! -e "$stage/services/browser-runtime"
 cp -a "$browser_runtime" "$stage/services/browser-runtime"
 python3 -IB scripts/build_browser_runtime.py "$sha" "$stage/services/browser-runtime" --verify
