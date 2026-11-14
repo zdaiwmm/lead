@@ -225,3 +225,33 @@ test("fencing a shared Runner also prevents already queued same-session work sta
   assert.equal(rpcs.length, 1);
   assert.equal(store.request("second").state, "prepared");
 });
+
+test("shared recovery waits for account readiness before starting a prepared request", async t => {
+  const root = home(t), scope = binding();
+  const store = new Store(scopeStoreFolder(root, scope)); store.bindServer(scope);
+  store.begin("prepared-before-crash", payload);
+  let ready = false;
+  const rpcs: Rpc[] = [];
+  const broker = { async call(method: string, params: any) {
+    if (method === "worker.hello") return { worker_generation: "generation-ready" };
+    if (method === "scope.list") return { scopes: [scope] };
+    if (method === "scope.poll") return { epoch: 1, commands: [] };
+    return { accepted: params.events?.map((event: any) => event.id) || [] };
+  } };
+  const worker = new ServerWorker(root, broker, { capabilities: async () => ({ ready }),
+    runnerFactory(store, client, bridge) {
+      const rpc = new Rpc(); rpcs.push(rpc);
+      return new Runner(store, () => rpc, { client, bridge });
+    } });
+  t.after(() => worker.close());
+  await worker.tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(rpcs[0].calls.some(call => call.method === "turn/start"), false);
+  assert.equal(new Store(store.folder).request("prepared-before-crash").state, "prepared");
+  ready = true; worker.lastCapabilities = 0;
+  await worker.tick();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(rpcs[0].calls.filter(call => call.method === "turn/start").length, 1);
+  await worker.tick();
+  assert.equal(rpcs[0].calls.filter(call => call.method === "turn/start").length, 1);
+});

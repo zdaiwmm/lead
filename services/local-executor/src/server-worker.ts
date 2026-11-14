@@ -82,7 +82,12 @@ export class ServerWorker {
         this.scopes.set(binding.scope_ref, { store, daemon: new Daemon(store, runner, client, this.capabilities), recovered: false });
       }
       await Promise.all([...this.scopes].map(async ([ref, entry]) => {
-        try { await entry.daemon.tick(); if (!entry.recovered) { entry.daemon.recover(); entry.recovered = true; } }
+        try {
+          await entry.daemon.tick();
+          if (!entry.recovered && this.capabilities.ready === true) {
+            entry.daemon.recover(); entry.recovered = true;
+          }
+        }
         catch (error) { await this.failure(ref, error); }
       }));
       if (this.stopped) throw new BrokerError("executor_node_unavailable", 401);

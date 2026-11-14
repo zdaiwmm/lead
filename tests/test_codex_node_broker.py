@@ -1,11 +1,13 @@
 """Synthetic broker trust boundaries; never opens production credentials."""
 import importlib.util
+import io
 import json
 import os
 import socket
 import subprocess
 import sys
 import threading
+import urllib.error
 from pathlib import Path
 from uuid import uuid4
 
@@ -121,6 +123,21 @@ def test_transport_exception_does_not_disclose_private_input(setup):
     result = service.dispatch(peer, frame("scope.list", worker_generation=token))
     assert result["error"] == {"code": "executor_not_ready", "status": 503, "retryable": True}
     assert "SECRET" not in json.dumps(result)
+
+
+def test_node_epoch_failure_keeps_its_global_error_code(monkeypatch):
+    client = broker.NodeHTTP({"base_url": "https://example.invalid", "node_id": uid(),
+        "node_token": "SYNTHETIC_NODE_CREDENTIAL_0123456789", "node_epoch": 1,
+        "instance_id": uid(), "credential_generation": 1})
+
+    def fail(request, timeout):
+        raise urllib.error.HTTPError("https://example.invalid", 409, "conflict", {},
+            io.BytesIO(b'{"detail":"executor_node_epoch_changed"}'))
+
+    monkeypatch.setattr(client.opener, "open", fail)
+    with pytest.raises(broker.BrokerError) as raised:
+        client("/executor/v2/nodes/poll", {})
+    assert raised.value.code == "executor_node_epoch_changed"
 
 
 def test_duplicate_keys_and_oversized_frames_are_rejected():

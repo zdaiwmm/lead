@@ -26,7 +26,7 @@ MAX_FRAME = 16 * 1024 * 1024
 SOCKET = "/run/lead-codex-node/broker.sock"
 WORKER_UNIT = "lead-codex-worker.service"
 WORKER_USER = "lead-codex"
-ERRORS = {"executor_node_unavailable", "executor_scope_forbidden", "executor_epoch_changed",
+ERRORS = {"executor_node_unavailable", "executor_node_epoch_changed", "executor_scope_forbidden", "executor_epoch_changed",
     "executor_scope_generation_changed", "executor_request_conflict", "executor_result_conflict",
     "executor_payload_invalid", "executor_capacity_unavailable", "executor_not_ready"}
 
@@ -231,7 +231,7 @@ class Broker:
                 require(self.authenticate(peer) == generation, "broker_worker_changed", 409)
             return {"v": 1, "id": request_id, "result": result}
         except BrokerError as error:
-            if error.code == "executor_node_unavailable":
+            if error.code in ("executor_node_unavailable", "executor_node_epoch_changed"):
                 self.revoked = True
             return {"v": 1, "id": request_id, "error": {"code": error.code,
                 "status": error.status, "retryable": error.retryable}}
