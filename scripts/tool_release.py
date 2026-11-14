@@ -106,23 +106,25 @@ def remote_program(files, sha, name, before):
     # The installer itself is a source in the same authenticated, tested bundle.
     module = base64.b64encode(files["scripts/tool_install.py"]).decode()
     data = base64.b64encode(files["scripts/" + name]).decode()
+    helper = base64.b64encode(files["scripts/home_systemd_release.py"]).decode()
     program = """import base64,json,os,subprocess
 from pathlib import Path
 assert os.geteuid()==0
 exec(compile(base64.b64decode(__MODULE__),'reviewed-tool-installer','exec'))
+source_helper={'__name__':'reviewed_home_source'}
+exec(compile(base64.b64decode(__HELPER__),'reviewed-home-source','exec'),source_helper)
 store=Path('/srv/lead-prod-vault/lead-git-releases')
 tools=Path('/usr/local/lib/lead-home-release')
 def current():
  return subprocess.check_output([str(tools/'home_systemd_release.py'),'current'],text=True,timeout=40).strip()
 def source(sha,name):
  mirror=store/'lead.git'
- subprocess.run(['git','-c','credential.helper=','-c','core.hooksPath=/dev/null','--git-dir',str(mirror),'fetch','--no-tags','https://github.com/zdaiwmm/lead.git','+refs/heads/main:refs/heads/main'],check=True,timeout=120,stdout=subprocess.DEVNULL)
- subprocess.run(['git','--git-dir',str(mirror),'merge-base','--is-ancestor',sha,'refs/heads/main'],check=True)
+ source_helper['sync_public_main'](mirror,sha)
  return subprocess.check_output(['git','--git-dir',str(mirror),'show',sha+':'+name])
 result=install(tools,store,__NAME__,base64.b64decode(__DATA__),__SHA__,__OLD__,__APP__,current=current,git_source=source)
 print(json.dumps(result))
 """
-    for key, value in {"MODULE": module, "DATA": data, "NAME": name, "SHA": sha,
+    for key, value in {"MODULE": module, "HELPER": helper, "DATA": data, "NAME": name, "SHA": sha,
                        "OLD": before["old"], "APP": before["app"]}.items():
         program = program.replace("__" + key + "__", repr(value))
     return program

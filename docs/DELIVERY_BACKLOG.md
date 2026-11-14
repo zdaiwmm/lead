@@ -1,5 +1,7 @@
 # lead 开发工作项和验收清单
 
+2026-11-15 共用执行实际部署门禁修正：4b3461d主线CI `43616023880/1` backend失败，旧产物不发布，原应用仍S9/0034。真实备份克隆R1因GitHub连接超时、R2因LD环境遗漏在建库前停止；R3使用已核公开Gitbundle，按实际注册管理员连续迁移两次，原列和全局角色/成员关系未变，9项负例均拒绝并回滚，独立确认克隆无残留。保留原catalog摘要，另固定实际混合owner完整摘要`64239613f49e124deb187afa68d32a91`，不改owner或抹除权限字段；Home与工具安装bootstrap共用固定公开main-ref双读和精确本地Git核验，匹配才复用已导入对象，原来源/审批/锁/备份/回读门禁保留。本次启用范围已批准，待相邻修正合入后的新精确main完整验证及同轮产物正式执行。
+
 2026-11-15 共用执行演练修正：精确main `54f521f62edb6f45c8a11ed64afb65990aaec0df` 的CI attempt1因apt仓库TLS超时尚未进入测试，attempt2因已复现shared rehearsal名称与受控role连接guard不匹配，由Root取消；无生产应用切换。最小修正仅严格接受growth/shared两种固定演练库名，并在shared专属放行表固定新helper blob，旧growth协议不变；定向69项合成回归通过，新精确main完整验证仍待执行。
 
 2026-11-14 服务器执行端最新：[第23.18节](requirements/20261112-unified-browser-research-memory.md#2318-mijiu-server-执行端2026-11-14本次授权实施中)。093精确CI43598058049/1完整成功及同轮原件/canonical prepare放行，独立出网已安装启用并回读。本人手机官方授权完成，服务器account/model ready为ChatGPT/Sol/medium；1次最小真实回复及换进程恢复同一非空Thread通过，无第二次模型请求或社媒操作。新Agent共用Node与独立studio已整合，独立PG146项/11表16函数catalog/7负例及真实多UID/MainPID凭据演练通过，临时资源清理。已修实际LoadCredential 0440掩码、配置CHECK及policy行锁问题，原RED保留；本机116核心、36连接器、152发布及前端构建通过。正式Node注册/worker、新App/0035生产迁移仍未执行，本次范围已获批准，待新精确main完整验证、备份恢复核验及正式执行；原AppS9、API通道和账本保持，不迁移或重放旧任务。

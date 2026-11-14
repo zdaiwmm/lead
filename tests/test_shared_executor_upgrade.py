@@ -247,3 +247,35 @@ def test_shared_drill_helper_admission_preserves_hold_blob_catalog_and_package_g
             admit()
         if not (held and matching and schema_ready):
             assert not any(call[0] == 'package' for call in calls)
+
+
+def test_shared_catalog_can_admit_only_a_separately_frozen_site_fingerprint(modules, monkeypatch):
+    hook, _ = modules
+    original_catalog = hook.shared_executor_catalog_query()
+    canonical = hook.SHARED_EXECUTOR_CATALOG_MD5
+    site = 'b' * 32
+    monkeypatch.setattr(hook, 'SHARED_EXECUTOR_SITE_CATALOG_MD5', site, raising=False)
+    query = hook.shared_executor_schema_query()
+    assert "md5((" + original_catalog + ")::text) IN ('" + canonical + "','" + site + "')" in query
+    # Owner names, ACL grantees and security flags remain in the exact digest.
+    assert hook.shared_executor_catalog_query() == original_catalog
+    assert 'pg_get_userbyid(c.relowner)' in original_catalog
+    assert 'pg_get_userbyid(p.proowner)' in original_catalog
+    assert "coalesce(r.rolname,'PUBLIC')" in original_catalog
+    assert 'rolsuper,rolbypassrls' in original_catalog and 'pg_auth_members' in original_catalog
+
+
+def test_unmeasured_site_catalog_has_no_second_admission(modules, monkeypatch):
+    hook, _ = modules
+    monkeypatch.setattr(hook, 'SHARED_EXECUTOR_SITE_CATALOG_MD5', None)
+    query = hook.shared_executor_schema_query()
+    assert query.endswith(" IN ('" + hook.SHARED_EXECUTOR_CATALOG_MD5 + "')")
+
+
+@pytest.mark.parametrize('site', ['', 'PENDING', 'A' * 32, 'b' * 31, 'b' * 33,
+    "b' OR true--", 0, False])
+def test_site_catalog_is_never_an_owner_alias_or_unvalidated_sql_literal(modules, monkeypatch, site):
+    hook, _ = modules
+    monkeypatch.setattr(hook, 'SHARED_EXECUTOR_SITE_CATALOG_MD5', site, raising=False)
+    with pytest.raises(hook.Refused, match='site catalog.*not frozen'):
+        hook.shared_executor_schema_query()

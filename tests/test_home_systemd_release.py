@@ -16,6 +16,7 @@ def hook(monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     h = importlib.import_module("home_systemd_release")
     monkeypatch.setattr(h, "STORE", tmp_path)
+    monkeypatch.setattr(h, "public_main", lambda: "b" * 40)
     # A maintenance host may really have these installed. Unit tests select
     # their own fixture tools instead of discovering the host's live verifier.
     monkeypatch.setattr(h, "TOOLS", tmp_path / "tools")
@@ -139,6 +140,8 @@ def test_deploy_path_checks_compatibility_and_skips_repeats(
 
     def command(*args, **kwargs):
         commands.append(args)
+        if "rev-parse" in args and args[-1] == "refs/heads/main":
+            return new
         if args[0] == "findmnt":
             return str(hook.VAULT)
         if "diff" in args:
@@ -931,6 +934,8 @@ def provisioning(hook, monkeypatch, tmp_path):
     dropin = systemd / (service + '.d') / 'zzzz-lead-executor.conf'
     def run(*args, **kwargs):
         commands.append(args)
+        if 'rev-parse' in args and args[-1] == 'refs/heads/main':
+            return sha
         if args[:2] == ('systemctl', 'stop'):
             props['ActiveState'] = 'inactive'
         if args[:2] == ('systemctl', 'start'):

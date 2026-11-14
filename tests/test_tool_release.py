@@ -225,3 +225,73 @@ def test_attended_broker_never_executes_an_unscoped_operation(monkeypatch):
     with pytest.raises(ConnectionError, match="interrupted"):
         operator.serve(io.StringIO(json.dumps({"operation": "deploy", "sha": SHA}) + "\n"),
                        io.StringIO(), ["unused"], SHA)
+
+
+@pytest.mark.parametrize('fault', [None, 'api', 'source'])
+def test_bootstrap_source_uses_authenticated_bundle_helper_without_installing_it(monkeypatch, fault, capsys):
+    import os
+    import urllib.error
+    import urllib.request
+    from types import SimpleNamespace
+
+    root = Path(__file__).resolve().parents[1]
+    data = b'VALUE="reviewed target"\n'
+    # Execute the generated bootstrap and its real Home helper, but never install.
+    driver = b'''def install(tools,store,name,data,sha,old,app,*,current,git_source):
+ if git_source(sha,'scripts/'+name)!=data:raise ValueError('Approved main Git source differs')
+ return {'source_verified':True,'application_switch':False}
+'''
+    files = {'scripts/tool_install.py': driver,
+             'scripts/home_systemd_release.py': (root / 'scripts/home_systemd_release.py').read_bytes(),
+             'scripts/request_home_release.py': data}
+    program = release.remote_program(files, SHA, 'request_home_release.py', {'old': '0' * 64, 'app': APP})
+    git_calls, http_calls, shown = [], [], []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, limit):
+            assert limit == 65537
+            return json.dumps({'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': SHA}}).encode()
+
+    def open(request, timeout):
+        http_calls.append(request.full_url)
+        if fault == 'api':
+            raise urllib.error.URLError('synthetic API unavailable')
+        return Response()
+
+    def run(argv, **kwargs):
+        git_calls.append(argv)
+        return SimpleNamespace(stdout=SHA + '\n' if 'rev-parse' in argv else '')
+
+    def output(argv, **kwargs):
+        assert argv == ['git', '--git-dir', '/srv/lead-prod-vault/lead-git-releases/lead.git',
+                        'show', SHA + ':scripts/request_home_release.py']
+        shown.append(argv)
+        return b'wrong source' if fault == 'source' else data
+
+    monkeypatch.setattr(os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(urllib.request, 'build_opener', lambda *args: SimpleNamespace(open=open))
+    monkeypatch.setattr(subprocess, 'run', run)
+    monkeypatch.setattr(subprocess, 'check_output', output)
+    namespace = {'__name__': 'bootstrap_test'}
+    if fault == 'api':
+        with pytest.raises(Exception, match='public main reference unavailable'):
+            exec(compile(program, '<bootstrap>', 'exec'), namespace)
+        assert not git_calls and not shown
+    elif fault == 'source':
+        with pytest.raises(ValueError, match='Git source differs'):
+            exec(compile(program, '<bootstrap>', 'exec'), namespace)
+        assert len(shown) == 1
+    else:
+        exec(compile(program, '<bootstrap>', 'exec'), namespace)
+        assert json.loads(capsys.readouterr().out)['source_verified'] is True
+        assert len(shown) == 1
+    assert not any('fetch' in call for call in git_calls)
+    assert len(http_calls) == (1 if fault == 'api' else 2)

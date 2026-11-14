@@ -170,6 +170,8 @@ def test_shared_release_catalog_rejects_each_permission_and_identity_regression(
         'GRANT INSERT ON lead.executor_nodes TO lead_runtime',
         'ALTER TABLE lead.admin_configs DROP CONSTRAINT admin_configs_kind_check',
         'DROP INDEX lead.executor_node_project_grant',
+        'ALTER TABLE lead.executor_nodes OWNER TO lead_auth',
+        'GRANT SELECT ON lead.executor_nodes TO pg_monitor',
     )
     with psycopg.connect(**target) as c:
         assert c.execute(query).fetchone()[0] is True

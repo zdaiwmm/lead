@@ -16,6 +16,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import UUID
@@ -43,6 +44,62 @@ def require(condition, message):
 
 def run(*args, timeout=30):
     return subprocess.run(args, capture_output=True, text=True, check=True, timeout=timeout).stdout.rstrip("\n")
+
+
+def public_main():
+    """Read only the fixed public GitHub ref, without proxy or redirect trust."""
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            require(key not in value, 'ambiguous public main response')
+            value[key] = item
+        return value
+
+    request = urllib.request.Request('https://api.github.com/repos/zdaiwmm/lead/git/ref/heads/main',
+        headers={'User-Agent': 'lead-home-release', 'Accept': 'application/vnd.github+json'})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    try:
+        with opener.open(request, timeout=20) as response:
+            require(response.status == 200, 'public main response unavailable')
+            raw = response.read(65537)
+        require(len(raw) <= 65536, 'public main response too large')
+        value = json.loads(raw, object_pairs_hook=unique)
+    except (OSError, ValueError, RecursionError):
+        raise Refused('public main reference unavailable') from None
+    require(type(value) is dict and value.get('ref') == 'refs/heads/main', 'public main reference differs')
+    target = value.get('object')
+    require(type(target) is dict and target.get('type') == 'commit'
+            and type(target.get('sha')) is str and SHA.fullmatch(target['sha']), 'public main commit differs')
+    return target['sha']
+
+
+def sync_public_main(mirror, sha):
+    """An imported mirror is usable only with fresh, unchanged public proof."""
+    require(SHA.fullmatch(sha), 'invalid full SHA')
+    published = public_main()
+
+    def local_main():
+        try:
+            value = run('git', '--git-dir', mirror, 'rev-parse', '--verify', '--quiet', 'refs/heads/main')
+        except subprocess.CalledProcessError as error:
+            if error.returncode != 1:
+                raise
+            return None
+        require(SHA.fullmatch(value), 'local main reference unavailable')
+        return value
+
+    if local_main() != published:
+        run('git', '-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', '--git-dir', mirror,
+            'fetch', '--no-tags', 'https://github.com/zdaiwmm/lead.git',
+            '+refs/heads/main:refs/heads/main', timeout=120)
+    require(public_main() == published, 'public main changed during source verification')
+    require(local_main() == published, 'local main differs from public main')
+    run('git', '--git-dir', mirror, 'merge-base', '--is-ancestor', sha, 'refs/heads/main')
+    return published
 
 
 def unit(role):
@@ -655,10 +712,7 @@ def provision_executor(sha, plan_path):
         require(release.stat().st_mode & 0o005 == 0o005,
                 'executor image root must be readable and traversable by the service user')
         mirror = STORE / 'lead.git'
-        run('git', '-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null', '--git-dir', mirror,
-            'fetch', '--no-tags', 'https://github.com/zdaiwmm/lead.git',
-            '+refs/heads/main:refs/heads/main', timeout=120)
-        run('git', '--git-dir', mirror, 'merge-base', '--is-ancestor', sha, 'refs/heads/main')
+        sync_public_main(mirror, sha)
         plan, raw = executor_provision_plan(path, sha)
         channel, service, binding = plan['channel'], plan['service'], plan['binding']
         if plan['core_mode'] == 'main-current':
@@ -1442,6 +1496,10 @@ SHARED_EXECUTOR_FILES = {
 # PostgreSQL 18 rehearsal: seven permission/key/policy mutations rejected.
 # Evidence SHA256: 273ca6daff28687df90bb91c8c06000cf2fe740a4f2ecd2d8c670ed277dc2cc5
 SHARED_EXECUTOR_CATALOG_MD5 = '5bb5c1b655606cf163aef47b5d57ab82'
+# PostgreSQL 18.6 registered-admin backup clone: two migrations, nine mutations rejected.
+# Catalog SHA256: 8d207c035353958495aa56e9a5b5f68d031ecf083ca6abccb1e816a715d67063
+# Proof SHA256: b71b527eafa9b4bae701a73655dc0bf83652c3e03861ac92a6aa123015c6b9c1
+SHARED_EXECUTOR_SITE_CATALOG_MD5 = '64239613f49e124deb187afa68d32a91'
 
 
 def shared_executor_catalog_query():
@@ -1510,6 +1568,13 @@ def shared_executor_catalog_query():
 def shared_executor_schema_query():
     require(re.fullmatch('[a-f0-9]{32}',SHARED_EXECUTOR_CATALOG_MD5),
             'shared-executor catalog is not frozen')
+    digests = [SHARED_EXECUTOR_CATALOG_MD5]
+    if SHARED_EXECUTOR_SITE_CATALOG_MD5 is not None:
+        require(type(SHARED_EXECUTOR_SITE_CATALOG_MD5) is str
+                and re.fullmatch('[a-f0-9]{32}',SHARED_EXECUTOR_SITE_CATALOG_MD5),
+                'shared-executor site catalog is not frozen')
+        digests.append(SHARED_EXECUTOR_SITE_CATALOG_MD5)
+    exact_catalogs = ','.join("'"+value+"'" for value in digests)
     return ('SELECT ('+browser_schema_query().removeprefix('SELECT').strip()+') AND ('+
             local_executor_schema_query(shared=True).removeprefix('SELECT').strip()+
             ") AND (SELECT count(*)=5 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class "
@@ -1517,7 +1582,7 @@ def shared_executor_schema_query():
             "'executor_studio_requests','executor_studio_commands','executor_studio_events')) AND "
             "(SELECT count(*)=2 AND bool_and(NOT rolsuper AND NOT rolbypassrls) FROM pg_roles "
             "WHERE rolname IN ('lead_runtime','lead_auth')) AND "
-            "md5(("+shared_executor_catalog_query()+")::text)='"+SHARED_EXECUTOR_CATALOG_MD5+"'")
+            "md5(("+shared_executor_catalog_query()+")::text) IN ("+exact_catalogs+")")
 
 
 def reviewed_shared_executor(mirror,sha,extra):
@@ -1751,11 +1816,8 @@ def deploy(sha):
             run(TOOLS / "mount-image", sha, timeout=1800)
         image(sha)
         mirror = STORE / "lead.git"
-        run("git", "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "--git-dir", mirror,
-            "fetch", "--no-tags", "https://github.com/zdaiwmm/lead.git",
-            "+refs/heads/main:refs/heads/main", timeout=120)
+        sync_public_main(mirror, sha)
         run("git", "--git-dir", mirror, "merge-base", "--is-ancestor", old, sha)
-        run("git", "--git-dir", mirror, "merge-base", "--is-ancestor", sha, "refs/heads/main")
         # Reject schema, dependency, service configuration and runtime changes without a separate plan.
         changes = run("git", "--git-dir", mirror, "diff", "--no-renames", "--name-only", "-z", old, sha)
         allowed = ("services/api/lead_app/", "apps/web/app/", "apps/web/public/", "docs/", "tests/", ".github/")
