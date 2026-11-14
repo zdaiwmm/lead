@@ -1,6 +1,6 @@
 # lead 开发工作项和验收清单
 
-2026-11-14 服务器执行端最新：[第23.18节](requirements/20261112-unified-browser-research-memory.md#2318-mijiu-server-执行端2026-11-14本次授权实施中)。PR75已合入2a21，PG启动和frontend/checks/namespace通过，但完整CI43587579142/1在2095P后因首次SW脚本缺Network归属证据失败，未放行。现已确定复现脚本fetch早于观察启动，并修page throttle与唯一root session时序；独立窄审、59单元、原caller及三个相邻真实回归通过，原权限断言保留，待新精确main完整CI。用户澄清服务器Codex须作为所有项目共用底座、手机只授权一次，不逐项目配对；统一Node注册/项目范围派生/建项前工作室范围的方案另行收敛，应用更新与迁移须按实际新范围交付。Node/Codex/S9连接器已安装，正式unit、真实账号登录及统一接入未完成；原AppS9、API通道和账本保持，无真实社媒操作。
+2026-11-14 服务器执行端最新：[第23.18节](requirements/20261112-unified-browser-research-memory.md#2318-mijiu-server-执行端2026-11-14本次授权实施中)。093精确CI43598058049/1完整成功及同轮原件/canonical prepare放行，独立出网已安装启用并回读。本人手机官方授权完成，服务器account/model ready为ChatGPT/Sol/medium；1次最小真实回复及换进程恢复同一非空Thread通过，无第二次模型请求或社媒操作。新Agent共用Node与独立studio已整合，独立PG146项/11表16函数catalog/7负例及真实多UID/MainPID凭据演练通过，临时资源清理。已修实际LoadCredential 0440掩码、配置CHECK及policy行锁问题，原RED保留；本机116核心、36连接器、152发布及前端构建通过。正式Node注册/worker、新App/0035生产迁移仍未执行，待具体PR快检、最终新范围授权及精确main完整验证；原AppS9、API通道和账本保持，不迁移或重放旧任务。
 
 2026-11-14 本次服务器执行端：[第23.18节](requirements/20261112-unified-browser-research-memory.md#2318-mijiu-server-执行端2026-11-14本次授权实施中)。用户已授权在 mijiu-server 安装 Codex、常驻接入和配对，沿用 ChatGPT/Sol-medium，先准备后本人官方授权。独立分支 `codex/server-codex-executor-20261114` 起于实时main c635d3b；确认服务器Ubuntu/x86-64、原应用仍S9。采用专用普通用户/systemd、原封连接器run，不运行macOS的pair --install，不迁移旧Task/device/thread。新增unit/打包与流程说明按application完整CI，原S9应用不重切；账号授权、配对和实测结果待后续回填。服务器访问Lead仍经公网HTTPS，TLS通过，不承诺零延迟；旧unknown/费用及30天配对有效期、epoch丢响应的人工恢复边界保留。
 

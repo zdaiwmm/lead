@@ -34,6 +34,26 @@ export interface Binding {
   epoch: number;
   name: string;
 }
+export interface ServerBinding {
+  version: 2;
+  transport: "unix-broker";
+  scope_ref: string;
+  scope_kind: "project" | "studio";
+  tenant_id: string;
+  agent_id?: string;
+  device_id?: string;
+  studio_id?: string;
+  epoch: number;
+  grant_generation: number;
+  policy_revision: string;
+}
+export interface ExecutorClient {
+  binding?: Binding | ServerBinding;
+  call(path: string, payload: Dict): Promise<Dict>;
+}
+export interface BrokerRpc {
+  call(method: string, params: Dict): Promise<Dict>;
+}
 export interface RequestRecord {
   id: string;
   hash: string;

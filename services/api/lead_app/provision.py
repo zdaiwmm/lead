@@ -114,6 +114,18 @@ def provision_security(conn):
     )
     conn.execute("REVOKE UPDATE,DELETE ON lead.audit_events FROM lead_runtime")
     conn.execute("REVOKE UPDATE,DELETE ON lead.admin_config_versions FROM lead_runtime")
+    if conn.execute("SELECT to_regclass('lead.executor_nodes')").fetchone()[0]:
+        conn.execute("REVOKE INSERT,UPDATE,DELETE ON lead.executor_nodes,lead.executor_node_grants FROM lead_runtime")
+        conn.execute("GRANT UPDATE(capabilities,last_seen_at) ON lead.executor_nodes TO lead_runtime")
+        conn.execute("REVOKE UPDATE,DELETE ON lead.executor_studio_events FROM lead_runtime")
+        functions = ('executor_policy()', 'executor_node_write(uuid,uuid,uuid[],text,text,text,timestamptz)',
+            'executor_node_activate(uuid,text,text,text,text,jsonb)', 'executor_node_control(uuid,text,text)',
+            'executor_node_instance(uuid,bigint,text)', 'executor_grant_ensure(uuid,uuid,uuid)',
+            'executor_catalog_projects(uuid,uuid)', 'executor_grant_instance(uuid,bigint,bigint,text)',
+            'executor_grant_locked(uuid)', 'executor_grant_revoke(uuid)')
+        for function in functions:
+            conn.execute(sql.SQL('REVOKE ALL ON FUNCTION lead.' + function + ' FROM PUBLIC'))
+            conn.execute(sql.SQL('GRANT EXECUTE ON FUNCTION lead.' + function + ' TO lead_runtime'))
     conn.execute(
         "REVOKE INSERT,UPDATE,DELETE ON lead.recovery_observations FROM lead_runtime"
     )

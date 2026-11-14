@@ -42,10 +42,10 @@ def test_additive_upgrade_keeps_original_columns_and_detects_control_mutation(up
         return psycopg.connect(**target)
     columns=helper.column_inventory(connect,target['dbname'])
     before=helper.data_inventory(connect,target['dbname'],columns)
-    upgrade(target)
+    upgrade(target, target='0034_local_executor')
     after=helper.data_inventory(connect,target['dbname'],columns)
     helper.assert_unchanged(before,after)
-    upgrade(target)
+    upgrade(target, target='0034_local_executor')
     helper.assert_unchanged(before,helper.data_inventory(connect,target['dbname'],columns))
     with psycopg.connect(**target) as c:
         assert c.execute('SELECT desired_state,control_version FROM lead.agents WHERE id=%s',(aid,)).fetchone()==('paused',7)
@@ -58,7 +58,7 @@ def test_additive_upgrade_keeps_original_columns_and_detects_control_mutation(up
 def test_release_schema_readback_checks_actual_unified_permissions_and_guards(upgrade_database):
     _, target = upgrade_database
     release = importlib.import_module('home_systemd_release')
-    upgrade(target)
+    upgrade(target, target='0034_local_executor')
     query = release.unified_schema_query()
     mutations = (
         "ALTER TABLE lead.experiences DISABLE ROW LEVEL SECURITY",
@@ -90,7 +90,7 @@ def test_release_schema_readback_checks_actual_unified_permissions_and_guards(up
 def test_unified_release_refuses_legacy_functions_even_with_additive_tables(upgrade_database, name):
     _, target = upgrade_database
     release = importlib.import_module('home_systemd_release')
-    upgrade(target)
+    upgrade(target, target='0034_local_executor')
     legacy = (Path(__file__).resolve().parents[1]/'infra/migrations/sql/0031_growth_runtime.sql').read_text()
     with psycopg.connect(**target) as c:
         statement = re.search(r'CREATE FUNCTION lead\.'+name+r'\(.*?\$\$;', legacy, re.S)[0]
@@ -119,7 +119,7 @@ def test_codex_upgrade_preserves_existing_unified_business_evidence(upgrade_data
     columns = helper.column_inventory(connect, target['dbname'])
     assert {'experiences','research_allowances'} <= set(columns)
     before = helper.data_inventory(connect, target['dbname'], columns)
-    upgrade(target)
+    upgrade(target, target='0034_local_executor')
     helper.assert_unchanged(before, helper.data_inventory(connect, target['dbname'], columns))
     # An application rollback must also retain newly created transport facts.
     columns = helper.column_inventory(connect, target['dbname'])
@@ -129,7 +129,7 @@ def test_codex_upgrade_preserves_existing_unified_business_evidence(upgrade_data
 def test_transport_schema_rejects_weakened_keys_policies_and_privileges(upgrade_database):
     _, target = upgrade_database
     release = importlib.import_module('home_systemd_release')
-    upgrade(target)
+    upgrade(target, target='0034_local_executor')
     query = release.local_executor_schema_query()
     mutations = (
         "ALTER TABLE lead.local_executor_devices DISABLE ROW LEVEL SECURITY",
@@ -153,4 +153,30 @@ def test_transport_schema_rejects_weakened_keys_policies_and_privileges(upgrade_
             assert c.execute(query).fetchone()[0] is False, statement
             c.execute('ROLLBACK TO SAVEPOINT transport_guard')
             c.execute('RELEASE SAVEPOINT transport_guard')
+            assert c.execute(query).fetchone()[0] is True
+
+
+def test_shared_release_catalog_rejects_each_permission_and_identity_regression(upgrade_database):
+    _, target = upgrade_database
+    release = importlib.import_module('home_systemd_release')
+    upgrade(target, target='0035_shared_executor')
+    query = release.shared_executor_schema_query()
+    mutations = (
+        'ALTER TABLE lead.executor_nodes DISABLE ROW LEVEL SECURITY',
+        'ALTER TABLE lead.executor_node_grants DROP CONSTRAINT executor_node_grants_tenant_id_agent_id_device_id_fkey',
+        'CREATE POLICY unexpected_allow ON lead.executor_nodes USING(true)',
+        """CREATE OR REPLACE FUNCTION lead.executor_project_row(p_tenant uuid,p_agent uuid,p_device uuid,p_scope jsonb)
+            RETURNS boolean LANGUAGE sql STABLE AS $$ SELECT true $$""",
+        'GRANT INSERT ON lead.executor_nodes TO lead_runtime',
+        'ALTER TABLE lead.admin_configs DROP CONSTRAINT admin_configs_kind_check',
+        'DROP INDEX lead.executor_node_project_grant',
+    )
+    with psycopg.connect(**target) as c:
+        assert c.execute(query).fetchone()[0] is True
+        for statement in mutations:
+            c.execute('SAVEPOINT shared_guard')
+            c.execute(statement)
+            assert c.execute(query).fetchone()[0] is False, statement
+            c.execute('ROLLBACK TO SAVEPOINT shared_guard')
+            c.execute('RELEASE SAVEPOINT shared_guard')
             assert c.execute(query).fetchone()[0] is True

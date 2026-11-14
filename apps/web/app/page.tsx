@@ -19,6 +19,7 @@ import ChannelCards from "./channel-cards";
 import { MediaUpload, AssetPreview } from "./media-upload";
 import { api, setWorkspace, getWorkspace } from "./api-client";
 import WorkspaceSettings from "./workspace-settings";
+import SharedExecutorStatus from "./shared-executor-status";
 import UsagePanel from "./usage-panel";
 import AgentAvatar from "./agent-avatar";
 import AgentIdentity from "./agent-identity";
@@ -697,6 +698,7 @@ export default function Lead() {
           <main className="settings-page">
             <p className="eyebrow">WORKSPACE</p>
             <h1>设置</h1>
+            <SharedExecutorStatus key={user?.tenant_id || "local"} />
             {user?.mode === "oidc" && (
               <WorkspaceSettings user={user} key={user.tenant_id} />
             )}

@@ -3,44 +3,53 @@ import { Store } from "./store.ts";
 import { LeadClient } from "./transport.ts";
 import { Runner } from "./runner.ts";
 import { capabilities as readCapabilities } from "./capabilities.ts";
-import type { Command, Dict } from "./types.ts";
+import type { Command, Dict, ExecutorClient } from "./types.ts";
+import { BrokerError } from "./broker-client.ts";
 export class Daemon {
   store: Store;
   runner: Runner;
-  client: LeadClient;
-  instanceId = randomUUID();
+  client: ExecutorClient;
+  instanceId: string = randomUUID();
   tasks = new Map<string, Promise<void>>();
   stopped = false;
   capabilities: Dict;
   constructor(
     store: Store,
     runner = new Runner(store),
-    client?: LeadClient,
+    client?: ExecutorClient,
     capabilities: Dict = {},
   ) {
-    if (!store.data.binding) throw new Error("device_not_paired");
+    if (!store.runtimeBinding()) throw new Error("device_not_paired");
     this.store = store;
     this.runner = runner;
-    this.client = client || new LeadClient(store.data.binding);
+    if (!client && !store.data.binding) throw new Error("server_broker_required");
+    this.client = client || new LeadClient(store.data.binding!);
     this.capabilities = capabilities;
+    if (store.shared) this.instanceId = store.data.instance_id!;
   }
   async tick() {
+    if (this.stopped) return;
     // Establish this process's epoch before uploading events or running any tools.
     const response = await this.client.call("poll", {
       instance_id: this.instanceId,
       capabilities: this.capabilities,
     });
+    if (this.stopped) return;
     if (typeof response.epoch !== "number")
       throw new Error("invalid_device_epoch");
-    if (this.store.data.binding!.epoch !== response.epoch) {
-      this.store.data.binding!.epoch = response.epoch;
+    if (this.store.shared && this.store.runtimeBinding()!.epoch !== response.epoch)
+      throw new BrokerError("executor_epoch_changed", 409);
+    if (this.store.runtimeBinding()!.epoch !== response.epoch) {
+      this.store.runtimeBinding()!.epoch = response.epoch;
       this.store.save();
     }
-    this.client.binding = this.store.data.binding!;
+    this.client.binding = this.store.runtimeBinding()!;
     await this.flush();
+    if (this.stopped) return;
     for (const command of response.commands || []) this.dispatch(command);
   }
   dispatch(command: Command) {
+    if (this.stopped) return;
     if (this.tasks.has(command.id)) return;
     const task = this.runner
       .command(command)
@@ -54,6 +63,7 @@ export class Daemon {
     this.tasks.set(command.id, task);
   }
   recover() {
+    if (this.stopped) return;
     for (const record of Object.values(this.store.data.requests))
       if (!["completed", "failed", "interrupted"].includes(record.state))
         this.dispatch({

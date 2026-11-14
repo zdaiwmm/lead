@@ -16,9 +16,11 @@ def helper():
 
 
 @pytest.mark.parametrize('failure',['app','executors','schema','installed'])
-def test_every_independent_check_precedes_actual_restore(helper,tmp_path,monkeypatch,failure):
+@pytest.mark.parametrize('shared',[False,True])
+def test_every_independent_check_precedes_actual_restore(helper,tmp_path,monkeypatch,failure,shared):
     sha='b'*40
-    pending=tmp_path/'unified-browser-cutover.pending'
+    prefix='shared-executor' if shared else 'unified-browser'
+    pending=tmp_path/(prefix+'-cutover.pending')
     pending.write_text(sha+'\n')
     facts={'held':1,'other':0,'running':0,'ingress':'inactive'}
     calls=[]
@@ -43,19 +45,21 @@ def test_every_independent_check_precedes_actual_restore(helper,tmp_path,monkeyp
     monkeypatch.setattr(helper,'run',run)
     verifier={'verify':lambda *args,**kwargs:check('app'),
               'verify_executors':lambda *args:check('executors'),
-              'unified_schema_query':lambda:'query'}
+              ('shared_executor_schema_query' if shared else 'unified_schema_query'):lambda:'query'}
     with pytest.raises(ValueError,match='injected'):
-        helper.finish_cutover(tmp_path,sha,verifier,{'sql':sql},lambda path,data:path.write_bytes(data))
+        helper.finish_cutover(tmp_path,sha,verifier,{'sql':sql},lambda path,data:path.write_bytes(data),shared=shared)
     assert facts=={'held':1,'other':0,'running':0,'ingress':'inactive'}
     assert pending.exists()
-    assert not (tmp_path/'unified-browser-resumption.json').exists()
+    assert not (tmp_path/(prefix+'-resumption.json')).exists()
     assert not any(isinstance(call,tuple) and ('restore' in call or 'start' in call) for call in calls)
 
 
 @pytest.mark.parametrize('failure',['start-response','complete-journal'])
-def test_late_failure_reconciles_open_state_without_rehold_or_second_restore(helper,tmp_path,monkeypatch,failure):
+@pytest.mark.parametrize('shared',[False,True])
+def test_late_failure_reconciles_open_state_without_rehold_or_second_restore(helper,tmp_path,monkeypatch,failure,shared):
     sha='b'*40
-    pending=tmp_path/'unified-browser-cutover.pending'
+    prefix='shared-executor' if shared else 'unified-browser'
+    pending=tmp_path/(prefix+'-cutover.pending')
     pending.write_text(sha+'\n')
     facts={'held':1,'other':0,'running':0,'ingress':'inactive'}
     injected=False
@@ -75,21 +79,21 @@ def test_late_failure_reconciles_open_state_without_rehold_or_second_restore(hel
         return ''
     def write(path,data):
         nonlocal injected
-        if path.name=='unified-browser-cutover.complete' and failure=='complete-journal' and not injected:
+        if path.name==prefix+'-cutover.complete' and failure=='complete-journal' and not injected:
             injected=True
             raise ValueError('completion journal unavailable')
         path.write_bytes(data)
     monkeypatch.setattr(helper,'run',run)
     verifier={'verify':lambda *args,**kwargs:None,'verify_executors':lambda *args:None,
-              'unified_schema_query':lambda:'query'}
+              ('shared_executor_schema_query' if shared else 'unified_schema_query'):lambda:'query'}
     with pytest.raises(ValueError):
-        helper.finish_cutover(tmp_path,sha,verifier,{'sql':lambda query:'t'},write)
-    record=json.loads((tmp_path/'unified-browser-resumption.json').read_text())
+        helper.finish_cutover(tmp_path,sha,verifier,{'sql':lambda query:'t'},write,shared=shared)
+    record=json.loads((tmp_path/(prefix+'-resumption.json')).read_text())
     assert facts=={'held':0,'other':0,'running':1,'ingress':'active'}
     assert record['state']==('reconciliation-required' if failure=='start-response' else 'ingress-opened')
     assert record['observed']==facts
     assert pending.exists()
-    helper.finish_cutover(tmp_path,sha,verifier,{'sql':lambda query:'t'},write)
+    helper.finish_cutover(tmp_path,sha,verifier,{'sql':lambda query:'t'},write,shared=shared)
     assert not pending.exists()
     assert sum('restore' in call for call in calls)==1
     assert not any('hold' in call for call in calls)

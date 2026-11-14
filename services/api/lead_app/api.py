@@ -43,6 +43,7 @@ from .conversions import router as conversion_router
 from .creative_pipeline import router as creative_router
 from .db import all_rows, audit, one, record, require_agent, tx
 from .events import router as event_router
+from .executor_nodes_api import router as executor_nodes_router
 from .growth.views import router as growth_router
 from .local_executor_api import router as local_executor_router
 from .operating_playbooks import router as playbook_router
@@ -82,6 +83,7 @@ app.include_router(creative_router)
 app.include_router(operations_router)
 app.include_router(growth_router)
 app.include_router(local_executor_router)
+app.include_router(executor_nodes_router)
 app.include_router(browser_pilot_router)
 app.include_router(admin_router)
 app.include_router(advanced_admin_router)
@@ -294,16 +296,27 @@ class AgentSetupEdit(AgentSetupProfile):
 
 @app.post("/api/agents/setup/analyze")
 async def analyze_website(body: website_brief.Website, request: Request):
-    from . import local_executor
     aid = str(body.agent_id) if body.agent_id else None
     if aid:
         with tx(aid) as c:
             require_agent(c, aid)
     from .local_executor_client import activity_jobs, execution_context, uses_native
     key = "website:" + current_tenant() + ":" + str(body.request_id or hashlib.sha256(body.product_url.encode()).hexdigest())
-    if uses_native(aid, key=key):
+    if aid:
+        key = 'project:' + aid + ':' + key
+    else:
+        from .executor_studio import actor_transaction, namespace
+        with actor_transaction() as (_, actor):
+            key = namespace(actor, key)
+    selection = execution_context.set({'studio_purpose': 'website_brief'} if aid is None else {})
+    try:
+        native = uses_native(aid, key=key)
+    finally:
+        execution_context.reset(selection)
+    if native:
         async def continue_analysis():
-            context = execution_context.set({"key": key, "session_key": key, "agent_id": aid or local_executor.default_agent()})
+            context = execution_context.set({"key": key, "session_key": key, "agent_id": aid,
+                                             **({'studio_purpose': 'website_brief'} if aid is None else {})})
             try:
                 return await website_brief.analyze(body.product_url, aid)
             finally:

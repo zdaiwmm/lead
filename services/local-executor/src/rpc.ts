@@ -17,10 +17,14 @@ export class AppServer implements RpcLike {
   binary: string;
   args: string[];
   cwd?: string;
-  constructor(binary = "codex", args: string[] = [], cwd?: string) {
+  environment?: NodeJS.ProcessEnv;
+  experimentalApi: boolean;
+  constructor(binary = "codex", args: string[] = [], cwd?: string, environment?: NodeJS.ProcessEnv, experimentalApi = false) {
     this.binary = binary;
     this.args = args;
     this.cwd = cwd;
+    this.environment = environment;
+    this.experimentalApi = experimentalApi;
   }
   onNotification(fn: typeof this.notification) {
     this.notification = fn;
@@ -29,7 +33,7 @@ export class AppServer implements RpcLike {
     this.serverRequest = fn;
   }
   async open() {
-    const env = { ...process.env };
+    const env = { ...(this.environment || process.env) };
     delete env.LEAD_EXECUTOR_TOKEN;
     delete env.OPENAI_API_KEY;
     this.process = spawn(
@@ -70,6 +74,7 @@ export class AppServer implements RpcLike {
       else entry.resolve(msg.result);
     });
     await this.request("initialize", {
+      ...(this.experimentalApi ? { capabilities: { experimentalApi: true } } : {}),
       clientInfo: {
         name: "lead_local_executor",
         title: "Lead Local Executor",

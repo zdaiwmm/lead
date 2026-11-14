@@ -33,6 +33,11 @@ class SettingsModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class ExecutionSettings(SettingsModel):
+    source: Literal['legacy', 'managed_node'] = 'legacy'
+    node_id: UUID | None = None
+
+
 class ToolSettings(SettingsModel):
     public_web: bool = True
     advanced_research: bool = True
@@ -242,6 +247,7 @@ class NotificationSettings(SettingsModel):
 
 
 SCHEMAS = {
+    "execution": ExecutionSettings,
     "member_access": MemberAccessSettings,
     "pricing": PricingSettings,
     "external_notifications": ExternalNotificationSettings,

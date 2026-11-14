@@ -33,10 +33,13 @@ PRESERVED_TABLES = (
 )
 ADDITIVE_TABLES = ('experiences', 'research_allowances', 'local_executor_devices',
     'local_executor_projects', 'local_executor_requests', 'local_executor_commands', 'local_executor_events')
+SHARED_TABLES = ('executor_nodes', 'executor_node_grants', 'executor_studio_requests',
+    'executor_studio_commands', 'executor_studio_events', 'tenants', 'memberships',
+    'admin_configs', 'admin_config_versions')
 
 
-def validate_baseline(versions):
-    if len(versions) != 1 or versions[0] not in BASELINES:
+def validate_baseline(versions, *, shared=False):
+    if len(versions) != 1 or versions[0] not in (('0034_local_executor',) if shared else BASELINES):
         raise ValueError('Unexpected starting schema')
     return versions[0]
 
@@ -96,10 +99,10 @@ def verify_approval(sha, archive, *, get=public_api, started=False):
     return receipt
 
 
-def column_inventory(connect, name):
+def column_inventory(connect, name, *, shared=False):
     with connect(name) as c:
         tables = list(PRESERVED_TABLES)
-        tables.extend(table for table in ADDITIVE_TABLES
+        tables.extend(table for table in ADDITIVE_TABLES + (SHARED_TABLES if shared else ())
                       if c.execute('SELECT to_regclass(%s)', ('lead.'+table,)).fetchone()[0])
         return {table:[r[0] for r in c.execute("SELECT attname FROM pg_attribute WHERE attrelid=%s::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum",('lead.'+table,))] for table in tables}
 
@@ -136,11 +139,13 @@ def resume_facts(sha,site):
     return {**counts,'ingress':intake}
 
 
-def finish_cutover(stage,sha,verifier,site,write):
-    pending=stage/(PREFIX+'-cutover.pending')
+def finish_cutover(stage,sha,verifier,site,write, *, shared=False):
+    prefix='shared-executor' if shared else PREFIX
+    query='shared_executor_schema_query' if shared else 'unified_schema_query'
+    pending=stage/(prefix+'-cutover.pending')
     if pending.read_text().strip()!=sha:
         raise ValueError('Unified-browser cutover pending marker missing')
-    resume=stage/(PREFIX+'-resumption.json')
+    resume=stage/(prefix+'-resumption.json')
     if resume.exists() and json.loads(resume.read_text()).get('sha')!=sha:
         raise ValueError('Resumption journal differs')
     facts=resume_facts(sha,site)
@@ -148,7 +153,7 @@ def finish_cutover(stage,sha,verifier,site,write):
         raise ValueError('Initial cutover is not held')
     verifier['verify'](sha,fenced=facts['ingress']=='inactive',require_idle=False)
     verifier['verify_executors'](sha)
-    if site['sql'](verifier['unified_schema_query']())!='t':
+    if site['sql'](verifier[query]())!='t':
         raise ValueError('Final unified-browser schema readback failed')
     # Independent installed verifier must finish BEFORE scheduling or ingress opens.
     run(TOOLS/'home_systemd_release.py','verify-cutover',sha)
@@ -176,12 +181,30 @@ def finish_cutover(stage,sha,verifier,site,write):
             observed={'state':'unavailable'}
         record('reconciliation-required',observed)
         raise
-    complete=stage/(PREFIX+'-cutover.complete')
+    complete=stage/(prefix+'-cutover.complete')
     write(complete,(sha+'\n').encode())
     pending.unlink()
 
 
-def main():
+def source_requirements(*, shared=False):
+    scripts=('scripts/unified_browser_upgrade.py','scripts/growth_runtime_upgrade.py',
+        'scripts/home_systemd_release.py','scripts/request_home_release.py')
+    required=set(scripts)|{'infra/migrations/versions/0032_research_memory.py','infra/migrations/sql/0032_research_memory.sql',
+        'infra/migrations/versions/0033_unified_browser.py','infra/migrations/sql/0033_unified_browser.sql',
+        'infra/migrations/versions/0034_local_executor.py','infra/migrations/sql/0034_local_executor.sql'}
+    if shared:
+        required.update(('scripts/shared_executor_upgrade.py','infra/migrations/versions/0035_shared_executor.py',
+                         'infra/migrations/sql/0035_shared_executor.sql'))
+    return required
+
+
+def main(*, shared=False):
+    # Only the separate, attested entrypoint selects the fixed shared plan. No
+    # command-line target, source, table or verifier override is accepted.
+    goal='0035_shared_executor' if shared else GOAL
+    prefix='shared-executor' if shared else PREFIX
+    helper='shared_executor_upgrade.py' if shared else 'unified_browser_upgrade.py'
+    query='shared_executor_schema_query' if shared else 'unified_schema_query'
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('phase',choices=('rehearse','apply','finish'))
     parser.add_argument('--sha',required=True)
@@ -194,12 +217,15 @@ def main():
     source=stage/'source'
     if stage.resolve()!=stage or stage.stat().st_uid!=0 or stage.stat().st_mode & 0o077:
         raise ValueError('Private root-owned stage required')
-    if Path(__file__).resolve()!=source/'scripts/unified_browser_upgrade.py':
+    entry=Path(sys.argv[0]).resolve() if shared else Path(__file__).resolve()
+    if entry!=source/'scripts'/helper:
         raise ValueError('Use the attested main source in its private stage')
     mirror=STORE/'lead.git'
     run('git','--git-dir',mirror,'merge-base','--is-ancestor',args.sha,'refs/heads/main')
     scripts=('scripts/unified_browser_upgrade.py','scripts/growth_runtime_upgrade.py',
         'scripts/home_systemd_release.py','scripts/request_home_release.py')
+    if shared:
+        scripts+=('scripts/shared_executor_upgrade.py',)
     listing=run('git','--git-dir',mirror,'ls-tree','-r',args.sha,'--','services','infra/migrations','infra/alembic.ini',*scripts)
     listed=set()
     for line in listing.splitlines():
@@ -212,14 +238,13 @@ def main():
                 or any(parent.stat().st_uid!=0 or parent.stat().st_mode & 0o022 for parent in path.parents if parent.is_relative_to(stage))
                 or run('git','hash-object','--no-filters',path)!=blob):
             raise ValueError('Upgrade source drift')
-    required=set(scripts)|{'infra/migrations/versions/0032_research_memory.py','infra/migrations/sql/0032_research_memory.sql',
-        'infra/migrations/versions/0033_unified_browser.py','infra/migrations/sql/0033_unified_browser.sql',
-        'infra/migrations/versions/0034_local_executor.py','infra/migrations/sql/0034_local_executor.sql'}
+    required=source_requirements(shared=shared)
     if not required<=listed:
         raise ValueError('Upgrade source manifest is incomplete')
     sys.path[:0]=[str(source/'scripts')]
     base=runpy.run_path(str(source/'scripts/growth_runtime_upgrade.py'))
     verifier=runpy.run_path(str(source/'scripts/home_systemd_release.py'))
+    schema_query=verifier[query]()  # Unfrozen shared catalog stops before any backup/DDL.
     site=runpy.run_path('/srv/lead-prod-vault/lead-onboard-87d151a/site-state.py')
     env=site['e']
     os.environ.update(base['database_environment'](LIVE,env))
@@ -235,40 +260,40 @@ def main():
         with connect(name) as c:
             return [r[0] for r in c.execute('SELECT version_num FROM public.lead_migration_version')]
     def migrate(name,columns,before):
-        validate_baseline(version(name))
+        validate_baseline(version(name),shared=shared)
         os.environ['LEAD_DB_NAME']=name
-        upgrade({**options,'dbname':name},target=GOAL,roles=True)
-        if version(name)!=[GOAL]:
+        upgrade({**options,'dbname':name},target=goal,roles=True)
+        if version(name)!=[goal]:
             raise ValueError('Unexpected migrated schema')
         assert_unchanged(before,data_inventory(connect,name,columns))
         with connect(name) as c:
-            if not c.execute(verifier['unified_schema_query']()).fetchone()[0]:
+            if not c.execute(schema_query).fetchone()[0]:
                 raise ValueError('Unified-browser schema attestation failed')
     config_before=(LIVE/'state/config.json').read_bytes()
-    dump=stage/'pre-unified-browser.dump'
-    proof=stage/'unified-browser-rehearsal.json'
+    dump=stage/('pre-'+prefix+'.dump')
+    proof=stage/(prefix+'-rehearsal.json')
     def write(path,data):
         base['atomic_private'](path,data,previous=dump)
     pg=site['pg']/'lib/postgresql/18/bin'
     if args.phase=='rehearse':
-        baseline=validate_baseline(version('lead'))
+        baseline=validate_baseline(version('lead'),shared=shared)
         if not dump.exists():
-            partial=stage/'pre-unified-browser.partial'
+            partial=stage/('pre-'+prefix+'.partial')
             subprocess.run([pg/'pg_dump','-Fc','--file',partial,'lead'],env=env,check=True)
             os.replace(partial,dump)
-        name='lead_growth_drill_'+args.sha[:12]
+        name=('lead_shared_drill_' if shared else 'lead_growth_drill_')+args.sha[:12]
         with psycopg.connect(**options,dbname='postgres',autocommit=True) as admin:
             admin.execute(sql.SQL('CREATE DATABASE {} TEMPLATE template0').format(sql.Identifier(name)))
             try:
                 admin.execute(sql.SQL('REVOKE CONNECT ON DATABASE {} FROM PUBLIC').format(sql.Identifier(name)))
                 subprocess.run([pg/'pg_restore','--exit-on-error','-d',name,dump],env=env,check=True)
-                if validate_baseline(version(name)) != baseline:
+                if validate_baseline(version(name),shared=shared) != baseline:
                     raise ValueError('Original backup baseline differs')
-                columns=column_inventory(connect,name)
+                columns=column_inventory(connect,name,shared=shared)
                 before=data_inventory(connect,name,columns)
                 with base['drill_role_connections'](name,options):
                     migrate(name,columns,before)
-                    upgrade({**options,'dbname':name},target=GOAL,roles=True)
+                    upgrade({**options,'dbname':name},target=goal,roles=True)
                     assert_unchanged(before,data_inventory(connect,name,columns))
                 # The same verifier accepts the additive schema for the old app;
                 # neither authority nor unknown-action state is restored backwards.
@@ -288,13 +313,13 @@ def main():
     with dump.open('rb') as stream:
         if expected.get('sha')!=args.sha or expected.get('old')!=args.old or expected.get('dump_sha256')!=hashlib.file_digest(stream,'sha256').hexdigest():
             raise ValueError('Rehearsal proof differs')
-    started=stage/(PREFIX+'-migration.started.json')
-    journal=stage/(PREFIX+'-migration.json')
+    started=stage/(prefix+'-migration.started.json')
+    journal=stage/(prefix+'-migration.json')
     with (STORE/'deploy.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         verify_approval(args.sha,stage/'home-approval.zip',started=started.exists())
         if args.phase=='finish':
-            finish_cutover(stage,args.sha,verifier,site,write)
+            finish_cutover(stage,args.sha,verifier,site,write,shared=shared)
             print('Application and independent executors verified; original scheduling restored',flush=True)
             return
         if run(TOOLS/'home_systemd_release.py','current')!=args.old:
@@ -303,10 +328,10 @@ def main():
             saved=json.loads(started.read_text())
             if saved.get('sha')!=args.sha or saved.get('old')!=args.old:
                 raise ValueError('Original migration journal differs')
-            if version('lead')==[GOAL]:
+            if version('lead')==[goal]:
                 assert_unchanged(saved['before'],data_inventory(connect,'lead',saved['columns']))
                 with connect('lead') as c:
-                    if not c.execute(verifier['unified_schema_query']()).fetchone()[0]:
+                    if not c.execute(schema_query).fetchone()[0]:
                         raise ValueError('Interrupted migration schema readback failed')
                 write(journal,json.dumps({'sha':args.sha,'old':args.old}).encode())
                 print('Already migrated; independently read back original journal',flush=True)
@@ -316,7 +341,7 @@ def main():
             raise ValueError('Previous migration did not reach goal; hold retained for inspection')
         if journal.exists():
             raise ValueError('Migration journal exists without original start record')
-        if validate_baseline(version('lead')) != expected.get('baseline'):
+        if validate_baseline(version('lead'),shared=shared) != expected.get('baseline'):
             raise ValueError('Rehearsed starting schema differs; hold retained for inspection')
         if hashlib.sha256(config_before).hexdigest()!=expected['config_sha256']:
             raise ValueError('Node configuration changed since rehearsal')
@@ -336,11 +361,11 @@ def main():
         run('systemctl','stop','lead-home-live.path','lead-home-ingress.socket','lead-home-ingress.service')
         if run(TOOLS/'home_live_maintenance.py','ready')!='idle':
             raise ValueError('Work started during maintenance; hold retained')
-        columns=column_inventory(connect,'lead')
+        columns=column_inventory(connect,'lead',shared=shared)
         if columns!=expected['columns']:
             raise ValueError('Baseline schema drifted since rehearsal; hold retained')
         before=data_inventory(connect,'lead',columns)
-        write(stage/(PREFIX+'-cutover.pending'),(args.sha+'\n').encode())
+        write(stage/(prefix+'-cutover.pending'),(args.sha+'\n').encode())
         write(started,json.dumps({'sha':args.sha,'old':args.old,'columns':columns,'before':before}).encode())
         migrate('lead',columns,before)
         write(journal,json.dumps({'sha':args.sha,'old':args.old}).encode())

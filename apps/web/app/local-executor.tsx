@@ -9,7 +9,7 @@ import styles from "./local-executor.module.css";
 type Row = Record<string, any>;
 const terminal = new Set(["completed", "failed", "interrupted", "execution_unknown", "canceled"]);
 const labels: Record<string, string> = {
-  queued: "等待本机接收", running: "执行中", waiting_input: "需要你补充",
+  queued: "等待 Codex 接收", running: "执行中", waiting_input: "需要你补充",
   completed: "执行结束", failed: "执行未完成", interrupted: "已中断",
   execution_unknown: "正在核对原执行", canceled: "已取消",
 };
@@ -17,8 +17,8 @@ const when = (value: string | null) => value ? new Date(value).toLocaleString("z
   timeZone: "Asia/Shanghai", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
 }) : "尚未上线";
 
-function NativeQuestion({ item, disabled, respond }: {
-  item: Row; disabled: boolean; respond: (item: Row, result: Row) => Promise<void>;
+function NativeQuestion({ item, disabled, respond, managed }: {
+  item: Row; disabled: boolean; managed: boolean; respond: (item: Row, result: Row) => Promise<void>;
 }) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const native = item.params || {};
@@ -33,6 +33,9 @@ function NativeQuestion({ item, disabled, respond }: {
   }));
   const isApproval = method.endsWith("requestApproval");
   const permissions = method.includes("permissions/");
+  if (managed && (isApproval || permissions)) return <article className={styles.question}>
+    <p>服务器执行权限范围固定，本次扩大权限的操作已拒绝。可以调整工作要求后继续。</p>
+  </article>;
   const send = () => {
     if (elicitation) {
       const content = Object.fromEntries(fields.filter(field => answers[field.id] !== undefined && answers[field.id] !== "").map(field => [field.id,
@@ -121,20 +124,24 @@ export default function LocalExecutor({ aid, readOnly }: { aid: string; readOnly
     await action(() => command(item.request_id, "respond", { id: item.params.id, result }));
   }
   const expires = invitation && new Date(invitation.expires_at).getTime() <= Date.now();
-  const state = !data ? "正在读取设备状态…" : data.mode !== "codex" ? "本机执行尚未启用" :
+  const managed = data?.execution_source === "managed_node";
+  const ready = managed ? data?.shared_node?.online && data?.shared_node?.ready : preferred?.online && data?.mode === "codex";
+  const state = !data ? "正在读取执行状态…" : managed ? (ready ? "共用服务器 Codex 已就绪" : "等待共用服务器 Codex 就绪") : data.mode !== "codex" ? "本机执行尚未启用" :
     preferred?.online ? `${preferred.name} 已连接` : "等待本机上线";
   return <section className={`workspace-section ${styles.section}`} aria-labelledby="local-executor-heading">
     <div className="section-head">
-      <h2 id="local-executor-heading"><Laptop size={17} aria-hidden="true" />本机 Codex</h2>
-      <button className="text-button" onClick={() => setManage(value => !value)} aria-expanded={manage}>设备与连接</button>
+      <h2 id="local-executor-heading"><Laptop size={17} aria-hidden="true" />Codex 执行</h2>
+      <button className="text-button" onClick={() => setManage(value => !value)} aria-expanded={manage}>高级设备设置</button>
     </div>
     <div className={styles.summary}>
-      <p role="status"><span className={`dot ${preferred?.online && data?.mode === "codex" ? "green" : ""}`} />{state}</p>
-      {!devices.length && <button className="primary" disabled={busy || !canControl} onClick={() => void connect()}>连接本机 Codex</button>}
+      <p role="status"><span className={`dot ${ready ? "green" : ""}`} />{state}</p>
     </div>
-    <p className={styles.help}>使用你本人已登录的 Codex，无需模型 API key。关闭网页后继续运行；电脑休眠或离线时等待恢复。</p>
+    <p className={styles.help}>{managed ? "此项目共用服务器上的 Codex，无需单独登录或配对。关闭网页后继续运行；服务器离线时等待恢复。" : "使用本人已登录的 Codex，无需模型 API key。关闭网页后继续运行；执行设备离线时等待恢复。"}</p>
     {(issue || error) && <p className={styles.error} role="alert">{issue || error} <button className="text-button" onClick={refresh}><RefreshCw size={13} />重新读取</button></p>}
     {manage && <div className={styles.manage}>
+      <p className={styles.help}>默认使用工作室的执行设置。连接个人设备会成为此项目的例外，仅影响之后的新工作。</p>
+      {data?.execution_override && data.execution_override !== "inherit" && <button disabled={busy || !canControl}
+        onClick={() => void action(() => api(`/agents/${aid}/executor/inherit`, {}))}>恢复工作室默认设置</button>}
       <p><a href="/api/executor/download" download>下载本机连接器</a><span className="muted"> · 安装后，在本机完成一次连接。</span></p>
       <p className={styles.help}>首次下载后，在本机终端安装：<code>npm install -g ~/Downloads/lead-local-executor.tgz</code>。下方连接指令会同时启用后台执行，各项目分别保存连接状态。</p>
       {devices.length > 0 && <ul className={styles.devices}>{devices.map(device => <li key={device.id}>
@@ -161,7 +168,7 @@ export default function LocalExecutor({ aid, readOnly }: { aid: string; readOnly
       <p className={styles.help}>本机执行使用 GPT-6.1 Sol，中等推理。设备上的官方 Codex 管理登录和模型使用，原账号与发送记录继续保留。</p>
     </div>}
     {active.length > 0 && <div className={styles.work}>
-      <div className={styles.workHeading}><strong>本机正在处理</strong><span>{active.length} 项</span></div>
+      <div className={styles.workHeading}><strong>Codex 正在处理</strong><span>{active.length} 项</span></div>
       <ul className={styles.devices}>{active.slice(0, 4).map(request => <li key={request.id}>
         <div><span>{labels[request.state] || "推进中"}</span><small>{when(request.created_at)}</small>
           {request.usage?.total?.totalTokens != null && <small>本线程累计 {Number(request.usage.total.totalTokens).toLocaleString("zh-CN")} tokens，非 API 账单</small>}
@@ -181,7 +188,7 @@ export default function LocalExecutor({ aid, readOnly }: { aid: string; readOnly
     </div>}
     {pending.length > 0 && <div className={styles.pending}>
       <h3>需要你补充或确认</h3>
-      {pending.map(item => <NativeQuestion key={item.event_id} item={item} disabled={busy || !canControl} respond={respond} />)}
+      {pending.map(item => <NativeQuestion key={item.event_id} item={item} managed={managed} disabled={busy || !canControl} respond={respond} />)}
     </div>}
     {data?.requests?.some((request: Row) => request.state === "execution_unknown") &&
       <p className={styles.help}>有执行结果尚未确认，将沿原会话核对；原发布记录不会因此重新发送。</p>}

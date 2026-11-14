@@ -16,12 +16,16 @@ import type {
   Event,
   RequestRecord,
   RunPayload,
+  ServerBinding,
 } from "./types.ts";
+import { bindingIdentity, validateServerBinding } from "./server-binding.ts";
 const digest = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 interface State {
   version: number;
   binding?: Binding;
+  server_binding?: ServerBinding;
+  instance_id?: string;
   requests: Record<string, RequestRecord>;
   sessions: Record<string, string>;
   events: Event[];
@@ -37,7 +41,13 @@ export class Store {
     this.data = existsSync(file)
       ? JSON.parse(readFileSync(file, "utf8"))
       : { version: 1, requests: {}, sessions: {}, events: [], controls: [] };
-    if (this.data.version !== 1) throw new Error("unsupported_state_version");
+    if (![1, 2].includes(this.data.version)) throw new Error("unsupported_state_version");
+    if (this.data.version === 2) {
+      if (this.data.binding) throw new Error("invalid_server_binding");
+      this.data.server_binding = validateServerBinding(this.data.server_binding);
+      if (typeof this.data.instance_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(this.data.instance_id))
+        throw new Error("invalid_server_instance");
+    }
   }
   save() {
     const temp = join(this.folder, `.state-${process.pid}.tmp`);
@@ -57,9 +67,24 @@ export class Store {
     }
   }
   bind(binding: Binding) {
+    if (this.data.version !== 1) throw new Error("invalid_personal_binding");
     this.data.binding = binding;
     this.save();
   }
+  bindServer(value: ServerBinding) {
+    const binding = validateServerBinding(value);
+    if (this.data.binding || this.data.version === 1 && (Object.keys(this.data.requests).length ||
+        Object.keys(this.data.sessions).length || this.data.events.length || this.data.controls.length) ||
+        this.data.server_binding && (bindingIdentity(this.data.server_binding) !== bindingIdentity(binding) ||
+          this.data.server_binding.epoch !== binding.epoch))
+      throw new Error("server_binding_conflict");
+    this.data.version = 2;
+    this.data.server_binding = binding;
+    this.data.instance_id ||= randomUUID();
+    this.save();
+  }
+  get shared() { return this.data.version === 2; }
+  runtimeBinding() { return this.data.server_binding || this.data.binding; }
   request(id: string) {
     return this.data.requests[id];
   }

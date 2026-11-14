@@ -115,7 +115,7 @@ def audit(conn, agent_id, kind, payload=None):
             current_tenant(),
             agent_id,
             "oidc"
-            if who and who.get("issuer") != "local"
+            if who and who.get("issuer") != "local" and not (trusted_execution() and who.get('actor_type') == 'service')
             else "service"
             if trusted_execution()
             else "local_owner",
