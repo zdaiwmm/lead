@@ -84,8 +84,18 @@ class BoundarySite:
         return '''<script>
 (async () => {
   await navigator.serviceWorker.register('/sw.js');
-  await navigator.serviceWorker.ready;
-  if (!navigator.serviceWorker.controller) await new Promise(resolve => navigator.serviceWorker.addEventListener('controllerchange', resolve, {once: true}));
+  const registration = await navigator.serviceWorker.ready;
+  if (!navigator.serviceWorker.controller) await new Promise(resolve => {
+    // Activation may have claimed the old document before this navigation committed.
+    const controlled = () => {
+      if (!navigator.serviceWorker.controller) return;
+      navigator.serviceWorker.removeEventListener('controllerchange', controlled);
+      resolve();
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', controlled);
+    registration.active.postMessage({action: 'claim-client'});
+    controlled();
+  });
   const state = document.querySelector('output');
   if (state) state.textContent = 'Background service ready';
   for (const button of document.querySelectorAll('[data-background]')) button.addEventListener('click', () => {
@@ -109,6 +119,10 @@ self.addEventListener('fetch', event => {
 });
 self.addEventListener('message', event => {
   const action = event.data.action;
+  if (action === 'claim-client') {
+    event.waitUntil(self.clients.claim());
+    return;
+  }
   if (!['refresh', 'complete'].includes(action)) return;
   event.waitUntil(fetch(action === 'refresh' ? '/session/refresh' : '/session/complete', {
     method: 'POST', credentials: 'include', body: new URLSearchParams({nonce: event.data.nonce})
