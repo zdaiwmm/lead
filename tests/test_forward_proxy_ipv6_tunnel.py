@@ -109,10 +109,12 @@ async def socks_server(path, *, tls=None, reject=False):
         assert not errors
 
 
-@pytest.mark.parametrize("target", [f"[{DESTINATION}]:443", f"{DESTINATION}:443"])
+@pytest.mark.parametrize("port", [80, 443])
+@pytest.mark.parametrize("bracketed", [False, True])
 async def test_ipv6_connect_uses_real_unix_socks_and_preserves_slots(
-    configured, tmp_path, target
+    configured, tmp_path, port, bracketed
 ):
+    target = f"[{DESTINATION}]:{port}" if bracketed else f"{DESTINATION}:{port}"
     first = BrowserForwardProxy(configured, BOUND, slot_id="fixture-a")
     second = BrowserForwardProxy(configured, BOUND, slot_id="fixture-b")
     assert first.socket_path != second.socket_path
@@ -140,7 +142,7 @@ async def test_ipv6_connect_uses_real_unix_socks_and_preserves_slots(
             assert await reader.readexactly(16) == b"opaque TLS bytes"
             writer.close()
             await writer.wait_closed()
-            assert requests == [(DESTINATION, 443)]
+            assert requests == [(DESTINATION, port)]
         finally:
             await first.close()
 
@@ -286,8 +288,8 @@ async def test_without_tunnel_keeps_existing_source_binding(monkeypatch):
         "[::1]:443",
         "[::ffff:1.1.1.1]:443",
         "[2002:c000:0201::]:443",
-        f"[{DESTINATION}]:80",
-        f"{DESTINATION}:80",
+        f"[{DESTINATION}]:81",
+        f"{DESTINATION}:8443",
     ],
 )
 async def test_tunnel_connect_keeps_native_public_ipv6_and_port_policy(

@@ -148,14 +148,24 @@ async def test_close_with_active_connect_and_partial_header(monkeypatch, connect
         assert proxy.tasks
         await asyncio.wait_for(proxy.close(), 1)
         assert not proxy.tasks
-        assert await asyncio.wait_for(reader.read(), 1) == b""
-        assert reader.at_eof()
+        try:
+            assert await asyncio.wait_for(reader.read(), 1) == b""
+            assert reader.at_eof()
+        except ConnectionResetError:
+            # Cancelling an incomplete header may close unread TCP bytes with RST.
+            assert not connected
+        if not connected:
+            assert upstream_writers == []
+            assert proxy.connections == 0 and proxy.bytes_forwarded == 0
     finally:
         for task in list(proxy.tasks):
             task.cancel()
         await asyncio.gather(*list(proxy.tasks), return_exceptions=True)
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except ConnectionResetError:
+            assert not connected
         for remote in upstream_writers:
             remote.close()
         await proxy.close()

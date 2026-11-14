@@ -1189,3 +1189,13 @@ PR62在最终72775e9必需快速检查全绿后合入main为055242721d3ee0cb7cc4
 完整Linux回归已完成：旧step通过镜像/launcher首段后，准确在private checkout读取处报PermissionError；修补后的真实完整step为1 passed/4.56秒，实际执行12369文件inventory及SDK/Chromium151启动和版本检查，没有stub验收函数。自有mount、verifier、loop设备均核无残留。
 诊断使用既有隔离SDK及临时公开CPython3.12.3副本，六核心版本与锁对照无差异；不是精确CI产物或发布证明，未完成的大包下载已停且未使用。来源、ABI、哈希及清理记录见`/private/tmp/lead-ci-nonroot-20261114/proof.json`。Mac的显式Linux用例跳过，32项CI契约通过。
 测试所用PyYAML实际6.0.3与锁一致；Context7精确版本片段未覆盖BaseLoader，已补核官方文档与本机API，没有升级依赖。
+
+### 23.10 完整回归的测试契约与隔离库补正
+
+PR64合并为b7f4068d2bc19f1a4b76302469a1f1f19d83521b，精确main CI43530615586/attempt1的frontend、真实低权限镜像检查及namespace均通过；backend在2532项回归中到67%后达到原25分钟墙钟限制。取消前日志准确映射33处F，没有完整失败汇总、Application verification或工具包放行。该镜像仅预取并核传输摘要，未用于安装或发布；生产仍7940/0031，没有正式工具、hold、DDL或新请求。
+
+定向实际Linux复现先定位旧测试替身缺native_runtime/lock、旧API模型用例虚构项目ID穿过新增路由，以及旧模型能力stub不接受项目参数。仅补齐对应测试契约，不放宽UUID或产品路由。代理测试按已批准协议核80/443及两种IPv6表示的实际SOCKS目的端口，81/8443及非法地址继续拒绝；半截请求取消可为EOF或TCP RST，完整CONNECT仍要求EOF，半头无上游/无转发且非空响应仍失败。7份测试文件在独立PG和Linux下35 passed/2.61秒并清理克隆，独立审查无阻断；Mac短私有目录24项代理检查通过，最初过长socket路径的环境失败另留，不算产品失败。
+
+原共享测试站的/login对已登录cookie也固定显示匿名form，导致新版fresh current+private双源身份检查正确拒绝。测试站改为有效当前session实际303到已有/home，私有/account仍独立核验；首4个真实SDK输入/发布/回复/unknown回查场景通过，HTTP回归3项通过，其余映射场景继续定向核验。产品身份、权限、发送及回执逻辑不改，原失败/unknown不改写、不重放。
+
+评估程序的生产库名保护保持。原CI的隔离容器仍用lead库名，按实际配置会触发合成记忆夹具的拒绝；backend改为明确创建lead_ci并让迁移/API/测试继承该库，默认生产配置及infra不变。整组失败立即输出short traceback，成功仍执行完整集合；墙钟预算调整到45分钟，不改模型token/步数/原生turn等待限制。32项CI契约及完整Ruff/凭据检查通过；pytest实际9.2.0、pytest-asyncio1.4.1未变，Context7精确pytest9.2文档已核参数组合与测试作用域替换。最终合并精确main完整成功、同轮产物及正式发布独立回读仍待完成。
