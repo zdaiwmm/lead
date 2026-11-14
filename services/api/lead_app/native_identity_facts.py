@@ -252,10 +252,15 @@ _CURRENT_IDENTITY = r'''
      const css=path.join(' > ');return !item&&css.length<=300&&document.querySelectorAll(css).length===1&&document.querySelector(css)===node?css:null;
    };
    const full=text(node);let identity=full;
-   if(link&&node.contains(link)){
-     const label=text(link),start=full.indexOf(label);
-     if(!label||start<0||start!==full.lastIndexOf(label)||!/^[\s·|—–:;,-]*$/.test(full.slice(start+label.length)))return null;
-     identity=full.slice(0,start);
+   if(link){
+     const label=text(link),start=label?full.indexOf(label):-1;
+     // A related sibling can repeat its navigation label after a separator.
+     // Identifier characters (including ':' and '-') never permit trimming.
+     const repeatedLabel=start>0&&/[·|—–;,]\s*$/.test(full.slice(0,start));
+     if(node.contains(link)||repeatedLabel){
+       if(!label||start<0||start!==full.lastIndexOf(label)||!/^[\s·|—–:;,-]*$/.test(full.slice(start+label.length)))return null;
+       identity=full.slice(0,start);
+     }
    }
    const subjectSelector=selector(node),linkSelector=link?selector(link):null;
    if(!subjectSelector||link&&!linkSelector)return null;
