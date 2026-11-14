@@ -14,12 +14,19 @@ def test_real_evaluation_has_nine_non_leaking_inputs_and_three_repetitions():
     finally:
         sys.path.pop(0)
     assert len(module.CASES)==9 and len(set(module.CASES))==9
-    assert {branch for _,branch in module.CASES}==set(module.FACTS)
+    original_branches={branch for _,branch in module.CASES}
+    assert set(module.FACTS)==original_branches | {module.MEMORY_CASE}
     assert len({product for product,_ in module.CASES})==3
-    assert set(module.RUBRIC)==set(module.FACTS)
+    assert set(module.RUBRIC)==original_branches
+    assert module.selected_cases()==[
+        (product,branch,repetition)
+        for product,branch in module.CASES
+        for repetition in (1,2,3)
+    ]
+    assert module.MEMORY_CASE not in {branch for _,branch,_ in module.selected_cases()}
+    assert module.selected_cases(module.MEMORY_CASE)==[("quote",module.MEMORY_CASE,1)]
     # Each three-run case has an identical logical product/feedback input;
     # model prompt generation never receives the evaluator rubric.
     import inspect
     implementation = inspect.getsource(module.evaluate)
-    assert 'range(1,4)' in implementation
     assert 'RUBRIC[branch]' not in implementation.split('record["result"] = await agent.decide')[0]
