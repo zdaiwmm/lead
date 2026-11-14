@@ -46,3 +46,23 @@ def test_fixture_owner_challenge_does_not_create_authenticated_session_early():
             assert not board.oracle()['posts']
     finally:
         board.close()
+
+
+def test_fixture_warm_login_exposes_fresh_current_and_independent_private_subject():
+    board=NativeBoard().start()
+    try:
+        with httpx.Client(base_url='http://127.0.0.1:'+str(board.server.server_port),trust_env=False,timeout=2) as client:
+            assert client.get('/login').status_code==200
+            assert client.post('/session',data={'username':board.state.username,'password':board.state.password}).status_code==303
+            login=client.get('/login')
+            assert login.status_code==303 and login.headers['location']=='/home'
+            current=client.get('/home')
+            assert 'Signed in as '+board.state.username in current.text and 'rel="me" href="/account"' in current.text
+            private=client.get('/account')
+            assert 'Account ID:' in private.text and '<strong id="subject">'+board.state.username+'</strong>' in private.text
+            board.state.wrong_subject=True
+            assert 'different-fixture-member' in client.get('/account').text
+            assert 'Signed in as '+board.state.username in client.get('/home').text
+            assert [row['path'] for row in board.oracle()['requests'] if row['method']=='POST']==['/session']
+    finally:
+        board.close()

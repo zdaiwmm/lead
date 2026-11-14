@@ -78,6 +78,8 @@ class NativeBoard:
                 path = self.record()
                 subject = self.subject()
                 if path == '/login':
+                    if subject:
+                        return self.send(303, location='/home')
                     return self.page('Sign in', '<h1>Sign in to your account</h1><form method="post" action="/session">'
                         '<label>Account<input name="username" autocomplete="username" required></label>'
                         '<label>Password<input name="password" type="password" autocomplete="current-password" required></label>'
