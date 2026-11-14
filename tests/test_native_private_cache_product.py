@@ -1,4 +1,5 @@
 """A real SW-cached private A page cannot certify the current server subject B."""
+import asyncio
 import json
 import os
 import re
@@ -13,6 +14,7 @@ pytestmark=pytest.mark.skipif(os.environ.get('LEAD_NATIVE_PRODUCT_TESTS')!='1',r
 async def test_private_identity_probe_bypasses_stale_worker_cache_without_disabling_business_worker(monkeypatch):
     import test_native_boundary_product as boundary
     from lead_app.account_connection import execute_account
+    from lead_app.browser_runtime import NativeNetworkGate
     from lead_app.browser_tools import BrowserTools
     from lead_app.db import all_rows, one, tx
     from lead_app.growth import runtime, tools
@@ -20,6 +22,31 @@ async def test_private_identity_probe_bypasses_stale_worker_cache_without_disabl
     from lead_app.growth.store import submit_work
     from lead_app.growth.tools import AccountInput
     from native_browser_boundary_fixture import BoundarySite
+
+    # Deterministically cover the first-script race: root setup starts only
+    # after the page holds its worker, or after the unprotected Fetch already
+    # arrived. The latter must fail on the old implementation, without retries.
+    observed = {}
+    original_attached, original_paused = NativeNetworkGate.attached, NativeNetworkGate.paused
+
+    def bootstrap_seen(gate):
+        return observed.setdefault(gate, asyncio.Event())
+
+    async def ordered_attached(gate, event, parent):
+        if event['targetInfo']['type'] == 'service_worker':
+            if parent is None:
+                await asyncio.wait_for(bootstrap_seen(gate).wait(), 10)
+            else:
+                bootstrap_seen(gate).set()
+        return await original_attached(gate, event, parent)
+
+    async def ordered_paused(gate, event):
+        if event.get('networkId') and event.get('frameId') == event['networkId']:
+            bootstrap_seen(gate).set()
+        return await original_paused(gate, event)
+
+    monkeypatch.setattr(NativeNetworkGate, 'attached', ordered_attached)
+    monkeypatch.setattr(NativeNetworkGate, 'paused', ordered_paused)
 
     worker=BoundarySite._worker
     monkeypatch.setattr(BoundarySite,'_worker',staticmethod(lambda:worker()+'''

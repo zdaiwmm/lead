@@ -120,6 +120,9 @@ class NativeNetworkGate:
         self.pending = {}
         self.tasks = set()
         self.targets = {}
+        self.attachments = {}
+        self.worker_throttles = {}
+        self.worker_network_started = {}
         self.owners = {}
         self.initialized = set()
         self.roots = {}
@@ -144,9 +147,24 @@ class NativeNetworkGate:
         message = {'id': number, 'method': method, 'params': params or {}}
         if session:
             message['sessionId'] = session
+        binding = self.attachments.get(session)
         try:
             await self.ws.send(json.dumps(message))
+            if (method == 'Network.enable' and self.attachment_current(session, binding)
+                    and binding[1][1] == 'service_worker'):
+                # The browser-side handler enables observation before forwarding
+                # this command to a renderer, which may not exist until the main
+                # script loads. A later child resume on this same ordered socket
+                # must not wait for that renderer's ACK. This is setup ordering,
+                # never request ownership: resolve_owner still needs Network.
+                self.worker_network_started[session] = binding
+                self.changed.set()
             return await asyncio.wait_for(future, 10)
+        except Exception:
+            if method == 'Network.enable' and self.worker_network_started.get(session) is binding:
+                self.worker_network_started.pop(session, None)
+                self.changed.set()
+            raise
         finally:
             self.pending.pop(number, None)
 
@@ -171,13 +189,27 @@ class NativeNetworkGate:
                 event, session = message.get('params', {}), message.get('sessionId')
                 method = message.get('method')
                 if method == 'Target.attachedToTarget':
+                    info, child = event['targetInfo'], event['sessionId']
+                    binding = (info, self.target_identity(info))
+                    if info['type'] == 'service_worker' and session is not None:
+                        self.worker_throttles[child] = (binding, session, self.attachments.get(session))
+                    else:
+                        # Publish in the reader, before a queued setup task can
+                        # be overtaken by Network or detach events in this batch.
+                        self.targets[child] = info
+                        self.attachments[child] = binding
+                    self.changed.set()
                     self.schedule(self.attached(event, session))
                 elif method == 'Target.targetInfoChanged':
                     info=event['targetInfo']
                     for current in self.targets.values():
                         if current['targetId']==info['targetId']:
                             current.update(info)
+                    self.changed.set()
                 elif method == 'Target.detachedFromTarget':
+                    self.worker_throttles.pop(event['sessionId'], None)
+                    self.worker_network_started.pop(event['sessionId'], None)
+                    self.attachments.pop(event['sessionId'], None)
                     target=self.targets.get(event['sessionId'],{}).get('targetId')
                     self.documents.pop(target,None)
                     root=self.owners.get(event['sessionId'])
@@ -267,11 +299,79 @@ class NativeNetworkGate:
             response={'response':'ProvideCredentials','username':self.proxy['username'],'password':self.proxy['password']}
         await self.send('Fetch.continueWithAuth',{'requestId':request,'authChallengeResponse':response})
 
+    @staticmethod
+    def target_identity(info):
+        return tuple(info.get(key) for key in ('targetId', 'type', 'browserContextId'))
+
+    def attachment_current(self, session, binding):
+        return bool(binding and self.attachments.get(session) is binding
+            and self.targets.get(session) is binding[0] and self.target_identity(binding[0]) == binding[1])
+
+    async def resume_worker_throttle(self, event):
+        session = event['sessionId']
+        throttle = self.worker_throttles.get(session)
+        if not throttle:
+            return
+        binding, parent, parent_binding = throttle
+
+        def current():
+            return (self.worker_throttles.get(session) is throttle
+                and self.target_identity(binding[0]) == binding[1]
+                and self.attachment_current(parent, parent_binding)
+                and parent_binding[1][1] in ('page', 'iframe')
+                and bool(self.context_id) and parent_binding[1][2] == binding[1][2] == self.context_id)
+
+        try:
+            deadline = asyncio.get_running_loop().time() + 10
+            while current():
+                canonical = [(key, value) for key, value in self.attachments.items()
+                    if value[1] == binding[1] and self.attachment_current(key, value)]
+                if len(canonical) > 1:
+                    raise ValueError('worker_control_ambiguous')
+                if canonical:
+                    root, original = canonical[0]
+                    if self.worker_network_started.get(root) is original:
+                        # Page auto-attach alone holds Chromium's first script
+                        # fetch. It gets no Network/Debugger domain or authority;
+                        # only the exact current root session records evidence.
+                        await self.send('Runtime.runIfWaitingForDebugger', {}, session)
+                        if not current() or not self.attachment_current(root, original):
+                            raise ValueError('worker_control_changed')
+                        return
+                left = deadline - asyncio.get_running_loop().time()
+                if left <= 0:
+                    break
+                self.changed.clear()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self.changed.wait(), left)
+            raise ValueError('worker_control_unavailable')
+        except Exception:
+            if (self.worker_throttles.get(session) is throttle
+                    and self.attachment_current(parent, parent_binding)):
+                with contextlib.suppress(Exception):
+                    await self.send('Target.detachFromTarget', {'sessionId': session}, parent)
+        finally:
+            if self.worker_throttles.get(session) is throttle:
+                self.worker_throttles.pop(session, None)
+
     async def attached(self, event, parent):
         info, session = event['targetInfo'], event['sessionId']
         target, kind = info['targetId'], info['type']
+        if kind == 'service_worker' and parent is not None:
+            return await self.resume_worker_throttle(event)
+        binding = self.attachments.get(session)
+        if not self.attachment_current(session, binding) or binding[0] is not info:
+            return
+
+        async def configure(method, params):
+            if not self.attachment_current(session, binding):
+                raise ValueError('target_control_changed')
+            result = await self.send(method, params, session)
+            if not self.attachment_current(session, binding):
+                raise ValueError('target_control_changed')
+            return result
+
         try:
-            self.targets[session] = info
             if kind in ('page', 'iframe'):
                 root = target if target in self.roots else self.owners.get(parent)
                 if kind == 'page' and info.get('openerId'):
@@ -282,24 +382,30 @@ class NativeNetworkGate:
                     attach_popup(self.roots[root],info)
                 if root:
                     self.owners[session] = root
-                await self.send('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': True,
-                    'flatten': True, 'filter': [{'type': 'iframe', 'exclude': False}, {'exclude': True}]}, session)
-            await self.send('Network.enable', {}, session)
+                await configure('Target.setAutoAttach', {'autoAttach': True, 'waitForDebuggerOnStart': True,
+                    'flatten': True, 'filter': [{'type': 'iframe', 'exclude': False},
+                        {'type': 'service_worker', 'exclude': False}, {'exclude': True}]})
+            await configure('Network.enable', {})
             if kind in ('page','iframe','service_worker'):
-                await self.send('Runtime.enable',{},session)
-                await self.send('Debugger.enable',{},session)
+                await configure('Runtime.enable',{})
+                await configure('Debugger.enable',{})
             if kind in ('page','iframe'):
-                await self.send('Page.enable',{},session)
+                await configure('Page.enable',{})
             if kind=='page':
-                await self.send('ServiceWorker.enable',{},session)
-            await self.send('Runtime.runIfWaitingForDebugger', {}, session)
+                await configure('ServiceWorker.enable',{})
+            await configure('Runtime.runIfWaitingForDebugger', {})
             self.initialized.add(session)
             self.changed.set()
         except Exception:
-            self.targets.pop(session, None)
-            self.owners.pop(session, None)
-            with contextlib.suppress(Exception):
-                await self.send('Target.closeTarget', {'targetId': target})
+            if self.attachments.get(session) is binding:
+                self.attachments.pop(session, None)
+                self.worker_network_started.pop(session, None)
+                self.targets.pop(session, None)
+                self.owners.pop(session, None)
+                self.initialized.discard(session)
+                self.changed.set()
+                with contextlib.suppress(Exception):
+                    await self.send('Target.closeTarget', {'targetId': target})
 
     async def start(self, socket_path, browser_path, context_id):
         self.context_id = context_id

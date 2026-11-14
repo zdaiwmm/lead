@@ -127,6 +127,11 @@ jobs:
           PYTHONPATH="$LEAD_BROWSER_RUNTIME_DIR/site-packages:$PWD/services/api" ANONYMIZED_TELEMETRY=false \
             "$LEAD_BROWSER_RUNTIME_PYTHON" -B -S tests/browser_namespace_cdp_probe.py \
             "$PWD/scripts/browser_namespace.py" "$LEAD_BROWSER_RUNTIME_DIR/chromium/chrome-linux64/chrome"
+      - name: Native service-worker startup regression
+        # Keep the original full collection and order. Check the current SW
+        # startup blocker first as well, so an immediate regression fails early.
+        # Its suite-order behavior remains covered by the full run below.
+        run: LEAD_TEST_CHANNEL_TEMPORAL=127.0.0.1:17233 LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_NATIVE_PRODUCT_TESTS=1 LEAD_WORKFLOW_TESTS=1 LEAD_GROWTH_TEST_ENV=1 .venv/bin/pytest -q --maxfail=1 --tb=short --durations=15 --junitxml=.state/ci-sw-startup.xml tests/test_native_private_cache_product.py::test_private_identity_probe_bypasses_stale_worker_cache_without_disabling_business_worker
       - name: Database, media and authorization tests
         run: LEAD_TEST_CHANNEL_TEMPORAL=127.0.0.1:17233 LEAD_NETWORK_NAMESPACE=1 LEAD_BROWSER_TESTS=1 LEAD_NATIVE_PRODUCT_TESTS=1 LEAD_WORKFLOW_TESTS=1 LEAD_GROWTH_TEST_ENV=1 .venv/bin/pytest -q --maxfail=1 --tb=short --durations=15 --junitxml=.state/ci-tests.xml
       - if: always() && hashFiles('.state/infra.env') != ''
