@@ -1,4 +1,6 @@
 """Independent fixture oracle checks, not product acceptance claims."""
+import time
+
 import httpx
 import pytest
 from native_browser_fixture import BoardState, NativeBoard
@@ -64,5 +66,21 @@ def test_fixture_warm_login_exposes_fresh_current_and_independent_private_subjec
             assert 'different-fixture-member' in client.get('/account').text
             assert 'Signed in as '+board.state.username in client.get('/home').text
             assert [row['path'] for row in board.oracle()['requests'] if row['method']=='POST']==['/session']
+    finally:
+        board.close()
+
+
+@pytest.mark.parametrize('persistent', (False, True))
+def test_fixture_cookie_persistence_requires_explicit_opt_in(persistent):
+    state=BoardState()
+    state.persistent_session=persistent
+    board=NativeBoard(state).start()
+    try:
+        with httpx.Client(base_url='http://127.0.0.1:'+str(board.server.server_port),trust_env=False,timeout=2) as client:
+            assert client.post('/session',data={'username':state.username,'password':state.password}).status_code==303
+            cookie=next(item for item in client.cookies.jar if item.name=='board_session')
+            session_only=cookie.discard
+            assert session_only is not persistent
+            assert cookie.expires > time.time() if persistent else cookie.expires is None
     finally:
         board.close()
