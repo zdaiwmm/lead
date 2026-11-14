@@ -1,0 +1,82 @@
+[Unit]
+Description=Lead Codex dedicated authenticated TLS egress
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+# A short root wrapper reads the root-only seed and immediately drops all groups
+# and saved UID/GID before exec. Xray never runs as root; no privileged child.
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I -B /opt/lead-codex-egress/egress.py
+WorkingDirectory=/
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+LimitCORE=0
+KillMode=control-group
+TimeoutStopSec=15
+# Exit 78 / normal Xray parse failures remain stopped. Signals/crashes recover.
+Restart=on-abnormal
+RestartSec=10
+# Suppress raw parser errors: the upstream parser may include private inputs.
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
+
+# Preparation only. No automatic installation or service activation is supplied.
+# Install root-owned code (0644), verified official Xray 26.10.31 (0755), and a
+# separate locked, nologin network account with its own UID/GID. That account
+# must not own the Codex HOME or be able to read the source/auth files.
+# The deployment's root-owned unit drop-in MUST declare RequiresMountsFor for
+# the actual protected source volume (or the existing mount-ready unit). It
+# must not unlock a volume or start/restart the original API service. Missing
+# source fails closed; this template alone does not prove boot/mount recovery.
+# All code/config ancestors must be root-owned and not group/world writable;
+# no symlinks or hardlinks. Operations, source and auth must be 0400 or 0600.
+# Sole legacy exception: source_owner_uid:1000 explicitly permits UID1000 on
+# the fixed LEGACY_SOURCE file and its two immediate directory ancestors only.
+# Never change the existing source's owner, bytes or permissions. DAC_READ_SEARCH
+# is for root's read phase; after dropping IDs, /proc/self/status must prove all
+# effective/permitted/inheritable/ambient capabilities zero and NoNewPrivs=1.
+# Fixed root-only /etc/lead-codex-egress/egress.json schema (placeholders only):
+# {"source_config":"/etc/PRIVATE_SOURCE/CONFIG.json",
+#  "outbound_tag":"PRIVATE_EXISTING_TAG","listen_port":18181,
+#  "network_user":"PRIVATE_NETWORK_USER","auth_file":"/etc/PRIVATE_AUTH/AUTH.json"}
+# source_owner_uid is optional (default 0); only 0 or the fixed legacy UID1000.
+# Auth schema: {"user":"RANDOM_URLSAFE_USER","pass":"RANDOM_URLSAFE_PASSWORD"}.
+# Operator generates user >=16 and pass >=32 URL-safe characters with secure
+# randomness, each with >=12 distinct characters. No defaults/auto-generation.
+# Separate, deliberate root provisioning of Codex-only proxy authentication is
+# still required. This unit does not change the executor's environment or API,
+# browser, DNS, public listener, original Xray process/socket/config or auth HOME.
+# TLS sniffing rewrites actual destination to exactly one allowed official SNI;
+# arbitrary CONNECT host with allowed SNI targets that official host, not the
+# requested host. IP literals are excluded from rewriting and blackholed. No
+# TLS interception, CA injection, certificate-verification bypass or API fallback.
+# Upstream REALITY transport identity and credentials remain unchanged in memory.
+# Before deployment: exact-binary parser + 407/wrong-auth + domain/SNI/port/IP/
+# no-SNI/non-TLS/UDP deny probes, actual UID/group/stdin inspection, stop/crash
+# recovery and existing isolation regression. Then reviewed exact-main CI and
+# authorized official GET check through the known channel. Config test alone
+# proves neither proxy authentication nor ability to log in. Current region/auth
+# eligibility and permission to use the old remote service remain unverified.
+# Optional profile check-client-env rejects missing/empty HTTPS_PROXY/NO_PROXY,
+# non-127.0.0.1/privileged ports, weak auth and conflicting proxy aliases. Use
+# only http://RANDOM_USER:RANDOM_PASSWORD@127.0.0.1:PORT. NO_PROXY entries must
+# be selected from localhost,127.0.0.1,::1,shui.click; no wildcard/OpenAI bypass.
