@@ -1213,3 +1213,31 @@ PR65在精确a68a73b全部必需快检通过后合并bf363459db6a432796a57de8bbb
 最小补正已完成：仅用例按实际config.env读取原manifest并要求native_smoke=True，然后声明该用例既定native lane，不改产品native_available。实际原ZIP核digest/REVISION后只解runtime；11920文件路径/大小/SHA均与manifest一致，非root解压的umask077仅改变mode，在自己诊断目录恢复原mode后，原bf verify及SDK/Chrome smoke全绿，manifest未改、ROOT包始终不存在。原自然负例确实误入Camoufox，却因本地缺fpgen数据先500；只替代legacy初始化的窄seam使用真实DB/provider与原begin/open取得400“未知频道”，不把它称为原CI的完整自然重现。
 
 真实外部bundle下boundary→six-task共2 passed/56.84秒，两次开头native_available均false，各自声明lane后open200且profile为native-shared/chromium，无跨用例泄漏。原6阶段requests=[5,2,3,2,3,2]、17次明确fake SDK请求、机械unknown seed请求/预留0，以及3份独立DOM回执均通过。最终读取config.env的路径与该轮os.environ值相同，主体证据按未变输入复用，不重复整条流程。三次独立DB均drop，自己解压的大文件清理，原失败、seam证据及manifest摘要保留；0新增真实模型或生产操作。准确后续PR/main/CI及正式交付仍记PR交付栏。
+
+### 23.12 共享验证目录中的原连接日志归属
+
+PR66合并051e89c0e8ccc4e755d22bf7e2f4b5153efecbca；精确main CI43542800124/attempt1中六阶段用例已真实通过，backend为1453 passed/1 skipped后停止在credential_completeness[bare]。实际密码为空、表单无效且authorize不允许点击等前序断言已经通过，失败仅为safe-step-trace第三步读到ok。用例使用next(glob('connection-*'))，共享STATE有其他原连接记录，首目录不是本次连接的可靠身份；同类全局读取另见execution_configuration及sdk_safe_trace。不得据错日志修改产品拒绝逻辑或删掉安全断言。
+
+此项修补仅涉及验证日志归属，按helper实际原ConnectionRef/connection_id读取对应目录，保留所有credential拒绝、动作边界、请求数、隐私与无重发断言。为减少每轮主线只发现一个后续用例的问题，同时连续验证前次未到达的817个native直接相关用例（84文件，自己单一STATE和独立PG，不重跑前1453）；保留顺序并收齐失败，3个日志消费者由独立专项处理。主线仍执行完整全仓集合，short traceback保留，取消first-fail提前退出以采集整轮结果，任何失败仍阻断应用和工具放行。这不是本地全仓完整证明，最终仍必须新精确main全绿及同轮产物。
+
+
+### 23.13 未到达的 native 关联集合与验证隔离收口
+
+原051源码、ROOT不放置browser-runtime、真实同轮外置SDK及一个自有STATE/PG下，817项连续执行完毕：772 passed、10 failed、35 setup errors，1122.34秒；最后vision/worker/receipt均未再报错，自有库已drop。此结果不替代精确main完整应用证明。35项缺默认headless-shell先于测试主体失败；使用锁定Playwright1.62官方CLI安装rev1234/Chrome151.0.7922.34到自有cache后，method24通过，person11暴露9个旧__new__假controller缺lease/task_id或意外进入本机执行器路由。仅fixture改为真实constructor、并对明确legacy单测限定路由，35项原真实DOM随后全部通过23.75秒；原26 passed/9 failed日志保留。
+
+其他10处按实际trace分组：frame_role3未选择既定native lane，错误进入Camoufox；manager_death3仍要求旧独立运行库名前缀，未执行kill；SDK registry1在API依赖隔离环境直接import browser_use；progress1对无依据权限提案仍期望8次selector-only修复；SW组合1复用固定STATE/control-only-tls目录；identity_layout login1则在真实重新验证进入本人确认。前三处验证隔离与组合目录修补保留原全部安全断言；registry用官方外置SDK Python3.12子进程实际运行原Tools.registry与原manager，API仍无browser_use，真实Linux11 passed/1.02秒、2次原RPC/4次坏字段在RPC前拒绝。progress依既有非selector一次修正契约严格改为2次和one_correction_exhausted，原no_progress8、时钟/reload/scroll与释放后同Task续跑不变，真实Linux3 passed/198.02秒，自有PG已drop，无付费模型。
+
+### 23.14 相邻自我链接重复导航标签的重新验证
+
+identity_layout原独立Linux复现为reauth waiting/challenge且进入owner，模型调用10→10，未再次提交凭据。真实DOM进一步定位：相邻rel=me链接的标签也出现在当前身份文字末尾；旧自动推断已承认相邻关联，却仅对内嵌链接移除导航标签，因此完整ID语法正确拒绝多余尾文。新增相邻/前置布局2 failed，另7个完整ID/负向用例通过；最小修复仅在已证明唯一可见、本域且局部关联的rel=me链接后，允许非ID分隔符之后完整且唯一的当前导航标签。冒号、连字符等ID字符不能触发截短，未知/重复尾文、公共内容、多主体与多链接仍拒绝；同文档、相同节点/链接和二次采样不变。
+
+该实际产品兼容问题独立PR67，基线051，候选2f938615eab449f417ed2c58705147d617bc54a1；与测试隔离修补分别交付。当前identity/current/private/重新验证真实DOM共108 passed/46.78秒，独立窄审接受、Ruff/diff检查通过；原产品Linux消费者在相同外置SDK、新自有PG下identity_layout login/wrong2项与reauth continuation3项共5 passed/31.95秒，原helper全流程通过且无再次提交凭据，库已drop。精确head全部快检43548379322/1通过后，PR67于02:51:24Z合并0528d5af9f115a051d8dc1491188a2050040659e；该中间主线尚待测试隔离修补整合，不能作为完整应用放行。没有放宽身份校验、增加凭据重试或重放unknown，生产仍7940/0031，正式工具、hold、DDL及请求尚未开始。
+
+
+原日志归属修补的真实红绿：导入此前真实成功连接的safe trace且原字节SHA不变，限定本STATE目录枚举将该旧连接排首后，旧全局lookup稳定1 failed；精确原connection_id取日志后三消费者7 passed/59.96秒，各自原连接ID与实际trace目录一一对应，原空密码点击仍denied。首次自然枚举新目录恰排首曾1 passed，不冒充稳定红；中途纯观察脚本误判不作为产品失败。记录、原失败与旧unknown/费用均保留。
+
+
+本次窗口按实际工作量调整：前1453项精确CI已耗1046.81秒（17分26秒），后817项自有Linux连续跑1122.34秒（18分42秒），两段尚未计余下约270项、CI安装/迁移及本次恢复执行的manager/frame负向用例。原45分钟整体窗口接近已测工作量，backend改为60分钟防止完整回归因旧窗口取消；不是业务请求、模型token或原生任务时限，检查结束立即进入下一阶段，所有失败照常阻断。未缩减集合或放宽断言。
+
+
+frame/manager/TLS三文件的冻结增量独立窄审通过。真实Linux外置原S5 SDK、ROOT无runtime、单一STATE顺序frame3→manager3→composition→SW共8 passed/328.32秒：专库在三次kill场景均实际使用，原prefix与exactDB断言保留；后续composition回原outer库，专库和outer最终均drop；最后SW通过原固定TLS目录冲突点，所有原Action/attempt、只读回查、零重发及业务证据断言保留。三文件只有测试修改，Ruff/diff检查通过；独立SW补充运行与最终PR/main放行结果以交付栏为准。

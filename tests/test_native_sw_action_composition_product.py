@@ -15,6 +15,7 @@ import threading
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 
 import pytest
@@ -304,76 +305,76 @@ async def test_sso_bound_original_actions_use_worker_transport_and_replay_no_new
 
             # Final independent fault stage: lose only Gate's control socket,
             # keeping the original manager, Chrome and current SW alive.
-            folder = STATE/'control-only-tls'
-            folder.mkdir(mode=0o700)
-            tls_server,tls_client = tls_contexts(folder)
-            received,closed = [],asyncio.Event()
-            async def stream(reader,writer):
+            with TemporaryDirectory(prefix='control-only-tls-', dir=STATE) as temporary:
+                folder = Path(temporary)
+                tls_server,tls_client = tls_contexts(folder)
+                received,closed = [],asyncio.Event()
+                async def stream(reader,writer):
+                    try:
+                        received.append((await reader.readline()).decode().strip())
+                        writer.write(b'BEFORE\n')
+                        await writer.drain()
+                        await reader.read()
+                    finally:
+                        writer.close()
+                        closed.set()
+                listener = await asyncio.start_server(stream,'127.0.0.1',0,ssl=tls_server)
+                proxy = actor.forward_proxy
+                previous_resolve = proxy.resolve
+                async def tls_resolve(host):
+                    # This sole test destination uses the exact local TLS mapping
+                    # below; every business hostname keeps the strict fixture DNS.
+                    if host=='93.184.215.230':
+                        return host
+                    return await previous_resolve(host)
+                monkeypatch.setattr(proxy,'resolve',tls_resolve)
+                previous_connect = proxy.connect
+                async def tls_transport(ip,port):
+                    if ip=='93.184.215.230' and port==443:
+                        return await asyncio.open_connection('127.0.0.1',listener.sockets[0].getsockname()[1])
+                    return await previous_connect(ip,port)
+                monkeypatch.setattr(proxy,'connect',tls_transport)
+                writer = partial = None
                 try:
-                    received.append((await reader.readline()).decode().strip())
+                    reader,writer = await asyncio.open_connection('127.0.0.1',proxy.port)
+                    writer.write(('CONNECT 93.184.215.230:443 HTTP/1.1\r\nHost: 93.184.215.230:443\r\n'
+                        +'Proxy-Authorization: '+proxy.auth+'\r\n\r\n').encode())
+                    await writer.drain()
+                    assert b'200' in await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'),5)
+                    await writer.start_tls(tls_client,server_hostname='stream.fixture.test')
                     writer.write(b'BEFORE\n')
                     await writer.drain()
-                    await reader.read()
+                    assert await asyncio.wait_for(reader.readline(),5) == b'BEFORE\n'
+                    incomplete,partial = await asyncio.open_connection('127.0.0.1',proxy.port)
+                    partial.write(b'CONNECT ')
+                    await partial.drain()
+                    await until(lambda:len(proxy.tasks)>=2)
+                    before_models = len(calls)
+                    runtime = actor.native_runtime
+                    await gate.ws.close()
+                    await until(lambda:runtime.closed and actor.disconnected and not proxy.tasks)
+                    assert await asyncio.wait_for(reader.read(1),5) == b''
+                    assert await asyncio.wait_for(incomplete.read(1),5) == b''
+                    await asyncio.wait_for(closed.wait(),5)
+                    assert not page.is_closed() and await page.evaluate('1') == 1
+                    assert await worker.evaluate('self.registration.active.scriptURL') == site.origin()+'/sw.js'
+                    await asyncio.wait_for(worker.evaluate('''async()=>{const p=await (await (await caches.open('native-action-pending-test')).match('/pending-last')).json();
+                        return fetch(p.url,{method:'POST',headers:{'Content-Type':p.type},body:p.body}).then(r=>r.status).catch(e=>e.name)}'''),5)
+                    assert data['source_count']('POST','/posts') == 2 and len(calls) == before_models
+                    assert runtime.forward_token() is None and received == ['BEFORE']
+                    with pytest.raises(OSError):
+                        await asyncio.open_connection('127.0.0.1',proxy.port)
+                    with tx(aid) as c:
+                        assert all(row['state']=='confirmed' for row in all_rows(c,'SELECT state FROM lead.actions'))
+                        assert all_rows(c,'SELECT attempt FROM lead.action_attempts') == [{'attempt':1},{'attempt':1}]
+                    report['control_only'] = {'manager_pid':os.getpid(),'chrome_cdp_alive':True,'same_worker_alive':True,
+                        'tls_eof':True,'partial_header_eof':True,'old_worker_source_delta':0,'new_model_requests':0}
                 finally:
-                    writer.close()
-                    closed.set()
-            listener = await asyncio.start_server(stream,'127.0.0.1',0,ssl=tls_server)
-            proxy = actor.forward_proxy
-            previous_resolve = proxy.resolve
-            async def tls_resolve(host):
-                # This sole test destination uses the exact local TLS mapping
-                # below; every business hostname keeps the strict fixture DNS.
-                if host=='93.184.215.230':
-                    return host
-                return await previous_resolve(host)
-            monkeypatch.setattr(proxy,'resolve',tls_resolve)
-            previous_connect = proxy.connect
-            async def tls_transport(ip,port):
-                if ip=='93.184.215.230' and port==443:
-                    return await asyncio.open_connection('127.0.0.1',listener.sockets[0].getsockname()[1])
-                return await previous_connect(ip,port)
-            monkeypatch.setattr(proxy,'connect',tls_transport)
-            writer = partial = None
-            try:
-                reader,writer = await asyncio.open_connection('127.0.0.1',proxy.port)
-                writer.write(('CONNECT 93.184.215.230:443 HTTP/1.1\r\nHost: 93.184.215.230:443\r\n'
-                    +'Proxy-Authorization: '+proxy.auth+'\r\n\r\n').encode())
-                await writer.drain()
-                assert b'200' in await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'),5)
-                await writer.start_tls(tls_client,server_hostname='stream.fixture.test')
-                writer.write(b'BEFORE\n')
-                await writer.drain()
-                assert await asyncio.wait_for(reader.readline(),5) == b'BEFORE\n'
-                incomplete,partial = await asyncio.open_connection('127.0.0.1',proxy.port)
-                partial.write(b'CONNECT ')
-                await partial.drain()
-                await until(lambda:len(proxy.tasks)>=2)
-                before_models = len(calls)
-                runtime = actor.native_runtime
-                await gate.ws.close()
-                await until(lambda:runtime.closed and actor.disconnected and not proxy.tasks)
-                assert await asyncio.wait_for(reader.read(1),5) == b''
-                assert await asyncio.wait_for(incomplete.read(1),5) == b''
-                await asyncio.wait_for(closed.wait(),5)
-                assert not page.is_closed() and await page.evaluate('1') == 1
-                assert await worker.evaluate('self.registration.active.scriptURL') == site.origin()+'/sw.js'
-                await asyncio.wait_for(worker.evaluate('''async()=>{const p=await (await (await caches.open('native-action-pending-test')).match('/pending-last')).json();
-                    return fetch(p.url,{method:'POST',headers:{'Content-Type':p.type},body:p.body}).then(r=>r.status).catch(e=>e.name)}'''),5)
-                assert data['source_count']('POST','/posts') == 2 and len(calls) == before_models
-                assert runtime.forward_token() is None and received == ['BEFORE']
-                with pytest.raises(OSError):
-                    await asyncio.open_connection('127.0.0.1',proxy.port)
-                with tx(aid) as c:
-                    assert all(row['state']=='confirmed' for row in all_rows(c,'SELECT state FROM lead.actions'))
-                    assert all_rows(c,'SELECT attempt FROM lead.action_attempts') == [{'attempt':1},{'attempt':1}]
-                report['control_only'] = {'manager_pid':os.getpid(),'chrome_cdp_alive':True,'same_worker_alive':True,
-                    'tls_eof':True,'partial_header_eof':True,'old_worker_source_delta':0,'new_model_requests':0}
-            finally:
-                for output in (writer,partial):
-                    if output:
-                        output.close()
-                listener.close()
-                await listener.wait_closed()
+                    for output in (writer,partial):
+                        if output:
+                            output.close()
+                    listener.close()
+                    await listener.wait_closed()
         finally:
             if hold:
                 await hold.close()

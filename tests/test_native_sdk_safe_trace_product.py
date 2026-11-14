@@ -17,7 +17,7 @@ async def test_sdk_trace_distinguishes_bad_index_and_input_denial_without_values
     monkeypatch.setattr(account_profiles,'native_available',lambda:True)
     result=await verify_login(monkeypatch,mode='trace_probe')
     assert result['task_state']=='succeeded' and result['account']['state']=='connected'
-    folder=next((STATE/'browser-use-runs').glob('connection-*'))
+    folder=STATE/'browser-use-runs'/('connection-'+result['connection_id'])
     path=folder/'safe-step-trace.json'
     assert path.is_file(), 'Actual SDK execution must persist a safe action trace.'
     raw=path.read_text()
@@ -35,5 +35,5 @@ async def test_sdk_trace_distinguishes_bad_index_and_input_denial_without_values
     assert not any(row['trace_in_model_prompt'] for row in result['synthetic_model_diagnostics'])
     assert result['usage']['request_count']==7 and not result['usage']['billing_unknown']
     assert len([row for row in result['oracle']['requests'] if row['method']=='POST' and row['path']=='/session'])==1
-    (STATE/'safe-trace-product.json').write_text(json.dumps({'trace':trace,'privacy':result['privacy'],
+    (STATE/'safe-trace-product.json').write_text(json.dumps({'connection_id':result['connection_id'],'trace':trace,'privacy':result['privacy'],
         'task_state':result['task_state'],'account_state':result['account']['state'],'usage':result['usage']},indent=2))

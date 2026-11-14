@@ -43,9 +43,9 @@ async def test_incomplete_login_submit_is_denied_before_native_click(monkeypatch
     monkeypatch.setattr(NativeConnection,'authorize',observed)
     monkeypatch.setattr(account_profiles,'native_available',lambda:True)
     result=await helper.verify_login(monkeypatch,mode='credential_form_probe_'+style)
-    folder=next((STATE/'browser-use-runs').glob('connection-*'))
+    folder=STATE/'browser-use-runs'/('connection-'+result['connection_id'])
     trace=json.loads((folder/'safe-step-trace.json').read_text())
-    safe={'samples':samples,'trace':trace,'observations':[
+    safe={'connection_id':result['connection_id'],'samples':samples,'trace':trace,'observations':[
         row.get('credential_controls',[]) for row in result['synthetic_model_diagnostics']],
         'privacy':result['privacy'],'request_count':result['usage']['request_count'],
         'authentication_posts':len([r for r in result['oracle']['requests'] if r['method']=='POST' and r['path']=='/session']),
