@@ -998,11 +998,23 @@ def unified_cutover_pending(sha):
     return True
 
 
+def shared_cutover_pending(sha):
+    require(SHA.fullmatch(sha),"invalid cutover revision")
+    stage=STORE/("maintenance-"+sha)
+    marker=stage/"shared-executor-cutover.pending"
+    if not os.path.lexists(marker):
+        return False
+    executor_directory(stage,private=True)
+    require(executor_host_file(marker,private=True).decode().strip()==sha,"shared-executor cutover journal differs")
+    return True
+
+
 def cutover_kind(sha):
     growth=growth_cutover_pending(sha)
     unified=unified_cutover_pending(sha)
-    require(not (growth and unified),'ambiguous cutover journals')
-    return 'growth' if growth else 'unified-browser' if unified else None
+    shared=shared_cutover_pending(sha)
+    require(sum((growth,unified,shared))<=1,'ambiguous cutover journals')
+    return 'growth' if growth else 'unified-browser' if unified else 'shared-executor' if shared else None
 
 
 def cutover_pending(sha):
@@ -1071,7 +1083,7 @@ FAULT_ISOLATION_FILES = {'scripts/fault_isolation_upgrade.py': '6fa2986893c3d1db
 def fault_schema_query():
     return """SELECT
         (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN
-            (ARRAY['0030_fault_isolation'],ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'])
+            (ARRAY['0030_fault_isolation'],ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'],ARRAY['0035_shared_executor'])
         AND (SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity)
              FROM pg_class WHERE oid IN (to_regclass('lead.runtime_issues'),to_regclass('lead.ui_revisions')))
         AND (SELECT count(*)=4 FROM pg_policies WHERE schemaname='lead'
@@ -1116,7 +1128,7 @@ GROWTH_RUNTIME_FILES = {'scripts/growth_runtime_upgrade.py': '5a98672c797361272a
 
 
 def growth_schema_query():
-    return """SELECT (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN (ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'])
+    return """SELECT (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN (ARRAY['0031_growth_runtime'],ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'],ARRAY['0035_shared_executor'])
         AND (SELECT count(*)=3 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class WHERE oid IN
             (to_regclass('lead.growth_experiments'),to_regclass('lead.account_operating_intents'),to_regclass('lead.profile_execution_routes')))
         AND (SELECT count(*)=6 FROM pg_policies WHERE schemaname='lead'
@@ -1262,7 +1274,7 @@ LOCAL_EXECUTOR_FILES = frozenset((
 
 def browser_schema_query():
     return "SELECT ("+growth_schema_query().removeprefix("SELECT ")+""" )
-        AND (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN (ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'])
+        AND (SELECT array_agg(version_num::text) FROM public.lead_migration_version) IN (ARRAY['0033_unified_browser'],ARRAY['0034_local_executor'],ARRAY['0035_shared_executor'])
         AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.growth_complete_connection(uuid,uuid,uuid,bigint,bigint,bigint,jsonb,text,jsonb)') AND prosecdef AND md5(prosrc)='fe6c839637f14db267c2b0dae12b6eef')
         AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.growth_receipt_valid(uuid)') AND prosecdef AND md5(prosrc)='f868f71708e1cdcd167aac21b3a43630')
         AND EXISTS(SELECT FROM pg_proc WHERE oid=to_regprocedure('lead.growth_confirm_publication(uuid)') AND prosecdef AND md5(prosrc)='4e4b9df37d438d1232deba642c577e93')
@@ -1303,10 +1315,12 @@ def browser_schema_query():
     """
 
 
-def local_executor_schema_query():
+def local_executor_schema_query(*, shared=False):
     """Exact additive transport keys and RLS; no production facts are sampled."""
-    return """SELECT
-        (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['0034_local_executor']
+    version='0035_shared_executor' if shared else '0034_local_executor'
+    original_policies="polname IN ('agent_scope','member_scope') AND " if shared else ''
+    return f"""SELECT
+        (SELECT array_agg(version_num::text) FROM public.lead_migration_version)=ARRAY['{version}']
         AND (SELECT count(*)=5 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class
             WHERE relnamespace='lead'::regnamespace AND relname IN ('local_executor_devices','local_executor_projects',
                 'local_executor_requests','local_executor_commands','local_executor_events'))
@@ -1317,7 +1331,7 @@ def local_executor_schema_query():
               WHEN 'member_scope' THEN NOT polpermissive AND md5(pg_get_expr(polqual,polrelid))='ba49c86007a3518c764dfc9790c67b50'
                 AND md5(pg_get_expr(polwithcheck,polrelid))='ba49c86007a3518c764dfc9790c67b50'
               ELSE false END) FROM pg_policy
-            WHERE polrelid IN (to_regclass('lead.local_executor_devices'),to_regclass('lead.local_executor_projects'),
+            WHERE {original_policies}polrelid IN (to_regclass('lead.local_executor_devices'),to_regclass('lead.local_executor_projects'),
                 to_regclass('lead.local_executor_requests'),to_regclass('lead.local_executor_commands'),to_regclass('lead.local_executor_events')))
         AND (SELECT count(*)=22 FROM pg_constraint WHERE convalidated
             AND (conindid=0 OR EXISTS(SELECT FROM pg_index WHERE indexrelid=conindid AND indisunique AND indisvalid AND indisready))
@@ -1360,6 +1374,172 @@ def unified_schema_query():
     return "SELECT ("+browser_schema_query().removeprefix("SELECT").strip()+") AND ("+local_executor_schema_query().removeprefix("SELECT").strip()+")"
 
 
+# Public source blobs are reviewed separately from the catalog of an actual
+# PostgreSQL 18 rehearsal. A missing catalog attestation must never admit DDL.
+SHARED_EXECUTOR_FILES = {
+    'apps/web/next.config.ts': '36f582242ca36fa5274008ef981aec32580a8590',
+    'infra/local-executor/egress.py': '0e710ad696dcd3b801397037c1192a313911ffa0',
+    'infra/local-executor/lead-codex-egress.conf': '42e731ae9d0ff5b45c68dae0b0f62ff770060493',
+    'infra/local-executor/lead-codex-egress.service': 'e2199a737732bba1e18471d3e11920ad350c42d2',
+    'infra/local-executor/lead-codex-node.service': '3456e0d0103ea4a4faef176ac3ba30a72a12c513',
+    'infra/local-executor/lead-codex-node.socket': '1c925357993bcb6e6b6fb3ca1400006edcd4b347',
+    'infra/local-executor/lead-codex-worker.service': '44df0a853be5f2dc0a217484fc89e3f156f886df',
+    'infra/local-executor/lead-codex@.service': '2574edb43a06ccbbd4866b0342a4e8f69be492a6',
+    'infra/local-executor/node_broker.py': '39b083a796ee4bb31c03a7484eee522e0c086e73',
+    'infra/migrations/sql/0032_research_memory.sql': '1cd03ca94dae3bdd3bcd11124c92bd224a9c6e15',
+    'infra/migrations/sql/0033_unified_browser.sql': '2328c5a253438f1b157d24cf71f81b18075485b8',
+    'infra/migrations/sql/0034_local_executor.sql': '77be5f0e80251e67020427e4b4f9947079196753',
+    'infra/migrations/sql/0035_shared_executor.sql': 'fe714092acb0b7cc3377342f1b7c1ff5be5de08d',
+    'infra/migrations/versions/0032_research_memory.py': '6f1423fefdd2fa3aba498b37d9f7fad9159ced65',
+    'infra/migrations/versions/0033_unified_browser.py': '8f75f097ad91baac8295537e6d5a52b49b503693',
+    'infra/migrations/versions/0034_local_executor.py': '8902def3c7daa0578de3e9e3bebf9674992d1411',
+    'infra/migrations/versions/0035_shared_executor.py': '44ed281a355e4532e242967004f24af84983f6d0',
+    'requirements.browser-use.lock.txt': '9105c7748d6aa830f312114e4f9d3e1431e4f911',
+    'requirements.lock.txt': 'dcf3273dc078a66007e8db836ecefa2518834bbf',
+    'scripts/browser_namespace.py': '7ecb47f233761b910317126d9d15e8edfb9fe21b',
+    'scripts/browser_use_runner.py': '7abc6429011cd5087ca5413b1916ab24969116df',
+    'scripts/build_browser_runtime.py': 'cbc4d3d3521a2fe50c589813cf0d3956289ca94a',
+    'scripts/build_home_image.sh': '2f90521b4f04fcdb3b90179958decd4fbffc5827',
+    'scripts/shared_executor_upgrade.py': 'efd0a3907f70297e455989af608f1fad8906f264',
+    'scripts/unified_browser_upgrade.py': '8d6c4e9fc060b2cc907c9849838e6483cb9d196d',
+    'services/local-executor/.gitignore': '72bdd5d427f474fb9b7835d3226d921ef7a8bd6f',
+    'services/local-executor/README.md': 'a14c1164203cadf8aa3ede18c649c536aa73e5f8',
+    'services/local-executor/package-lock.json': 'cc1e5486a892bed0fdb59f70c6c0cc083659bbdc',
+    'services/local-executor/package.json': 'e7f3c2fc9606e76c01dcdd91dab71650fa1202cf',
+    'services/local-executor/src/broker-client.ts': 'a348cef2b138854f1e3b3d1f02fb9ac997abdc51',
+    'services/local-executor/src/capabilities.ts': 'e49690e0145c8b1354273db0751f7d6e75a91fe7',
+    'services/local-executor/src/cli.ts': '97c3efb31282f65048e301132c5ac34978b360c3',
+    'services/local-executor/src/daemon.ts': '93cb3da3d9ae828c958c5b6ca517299825c0dcea',
+    'services/local-executor/src/launchd.ts': '1e77964b223df26ec81407c9c94cd7061e280d69',
+    'services/local-executor/src/mcp.ts': '432118740c6839772d71e7efcd1a3a54c07854cf',
+    'services/local-executor/src/request-bridge.ts': 'c19a5229ea2a5d5ebd5ba163b71b5aac2f19a12e',
+    'services/local-executor/src/rpc.ts': '3f38f34f49b37f3a31756366e9ebde1646075a8f',
+    'services/local-executor/src/runner.ts': '741dbc978555ca2231639611dc5c73ed9b7726e3',
+    'services/local-executor/src/server-binding.ts': '02bc1cc9ec4504750f7c3fd512b8b30aaec775d5',
+    'services/local-executor/src/server-worker.ts': '122afb64e2a1ed475f42f38d958e69cc2c1553a7',
+    'services/local-executor/src/shared-runtime.ts': '367fff19f56b93b4d8e7a6da985e73254e26c5b4',
+    'services/local-executor/src/store.ts': '8e69365e411894e42dab3900d337e0da1a95188f',
+    'services/local-executor/src/transport.ts': '67420728f073acd762e15484aa485df30cd67994',
+    'services/local-executor/src/types.ts': 'e02fb8fe26ae84b68284af5b60014de08db0dd8d',
+    'services/local-executor/test/cli.test.ts': '1298a9fc3b82b7a9136076f5d51dd385d8447926',
+    'services/local-executor/test/consumer-api.py': '409e9c530464f9e2da19469a40316498ed2fa836',
+    'services/local-executor/test/consumer-compact.ts': 'd58c5832684a7709ce20bfd219194e4bb45f7670',
+    'services/local-executor/test/consumer-runner.ts': 'ffa1dfed3a0a2d04572790a3d8b92d5daa14b1fb',
+    'services/local-executor/test/integration-api.py': '3e89fb92c88d7dff046573599452c66bb14c4a21',
+    'services/local-executor/test/integration-control.ts': '4b2e278a428b5424c748443220f5f494d0a2dfcd',
+    'services/local-executor/test/integration.ts': '69d2cc0244096085227945f7543dba96b628d077',
+    'services/local-executor/test/mcp.test.ts': '40c634be81ee3731a91c390bb689ede4d2fff8e4',
+    'services/local-executor/test/request-bridge.test.ts': 'f3143b65f7621d50378c704d69ead871b0530c6b',
+    'services/local-executor/test/runtime.test.ts': 'd363bed2b4e1297e93ecd4e356f000c94ede27ed',
+    'services/local-executor/test/server-worker.test.ts': 'df2e40ca328d4469c79b42ed2c027062f53a12fc',
+    'services/local-executor/test/subagent-api.py': '2d143bc1608954fc729a12751c889961375fd3cf',
+    'services/local-executor/test/subagent-metadata.ts': '610a0e379c23d928785f552d3cbe88a2451f88b5',
+    'services/local-executor/test/transport.test.ts': '290aadf7abc7a7ed1e1a68eda2b43a73ee310e3a',
+    'services/local-executor/test/verify_onboarding_ui.py': 'ccff869c5a5e4abd8719c6ba8dc80b1f4d1b3fdb',
+    'services/local-executor/tsconfig.json': '513e6691417731913efca310e2b6d7f0142ca98e',
+}
+# PostgreSQL 18 rehearsal: seven permission/key/policy mutations rejected.
+# Evidence SHA256: 273ca6daff28687df90bb91c8c06000cf2fe740a4f2ecd2d8c670ed277dc2cc5
+SHARED_EXECUTOR_CATALOG_MD5 = '5bb5c1b655606cf163aef47b5d57ab82'
+
+
+def shared_executor_catalog_query():
+    """Deterministic catalog only: no credentials or application rows sampled.
+
+    Names replace installation-specific OIDs. Original transport tables and
+    the execution-default config constraint remain in scope. Freeze only the
+    actual rehearsed query result; no live application rows are inspected.
+    """
+    return """WITH tables AS (
+        SELECT c.* FROM pg_class c WHERE c.relnamespace='lead'::regnamespace AND c.relname IN
+        ('local_executor_devices','local_executor_projects','local_executor_requests','local_executor_commands',
+         'local_executor_events','executor_nodes','executor_node_grants','executor_studio_requests',
+         'executor_studio_commands','executor_studio_events','admin_configs')),
+    funcs AS (SELECT p.* FROM pg_proc p WHERE p.pronamespace='lead'::regnamespace
+        AND (p.proname LIKE 'executor\\_%' ESCAPE '\\' OR p.proname LIKE 'ctx\\_executor\\_%' ESCAPE '\\')),
+    roles AS (SELECT * FROM pg_roles WHERE rolname IN ('lead_runtime','lead_auth','lead_identity_owner')
+        OR oid IN (SELECT relowner FROM tables UNION SELECT proowner FROM funcs))
+    SELECT jsonb_build_object(
+      'tables',(SELECT jsonb_agg(jsonb_build_array(c.relname,pg_get_userbyid(c.relowner),c.relrowsecurity,c.relforcerowsecurity,
+        (SELECT jsonb_agg(jsonb_build_array(coalesce(r.rolname,'PUBLIC'),a.privilege_type,a.is_grantable)
+          ORDER BY coalesce(r.rolname,'PUBLIC'),a.privilege_type,a.is_grantable)
+         FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a LEFT JOIN pg_roles r ON r.oid=a.grantee))
+        ORDER BY c.relname) FROM tables c),
+      'columns',(SELECT jsonb_agg(jsonb_build_array(c.relname,a.attname,format_type(a.atttypid,a.atttypmod),a.attnotnull,
+        pg_get_expr(d.adbin,d.adrelid),
+        has_column_privilege('lead_runtime',c.oid,a.attnum,'SELECT'),
+        has_column_privilege('lead_runtime',c.oid,a.attnum,'INSERT'),
+        has_column_privilege('lead_runtime',c.oid,a.attnum,'UPDATE'),
+        (SELECT jsonb_agg(jsonb_build_array(coalesce(r.rolname,'PUBLIC'),x.privilege_type,x.is_grantable)
+          ORDER BY coalesce(r.rolname,'PUBLIC'),x.privilege_type,x.is_grantable)
+         FROM aclexplode(a.attacl) x LEFT JOIN pg_roles r ON r.oid=x.grantee)) ORDER BY c.relname,a.attnum)
+        FROM tables c JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+        LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum),
+      'constraints',(SELECT jsonb_agg(jsonb_build_array(c.relname,k.conname,k.contype,k.convalidated,
+        k.condeferrable,k.condeferred,pg_get_constraintdef(k.oid)) ORDER BY c.relname,k.conname)
+        FROM tables c JOIN pg_constraint k ON k.conrelid=c.oid),
+      'indexes',(SELECT jsonb_agg(jsonb_build_array(c.relname,x.relname,i.indisunique,i.indisvalid,i.indisready,
+        pg_get_indexdef(i.indexrelid)) ORDER BY c.relname,x.relname)
+        FROM tables c JOIN pg_index i ON i.indrelid=c.oid JOIN pg_class x ON x.oid=i.indexrelid),
+      'policies',(SELECT jsonb_agg(jsonb_build_array(c.relname,p.polname,p.polcmd,p.polpermissive,
+        (SELECT jsonb_agg(coalesce(r.rolname,'PUBLIC') ORDER BY coalesce(r.rolname,'PUBLIC'))
+         FROM unnest(p.polroles) u(oid) LEFT JOIN pg_roles r ON r.oid=u.oid),
+        pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid)) ORDER BY c.relname,p.polname)
+        FROM tables c JOIN pg_policy p ON p.polrelid=c.oid),
+      'triggers',(SELECT jsonb_agg(jsonb_build_array(c.relname,t.tgname,t.tgenabled,pg_get_triggerdef(t.oid))
+        ORDER BY c.relname,t.tgname) FROM tables c JOIN pg_trigger t ON t.tgrelid=c.oid WHERE NOT t.tgisinternal),
+      'foreign_keys_enabled',NOT EXISTS(SELECT FROM tables c JOIN pg_constraint k ON k.conrelid=c.oid
+        JOIN pg_trigger t ON t.tgconstraint=k.oid WHERE k.contype='f' AND t.tgenabled<>'O'),
+      'functions',(SELECT jsonb_agg(jsonb_build_array(p.proname,pg_get_function_identity_arguments(p.oid),
+        pg_get_function_result(p.oid),p.prosrc,p.prosecdef,p.proconfig,pg_get_userbyid(p.proowner),
+        l.lanname,p.provolatile,p.proisstrict,p.proleakproof,p.proparallel,
+        has_function_privilege('lead_runtime',p.oid,'EXECUTE'),has_function_privilege('lead_auth',p.oid,'EXECUTE'),
+        (SELECT jsonb_agg(jsonb_build_array(coalesce(r.rolname,'PUBLIC'),a.privilege_type,a.is_grantable)
+          ORDER BY coalesce(r.rolname,'PUBLIC'),a.privilege_type,a.is_grantable)
+         FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a LEFT JOIN pg_roles r ON r.oid=a.grantee))
+        ORDER BY p.proname,pg_get_function_identity_arguments(p.oid)) FROM funcs p JOIN pg_language l ON l.oid=p.prolang),
+      'roles',(SELECT jsonb_agg(jsonb_build_array(rolname,rolsuper,rolbypassrls,rolinherit,rolcreaterole,rolcreatedb,
+        rolreplication,rolcanlogin) ORDER BY rolname) FROM roles),
+      'memberships',(SELECT jsonb_agg(jsonb_build_array(parent.rolname,child.rolname,m.admin_option,m.inherit_option,m.set_option)
+        ORDER BY parent.rolname,child.rolname) FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid
+        JOIN pg_roles child ON child.oid=m.member WHERE m.member IN (SELECT oid FROM roles))
+    )"""
+
+
+def shared_executor_schema_query():
+    require(re.fullmatch('[a-f0-9]{32}',SHARED_EXECUTOR_CATALOG_MD5),
+            'shared-executor catalog is not frozen')
+    return ('SELECT ('+browser_schema_query().removeprefix('SELECT').strip()+') AND ('+
+            local_executor_schema_query(shared=True).removeprefix('SELECT').strip()+
+            ") AND (SELECT count(*)=5 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM pg_class "
+            "WHERE relnamespace='lead'::regnamespace AND relname IN ('executor_nodes','executor_node_grants',"
+            "'executor_studio_requests','executor_studio_commands','executor_studio_events')) AND "
+            "(SELECT count(*)=2 AND bool_and(NOT rolsuper AND NOT rolbypassrls) FROM pg_roles "
+            "WHERE rolname IN ('lead_runtime','lead_auth')) AND "
+            "md5(("+shared_executor_catalog_query()+")::text)='"+SHARED_EXECUTOR_CATALOG_MD5+"'")
+
+
+def reviewed_shared_executor(mirror,sha,extra):
+    paths=extra.intersection(SHARED_EXECUTOR_FILES)
+    if not paths:
+        return set()
+    if not shared_cutover_pending(sha):
+        return set()  # Old exact-blob admission remains authoritative for 0034.
+    require(SHARED_EXECUTOR_FILES and all(SHA.fullmatch(v) for v in SHARED_EXECUTOR_FILES.values()),
+            'shared-executor release blobs are not frozen')
+    for path in paths:
+        require(run('git','--git-dir',mirror,'rev-parse',f'{sha}:{path}')==SHARED_EXECUTOR_FILES[path],
+                'shared-executor files require compatibility review')
+    query=shared_executor_schema_query()
+    site=TOOLS/'home_live_maintenance.py'
+    require(site.is_file(),'existing node database verifier required')
+    program=('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(query)+'))')
+    require(run('/usr/bin/python3','-IB','-c',program)=='t','shared-executor schema is not ready')
+    require(shared_cutover_pending(sha),'shared-executor cutover hold is missing')
+    verify_local_executor_package(sha)
+    return paths
+
+
 def verify_local_executor_package(sha):
     """Inspect the same immutable image's package without extracting or running it."""
     root = image(sha)
@@ -1391,16 +1571,19 @@ def reviewed_unified_browser(mirror,sha,extra):
                 'unified-browser files require compatibility review')
     site=TOOLS/'home_live_maintenance.py'
     require(site.is_file(),'existing node database verifier required')
-    program=('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(unified_schema_query())+'))')
+    shared=shared_cutover_pending(sha)
+    query=shared_executor_schema_query() if shared else unified_schema_query()
+    program=('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(query)+'))')
     require(run('/usr/bin/python3','-IB','-c',program)=='t','unified-browser schema is not ready')
-    require(unified_cutover_pending(sha),'unified-browser cutover hold is missing')
+    require(shared or unified_cutover_pending(sha),'unified-browser cutover hold is missing')
     if paths.intersection(LOCAL_EXECUTOR_FILES):
         verify_local_executor_package(sha)
     return paths
 
 
-def verify_unified_cutover(sha):
-    require(unified_cutover_pending(sha),'unified-browser cutover pending marker missing')
+def verify_unified_cutover(sha, *, shared=False):
+    pending=shared_cutover_pending if shared else unified_cutover_pending
+    require(pending(sha),'schema cutover pending marker missing')
     require(current()==sha,'cutover current revision differs')
     intake=run('systemctl','show','lead-home-ingress.socket','-p','ActiveState','--value')
     require(intake in ('active','inactive'),'cutover ingress state unavailable')
@@ -1408,26 +1591,37 @@ def verify_unified_cutover(sha):
     verify_executors(sha)
     site=TOOLS/'home_live_maintenance.py'
     require(site.is_file(),'existing node database verifier required')
-    program=('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(unified_schema_query())+'))')
+    query=shared_executor_schema_query() if shared else unified_schema_query()
+    program=('import runpy;read=runpy.run_path('+repr(str(site))+')["site_sql"];print(read('+repr(query)+'))')
     require(run('/usr/bin/python3','-IB','-c',program)=='t','unified-browser schema is not ready')
     verify_local_executor_package(sha)
-    require(current()==sha and unified_cutover_pending(sha),'cutover changed during verification')
+    require(current()==sha and pending(sha),'cutover changed during verification')
 
 
-def complete_unified_cutover(sha):
-    require(unified_cutover_pending(sha),'unified-browser cutover hold is missing')
+def complete_unified_cutover(sha, *, shared=False):
+    pending=shared_cutover_pending if shared else unified_cutover_pending
+    prefix='shared-executor' if shared else 'unified-browser'
+    helper_name='shared_executor_upgrade.py' if shared else 'unified_browser_upgrade.py'
+    files=SHARED_EXECUTOR_FILES if shared else UNIFIED_BROWSER_FILES
+    require(pending(sha),'schema cutover hold is missing')
     stage=STORE/('maintenance-'+sha)
-    journal=json.loads(executor_host_file(stage/'unified-browser-migration.json',private=True))
+    journal=json.loads(executor_host_file(stage/(prefix+'-migration.json'),private=True))
     require(journal.get('sha')==sha and SHA.fullmatch(journal.get('old','')),'unified-browser migration journal differs')
-    helper=stage/'source/scripts/unified_browser_upgrade.py'
-    executor_host_file(helper)
-    expected=UNIFIED_BROWSER_FILES['scripts/unified_browser_upgrade.py']
-    require(SHA.fullmatch(expected) and run('git','hash-object','--no-filters',helper)==expected,'unified-browser finalizer source differs')
+    helper=stage/'source/scripts'/helper_name
+    for name in ({helper_name,'unified_browser_upgrade.py'} if shared else {helper_name}):
+        path=stage/'source/scripts'/name
+        executor_host_file(path)
+        expected=files['scripts/'+name]
+        require(SHA.fullmatch(expected) and run('git','hash-object','--no-filters',path)==expected,'schema finalizer source differs')
     for channel in ('telegram','reddit'):
         provision_executor(sha,EXECUTOR_REGISTRY.parent/(channel+'-provision.json'))
     register_executors(sha)
     run(EXECUTOR_PYTHON_SOURCE,'-I','-B',helper,'finish','--sha',sha,'--old',journal['old'],timeout=360)
-    require(not unified_cutover_pending(sha),'unified-browser finalizer did not release its journal')
+    require(not pending(sha),'schema finalizer did not release its journal')
+
+
+def complete_shared_cutover(sha):
+    complete_unified_cutover(sha,shared=True)
 
 
 def release_preflight(sha):
@@ -1444,7 +1638,8 @@ def finalize_cutover(sha):
     kind=cutover_kind(sha)
     if kind:
         require(current()==sha,'application cutover has not completed; inspect original request')
-        (complete_growth_cutover if kind=='growth' else complete_unified_cutover)(sha)
+        {'growth':complete_growth_cutover,'unified-browser':complete_unified_cutover,
+         'shared-executor':complete_shared_cutover}[kind](sha)
 
 
 # These site units are installed and verified separately; only these reviewed blobs
@@ -1573,6 +1768,7 @@ def deploy(sha):
         extra -= LOCAL_VERIFICATION_FILES
         extra -= reviewed_maintenance_files(mirror, sha, extra)
         extra -= reviewed_channel_schema(mirror, sha, extra)
+        extra -= reviewed_shared_executor(mirror, sha, extra)
         extra -= reviewed_unified_browser(mirror, sha, extra)
         extra -= reviewed_fault_isolation(mirror, sha, extra)
         extra -= reviewed_growth_runtime(mirror,sha,extra)
@@ -1639,7 +1835,7 @@ def main():
         elif args.action == 'finalize-cutover':
             finalize_cutover(args.sha)
         elif args.action == "verify-cutover":
-            verify_unified_cutover(args.sha)
+            verify_unified_cutover(args.sha,shared=cutover_kind(args.sha)=='shared-executor')
         elif args.action == "verify":
             verify(args.sha)
             # Final release acceptance covers provisioned independent consumers.
@@ -1656,7 +1852,8 @@ def main():
             deploy(args.sha)
             kind=cutover_kind(args.sha)
             if kind:
-                (complete_growth_cutover if kind=='growth' else complete_unified_cutover)(args.sha)
+                {'growth':complete_growth_cutover,'unified-browser':complete_unified_cutover,
+                 'shared-executor':complete_shared_cutover}[kind](args.sha)
     except Refused as error:
         sys.exit(str(error))
     except (OSError, ValueError, subprocess.SubprocessError):
