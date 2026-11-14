@@ -85,10 +85,17 @@ jobs:
       - name: Start isolated CI database
         run: |
           docker compose --env-file .state/infra.env -f infra/compose.yaml up -d postgres temporal
+          # The image's temporary init server accepts Unix sockets, then stops.
+          # Only its final server listens on TCP; do not create a DB before it.
+          lead_ci_postgres_ready=false
           for attempt in $(seq 1 30); do
-            if docker compose --env-file .state/infra.env -f infra/compose.yaml exec -T postgres pg_isready -U lead_owner -d postgres; then break; fi
+            if docker compose --env-file .state/infra.env -f infra/compose.yaml exec -T postgres pg_isready -h 127.0.0.1 -U lead_owner -d postgres; then
+              lead_ci_postgres_ready=true
+              break
+            fi
             sleep 1
           done
+          test "$lead_ci_postgres_ready" = true
           docker compose --env-file .state/infra.env -f infra/compose.yaml exec -T postgres createdb -U lead_owner "$LEAD_DB_NAME"
           .venv/bin/python scripts/migrate.py
       - run: .venv/bin/ruff check services scripts tests infra/migrations

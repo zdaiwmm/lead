@@ -3,6 +3,8 @@
 import ast
 import importlib
 import json
+import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +18,59 @@ gate = importlib.import_module("ci_gate")
 release = importlib.import_module("request_home_release")
 
 SHA = "a" * 40
+
+
+@pytest.mark.parametrize("final_ready_after", [3, 0])
+def test_ci_database_wait_ignores_temporary_unix_server(tmp_path, final_ready_after):
+    """Run the actual workflow shell against init-time Unix and final TCP states."""
+    workflow = yaml.safe_load((Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text())
+    command = next(step['run'] for step in workflow['jobs']['backend']['steps']
+                   if step.get('name') == 'Start isolated CI database')
+    tools = tmp_path / 'bin'
+    tools.mkdir()
+    fake = tools / 'compose.py'
+    fake.write_text('''import os, pathlib, sys
+args = sys.argv[1:]
+count = pathlib.Path('probes')
+if 'up' in args:
+    sys.exit(0)
+if 'pg_isready' in args:
+    attempt = int(count.read_text()) + 1 if count.exists() else 1
+    count.write_text(str(attempt))
+    if '-h' not in args:
+        sys.exit(0)  # Init server is accepting Unix connections immediately.
+    assert args[args.index('-h') + 1] == '127.0.0.1'
+    ready = int(os.environ['FINAL_READY_AFTER'])
+    sys.exit(0 if ready and attempt >= ready else 1)
+if 'createdb' in args:
+    pathlib.Path('createdb_attempted').touch()
+    ready = int(os.environ['FINAL_READY_AFTER'])
+    sys.exit(0 if ready and int(count.read_text()) >= ready else 7)
+raise AssertionError('unexpected compose operation')
+''')
+    for name, body in {
+        'docker': f'exec {shlex.quote(sys.executable)} {shlex.quote(str(fake))} "$@"\n',
+        'sleep': 'exit 0\n',
+    }.items():
+        target = tools / name
+        target.write_text('#!/bin/sh\n' + body)
+        target.chmod(0o755)
+    python = tmp_path / '.venv/bin/python'
+    python.parent.mkdir(parents=True)
+    python.write_text('#!/bin/sh\ntouch migrated\n')
+    python.chmod(0o755)
+    result = subprocess.run(['/bin/bash', '-e', '-c', command], cwd=tmp_path,
+        env={**os.environ, 'PATH': str(tools) + os.pathsep + os.environ['PATH'],
+             'LEAD_DB_NAME': 'lead_fixture', 'FINAL_READY_AFTER': str(final_ready_after)},
+        capture_output=True, text=True, timeout=10)
+    if final_ready_after:
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / 'migrated').exists()
+        assert int((tmp_path / 'probes').read_text()) >= final_ready_after
+    else:
+        assert result.returncode != 0
+        assert not (tmp_path / 'createdb_attempted').exists()
+        assert not (tmp_path / 'migrated').exists()
 
 
 @pytest.mark.parametrize("paths,kind", [

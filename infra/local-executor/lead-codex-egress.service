@@ -14,7 +14,9 @@ WorkingDirectory=/
 UMask=0077
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SETUID CAP_SETGID
-AmbientCapabilities=
+# systemd 259's seccomp setup drops root CAP_SETUID unless it is ambient.
+# The wrapper drops UID and explicitly clears ambient/I/P/E before Xray exec.
+AmbientCapabilities=CAP_SETUID
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict

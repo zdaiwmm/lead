@@ -1,6 +1,6 @@
 # lead 开发工作项和验收清单
 
-2026-11-14 服务器执行端最新：[第23.18节](requirements/20261112-unified-browser-research-memory.md#2318-mijiu-server-执行端2026-11-14本次授权实施中)。PR73已获本人批准并合入66a3795；精确CI43572104585/1在60分钟取消、含一个F，未放行新unit。隔离复现定位页面集合与原位权限变化的并发缺口，专项独立审查修复，19项新增、相关44项/CI契约41项及实际Linux原序60项通过；完整CI时限改90分钟、保留全量并首失败及时汇总，精确新main仍待完整验证。Node/Codex与已放行S9原连接器已单独安装并回读；官方设备码请求因当前出口地区限制403，未签发码/登录/配对。本人未确认有现成出口，正准备独立受认证的官方TLS出站适配；22项合成与独立权限审查通过，真实二进制矩阵和安装尚未完成。目标项目待本人信息；原AppS9、API通道、旧账本和业务保持，未启旧timer、未开展实号试点。
+2026-11-14 服务器执行端最新：[第23.18节](requirements/20261112-unified-browser-research-memory.md#2318-mijiu-server-执行端2026-11-14本次授权实施中)。PR74已合入be69；精确CI43585570678/1的frontend/checks/namespace通过，backend在PG初始化临时服务器关闭时建库失败，尚未跑测试，不放行。等待最终TCP监听和超时拒绝建库的修补已先红后绿，CI契约43项通过。精确临时systemd unit另发现259.5启动期移除SETUID；保留隔离的窄修后24项合成、真实普通UID/四类cap清零及SIGKILL/stop/start恢复通过，待新main完整CI与同轮产物。18项真实Xray假通道矩阵通过，仅证明本地认证/路由，不证明远端出口。Node/Codex与已放行S9原连接器已独立安装；真实ChatGPT与项目配对尚未完成，目标项目待本人信息。原AppS9、API通道与旧账本保持，未装正式unit、未启旧timer、未做真实社媒发布。
 
 2026-11-14 本次服务器执行端：[第23.18节](requirements/20261112-unified-browser-research-memory.md#2318-mijiu-server-执行端2026-11-14本次授权实施中)。用户已授权在 mijiu-server 安装 Codex、常驻接入和配对，沿用 ChatGPT/Sol-medium，先准备后本人官方授权。独立分支 `codex/server-codex-executor-20261114` 起于实时main c635d3b；确认服务器Ubuntu/x86-64、原应用仍S9。采用专用普通用户/systemd、原封连接器run，不运行macOS的pair --install，不迁移旧Task/device/thread。新增unit/打包与流程说明按application完整CI，原S9应用不重切；账号授权、配对和实测结果待后续回填。服务器访问Lead仍经公网HTTPS，TLS通过，不承诺零延迟；旧unknown/费用及30天配对有效期、epoch丢响应的人工恢复边界保留。
 
