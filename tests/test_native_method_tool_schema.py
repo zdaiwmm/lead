@@ -85,18 +85,22 @@ def test_only_observable_parameters_are_shown_and_legacy_bounds_remain_runtime_c
     assert all(key in description for key in (PUBLISH-{'self_subject'})|{'editor_parent'})
 
 
-@pytest.mark.skipif(__import__('os').environ.get('LEAD_NATIVE_PRODUCT_TESTS')!='1',
-    reason='Explicit pinned SDK environment required')
-@pytest.mark.asyncio
-async def test_actual_sdk_registry_routes_exact_dtos_through_original_manager():
+async def _sdk_registry_probe():
     import json
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
     import httpx
     from browser_use import ActionResult, Tools
-    from lead_app.config import STATE
-    from test_native_identity_error_feedback import manager
+
+    # Read the existing manager extractor without importing its pytest module
+    # into the separately locked SDK environment.
+    manager_tree=ast.parse((ROOT/'tests/test_native_identity_error_feedback.py').read_text())
+    manager_node=next(node for node in manager_tree.body
+        if isinstance(node,ast.FunctionDef) and node.name=='manager')
+    manager_scope={'ast':ast,'Path':Path,'__file__':str(ROOT/'tests/test_native_identity_error_feedback.py')}
+    exec(compile(ast.Module(body=[manager_node],type_ignores=[]),'<original-manager-extractor>','exec'),manager_scope)
+    manager=manager_scope['manager']
 
     received=[]
     async def rpc(request):
@@ -124,14 +128,63 @@ async def test_actual_sdk_registry_routes_exact_dtos_through_original_manager():
                 else:
                     bad['selectors']['guessed_field']='observed-css'
                 count=len(received)
-                with pytest.raises((RuntimeError,ValueError)):
+                try:
                     await tools.registry.execute_action('propose_method',bad)
+                except (RuntimeError,ValueError):
+                    pass
+                else:
+                    raise AssertionError('Invalid selectors reached the actual SDK tool')
                 assert len(received)==count
         assert len(received)==2 and browser.assert_fresh_observation.await_count==2
-        (STATE/'method-tool-sdk-schema.json').write_text(json.dumps({'schema':schema,
+        return {'schema':schema,
             'manager_operation_names':[row['operation'] for row in received],
             'manager_selector_keys':[sorted(row['args']['selectors']) for row in received],
-            'missing_unknown_denied_before_rpc':4},indent=2))
+            'missing_unknown_denied_before_rpc':4}
+
+
+@pytest.mark.skipif(__import__('os').environ.get('LEAD_NATIVE_PRODUCT_TESTS')!='1',
+    reason='Explicit pinned SDK environment required')
+def test_actual_sdk_registry_routes_exact_dtos_through_original_manager():
+    import json
+    import os
+    import subprocess
+
+    from lead_app.config import STATE
+
+    runtime=Path(os.environ['LEAD_BROWSER_RUNTIME_DIR'])
+    # Only the SDK subprocess loads browser_use and its Python 3.12 dependencies.
+    # The application pytest process retains its independent dependency lock.
+    probe='''import ast,asyncio,importlib.metadata,json,sys
+from pathlib import Path
+from typing import Annotated,Literal
+from pydantic import BaseModel,ConfigDict,Field
+from pydantic.json_schema import SkipJsonSchema
+ROOT=Path(sys.argv[2])
+source=ast.parse(Path(sys.argv[1]).read_text())
+definitions=[node for node in source.body if
+    isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name in ('proposal_tool','_sdk_registry_probe')
+    or isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id=='PUBLISH' for target in node.targets)]
+assert len(definitions)==3
+exec(compile(ast.Module(body=definitions,type_ignores=[]),sys.argv[1],'exec'))
+result=asyncio.run(_sdk_registry_probe())
+result.update(sdk_version=importlib.metadata.version('browser-use'),python_version=list(sys.version_info[:2]))
+print(json.dumps(result,sort_keys=True))
+'''
+    environment={key:value for key,value in os.environ.items()
+        if not key.startswith(('LEAD_','OPENAI_','DEEPSEEK_','ANTHROPIC_','BROWSER_USE_'))}
+    environment.update(PYTHONPATH=os.pathsep.join((str(runtime/'site-packages'),str(ROOT/'services/api'))),
+        ANONYMIZED_TELEMETRY='false',BROWSER_USE_CLOUD_SYNC='false',BROWSER_USE_VERSION_CHECK='false',
+        BROWSER_USE_SETUP_LOGGING='false')
+    result=subprocess.run([os.environ['LEAD_BROWSER_RUNTIME_PYTHON'],'-B','-S','-c',probe,str(Path(__file__)),str(ROOT)],
+        cwd=runtime,env=environment,capture_output=True,text=True,timeout=30)
+    assert result.returncode==0,result.stderr[-4000:]
+    records=[line for line in result.stdout.splitlines() if line.startswith('{')]
+    assert records,result.stdout[-2000:]
+    observed=json.loads(records[-1])
+    assert observed['sdk_version']=='0.13.14' and observed['python_version']==[3,12]
+    assert observed['manager_operation_names']==['record_method','record_method']
+    assert observed['missing_unknown_denied_before_rpc']==4
+    (STATE/'method-tool-sdk-schema.json').write_text(json.dumps(observed,indent=2))
 
 
 def test_proposal_tool_explains_separate_rules_page_without_hidden_identity_hints():
