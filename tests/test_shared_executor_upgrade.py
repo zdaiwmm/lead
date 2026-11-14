@@ -186,3 +186,64 @@ def test_shared_finalizer_attests_both_helper_and_engine_then_uses_original_jour
     assert {'shared-executor-migration.json','shared_executor_upgrade.py','unified_browser_upgrade.py'}<=set(reads)
     assert calls[-1][4:]==('finish','--sha',sha,'--old',old)
     assert calls[-1][3]==str(stage/'source/scripts/shared_executor_upgrade.py')
+
+
+def test_shared_inventory_pins_the_new_drill_transport_without_widening_old_growth(modules):
+    hook, _ = modules
+    name = 'scripts/growth_runtime_upgrade.py'
+    data = (Path(__file__).resolve().parents[1] / name).read_bytes()
+    blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+    assert hook.SHARED_EXECUTOR_FILES.get(name) == blob
+    assert hook.GROWTH_RUNTIME_FILES[name] == '5a98672c797361272a1a22148ba7b3539ca09aba'
+    assert blob != hook.GROWTH_RUNTIME_FILES[name]
+
+
+@pytest.mark.parametrize('held,matching,schema_ready,package_ready,accepted', [
+    (True, True, True, True, True),
+    (True, False, True, True, False),
+    (False, True, True, True, False),
+    (True, True, False, True, False),
+    (True, True, True, False, False),
+])
+def test_shared_drill_helper_admission_preserves_hold_blob_catalog_and_package_guards(
+        modules, tmp_path, monkeypatch, held, matching, schema_ready, package_ready, accepted):
+    hook, _ = modules
+    name = 'scripts/growth_runtime_upgrade.py'
+    data = (Path(__file__).resolve().parents[1] / name).read_bytes()
+    blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+    monkeypatch.setattr(hook, 'TOOLS', tmp_path)
+    (tmp_path / 'home_live_maintenance.py').write_text('# synthetic verifier')
+    monkeypatch.setattr(hook, 'shared_cutover_pending', lambda sha: held)
+    monkeypatch.setattr(hook, 'growth_cutover_pending', lambda sha: False)
+    monkeypatch.setattr(hook, 'shared_executor_schema_query', lambda: 'shared-catalog-query')
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(args)
+        if args[0] == 'git':
+            return blob if matching else 'f' * 40
+        return 't' if schema_ready else 'f'
+
+    def package(sha):
+        calls.append(('package', sha))
+        if not package_ready:
+            raise hook.Refused('synthetic package rejected')
+
+    monkeypatch.setattr(hook, 'run', run)
+    monkeypatch.setattr(hook, 'verify_local_executor_package', package)
+
+    def admit():
+        extra = {name}
+        extra -= hook.reviewed_shared_executor('/synthetic/mirror', 'b' * 40, extra)
+        # The normal admission order consumes shared paths before the old gate.
+        extra -= hook.reviewed_growth_runtime('/synthetic/mirror', 'b' * 40, extra)
+        assert not extra
+
+    if accepted:
+        admit()
+        assert calls[-1] == ('package', 'b' * 40)
+    else:
+        with pytest.raises(hook.Refused):
+            admit()
+        if not (held and matching and schema_ready):
+            assert not any(call[0] == 'package' for call in calls)

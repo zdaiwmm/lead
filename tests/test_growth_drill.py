@@ -32,9 +32,10 @@ def test_operator_uses_the_registered_site_owner_instead_of_a_development_defaul
         upgrade.database_environment(tmp_path,{**settings,'PGDATABASE':'unrelated'})
 
 
-def test_restored_database_role_transport_enforces_real_rls_and_restores_connections():
+@pytest.mark.parametrize('prefix', ['lead_growth_drill_', 'lead_shared_drill_'])
+def test_restored_database_role_transport_enforces_real_rls_and_restores_connections(prefix):
     upgrade=helper()
-    name='lead_growth_drill_'+uuid4().hex[:12]
+    name=prefix+uuid4().hex[:12]
     owner=database_kwargs(owner=True)
     original=psycopg.connect
     with psycopg.connect(**{**owner,'dbname':'postgres'},autocommit=True) as admin:

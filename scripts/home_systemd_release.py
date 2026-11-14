@@ -1400,6 +1400,7 @@ SHARED_EXECUTOR_FILES = {
     'scripts/browser_use_runner.py': '7abc6429011cd5087ca5413b1916ab24969116df',
     'scripts/build_browser_runtime.py': 'cbc4d3d3521a2fe50c589813cf0d3956289ca94a',
     'scripts/build_home_image.sh': '2f90521b4f04fcdb3b90179958decd4fbffc5827',
+    'scripts/growth_runtime_upgrade.py': '4e0cb2f4a63ece38be37a3ef3ac8e2a05f14fe7c',
     'scripts/shared_executor_upgrade.py': 'efd0a3907f70297e455989af608f1fad8906f264',
     'scripts/unified_browser_upgrade.py': '8d6c4e9fc060b2cc907c9849838e6483cb9d196d',
     'services/local-executor/.gitignore': '72bdd5d427f474fb9b7835d3226d921ef7a8bd6f',

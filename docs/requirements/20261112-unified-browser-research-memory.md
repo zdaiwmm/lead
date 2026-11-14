@@ -1350,4 +1350,7 @@ manager测试child原命令使用API虚拟环境解释器加-S，关闭site后CI
 - 独立真实Linux服务演练首次发现LoadCredential在systemd259.5呈root:root的0440只读ACL掩码；原只准0400的校验拒绝启动。实际假凭据属性探测定位后，新增边界先红后绿，仅允许0400/0440，组读限root或supervisor组，仍拒绝worker组、写入及公开读取。修后真实凭据挂载、内核MainPID认证、同UID子进程拒绝、FD不继承、全局凭据及supervisor进程环境拒读五项全通过；仅创建固定新测试用户/路径，原失败先独立确认清理后才重验，修后亦全部清理。
 - 最终集成已含Node后端、TS worker、界面、0035固定升级入口。Root本地116项核心/桥接/broker通过（另1项Linux专属在Mac跳过），连接器36项/类型/构建通过，发布入口152项通过，前端类型/构建通过；本地初次配置缺失及Unix权限造成的环境失败保留并在合成配置/获准临时socket后重验。发布入口与60个精确blob、固定shared升级目标/私有source attestation/hold和finish恢复顺序另经窄审通过。原0034入口保留，新0035结构采用受控backup/clone/审批/维护hold，不自动执行生产DDL。
 
-统一Node正式注册、共用worker安装启用、Lead新应用切换和0035生产迁移仍未执行。新集成候选仍需精确PR head快检、获准合并后的精确main完整Application verification与同轮产物；093旧绿只放行已安装出网组件。应用切换/迁移超出原“不切现有业务应用”安装许可，待具体PR与检查就绪后一次确认；不迁移、改绑或重放旧任务，不执行真实社媒发布。
+- 2026-11-15：PR77已合入精确main `54f521f62edb6f45c8a11ed64afb65990aaec0df`；CI attempt1因apt仓库TLS超时尚未进入测试，attempt2因生产restore rehearsal准备中已复现shared演练库名称被旧growth专属guard拒绝，由Root取消。无生产应用切换。
+- 最小修正仅严格接受`lead_(growth|shared)_drill_`加12位小写十六进制名称，原host/port/受限role核验保留；新helper精确blob只纳入SHARED放行，旧GROWTH放行及hold协议不变。独立合成先11红再69绿，真实RLS用例扩至两种前缀但本地未连DB；待新精确main完整验证和同轮产物，不以本地测试放行生产。
+
+统一Node正式注册、共用worker安装启用、Lead新应用切换和0035生产迁移仍未执行。用户已明确“批准合并并启用共用服务器能力”，覆盖PR77、新App及0035；本次范围已获批准，待修正PR精确head快检、新精确main完整Application verification、备份恢复核验及同轮产物正式执行，无需再次确认相同范围。093旧绿只放行已安装出网组件；不迁移、改绑或重放旧任务，不执行真实社媒发布。
