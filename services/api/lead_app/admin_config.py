@@ -126,6 +126,8 @@ def parse_key(key):
         kind = "onboarding"
     elif key == "model-catalog/default":
         kind = "model_catalog"
+    elif key == "execution/default":
+        kind = "execution"
     elif key in {
         "member-access/default",
         "pricing/default",
@@ -192,6 +194,7 @@ def default_body(c, key):
         "member_access",
         "pricing",
         "external_notifications",
+        "execution",
     }:
         from .admin_settings import defaults
 

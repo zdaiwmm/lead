@@ -122,6 +122,12 @@ def require_config(key):
 
     kind, aid, _, _ = parse_key(key)
     who = principal()
+    if kind == 'execution':
+        from .scope import trusted_execution
+        if (who and (who.get('role') == 'owner' or trusted_execution()
+                and who.get('role') == 'service' and 'executor.manage' in who.get('capabilities', []))):
+            return
+        raise HTTPException(403, '共用执行策略仅由已授权工作室所有者或受控部署管理')
     if who is None:
         return  # trusted internal runtime; HTTP handlers always have a principal
     if kind not in KIND_CAPS:
@@ -177,7 +183,7 @@ def workbench_permission(method, path):
     # These device handlers choose the existing control/chat capability from
     # the actual command kind. Do not additionally require unrelated editing.
     executor_agent = r"/api/agents/[0-9a-fA-F-]{36}/executor/"
-    executor_post = r"(?:pairing|mode|devices/[0-9a-fA-F-]{36}/revoke|requests/[0-9a-fA-F-]{36}/commands)"
+    executor_post = r"(?:pairing|mode|inherit|devices/[0-9a-fA-F-]{36}/revoke|requests/[0-9a-fA-F-]{36}/commands)"
     if (method == "POST" and re.fullmatch(executor_agent + executor_post, path)
             or method == "DELETE" and re.fullmatch(executor_agent + r"devices/[0-9a-fA-F-]{36}", path)):
         return None

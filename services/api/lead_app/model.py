@@ -227,6 +227,12 @@ async def run_model(
             from .admin_settings import for_agent
             native_settings, _ = for_agent(agent_id, "models")
             prompt = managed_prompt(agent_id, prompt, native_settings)
+        else:
+            from .admin_settings import effective
+            from .db import tx
+            with tx() as c:
+                native_settings, _ = effective(c, 'models')
+            prompt = {'input': prompt, 'managed_tools': native_settings['tools']}
         return await native_model(output, prompt, system, agent_id=agent_id,
             purpose=purpose, call_key=call_key, tools=tools)
     from .budget import growth_cost_context

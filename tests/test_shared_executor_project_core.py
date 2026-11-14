@@ -69,6 +69,8 @@ def store(monkeypatch):
             'ready': False, 'state': 'offline'},
         is_managed_device=lambda _c, value: str(value) == DEVICE)
     monkeypatch.setitem(sys.modules, 'lead_app.executor_nodes', nodes)
+    import lead_app
+    monkeypatch.setattr(lead_app, 'executor_nodes', nodes, raising=False)
     monkeypatch.setattr(executor, 'tx', lambda *_a, **_k: nullcontext(c))
     monkeypatch.setattr(executor, 'current_tenant', lambda: TENANT)
     monkeypatch.setattr(executor, 'one', one)

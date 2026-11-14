@@ -23,6 +23,8 @@ def principal():
 
 def actor_ref():
     who = principal()
+    if who and who.get('actor_type') == 'service' and trusted_execution():
+        return 'service:' + who['subject']
     if not who or who.get("issuer") == "local":
         return "local"
     return (

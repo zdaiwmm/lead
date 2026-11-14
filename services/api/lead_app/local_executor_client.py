@@ -53,6 +53,9 @@ def uses_native(aid=None, *, task_id=None, key=None):
     selected = aid or context.get("agent_id")
     if local_executor.enabled(selected):
         return True
+    if selected is None and context.get('studio_purpose') == 'website_brief' and (key or context.get('key')):
+        from .executor_studio import bound
+        return bound(key or context['key'])
     return bool(selected and getattr(local_executor, "bound", lambda *args, **kwargs: False)(selected,
         task_id=task_id or context.get("task_id"), key=key or context.get("key")))
 
@@ -82,8 +85,12 @@ def native_continuation(lane):
 async def interrupt_request(aid, request_id):
     from . import local_executor
     try:
-        await asyncio.shield(asyncio.to_thread(local_executor.command, aid, request_id, "interrupt", {},
-            str(uuid5(NAMESPACE_URL, "lead-codex-cancel:" + str(request_id)))))
+        command_id = str(uuid5(NAMESPACE_URL, "lead-codex-cancel:" + str(request_id)))
+        if aid is None:
+            from .executor_studio import command
+            await asyncio.shield(asyncio.to_thread(command, request_id, 'interrupt', {}, command_id))
+        else:
+            await asyncio.shield(asyncio.to_thread(local_executor.command, aid, request_id, "interrupt", {}, command_id))
     except Exception:
         # The original business fence remains authoritative even if the device
         # or database is unavailable; late receipts must remain admissible.
@@ -95,7 +102,11 @@ async def await_request(aid, request_id):
 
     try:
         while True:
-            row = await asyncio.to_thread(local_executor.request_status, aid, request_id)
+            if aid is None:
+                from .executor_studio import request_status
+                row = await asyncio.to_thread(request_status, request_id)
+            else:
+                row = await asyncio.to_thread(local_executor.request_status, aid, request_id)
             state = row["state"]
             if state == "completed":
                 return row.get("output", (row.get("result") or {}).get("output"))
@@ -144,12 +155,12 @@ async def run_model(output, prompt, system, *, agent_id=None, purpose=None, call
     from . import local_executor
 
     context = execution_context.get() or {}
-    aid = agent_id or context.get("agent_id") or await asyncio.to_thread(local_executor.default_agent)
-    if not aid:
-        raise ExecutorUnavailable("local_executor_not_connected")
+    aid = agent_id or context.get("agent_id")
+    if aid is None and context.get('studio_purpose') != 'website_brief':
+        raise ExecutorUnavailable('executor_studio_actor_unavailable')
     task_id = context.get("task_id")
     session = context.get("session_key") or ("chat:" + str(aid) if output.__name__ == "Decision" else
-        "task:" + str(task_id) if task_id else "model:" + str(aid) + ":" + output.__name__)
+        "task:" + str(task_id) if task_id else "model:" + str(aid or 'studio') + ":" + output.__name__)
     # Public research is supplied by Codex's native web search. Python closures
     # are never serialized or executed on the user's computer.
     public_web = not isinstance(prompt, dict) or prompt.get("managed_tools", {}).get("public_web", True)
@@ -179,15 +190,23 @@ async def run_model(output, prompt, system, *, agent_id=None, purpose=None, call
                 ('lead_document_read','Read the complete current source document by its actual evidence ID, including all chunks and source metadata.'),
                 ('lead_task_read','Read the original task specification and complete business output by its actual task ID.')))
     key = request_identity(output, prompt, purpose, call_key)
-    lookup = getattr(local_executor, "request_by_key", lambda *args: None)
-    request = await asyncio.to_thread(lookup, aid, key)
+    if aid is None:
+        from . import executor_studio
+        request = await asyncio.to_thread(executor_studio.request_by_key, key, session_key=session)
+    else:
+        lookup = getattr(local_executor, "request_by_key", lambda *args: None)
+        request = await asyncio.to_thread(lookup, aid, key)
     if request:
-        if (request["session_key"] != session or str(request.get("task_id") or "") != str(task_id or "")
+        if ((aid is not None and request["session_key"] != session) or str(request.get("task_id") or "") != str(task_id or "")
                 or request["payload"].get("result_schema", request["payload"].get("output_schema")) != result_schema):
             raise ExecutorUnavailable("local_executor_request_contract_changed")
     else:
-        request = await asyncio.to_thread(local_executor.submit, aid, key, payload,
-            session_key=session, task_id=task_id, resume=True)
+        if aid is None:
+            request = await asyncio.to_thread(executor_studio.submit, key, payload, session_key=session,
+                                             operation_key=context.get('key') or key)
+        else:
+            request = await asyncio.to_thread(local_executor.submit, aid, key, payload,
+                session_key=session, task_id=task_id, resume=True)
     if hasattr(tools, "resume"):
         tools.resume(request.get("payload", {}).get("tool_context") or {})
     result = await await_request(aid, str(request["id"]))

@@ -533,7 +533,8 @@ def poll_device(c, device, *, source='personal_v1', grant_id=None, grant_generat
         + _SOURCE_FILTER + ' ORDER BY c.created_at,c.id LIMIT 30', (device['id'], *parameters))
     commands = [{'id': str(row['id']), 'kind': row['kind'], 'request_id': str(row['request_id']),
         'payload': row['payload']} for row in rows
-        if _source_matches({'scope': row['request_scope']}, source, grant_id, grant_generation)]
+        if _source_matches({'scope': row['request_scope']}, source, grant_id, grant_generation)
+        and not (source == 'managed_node' and row['kind'] == 'run' and row['request_scope'].get('canceled'))]
     return {'epoch': device['epoch'], 'commands': commands}
 
 
