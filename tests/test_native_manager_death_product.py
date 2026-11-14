@@ -142,7 +142,11 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
     from lead_app.growth.tools import ChannelInput, execute_channel
     from native_browser_fixture import NativeBoard
     from native_connection_product import verify_login
-    from native_manager_death_child import private_json
+    from native_manager_death_child import (
+        manager_environment,
+        private_json,
+        startup_summary,
+    )
 
     assert env().get('LEAD_DB_NAME', '').startswith('manager_death_')
     assert env()['LEAD_DB_NAME'] == manager_death_database
@@ -253,11 +257,14 @@ async def test_entire_manager_death_after_claim_closes_tunnel_and_only_reconcile
             private_json(boot_path, boot)
             log = (folder / (nonce + '.log')).open('w')
             logs.append(log)
-            child = subprocess.Popen([sys.executable, '-B', '-S', str(child_script), str(boot_path)],
-                                     env=dict(os.environ), stdout=log, stderr=log)
+            # Keep the API venv's normal site initialization; the SDK worker
+            # independently selects its own isolated interpreter and site.
+            child = subprocess.Popen([sys.executable, '-B', str(child_script), str(boot_path)],
+                                     env=manager_environment(), stdout=log, stderr=log)
             children.append(child)
             for _ in range(200):
-                assert child.poll() is None, 'synthetic manager exited before listening'
+                assert child.poll() is None, ('synthetic manager exited before listening: '
+                                             + json.dumps(startup_summary(log.name)))
                 try:
                     _, probe = await asyncio.open_connection('127.0.0.1', port)
                     probe.close()
