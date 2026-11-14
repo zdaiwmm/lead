@@ -72,13 +72,14 @@ async def test_resident_routing_is_dynamic_and_default_preserves_original(monkey
         return {'ordinary': True}
     monkeypatch.setattr(worker, 'managed_autonomous_cycle', original)
     monkeypatch.setattr(worker, 'env', lambda: settings)
-    args = {'agent_id': OWNER}
+    args = {'agent_id': OWNER, 'cycle_id': 'fixture-dynamic-cycle'}
     assert await worker.autonomous_cycle(args) == {'ordinary': True}
     settings['LEAD_RESIDENT_CYCLE_AGENT_IDS'] = OWNER
     assert (await worker.autonomous_cycle(args))['reason'] == 'device_resident_owns_cycle'
     settings['LEAD_RESIDENT_CYCLE_AGENT_IDS'] = OTHER
     assert await worker.autonomous_cycle(args) == {'ordinary': True}
     assert calls == [args, args]
+    assert all(call is args for call in calls)
 
 
 @pytest.mark.asyncio
@@ -87,7 +88,9 @@ async def test_failed_or_blocked_cycle_does_not_hold_other_agents(monkeypatch):
 
     blocked = asyncio.Event()
     entered = asyncio.Event()
+    calls = []
     async def original(args):
+        calls.append(args)
         if args.get('fail'):
             raise RuntimeError('fixture failure')
         if args.get('block'):
@@ -96,16 +99,21 @@ async def test_failed_or_blocked_cycle_does_not_hold_other_agents(monkeypatch):
         return {'agent_id': args['agent_id']}
     monkeypatch.setattr(worker, 'managed_autonomous_cycle', original)
     monkeypatch.setattr(worker, 'env', lambda: {})
+    failed = {'agent_id': OWNER, 'cycle_id': 'fixture-failed-cycle', 'fail': True}
+    waiting = {'agent_id': OWNER, 'cycle_id': 'fixture-blocked-cycle', 'block': True}
+    other = {'agent_id': OTHER, 'cycle_id': 'fixture-independent-cycle'}
     with pytest.raises(RuntimeError, match='fixture failure'):
-        await worker.autonomous_cycle({'agent_id': OWNER, 'fail': True})
-    first = asyncio.create_task(worker.autonomous_cycle({'agent_id': OWNER, 'block': True}))
+        await worker.autonomous_cycle(failed)
+    first = asyncio.create_task(worker.autonomous_cycle(waiting))
     try:
         await asyncio.wait_for(entered.wait(), 1)
-        assert await asyncio.wait_for(worker.autonomous_cycle({'agent_id': OTHER}), 1) == {'agent_id': OTHER}
+        assert await asyncio.wait_for(worker.autonomous_cycle(other), 1) == {'agent_id': OTHER}
         assert not first.done()
     finally:
         blocked.set()
-        await first
+        assert await first == {'agent_id': OWNER}
+    assert calls == [failed, waiting, other]
+    assert all(actual is expected for actual, expected in zip(calls, (failed, waiting, other), strict=True))
 
 
 @pytest.mark.asyncio
