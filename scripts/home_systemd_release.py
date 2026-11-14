@@ -1585,6 +1585,25 @@ def shared_executor_schema_query():
             "md5(("+shared_executor_catalog_query()+")::text) IN ("+exact_catalogs+")")
 
 
+# Only the reviewed v2 forwarding addition; no new DDL or cutover journal.
+SHARED_EXECUTOR_PROXY_BLOB = '8b07fed2ae460ee3b4404df64e91ebff38a225f6'
+
+
+def reviewed_shared_executor_proxy(mirror, sha, extra):
+    path = 'apps/web/next.config.ts'
+    if path not in extra:
+        return set()
+    require(run('git', '--git-dir', mirror, 'rev-parse', f'{sha}:{path}') == SHARED_EXECUTOR_PROXY_BLOB,
+            'shared-executor proxy requires compatibility review')
+    site = TOOLS / 'home_live_maintenance.py'
+    require(site.is_file(), 'existing node database verifier required')
+    query = shared_executor_schema_query()
+    program = ('import runpy;read=runpy.run_path(' + repr(str(site)) + ')["site_sql"];print(read(' + repr(query) + '))')
+    require(run('/usr/bin/python3', '-IB', '-c', program) == 't', 'shared-executor schema is not ready')
+    verify_local_executor_package(sha)
+    return {path}
+
+
 def reviewed_shared_executor(mirror,sha,extra):
     paths=extra.intersection(SHARED_EXECUTOR_FILES)
     if not paths:
@@ -1831,6 +1850,7 @@ def deploy(sha):
         extra -= LOCAL_VERIFICATION_FILES
         extra -= reviewed_maintenance_files(mirror, sha, extra)
         extra -= reviewed_channel_schema(mirror, sha, extra)
+        extra -= reviewed_shared_executor_proxy(mirror, sha, extra)
         extra -= reviewed_shared_executor(mirror, sha, extra)
         extra -= reviewed_unified_browser(mirror, sha, extra)
         extra -= reviewed_fault_isolation(mirror, sha, extra)
