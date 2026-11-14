@@ -53,7 +53,7 @@ def drill_role_connections(name,owner):
     actual requested role before any application query. Production connections
     and roles outside this exact disposable DB are untouched.
     """
-    if not re.fullmatch(r'lead_growth_drill_[a-f0-9]{12}',name):
+    if not re.fullmatch(r'lead_(?:growth|shared)_drill_[a-f0-9]{12}',name):
         raise ValueError('Role transport is limited to an isolated drill database')
     from unittest.mock import patch
 
