@@ -3,9 +3,52 @@
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
+
+STARTUP_ERROR_PREFIX = 'NATIVE_MANAGER_STARTUP_ERROR '
+
+
+def manager_environment():
+    # This is an API-venv process. The browser runtime still receives its own
+    # explicit interpreter/site through LEAD_BROWSER_RUNTIME_* when dispatched.
+    return {key: value for key, value in os.environ.items() if key not in {'PYTHONPATH', 'PYTHONHOME'}}
+
+
+def startup_diagnostic(error):
+    result = {'exception': type(error).__name__[:80]}
+    if isinstance(error, ModuleNotFoundError) and isinstance(error.name, str):
+        if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]{0,119}', error.name):
+            result['missing_module'] = error.name
+    return result
+
+
+def startup_summary(path):
+    # The private log may contain boot, proxy or exception values. Relay only
+    # the structured marker, never its surrounding traceback or raw messages.
+    with Path(path).open('rb') as log:
+        log.seek(0, 2)
+        log.seek(max(0, log.tell() - 8192))
+        lines = log.read().decode('utf-8', errors='replace').splitlines()
+    for line in reversed(lines):
+        if not line.startswith(STARTUP_ERROR_PREFIX):
+            continue
+        try:
+            data = json.loads(line[len(STARTUP_ERROR_PREFIX):])
+        except ValueError:
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get('exception'), str):
+            continue
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,79}', data['exception']):
+            continue
+        result = {'exception': data['exception']}
+        module = data.get('missing_module')
+        if isinstance(module, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]{0,119}', module):
+            result['missing_module'] = module
+        return result
+    return {'diagnostic': 'unavailable'}
 
 
 def private_json(path, value):
@@ -17,6 +60,9 @@ def private_json(path, value):
 
 
 def main():
+    # pytest's configured pythonpath belongs to the parent process. This child
+    # must locate the same checkout without relying on an ambient PYTHONPATH.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'services' / 'api'))
     import uvicorn
     from lead_app import browser, native_runner
     from lead_app.browser_runtime import PersistentRuntime
@@ -80,4 +126,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as error:
+        print(STARTUP_ERROR_PREFIX + json.dumps(startup_diagnostic(error)), file=sys.stderr, flush=True)
+        raise

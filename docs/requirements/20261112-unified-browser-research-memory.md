@@ -1241,3 +1241,14 @@ identity_layout原独立Linux复现为reauth waiting/challenge且进入owner，�
 
 
 frame/manager/TLS三文件的冻结增量独立窄审通过。真实Linux外置原S5 SDK、ROOT无runtime、单一STATE顺序frame3→manager3→composition→SW共8 passed/328.32秒：专库在三次kill场景均实际使用，原prefix与exactDB断言保留；后续composition回原outer库，专库和outer最终均drop；最后SW通过原固定TLS目录冲突点，所有原Action/attempt、只读回查、零重发及业务证据断言保留。三文件只有测试修改，Ruff/diff检查通过；独立SW补充运行与最终PR/main放行结果以交付栏为准。
+
+
+### 23.15 完整回归收齐的测试启动环境与周期输入
+
+最终候选0a4b38ea2e661b1f2dacd150dd52daea8c0bc57d（PR68）完整CI43549907876/attempt1在2894.82秒后收齐结果：2552 passed、1 skipped、5 failed及8 subtests passed。原已修trace、frame、SDK registry、person、progress、SW组合均已通过，未继续first-fail；失败只剩manager_death三切点的测试child在监听前退出，以及resident_ownership两处旧输入缺cycle_id。该候选无应用/工具放行证明，工具包被门禁跳过，已取到的原镜像只作缓存，不能部署；生产仍7940/0031，正式工具、维护、DDL、请求及切换均未开始。
+
+manager测试child原命令使用API虚拟环境解释器加-S，关闭site后CI无PYTHONPATH中的手工appsite，首import uvicorn失败。即使只删-S，pytest只加到父sys.path的services/api也不会传给tests脚本child；此前Linux诊断显式appsite掩盖了该差异，不能把3.12诊断绿反推3.14 CI环境绿。精确clean环境已实证两层红：原-S缺uvicorn、仅删-S缺lead_app；最小TEST ONLY修补让API child正常初始化自身venv site，并由当前脚本定位当前repo/services/api，去除继承PYTHONPATH/PYTHONHOME。官方SDK worker原有独立CP3.12、-S和显式SDK site完全未变，API不新增browser_use。
+
+新增启动诊断只允许固定typed字段/有限安全token，私有boot、log及异常message不进入CI；6个纯契约/隐私用例通过，独立限定审查接受。最终同字节28bef41在正常API3.12 venv、无手工appsite的Linux上已完成两层红→依赖/API全部导入并停在专设pre-server断言的启动证明；真实三切点及outer库恢复验证进行中，结果以PR交付栏为准。系统现成3.14.4仅额外最小startup证据，不冒充精确CI3.14.10或完整API验证，不重装大环境阻塞必要修补。
+
+另一独立resident输入故障将另PR修补：原Supervisor每次首次/继续轮询均传稳定pending_cycle，managed cycle原本也依cycle_id幂等。旧两个fixture只给agent_id，新native路由提前读取既有必需字段后暴露KeyError。只补稳定且各调用独立的cycle_id、保留默认路由/参数原样/失败与阻塞不拖住其他agent等断言，不改worker产品接口。最终合并后的确定main仍须完整精确应用CI与同轮工具、镜像及连接器原包；不回退旧绿、复用失败产物或放宽断言。
