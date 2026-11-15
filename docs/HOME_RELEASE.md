@@ -4,6 +4,22 @@
 
 维护电脑的正式取件入口使用 `prepare_home_image.py --archive-only --cache-dir`，复用同机私有缓存，不再为每轮任务重写取件脚本。它只交付带 GitHub 认证摘要的 ZIP，节点仍核验 REVISION。登记工具源码不进入业务镜像，不再要求手改摘要白名单。维护工具由 tool_release.py 取得同轮独立工具包，核验来源后单文件备份、锁、原子更新与回读；不重启业务。未知脚本、运行依赖及主机配置仍走原兼容核验。
 
+## 隔离服务的公开网页读取
+
+API与worker保留 `PrivateNetwork=yes` 及原 `JoinsNamespaceOf`；隔离空间没有公网路由时，不能通过更换DNS或借用账号/模型代理来读取公开网页。`lead-public-reader.socket/service` 在隔离外提供固定匿名读取通道，仅Unix socket、无TCP监听；只接受实际业务运行UID，操作仅为health及单个公开HTTP(S)网址读取。DNS公网地址检查、固定目的IP、每次重定向、TLS/SNI及原内容上限继续执行；不接收任意请求头、Cookie、代理或执行指令。原项目/任务/账号权限和读取后的复查、资料保存均留在API。
+
+服务使用独立DynamicUser及空RootDirectory，只读绑定同轮公共源码、既有受信Python、公共依赖及DNS/CA文件，不映射业务配置、数据库、账号或认证目录。解释器与依赖分别来自现有 `bin/py` 和 `bin/site`；依赖单独绑定到固定 `/site`，不继承任意PYTHONPATH。正式工具核对运行时来源与锁定包版本；服务在提供健康响应前检查纯读取依赖与CA可用，健康检查不访问网址或模型。客户端显式配置 `LEAD_PUBLIC_READER_SOCKET` 后失败即报告，不静默直连。该通道不授予账号、发布或target权限。
+
+首次置备采用以下次序，全部使用本需求已批准且完整应用验证通过的精确SHA；同轮工具包与原镜像分别留证，不能用工具/docs检查代替应用放行：
+
+1. 通过 `tool_release.py <SHA> --tool home_systemd_release.py --install` 安装同轮正式工具并独立回读；镜像仍由原 `mount-image` 核同一CI/run/attempt及原包，保持永久只读挂载。
+2. 在节点以管理员执行 `home_systemd_release.py public-reader-plan <SHA>`，只读冻结实际API/worker身份、原单元/挂载/进程及当前App。将该JSON以root私有、0600、不可覆盖方式写入固定 `/etc/lead-home-release/public-reader-provision.json`；本机业务标识与配置不进入公开仓库。
+3. 执行 `home_systemd_release.py provision-public-reader <SHA> /etc/lead-home-release/public-reader-provision.json`。工具持原deploy.lock，核对私有计划与全部原字节，只向固定目标安装socket/service和末尾consumer drop-in，不清空原Bind列表；仅启动新增服务，原App及API/worker进程不重启。另起连接执行 `verify-public-reader-prepared <SHA>`，核同版本服务、真实沙箱/依赖/健康以及原App/consumer未变。已有其他候选、路径或身份不匹配即拒绝。
+4. 经原受保护应用入口切换同一SHA及原渠道。正式部署在维护前和切换前复核consumer预像；正式verify除原应用、渠道、持久工作流和维护条件外，强制核API/worker实际进程已获得固定只读socket目录及路由，读取服务仍用独立身份、固定沙箱和对应源码。另起连接执行 `verify-public-reader <SHA>`，不能把待生效drop-in或服务active当成应用已接入。
+5. 各阶段保留同一持久journal。结果未知只读回原状态，实际已启动且证据完整时只登记原结果，不重发start或重建计划。失败回退先恢复旧App及consumer原配置/运行绑定，再停止新通道；正式 `rollback-public-reader <SHA>` 要求旧App已恢复并取得原维护安全点。回退后不能重放已完成的置备intent。
+
+无关后续App版本仅在读取服务、fetch、模板、依赖清单等相关输入逐字节不变且实际服务/依赖/挂载仍可独立核实时复用原读取服务；证据分别报告reader SHA与App SHA。输入变化或多候选不明确时拒绝，本入口不自动升级或覆盖已有服务。真实Linux演练覆盖隔离内直连拒绝、Unix读取合成公开源、其他UID拒绝、私有文件不可见、socket重建、回退和未知结果回读。最终经营验收仍须跟踪一次真实新事实的消费决策、实际原文、引用与后续结果；服务健康不等于来源可读或业务成功。
+
 ## 隔离 Worker 的模型连接
 
 模型凭据和网络通道分别核验。API 可读到密钥不表示 Worker 的挂载命名空间也能读取。为 Worker 绑定部署端既有凭据文件到应用 `ROOT/.env`，或使用其受控 EnvironmentFile；仅检查有效值是否存在，不输出密钥。保持文件权限与只读挂载。

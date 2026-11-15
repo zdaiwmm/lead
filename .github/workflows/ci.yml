@@ -291,6 +291,24 @@ jobs:
           sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/home_mount_drill.py
       - name: Independent executor systemd binding preservation drill
         run: sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/home_executor_systemd_drill.py
+      - name: Prepare the locked public reader runtime
+        run: |
+          sudo apt-get install -y python3-venv
+          test ! -e /opt/lead-public-reader-python
+          sudo /usr/bin/python3 -m venv --copies /opt/lead-public-reader-python
+          /usr/bin/python3 -IB - <<'PY'
+          import os
+          from pathlib import Path
+          names = {'httpx', 'httpcore', 'anyio', 'certifi', 'idna', 'h11',
+                   'sniffio', 'beautifulsoup4', 'soupsieve', 'typing-extensions'}
+          lines = [line for line in Path('requirements.lock.txt').read_text().splitlines()
+                   if line.split('==')[0].replace('_', '-') in names]
+          assert {line.split('==')[0].replace('_', '-') for line in lines} == names
+          Path(os.environ['RUNNER_TEMP'], 'public-reader.lock').write_text('\n'.join(lines) + '\n')
+          PY
+          sudo /opt/lead-public-reader-python/bin/python -m pip install --no-deps --no-cache-dir -r "$RUNNER_TEMP/public-reader.lock"
+      - name: Public reader systemd isolation and rollback drill
+        run: sudo env LEAD_DISPOSABLE_RUNNER=1 LEAD_PUBLIC_READER_PYTHON=/opt/lead-public-reader-python /usr/bin/python3 -IB tests/public_reader_systemd_drill.py
       - name: Shared Codex credential and Unix peer isolation drill
         if: needs.scope.outputs.kind == 'application'
         run: sudo env LEAD_DISPOSABLE_RUNNER=1 /usr/bin/python3 -IB tests/shared_codex_systemd_drill.py

@@ -1,6 +1,7 @@
 """Authenticated Lead MCP handlers; original business services own all authority."""
 import asyncio
 import json
+import socket
 
 import httpx
 
@@ -25,12 +26,14 @@ async def call(device, request, name, arguments, *, revalidate=None):
         if set(arguments) != {'url'}:
             raise ValueError('executor_tool_scope_changed')
         from .admin_settings import for_agent
-        settings,_=await asyncio.to_thread(for_agent,str(request['agent_id']),'models')
-        tools=settings['tools']
-        if (not tools.get('public_web')
-                or context.get('mode')=='community_discovery' and not tools.get('community_research')
-                or context.get('requires_advanced_research') and not tools.get('advanced_research')):
-            raise ValueError('executor_public_research_disabled')
+        async def check_research_settings():
+            settings,_=await asyncio.to_thread(for_agent,str(request['agent_id']),'models')
+            tools=settings['tools']
+            if (not tools.get('public_web')
+                    or context.get('mode')=='community_discovery' and not tools.get('community_research')
+                    or context.get('requires_advanced_research') and not tools.get('advanced_research')):
+                raise ValueError('executor_public_research_disabled')
+        await check_research_settings()
         from .fetch import fetch_product
         from .research import public_url
         url=public_url(arguments['url'])
@@ -41,7 +44,21 @@ async def call(device, request, name, arguments, *, revalidate=None):
                 raise ValueError('community_source_access_unavailable')
         growth_source = (revalidate is not None and request.get('task_id')
                          and await asyncio.to_thread(_growth_public_read, revalidate))
-        observed=await fetch_product(url,external_links=True)
+        try:
+            observed=await fetch_product(url,external_links=True)
+        except (OSError, httpx.RequestError, httpx.HTTPStatusError) as error:
+            if isinstance(error, PermissionError):
+                raise
+            await check_research_settings()
+            if revalidate is not None:
+                with revalidate():
+                    pass
+            return public_read_failure(url, error)
+        if not growth_source:
+            await check_research_settings()
+        if revalidate is not None and not growth_source:
+            with revalidate():
+                pass
         observed['producer']='codex-public-read'
         if growth_source:
             observed = await asyncio.to_thread(_growth_public_read, revalidate, observed)
@@ -67,6 +84,25 @@ async def call(device, request, name, arguments, *, revalidate=None):
             failure={'code':'browser_tool_unavailable'}
         return {'isError':True,'content':[{'type':'text','text':json.dumps(failure,ensure_ascii=False)}]}
     return response.json()
+
+
+def public_read_failure(url, error):
+    """Keep a source failure finite without hiding authority or policy errors."""
+    codes = {'source_dns_unavailable', 'source_transport_unavailable', 'source_timeout',
+        'reader_busy', 'reader_unavailable', 'reader_invalid_response'}
+    reason = getattr(error, 'code', None)
+    if reason not in codes:
+        reason = ('source_dns_unavailable' if isinstance(error, socket.gaierror)
+            else 'source_timeout' if isinstance(error, (TimeoutError, httpx.TimeoutException))
+            else 'source_http_error' if isinstance(error, httpx.HTTPStatusError)
+            else 'source_transport_unavailable')
+    failure = {'code': 'source_unavailable', 'reason': reason,
+        'failure_scope': 'platform' if reason.startswith('reader_') else 'source',
+        'source_ref': url, 'knowledge_progress': False, 'business_progress': False}
+    if isinstance(error, httpx.HTTPStatusError):
+        failure['http_status'] = error.response.status_code
+    return {'isError': True, 'content': [{'type': 'text', 'text': json.dumps(failure, ensure_ascii=False)}],
+        'structuredContent': failure}
 
 
 def _search_index(url):
