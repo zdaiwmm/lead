@@ -42,8 +42,9 @@ OBSERVED = {
 
 @pytest.fixture
 def socket_path(monkeypatch, pr):
-    directory = tempfile.TemporaryDirectory(prefix="lead-reader-", dir="/private/tmp")
-    path = str(Path(directory.name) / "reader.sock")
+    # Keep the Unix socket path short on both Linux and macOS.
+    directory = tempfile.TemporaryDirectory(prefix="lead-reader-", dir="/tmp")
+    path = str(Path(directory.name).resolve() / "reader.sock")
     monkeypatch.setattr(pr, "PUBLIC_READER_SOCKET", path)
     # A normal developer cannot chown temp directories to root. Preserve real
     # socket mode/ownership while modeling root-owned parents for client tests.
