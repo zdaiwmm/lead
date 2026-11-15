@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     env:
-      LEAD_STATE_DIR: ${{ runner.temp }}/lead-reader-test-state
+      LEAD_STATE_DIR: .state
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
