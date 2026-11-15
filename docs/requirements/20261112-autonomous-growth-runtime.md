@@ -858,6 +858,6 @@ PR #53、#54 已合并。#54 修正真实节点的 Telegram 配置入口：从�
 
 **原回传故障已解决（北京时间 16:28）：**PR86 精确 head `cc94ebdbd8b6890c2c1dd1d1edca4e76693d5fdf` 的 scope/checks/verified 成功，其余五项按文档范围跳过；合入主线 `a9c1f9c1100f4db1a3bf5bd494c87ddb41483424` 后，文档 CI `43694471734/1` 成功，没有应用或工具取件、构建或再部署。一次性恢复助手经限定独立核验，未知结果统一报告 unknown；冻结 SHA256 `05efbbee0538c5c469c56af24431331b1ced36258b0445cc27623f42c5e7f17c`。既有 deploy.lock 内按原目录完整元数据指纹验证，服务器私有 journal 先保存 intent，再仅对该目录 FD 恢复 UID/GID，保留0700及同一设备/inode；没有安装脚本、改配置、读认证文件、重启或发送新请求。
 
-另起 SSH 独立回读确认持久目录归属正确、模式和 inode 未变，实际应用仍为 M8276。原请求于 `2026-11-15T08:28:10.758415Z` 自然完成：399条原事件全部保存为服务端399条唯一事件，原 outbox和全部 scope outbox均0、未ACK命令0；原唯一请求及 thread/turn 与本地完成记录一致，结果存在。原 growth.decision 于08:28:12.132240Z成功处理，status=waiting_for_change，continuation四字段完整，producer=evidence_added、responsibility=owner，条件为新增来源/需求证据，下一步包括证据、需求及分发可行性的重新判断。accepted/rejected组均0，pending_work=false，没有再派工作或再次能力唤醒。修复后的30秒既有请求观察没有同目录EACCES，但也没有新的临时文件打开；解除依据是原大回执的真实完整回传，不以空观察冒充压力验证。
+另起 SSH 独立回读确认持久目录归属正确、模式和 inode 未变，实际应用仍为 M8276。原请求于 `2026-11-15T08:28:10.758415Z` 自然完成：399条原事件全部保存为服务端399条唯一事件，原请求 outbox和原 scope outbox均0、未ACK命令0；原唯一请求及 thread/turn 与本地完成记录一致，结果存在。原 growth.decision 于08:28:12.132240Z成功处理，status=waiting_for_change，continuation四字段完整，producer=evidence_added、responsibility=owner，条件为新增来源/需求证据，下一步包括证据、需求及分发可行性的重新判断。accepted/rejected组均0，pending_work=false，没有再派工作或再次能力唤醒。修复后的30秒既有请求观察没有同目录EACCES，但也没有新的临时文件打开；解除依据是原大回执的真实完整回传，不以空观察冒充压力验证。
 
-工程传输和经营判断链路已经恢复；本次未获得新原文、有效需求学习或业务进展，仍没有本次社媒动作。Facebook关闭、X未验证、Reddit/Telegram原权限和旧恢复账本继续保留。等待新事实是当前明确业务条件，不再是技术上卡在queued；不把它描述成已经持续产生运营成果。
+原请求回传与原经营判断已完成；本次未获得新原文、有效需求学习或业务进展，仍没有本次社媒动作。Facebook关闭、X未验证、Reddit/Telegram原权限和旧恢复账本继续保留。等待新事实是当前明确业务条件，不再是技术上卡在queued；不把它描述成已经持续产生运营成果。
