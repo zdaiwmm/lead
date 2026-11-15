@@ -472,3 +472,48 @@ def test_socket_trust_rejects_symlink_instead_of_socket(socket_path, pr):
             pr._trusted_socket(socket_path)
     finally:
         sock.close()
+
+
+async def test_read_child_filters_unsafe_candidate_links_without_losing_page(pr, monkeypatch, tmp_path):
+    script = tmp_path / "public_reader.py"
+    script.write_bytes(Path(pr.__file__).read_bytes())
+    # Exercise the existing candidate extraction: these hrefs are observations,
+    # not requests, so private/odd-port hrefs can legitimately appear here.
+    hrefs = [
+        "https://public.example.net/features", "http://localhost/help",
+        "http://127.0.0.1/product", "http://192.168.1.9/docs",
+        "https://public.example.net:8443/help",
+    ]
+    fetch_source = Path(pr.__file__).with_name("fetch.py").read_text()
+    (tmp_path / "fetch.py").write_text(
+        fetch_source + "\n\nasync def _fetch_direct(url, *, discover_links, external_links):\n"
+        "    assert external_links and not discover_links\n"
+        "    return {\"url\":url,\"title\":\"Public product\",\"text\":\"Observed public page\","
+        "\"requires_javascript\":False,\"links\":observed_source_urls(" + repr(hrefs) + ",url)}\n"
+    )
+    monkeypatch.setattr(pr, "__file__", str(script))
+    result = await pr._run_child({"v": 1, "action": "read", "url": "https://example.com/product", "discover_links": False, "external_links": True})
+    assert result == {
+        "v": 1, "ok": True,
+        "observed": {
+            "url": "https://example.com/product", "title": "Public product",
+            "text": "Observed public page", "requires_javascript": False,
+            "links": ["https://public.example.net/features"],
+        },
+    }
+
+
+@pytest.mark.parametrize("change", [
+    {"unexpected": "field"}, {"links": "https://public.example.net"},
+    {"links": [123]}, {"links": ["https://public.example.net"] * 11},
+])
+async def test_read_child_candidate_filter_still_rejects_unknown_schema(pr, monkeypatch, tmp_path, change):
+    script = tmp_path / "public_reader.py"
+    script.write_bytes(Path(pr.__file__).read_bytes())
+    (tmp_path / "fetch.py").write_text(
+        "async def _fetch_direct(url, *, discover_links, external_links):\n"
+        "    return " + repr({**OBSERVED, **change}) + "\n"
+    )
+    monkeypatch.setattr(pr, "__file__", str(script))
+    result = await pr._run_child({"v": 1, "action": "read", "url": "https://example.com/product", "discover_links": False, "external_links": True})
+    assert result == {"v": 1, "ok": False, "error": {"code": "source_policy_denied", "category": "policy"}}

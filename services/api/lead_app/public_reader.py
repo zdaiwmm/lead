@@ -450,6 +450,20 @@ def _read_main():
         observed = asyncio.run(fetch._fetch_direct(
             request["url"], discover_links=request["discover_links"], external_links=request["external_links"],
         ))
+        if isinstance(observed, dict) and isinstance(observed.get("links"), list):
+            candidates = observed["links"]
+            if len(candidates) > 10 or any(not isinstance(link, str) for link in candidates):
+                raise PublicReaderPolicyError()
+            public_links = []
+            for link in candidates:
+                try:
+                    _public_url(link, maximum=2000)
+                except PublicReaderPolicyError:
+                    continue
+                public_links.append(link)
+            # Candidate hrefs are observations, never destinations already read.
+            # Keep the page and only transmit candidates the client may accept.
+            observed = {**observed, "links": public_links}
         value = {"v": PROTOCOL, "ok": True, "observed": _observed(observed)}
         frame = _encode(value, MAX_RESPONSE)
     except Exception as exc:
