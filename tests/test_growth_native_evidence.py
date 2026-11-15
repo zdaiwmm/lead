@@ -1,4 +1,5 @@
 """Native source reads become scoped source documents, never business outcomes."""
+import socket
 from datetime import timedelta
 
 import pytest
@@ -240,6 +241,46 @@ async def test_public_chat_without_task_keeps_read_only_behavior(growth_agent, m
     assert 'evidence_ref' not in result['structuredContent']
     with tx(growth_agent) as c:
         assert one(c, 'SELECT count(*) n FROM lead.knowledge_documents')['n'] == 0
+
+
+@pytest.mark.parametrize('change', [None, 'grant', 'task'])
+async def test_managed_source_error_still_rechecks_original_authority(native_owner, monkeypatch, change):
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from fastapi import HTTPException
+    from lead_app import executor_nodes as nodes
+    from lead_app.executor_nodes_api import ScopeTools, scope_tools
+    from lead_app.scope import tenant_scope
+
+    node, _ = connected_node()
+    aid = domain.create_agent(runtime_engine='growth')
+    scope = scope_for(node, aid)
+    _, request = request_for(aid, device={'managed': True})
+    async def unavailable(url, **kwargs):
+        if change == 'grant':
+            with tenant_scope(native_owner['tenant_id'], native_owner):
+                nodes.revoke_grant(scope['scope_ref'])
+        elif change == 'task':
+            with tx(aid) as c:
+                c.execute("UPDATE lead.tasks SET state='canceled' WHERE id=%s", (request['task_id'],))
+        raise socket.gaierror(-3, 'test-only DNS failure')
+    monkeypatch.setattr(fetch, 'fetch_product', unavailable)
+    body = fence(node, scope, ScopeTools, request_id=str(request['id']),
+        name='lead_public_read', arguments={'url': SOURCE['url']})
+    async def invoke():
+        return await scope_tools(UUID(scope['scope_ref']),
+            SimpleNamespace(headers={'authorization': 'Bearer ' + node['node_token']}), body)
+    if change:
+        with pytest.raises(HTTPException) as error:
+            await invoke()
+        assert error.value.status_code == 403
+    else:
+        result = await invoke()
+        assert result['isError'] and result['structuredContent']['reason'] == 'source_dns_unavailable'
+    with tx(aid) as c:
+        assert one(c, 'SELECT count(*) n FROM lead.knowledge_documents')['n'] == 0
+    domain.set_control(aid, 'archive')
 
 
 async def test_committed_account_pause_fences_before_task_projection(growth_agent, monkeypatch):

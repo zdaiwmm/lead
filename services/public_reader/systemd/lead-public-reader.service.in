@@ -1,0 +1,53 @@
+[Unit]
+Description=Lead isolated public-page reader
+Requires=lead-public-reader.socket
+After=lead-public-reader.socket
+
+[Service]
+Type=simple
+DynamicUser=yes
+RootDirectory=/var/lib/lead-public-reader/root
+MountAPIVFS=yes
+WorkingDirectory=/app
+BindReadOnlyPaths=@IMAGE@/services/api/lead_app:/app/lead_app
+BindReadOnlyPaths=@PYTHON@:/python
+BindReadOnlyPaths=@SITE@:/site
+BindReadOnlyPaths=/usr/lib:/usr/lib
+BindReadOnlyPaths=-/lib:/lib -/lib64:/lib64
+BindReadOnlyPaths=/etc/resolv.conf:/etc/resolv.conf
+BindReadOnlyPaths=-/etc/hosts:/etc/hosts -/etc/nsswitch.conf:/etc/nsswitch.conf
+BindReadOnlyPaths=-/etc/ssl/certs:/etc/ssl/certs
+BindReadOnlyPaths=-/etc/ca-certificates/extracted:/etc/ca-certificates/extracted
+ExecStart=/python/bin/python3.12 -I -B /app/lead_app/public_reader.py serve --client-uid @UID@ --revision @SHA@
+Environment=LANG=C.UTF-8
+Environment=LD_LIBRARY_PATH=/python/lib
+PrivateNetwork=no
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+UMask=0077
+TasksMax=32
+MemoryMax=256M
+TimeoutStopSec=5
+KillMode=control-group
+StandardOutput=null
+StandardError=null
+Restart=on-failure
+RestartSec=1

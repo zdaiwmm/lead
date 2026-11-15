@@ -2,6 +2,7 @@
 
 import asyncio
 import ipaddress
+import os
 import re
 import socket
 import time
@@ -145,6 +146,16 @@ def observed_source_urls(hrefs,url):
 
 
 async def fetch_product(url, *, discover_links=False, external_links=False):
+    path = os.environ.get('LEAD_PUBLIC_READER_SOCKET')
+    if path is not None:
+        if not path:
+            raise ValueError('public_reader_configuration_invalid')
+        from .public_reader import read_via_reader
+        return await read_via_reader(path, url, discover_links=discover_links, external_links=external_links)
+    return await _fetch_direct(url, discover_links=discover_links, external_links=external_links)
+
+
+async def _fetch_direct(url, *, discover_links=False, external_links=False):
     async with httpx.AsyncClient(
         timeout=15, follow_redirects=False, trust_env=False
     ) as client:

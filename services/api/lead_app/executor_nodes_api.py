@@ -225,7 +225,7 @@ async def scope_tools(scope_ref: UUID, request: Request, body: ScopeTools):
         with tenant_scope(grant['tenant_id'], nodes.machine_identity(node['id'], grant['tenant_id'], grant['agent_id'])), service_scope():
             if grant['scope_kind'] == 'project':
                 from .local_executor_tools import call
-                if (body.name == 'lead_public_read' and current.get('task_id')
+                if (body.name == 'lead_public_read'
                         and current['payload'].get('tool_context', {}).get('kind') == 'model'):
                     @contextmanager
                     def revalidate():
@@ -239,7 +239,13 @@ async def scope_tools(scope_ref: UUID, request: Request, body: ScopeTools):
                     return await call(device, current, body.name, body.arguments, revalidate=revalidate)
                 return await call(device, current, body.name, body.arguments)
             from .executor_studio import call_public_tool
-            return await call_public_tool(current, body.name, body.arguments)
+            @contextmanager
+            def revalidate_studio():
+                with nodes.authorized_scope(token, str(scope_ref), body.node_epoch,
+                        body.grant_generation, body.epoch, instance_id=body.instance_id) as (c, node, grant):
+                    checked = tool_request(c, grant, str(body.request_id), body.name)
+                    yield c, checked
+            return await call_public_tool(current, body.name, body.arguments, revalidate=revalidate_studio)
     except (ValueError, LookupError) as error:
         raise _error(error) from None
     except psycopg.IntegrityError:

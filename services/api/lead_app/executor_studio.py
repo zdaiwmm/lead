@@ -1,6 +1,7 @@
 """Actor-owned pre-project work, never a borrowed project/device identity."""
 from contextlib import contextmanager
 
+import httpx
 from psycopg import sql
 
 from . import executor_nodes as nodes
@@ -206,17 +207,34 @@ def tool_request(c, grant, request_id, name):
     return row
 
 
-async def call_public_tool(request, name, arguments):
+async def call_public_tool(request, name, arguments, *, revalidate=None):
     if name != 'lead_public_read' or set(arguments) != {'url'}:
         raise ValueError('executor_tool_not_declared')
     from .admin_settings import effective
-    with tx() as c:
-        require_studio_actor(c, request['actor'])
-        settings, _ = effective(c, 'models')
-        if not settings['tools']['public_web']:
-            raise ValueError('executor_public_research_disabled')
+    def check_actor():
+        with tx() as c:
+            require_studio_actor(c, request['actor'])
+            settings, _ = effective(c, 'models')
+            if not settings['tools']['public_web']:
+                raise ValueError('executor_public_research_disabled')
+    check_actor()
     from .fetch import fetch_product
+    from .local_executor_tools import public_read_failure
     from .research import public_url
-    observed = await fetch_product(public_url(arguments['url']), external_links=True)
+    url = public_url(arguments['url'])
+    try:
+        observed = await fetch_product(url, external_links=True)
+    except (OSError, httpx.RequestError, httpx.HTTPStatusError) as error:
+        if isinstance(error, PermissionError):
+            raise
+        if revalidate is not None:
+            with revalidate():
+                pass
+        check_actor()
+        return public_read_failure(url, error)
+    if revalidate is not None:
+        with revalidate():
+            pass
+    check_actor()
     observed['producer'] = 'codex-public-read'
     return {'content': [{'type': 'text', 'text': core._encoded(observed)}], 'structuredContent': observed}

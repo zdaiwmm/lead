@@ -1,0 +1,15 @@
+[Unit]
+Description=Lead controlled public-page reader socket
+
+[Socket]
+ListenStream=/run/lead-public-reader/reader.sock
+SocketUser=@UID@
+SocketGroup=@GID@
+SocketMode=0600
+DirectoryMode=0755
+Accept=no
+RemoveOnStop=yes
+Service=lead-public-reader.service
+
+[Install]
+WantedBy=sockets.target
