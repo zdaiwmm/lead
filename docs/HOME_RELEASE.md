@@ -96,16 +96,19 @@ Python 3.11+、GitHub CLI 和可出站访问 GitHub 的 Unix 节点可以运行 
    systemctl restart lead-frame-fast-live.service
    ```
 
-3. 将 `upstream.conf` 的内容放入家庭 Nginx 的 `http` 作用域，将 `location.conf` 的内容放入已有的 `shui.click` 服务块内，保留其他入口和鉴权设置。每段只安装一次。该主机的 Nginx 使用单文件只读绑定；保留原配置文件 inode，将已审阅配置写入后在服务命名空间运行 `nginx -t`。通过才平滑重载；语法失败时还原原配置。常用核验命令如下。
-
-   ```sh
-   pid=$(systemctl show lead-home-edge -p MainPID --value)
-   nsenter -t "$pid" -m -n -- /run/lead-home/bin/nginx -p /tmp/ -t -c /run/lead-home/nginx.conf
-   systemctl kill --kill-whom=main -s HUP lead-home-edge
-   systemctl is-active lead-frame-fast-live
-   ```
+3. 将 `upstream.conf` 的内容放入家庭 Nginx 的 `http` 作用域，将 `location.conf` 的内容放入已有的 `shui.click` 服务块内，保留其他入口和鉴权设置。每段只安装一次。该主机的 Nginx 使用单文件只读绑定；保留原配置文件 inode，将已审阅配置写入后，在服务挂载及网络命名空间中以实际 Nginx 进程的 UID/GID 运行 `nginx -p /tmp/ -t -c /run/lead-home/nginx.conf`。进入命名空间不等于切换运行身份；须先清空附加组并降到核实的普通用户，不能以 root 执行 `-t` 或 `-T`。校验也可能创建、调整临时目录，不是只读操作。运行前后核对临时目录实际 inode、属主及模式未漂移，通过才对原 `lead-home-edge` 主进程发送 HUP；语法失败时还原原配置。本次目录恢复不改配置，不需要校验或重载 Nginx。
 
 4. 切换或回退应用镜像时，编码器需随 Web 重启以重新绑定 `current/web` 的依赖。用发布包比对实际编码器字节和单元，检查 Nginx 的两段规则。未登录访问取图应返回 401；正常编码路径带有 `Server-Timing`。用隔离工作室和独立浏览器资料测试登录页及点击；同源支持 AVIF 的客户端应收到私有响应、原始坐标尺寸。生产验收留存 SHA、回读和服务状态。回退编码服务时先还原入口规则并平滑重载，确认请求已回到原 Web 服务，再停止编码器；保留浏览器及工作室数据。
+
+### 2026-11-15 原回执临时目录恢复
+
+生产应用及渠道保持 `8276c7cd4c300e1e7fc2a7bfc5cb7be7edc65d88`。原 managed Node 请求已在本地完成，399 条原事件尚未回传。实际 RPC 持续拒绝、HTTPS 返回 500；仅观察既有重试的文件打开调用，30 秒内记录到 `/run/lead-home/scratch/body/` 下 8 次 EACCES、0 次成功。目录为 0700、属主与三个实际 Nginx 进程的普通运行用户不符，父 scratch 目录归属正常。超过内存缓冲的请求体需要使用该临时目录；未超过入口 256 KiB 上限不能排除此故障。
+
+本次只恢复现有目录归属，先完成本记录的 PR、精确 head 检查、合入 main 及文档范围验证，再在原节点操作；该文档证明不替代应用或工具发布证明。操作须持有原 deploy.lock，核对机器、既有正式工具字节、实际应用 SHA 和无在途切换；从实际 edge 的 BindPaths 找到 live vault 内持久 scratch 源，并确认宿主 body 与运行空间为同一设备/inode、无链接。核对主进程及现有 worker 的 UID/GID/FSUID/FSGID 一致且非 root，父目录归属和 0700 正确，body 仍为预期的旧属主/0700且为空；条件变化则停止。
+
+先在服务器私有 journal 保存目录原 UID/GID、模式、设备/inode、进程和操作意图，再通过 O_NOFOLLOW 打开的目录文件描述符，仅将该 body 目录改为已核实的 Nginx UID/GID。保留 0700，不递归、不改父目录、不删内容、不调整入口上限、用户授权或配置，不安装工具或重启任何服务。结果未知先回读同一 journal 与 inode，不盲目重复。回退只在目录身份和本次新属主仍匹配时恢复 journal 中的原属主，不删除已产生的文件。
+
+另起 SSH 独立核对同一持久 inode 的正确归属、0700、原进程和应用版本；等待原请求自然重试，回读原 outbox、服务端请求及 growth Task。不得清空 outbox、改成功状态、重启 Node、重投模型或另发能力变化。只有原事件自然回传、服务端原请求完成，才能解除本次回传阻断；判断是否形成有效来源、可执行后续或具体停止条件另按真实结果验收。历史目录改属的发起者尚无证据；root 配置校验是已识别的复发入口，不追认为本次历史原因。
 
 ## 模型依赖与浏览器验收工具的兼容核验
 
