@@ -21,6 +21,11 @@ jobs:
         run: |
           python3 -c 'import json,os; print(json.dumps({k:bool(os.environ.get(k)) for k in ("http_proxy","https_proxy","all_proxy","no_proxy","HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY")}))'
           sudo python3 -c 'import json,os; print(json.dumps({k:bool(os.environ.get(k)) for k in ("http_proxy","https_proxy","all_proxy","no_proxy","HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY")}))'
+          curl --version | head -n 1
+          for family in 4 6; do
+            curl --ipv${family} --fail --silent --show-error --proto '=https' --connect-timeout 5 --max-time 15 --output /dev/null --write-out "kernel family=${family} dns=%{time_namelookup} tcp=%{time_connect} tls=%{time_appconnect} http=%{http_code}\n" https://mirrors.edge.kernel.org/ubuntu/dists/noble/InRelease || true
+          done
+          curl --ipv4 --fail --silent --show-error --proto '=https' --connect-timeout 5 --max-time 15 --output /dev/null --write-out "official-archive dns=%{time_namelookup} tcp=%{time_connect} tls=%{time_appconnect} http=%{http_code}\n" https://archive.ubuntu.com/ubuntu/dists/noble/InRelease || true
           curl --fail --silent --show-error --proto '=https' --connect-timeout 5 --max-time 15 --output /dev/null https://mirrors.edge.kernel.org/ubuntu/dists/noble/InRelease
       - name: Verify and select signed Ubuntu mirror
         run: |
