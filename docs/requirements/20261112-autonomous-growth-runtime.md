@@ -978,3 +978,25 @@ a3原ZIP已由正式archive-only入口下载，原始字节传到节点后先冻
 **修复集成证据：**服务生命周期与模板集成 `d821f49`，专属运行时/原实例回退工具集成 `6632ff2`，版本与manager未知状态门禁补正为 `062a232`。本地发布与reader集成445项通过；最后3项守卫先红后绿，118项受影响reader回归通过，构成448项不重复定向覆盖；服务/调用方103项与独立审查复用同轮输入证据。最初的集成夹具缺合成配置及继承过严umask均已在独立测试环境修正，没有读取用户配置、修改业务代码或连接真实DB。Ruff、1025文件扫描、文档链接及diff检查通过。增量审查提出的显式runtime SHA未匹配manifest、unit文件恢复后manager缓存仍旧却提前收口两项均已修正；未知manager状态不自动重发reload/stop，已完成退休只验原归档，不触新实例路径。
 
 已用经过审查的只读来源逻辑核对实际节点：系统Python3.14、746条公共来源项/31433339字节，主解释器SHA256 `52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41`，NX明确有效；尚未复制或安装。实际NX前缀/MDWE、完整Linux新实例链及精确main应用CI仍待新候选完成，不能用本条本地结果替代正式放行。
+
+### 2026-11-16 公开读取修复发布与实际经营核验
+
+**隔离通道修复已发布并完成独立回读，经营产出验收未通过。** [PR96](https://github.com/zdaiwmm/lead/pull/96) 的精确head `f07a498734a2656ed3c203533048d2fc377528d3` 快速检查及真实Linux运行时/隔离/回退演练通过，合入冻结应用版本 `0ab830d4172658ab5f0d9cadc01680b9bf27a636`。[完整主线CI43751472925/1](https://github.com/zdaiwmm/lead/actions/runs/43751472925) 的Application verification和同轮工具包成功；后端3123 passed、1 skipped、102 subtests，3771.27秒。未重跑完整验证或重建发布包。
+
+复用原App artifact `14176646589`（368144524字节，ZIP SHA256 `b4d1cdbabeda11ecaa7165a6c42fe8e364379294871a55a89eda6a8e5d128c0e`），经正式archive-only缓存入口重新核对精确CI和来源；节点冻结原字节、重核CI/artifact及REVISION后永久只读挂载。独立连接核对完整镜像SHA256 `20c9b5d0ced04feff866743cdc10625e2d24908c315f2a33689b1715d33fd50e`、内核实际loop只读来源和原应用/进程。正式工具取同轮artifact `14178228731`，单文件安装后独立回读SHA256 `8b9d67ec0b081bdb72f20c198aff025ca5467ba4b7bc09925e4d7d6c6f4f3ebb`，工具安装没有切换应用或重启业务。
+
+正式准备并独立核对reader专用系统Python3.14和完整公共标准库清单，保留MDWE及原App共享解释器。旧a3实例经新增prepared回退入口恢复待生效文件、停止自有进程组，原API/worker重启数为0；另经正式退休入口归档原inode、计划及journal，独立回读通过。新0ab reader置备后，真实systemd259.5的身份、空根、私有路径隔离、绑定、运行时及父/同环境子进程启动检查通过。实际调用身份的一次固定example.com工程GET成功；没有创建经营任务或知识文档，不能将该对照读取计为经营原文。
+
+**原发布请求及渠道补齐：** [原保护审核43758809776/1](https://github.com/zdaiwmm/lead/actions/runs/43758809776) 通过，精确Deployment `7809544710` 绑定同一CI/run/attempt。正式应用切换成功后，首次最终核验发现独立Telegram selector仍指向8276；Reddit已随主应用运行0ab，故原请求于20:36:38 UTC如实保存并回传error。只读核对后归档旧Telegram私有计划，在原维护安全点通过现有 `provision-executor` 单独更新Telegram；原binding、适配器、8项保留访问和registry字节保持，未为补登记重复重启正确的Reddit/API进程。
+
+两个渠道、应用和reader实际接入经独立核验后，原入口恢复维护状态。随后持原节点锁、核原审批凭证/精确CI及旧文件摘要，只调用正式 `verify`，未执行deploy或finalize；先保存新的独立证明，再为**同一请求**追加success（20:53:20 UTC）。原 `.result/.reported=error` 字节及GitHub error历史完整保留，新对账与回传记录独立存放；8项离线反例核对失败不报成功、未知回传不重发、CI漂移拒绝和操作白名单。最终另起连接核对App、Telegram、Reddit均为0ab，API/worker实际已获得固定只读socket及路由，reader仍为独立身份/隔离；维护恢复和独立节点追加成功回传均通过。没有重新登记、安装或停启共用Node/连接器，也没有DDL或旧迁移。
+
+**真实经营结果：**最终工程回读后先核原基线，再经原 `ensure_decision` 提交唯一的新通道恢复事实，condition_revision=`public-reader:0ab830d4172658ab5f0d9cadc01680b9bf27a636`。私有提交工具首次在意图落盘前因runpy返回命名空间副本未初始化而停止；只读证明无journal/触发后，按真实函数globals修正，失败复现转绿并保留旧工具，第二版才完成唯一提交。没有重发旧owner/capability事实或手工创建研究内容。
+
+新事实于20:59:12 UTC进入真实决策，原生请求20:59:13开始、20:59:39自然完成；同request/thread/turn留有1次 `lead_public_read`，来源为Reddit，返回通用 `request_tool_unavailable`。20:59:40决策终态为waiting_for_change，原事实精确digest已消费、返回引用与实际决策一致；accepted/rejected均0、pending_work=false，继续条件四字段完整（resource_recovered、platform）。新增原文、finding、有效引用、accepted后续及社媒动作均0，**不能宣称持续经营或获客已恢复**。
+
+请求固定任务上下文、网址格式及现有研究开关只读核对正常。为区分通道与来源错误，另对相同URL/链接选项、相同reader和实际调用身份做一次单独记录意图的工程诊断，明确收到 `source_policy_denied / policy`；该诊断未创建任务、知识或模型调用，未计为业务证据。原业务调用未保留细分错误，不能据后一次结果追认其确切HTTP或内部策略原因，也不能将策略类别猜成Reddit封锁、私网解析、格式或正文上限。当前业务来源阻断及错误细目不足保留，未放松原公网/重定向/内容策略、扩大权限或再发经营恢复事实。
+
+独立窄审确认一个待验的分类缺口：reader的策略拒绝保持独立policy类别，未被当成可重试transport；但该异常经原生API错误映射和MCP桥接后会泛化为 `request_tool_unavailable`，不能宣称原生错误分类端到端完整。下一项独立范围应先核既有错误证据与分类契约、补离线回归；本轮未修改这项行为，不以重复读取、重发事实或放宽来源/权限策略代替修复。当前证据也不能证明经营模型的全局业务判断正确。
+
+最终业务快照确认旧根仍为47次检查/3次尝试且停止，原399条事件的完整身份摘要相同；控制/配置/授权版本、Facebook关闭、X未验证均保持。原2条已撤销grant与2条disabled target的历史行和摘要完整保留，有效授权/active target为0，未清历史表或重置旧费用/未知结果。私有证据延续本轮维护目录，包含正式安装/运行时/实例归档/镜像/渠道补齐/原请求追加对账、最终独立证明及真实决策快照；公开记录不包含业务标识、来源正文或认证资料。本次文档收尾不重建、再发布或替换冻结运行版本0ab。
