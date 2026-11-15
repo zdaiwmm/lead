@@ -912,6 +912,7 @@ PUBLIC_READER_SYSTEMD = Path('/etc/systemd/system')
 PUBLIC_READER_PLAN = Path('/etc/lead-home-release/public-reader-provision.json')
 PUBLIC_READER_PYTHON = EXECUTOR_PYTHON_SOURCE.parents[1]
 PUBLIC_READER_SITE = EXECUTOR_PYTHON_SOURCE.parents[2] / 'site'
+PUBLIC_READER_INACCESSIBLE = Path('/run/systemd/inaccessible/dir')
 PUBLIC_READER_DEPENDENCIES = frozenset(('httpx', 'httpcore', 'anyio', 'certifi', 'idna',
     'h11', 'sniffio', 'beautifulsoup4', 'soupsieve', 'typing-extensions'))
 PUBLIC_READER_CONSUMERS = ('api', 'worker')
@@ -1312,6 +1313,152 @@ def public_reader_mount(proc, target, source):
     require(view.samefile(source), 'public reader binding inode differs')
 
 
+def public_reader_root_probe(proc, uid, gid, node):
+    require(proc.name.isdecimal() and int(proc.name) > 1 and type(uid) is int and uid > 0
+            and type(gid) is int and gid > 0 and len(node) == 2
+            and all(type(value) is int and value >= 0 for value in node),
+            'public reader root mask probe identity invalid')
+    # Load every module/libc binding before changing namespaces/root. The child
+    # never executes service code, inherits environment values, or reads data.
+    program = r'''
+import ctypes
+import errno
+import os
+import sys
+
+stage = 11
+try:
+    pid, uid, gid, device, inode = map(int, sys.argv[1:])
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    libc.prctl.restype = ctypes.c_int
+    class Header(ctypes.Structure):
+        _fields_ = [('version', ctypes.c_uint32), ('pid', ctypes.c_int)]
+    class Data(ctypes.Structure):
+        _fields_ = [('effective', ctypes.c_uint32), ('permitted', ctypes.c_uint32), ('inheritable', ctypes.c_uint32)]
+    libc.capset.argtypes = [ctypes.POINTER(Header), ctypes.POINTER(Data)]
+    libc.capset.restype = ctypes.c_int
+    header, capabilities = Header(0x20080522, 0), (Data * 2)()
+    with open('/proc/sys/kernel/cap_last_cap', 'rb') as stream:
+        last_cap = int(stream.read(16))
+    if not 0 <= last_cap <= 63:
+        os._exit(stage)
+    namespace = os.open('/proc/' + str(pid) + '/ns/mnt', os.O_RDONLY | os.O_CLOEXEC)
+    root = os.open('/proc/' + str(pid) + '/root', os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    os.setns(namespace, 0)
+    os.fchdir(root)
+    os.chroot('.')
+    os.chdir('/')
+    os.close(root)
+    os.close(namespace)
+    stage = 12
+    actual = os.lstat('/root')
+    if (actual.st_dev, actual.st_ino) != (device, inode):
+        os._exit(stage)
+    stage = 13
+    # Clear ambient/bounding capabilities and keepcaps, then drop all three ID
+    # slots. No host cwd or namespace/root descriptor remains accessible.
+    for option, argument in ((38, 1), (47, 4), (8, 0)):
+        if libc.prctl(option, argument, 0, 0, 0) != 0:
+            os._exit(stage)
+    for capability in range(last_cap + 1):
+        if libc.prctl(24, capability, 0, 0, 0) != 0:
+            os._exit(stage)
+    os.setgroups([])
+    os.setresgid(gid, gid, gid)
+    os.setresuid(uid, uid, uid)
+    if libc.capset(ctypes.byref(header), capabilities) != 0:
+        os._exit(stage)
+    with open('/proc/self/status', 'rb') as stream:
+        fields = dict(line.split(b':', 1) for line in stream.read().splitlines() if b':' in line)
+    if (fields.get(b'Uid', b'').split() != [str(uid).encode()] * 4
+            or fields.get(b'Gid', b'').split() != [str(gid).encode()] * 4
+            or fields.get(b'Groups', b'').split()
+            or fields.get(b'NoNewPrivs', b'').strip() != b'1'
+            or any(int(fields.get(key, b'1').strip(), 16) != 0 for key in
+                   (b'CapInh', b'CapPrm', b'CapEff', b'CapBnd', b'CapAmb'))):
+        os._exit(stage)
+    stage = 14
+    try:
+        descriptor = os.open('/root', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        if error.errno != errno.EACCES:
+            os._exit(stage)
+    else:
+        os.close(descriptor)
+        os._exit(15)
+    os.write(1, b'root-inaccessible\n')
+    os._exit(0)
+except BaseException:
+    os._exit(stage)
+'''
+    try:
+        result = subprocess.run(['/usr/bin/python3', '-I', '-S', '-B', '-c', program,
+            proc.name, str(uid), str(gid), str(node[0]), str(node[1])],
+            env={}, stdin=subprocess.DEVNULL, close_fds=True, capture_output=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise Refused('public reader root mask probe failed') from None
+    require(result.returncode != 11, 'public reader root mask namespace probe failed')
+    require(result.returncode != 12, 'public reader root mask probe inode differs')
+    require(result.returncode != 13, 'public reader root mask identity probe failed')
+    require(result.returncode != 15, 'public reader root directory unexpectedly readable')
+    require(result.returncode == 0 and result.stdout == b'root-inaccessible\n' and not result.stderr,
+            'public reader root mask probe failed')
+
+
+def public_reader_masked_root(proc, plan):
+    invocation = property_of(PUBLIC_READER_SERVICE, 'InvocationID')
+    require(re.fullmatch('[a-f0-9]{32}', invocation) and process(PUBLIC_READER_SERVICE) == proc
+            and property_of(PUBLIC_READER_SERVICE, 'ProtectHome') == 'yes',
+            'public reader root protection differs')
+    status = (proc / 'status').read_text()
+    public_reader_process_identity(status, plan['client_uid'], plan['client_gid'])
+    fields = dict(line.split(':', 1) for line in status.splitlines() if ':' in line)
+    capabilities = ('CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb')
+    require(fields.get('NoNewPrivs', '').strip() == '1' and all(
+        re.fullmatch('[0-9a-fA-F]{16}', fields.get(key, '').strip())
+        and int(fields[key].strip(), 16) == 0 for key in capabilities),
+        'public reader root mask capability differs')
+    security_fields = ('Uid', 'Gid', 'Groups', 'NoNewPrivs', *capabilities)
+    before_identity = {key: fields[key].split() for key in security_fields}
+    uid, gid = int(fields['Uid'].split()[0]), int(fields['Gid'].split()[0])
+    executor_directory(PUBLIC_READER_INACCESSIBLE.parent)
+    source, target = PUBLIC_READER_INACCESSIBLE.lstat(), (proc / 'root/root').lstat()
+    require(stat.S_ISDIR(source.st_mode) and source.st_uid == source.st_gid == 0
+            and stat.S_IMODE(source.st_mode) == 0, 'public reader root mask source differs')
+    def identity(info):
+        return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
+    source_identity = identity(source)
+    require(identity(target) == source_identity, 'public reader root mask inode differs')
+    entries = [line.split() for line in (proc / 'mountinfo').read_text().splitlines()]
+    exact = [entry for entry in entries if entry[4] == '/root']
+    require(len(exact) == 1 and 'ro' in exact[0][5].split(',')
+            and not any(entry[4].startswith('/root/') for entry in entries),
+            'public reader root mask mount differs')
+    root_mounts = [entry for entry in entries if entry[4] == '/root' or entry[4].startswith('/root/')]
+    public_reader_root_probe(proc, uid, gid, (source.st_dev, source.st_ino))
+    after_fields = dict(line.split(':', 1) for line in (proc / 'status').read_text().splitlines() if ':' in line)
+    after_mounts = [line.split() for line in (proc / 'mountinfo').read_text().splitlines()]
+    require(process(PUBLIC_READER_SERVICE) == proc
+            and property_of(PUBLIC_READER_SERVICE, 'InvocationID') == invocation
+            and property_of(PUBLIC_READER_SERVICE, 'ProtectHome') == 'yes'
+            and {key: after_fields.get(key, '').split() for key in security_fields} == before_identity
+            and [entry for entry in after_mounts if entry[4] == '/root' or entry[4].startswith('/root/')] == root_mounts
+            and identity(PUBLIC_READER_INACCESSIBLE.lstat()) == source_identity
+            and identity((proc / 'root/root').lstat()) == source_identity,
+            'public reader root mask service changed')
+
+
+def public_reader_private_paths(proc, plan):
+    view = proc / 'root'
+    require(not (view / 'srv').exists(), 'public reader private srv path visible')
+    require(not (view / 'home').exists(), 'public reader private home path visible')
+    require(not (view / 'run/lead-home').exists(), 'public reader private lead-home runtime visible')
+    require(not (view / 'run/credentials').exists(), 'public reader private credentials runtime visible')
+    require(not (view / 'etc/lead-home-release').exists(), 'public reader private release config visible')
+    public_reader_masked_root(proc, plan)
+
+
 def verify_public_reader(sha, *, consumers=True, application_sha=None):
     record = public_reader_load(sha)
     require(record['state'] not in ('rolled-back', 'rolling-back'), 'public reader is restored')
@@ -1340,8 +1487,7 @@ def verify_public_reader(sha, *, consumers=True, application_sha=None):
     public_reader_mount(proc, Path('/site'), PUBLIC_READER_SITE)
     require(public_reader_runtime(sha) == record.get('runtime'), 'public reader runtime changed after provisioning')
     require((proc / 'ns/net').readlink() == Path('/proc/self/ns/net').readlink(), 'public reader not in host network')
-    for private in ('srv', 'home', 'root', 'run/lead-home', 'run/credentials', 'etc/lead-home-release'):
-        require(not (proc / 'root' / private).exists(), 'public reader private path visible')
+    public_reader_private_paths(proc, plan)
     runtime = PUBLIC_READER_RUNTIME.lstat()
     sock = (PUBLIC_READER_RUNTIME / 'reader.sock').lstat()
     require(stat.S_ISDIR(runtime.st_mode) and runtime.st_uid == 0 and stat.S_IMODE(runtime.st_mode) == 0o755
