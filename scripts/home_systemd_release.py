@@ -995,7 +995,10 @@ def public_reader_bindings(value):
         parts = item.split(':')
         require(len(parts) in (2, 3) and (len(parts) == 2 or parts[2] == 'rbind'),
                 'unsupported public reader consumer binding')
-        result.add((str(executor_path(parts[0])), str(executor_path(parts[1]))))
+        # systemctl prefixes an optional source with one ignore-ENOENT '-'.
+        # Unit preimages and the fixed append bytes remain checked separately.
+        source = parts[0][1:] if parts[0].startswith('-') else parts[0]
+        result.add((str(executor_path(source)), str(executor_path(parts[1]))))
     return result
 
 

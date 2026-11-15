@@ -706,3 +706,15 @@ def test_status_readback_queries_the_actual_unit(hook, monkeypatch, role, expect
     monkeypatch.setattr(hook, 'run', lambda *args: calls.append(args) or 'active')
     assert hook.property_of(role, 'ActiveState') == 'active'
     assert calls == [('systemctl', 'show', expected, '-p', 'ActiveState', '--value')]
+
+
+def test_systemd_optional_bind_source_is_a_modifier_not_a_relative_path(hook):
+    assert hook.public_reader_bindings('/usr:/usr:rbind -/lib:/lib:rbind -/lib64:/lib64:rbind') == {
+        ('/usr', '/usr'), ('/lib', '/lib'), ('/lib64', '/lib64')}
+
+
+@pytest.mark.parametrize('binding', ('--/lib:/lib:rbind', '-lib:/lib', '-/usr/../lib:/lib',
+                                     '/lib:-/lib', '/lib:/lib:unknown', '/lib:/lib:'))
+def test_optional_bind_modifier_never_bypasses_canonical_path_guard(hook, binding):
+    with pytest.raises(hook.Refused):
+        hook.public_reader_bindings(binding)
