@@ -79,6 +79,25 @@ def diagnostic_units(hook):
     print(json.dumps({'reader_units': units}), file=sys.stderr)
 
 
+def diagnostic_private_paths(hook):
+    try:
+        proc = hook.process(hook.PUBLIC_READER_SERVICE)
+        paths = []
+        for name in ('srv', 'home', 'root', 'run/lead-home', 'run/credentials', 'etc/lead-home-release'):
+            view = proc / 'root' / name
+            entry = {'path': '/' + name, 'exists': view.exists()}
+            if entry['exists']:
+                info = view.lstat()
+                entry.update(uid=info.st_uid, gid=info.st_gid, mode=oct(info.st_mode & 0o777))
+                if name == 'root':
+                    entry['fixed_inaccessible_inode'] = view.samefile('/run/systemd/inaccessible/dir')
+            paths.append(entry)
+        print(json.dumps({'private_path_metadata': paths,
+                          'ProtectHome': hook.property_of(hook.PUBLIC_READER_SERVICE, 'ProtectHome')}), file=sys.stderr)
+    except Exception as error:
+        print(json.dumps({'private_path_metadata': diagnostic_failure(hook, error)}), file=sys.stderr)
+
+
 @contextlib.contextmanager
 def diagnostic_scope(hook, sha):
     try:
@@ -86,6 +105,7 @@ def diagnostic_scope(hook, sha):
     except Exception as original:
         print(json.dumps({'diagnostic': 'drill_failure', **diagnostic_failure(hook, original)}), file=sys.stderr)
         diagnostic_units(hook)
+        diagnostic_private_paths(hook)
         try:
             diagnostic_readback(hook, sha, 'failure-before-cleanup')
         except Exception:
