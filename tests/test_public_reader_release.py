@@ -244,6 +244,26 @@ def test_unknown_start_never_repeats_or_automatically_stops_application(provisio
     assert p.commands == []
 
 
+def test_delivered_start_with_lost_reply_only_reconciles_original_journal(provision, monkeypatch):
+    p = provision
+    def delivered(*args, **_kwargs):
+        if args == ('systemctl', 'start', p.h.PUBLIC_READER_SERVICE):
+            raise TimeoutError('synthetic delivered start reply lost')
+        return ''
+    monkeypatch.setattr(p.h, 'run', delivered)
+    with pytest.raises(TimeoutError):
+        p.h.provision_public_reader(p.sha, p.h.PUBLIC_READER_PLAN)
+    original = p.h.public_reader_journal(p.sha).read_bytes()
+    p.commands.clear()
+    monkeypatch.setattr(p.h, 'run', lambda *args, **_kwargs: p.commands.append(args) or '')
+    p.h.provision_public_reader(p.sha, p.h.PUBLIC_READER_PLAN)
+    record = p.h.public_reader_load(p.sha)
+    assert record['state'] == 'ready'
+    assert record['reconciled_from'] == 'start-requested'
+    assert record['reconciled_journal_sha256'] == p.h.executor_digest(original)
+    assert record['previous'] == p.plan and p.commands == []
+
+
 @pytest.mark.parametrize('field', ('client_uid', 'expected_app', 'consumers'))
 def test_provision_rejects_stale_preimage_without_target_write(provision, field):
     p = provision
@@ -510,3 +530,39 @@ def test_metadata_dependency_versions_must_match_candidate_lock(hook, tmp_path, 
     next(hook.PUBLIC_READER_SITE.glob('httpx-*.dist-info/METADATA')).write_text('Name: httpx\nVersion: 2.0\n')
     with pytest.raises(hook.Refused, match='dependency.*differ'):
         hook.public_reader_dependencies('b' * 40)
+
+
+@pytest.mark.parametrize('during_backup', (False, True))
+def test_direct_deploy_refuses_consumer_drift_before_application_switch(provision, monkeypatch, during_backup):
+    p = provision
+    p.h.provision_public_reader(p.sha, p.h.PUBLIC_READER_PLAN)
+    source = p.h.STORE / p.sha / p.h.PUBLIC_READER_SOURCE_FILES[0]
+    source.parent.mkdir(parents=True)
+    source.write_text('public reader source fixture')
+    class Store(type(p.h.STORE)):
+        def stat(self, **kwargs):
+            value = super().stat(**kwargs)
+            return SimpleNamespace(st_uid=0, st_mode=value.st_mode)
+    monkeypatch.setattr(p.h, 'STORE', Store(p.h.STORE))
+    monkeypatch.setattr(p.h, 'safe_layout', lambda: None)
+    monkeypatch.setattr(p.h, 'verify', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(p.h, 'image', lambda sha: p.h.STORE / sha)
+    monkeypatch.setattr(p.h, 'sync_public_main', lambda *_args: None)
+    p.commands.clear()
+    activations = []
+    monkeypatch.setattr(p.h, 'replace_release', lambda *_args: activations.append(True))
+    def drift():
+        p.snapshots['worker']['unit_files']['foreign-dropin'] = 'e' * 64
+    def command(*args, **_kwargs):
+        p.commands.append(args)
+        if args == ('systemctl', 'start', 'lead-pc-local-backup.service'):
+            drift()
+        return str(p.h.VAULT) if args[0] == 'findmnt' else ''
+    monkeypatch.setattr(p.h, 'run', command)
+    if not during_backup:
+        drift()
+    with pytest.raises(p.h.Refused, match='consumer.*changed'):
+        p.h.deploy(p.sha)
+    assert activations == []
+    if not during_backup:
+        assert not any(args[:2] == ('systemctl', 'start') for args in p.commands)

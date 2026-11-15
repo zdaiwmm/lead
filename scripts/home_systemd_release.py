@@ -1150,7 +1150,18 @@ def public_reader_existing(record, sha):
     require(record.get('sha') == sha and record.get('state') not in ('rolled-back', 'rolling-back'),
             'public reader journal cannot be replayed')
     try:
-        return verify_public_reader(sha, consumers=False)
+        proof = verify_public_reader(sha, consumers=False)
+        if record['state'] != 'ready':
+            require(record['state'] in ('prepared', 'installing', 'start-requested')
+                    and current() == record['previous']['expected_app'],
+                    'public reader original application changed')
+            for role in PUBLIC_READER_CONSUMERS:
+                public_reader_assert_consumer(record, role, activated=False)
+            record['reconciled_journal_sha256'] = executor_digest(
+                executor_host_file(public_reader_journal(sha), private=True))
+            record['reconciled_from'] = record['state']
+            public_reader_save(record, 'ready')
+        return proof
     except (Refused, OSError, ValueError, subprocess.SubprocessError):
         raise Refused('public reader outcome unknown; inspect original journal without replaying') from None
 
@@ -1205,6 +1216,20 @@ def verify_public_reader_application(sha):
     record = public_reader_for_application(sha)
     proof = verify_public_reader(record['sha'], application_sha=sha)
     return {**proof, 'application_sha': sha, 'reader_sha': record['sha']}
+
+
+def public_reader_before_switch(sha, old):
+    require(current() == old, 'application changed before public reader preflight')
+    record = public_reader_for_application(sha)
+    if old == record['previous']['expected_app']:
+        verify_public_reader(record['sha'], consumers=False)
+        for role in PUBLIC_READER_CONSUMERS:
+            public_reader_assert_consumer(record, role, activated=False)
+    else:
+        require(public_reader_for_application(old)['sha'] == record['sha'],
+                'application reader baseline differs')
+        verify_public_reader(record['sha'], application_sha=old)
+    require(current() == old, 'application changed during public reader preflight')
 
 
 def public_reader_save(record, state):
@@ -2474,8 +2499,7 @@ def deploy(sha):
             run("git", "--git-dir", mirror, "diff", "--exit-code", reviewed, sha, "--", *sorted(extra))
             verify_frames(image(sha), running_web=image(old) / "web")
         if (STORE / sha / PUBLIC_READER_SOURCE_FILES[0]).is_file():
-            reader = public_reader_for_application(sha)
-            verify_public_reader(reader['sha'], consumers=False)
+            public_reader_before_switch(sha, old)
         # The node's maintenance fence outlives this process. It must remain held across recovery.
         with maintenance_window(old, sha) as (fence, check):
             run("systemctl", "start", fence)
@@ -2488,6 +2512,8 @@ def deploy(sha):
                 run("systemctl", "start", "lead-pc-local-backup.service", timeout=1800)
                 run(*check, old, sha)
                 require(current() == old, "baseline changed before activation")
+                if (STORE / sha / PUBLIC_READER_SOURCE_FILES[0]).is_file():
+                    public_reader_before_switch(sha, old)
                 replace_release(old, sha)
             except Exception:
                 # Only a positively reverified baseline can take traffic again automatically.

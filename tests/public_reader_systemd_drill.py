@@ -117,7 +117,33 @@ def main():
             plan = hook.public_reader_plan(sha)
             hook.PUBLIC_READER_PLAN.write_text(json.dumps(plan))
             hook.PUBLIC_READER_PLAN.chmod(0o600)
+            actual_run = hook.run
+            def lost_start_reply(*args, **kwargs):
+                result = actual_run(*args, **kwargs)
+                if args == ('systemctl', 'start', hook.PUBLIC_READER_SERVICE):
+                    raise TimeoutError('synthetic delivered start reply lost')
+                return result
+            hook.run = lost_start_reply
+            try:
+                hook.provision_public_reader(sha, hook.PUBLIC_READER_PLAN)
+            except TimeoutError:
+                pass
+            else:
+                raise AssertionError('lost start response was not injected')
+            original_intent = hook.public_reader_journal(sha).read_bytes()
+            assert hook.public_reader_load(sha)['state'] == 'start-requested'
+            invocation = hook.property_of(hook.PUBLIC_READER_SERVICE, 'InvocationID')
+            mutations = []
+            def readback_run(*args, **kwargs):
+                if args[0] == 'systemctl' and args[1] in ('start', 'stop', 'restart', 'enable', 'disable', 'daemon-reload'):
+                    mutations.append(args)
+                return actual_run(*args, **kwargs)
+            hook.run = readback_run
             prepared = hook.provision_public_reader(sha, hook.PUBLIC_READER_PLAN)
+            assert mutations == []
+            assert hook.property_of(hook.PUBLIC_READER_SERVICE, 'InvocationID') == invocation
+            assert hook.public_reader_load(sha)['reconciled_journal_sha256'] == hook.executor_digest(original_intent)
+            hook.run = actual_run
             assert prepared['consumers_verified'] is False
             assert all(hook.property_of(role, 'MainPID') == before['MainPID'] for role, before in originals.items())
             assert hook.verify_public_reader_prepared(sha)['application_sha'] == old
@@ -223,7 +249,8 @@ print('private-network-direct-denied-unix-read-ok')
             print(json.dumps({'real_systemd_provision': True, 'uid_before_frame': True,
                 'consumer_isolation_retained': True, 'local_public_source_read': True,
                 'private_canaries_hidden': True, 'socket_recreation': True,
-                'old_bindings_restored_before_reader_stop': True, 'replay_refused': True}))
+                'old_bindings_restored_before_reader_stop': True, 'unknown_start_readback_only': True,
+                'replay_refused': True}))
     finally:
         if server:
             server.shutdown()
