@@ -146,6 +146,14 @@ def test_runtime_refuses_source_change_before_any_final_install(runtime_install)
     assert not p.prefix.exists()
 
 
+def test_explicit_runtime_verification_rejects_another_installation_revision(runtime_install):
+    p = runtime_install
+    p.h.provision_public_reader_runtime(p.sha, p.h.PUBLIC_READER_RUNTIME_PLAN)
+    with pytest.raises(p.h.Refused, match='revision'):
+        p.h.verify_public_reader_runtime('c' * 40)
+    assert p.h.verify_public_reader_runtime()['runtime_revision'] == p.sha
+
+
 @pytest.fixture
 def hook(monkeypatch, tmp_path):
     source = Path(__file__).resolve().parents[1] / 'scripts/home_systemd_release.py'
@@ -892,9 +900,12 @@ def prepared_lifecycle(provision, tmp_path, monkeypatch):
              'RootDirectory': str(h.PUBLIC_READER_ROOT), 'ControlGroup': '/system.slice/' + h.PUBLIC_READER_SERVICE,
              'BindReadOnlyPaths': str(h.EXECUTOR_PYTHON_SOURCE.parents[1]) + ':/python'}
     socket_state = {'active': True}
+    manager = {'restored': False}
     def prop(role, name):
-        if role in (h.PUBLIC_READER_SERVICE, h.PUBLIC_READER_SOCKET) and name in ('FragmentPath', 'DropInPaths', 'NeedDaemonReload'):
-            return {'FragmentPath': str(h.PUBLIC_READER_SYSTEMD / role), 'DropInPaths': '', 'NeedDaemonReload': 'no'}[name]
+        if role in (h.PUBLIC_READER_SERVICE, h.PUBLIC_READER_SOCKET) and name in ('FragmentPath', 'DropInPaths', 'NeedDaemonReload', 'LoadState'):
+            return {'FragmentPath': '' if manager['restored'] else str(h.PUBLIC_READER_SYSTEMD / role),
+                    'DropInPaths': '', 'NeedDaemonReload': 'no',
+                    'LoadState': 'not-found' if manager['restored'] else 'loaded'}[name]
         if role == h.PUBLIC_READER_SERVICE:
             return props[name]
         if role == h.PUBLIC_READER_SOCKET:
@@ -909,9 +920,12 @@ def prepared_lifecycle(provision, tmp_path, monkeypatch):
             socket_state['active'] = False
             (h.PUBLIC_READER_RUNTIME / 'reader.sock').unlink()
             props.update(MainPID='0', ActiveState='inactive')
+        if args == ('systemctl', 'daemon-reload') and not any(path.exists() for path in h.public_reader_paths()[:2]):
+            manager['restored'] = True
         return ''
     monkeypatch.setattr(h, 'run', run)
     p.procs, p.props, p.socket_state = procs, props, socket_state
+    p.manager = manager
     return p
 
 
@@ -1036,3 +1050,34 @@ def test_interrupted_retirement_refuses_new_root_before_removing_old_runtime(pre
     with pytest.raises(h.Refused, match='root path reused'):
         h.retire_public_reader(p.sha)
     assert h.public_reader_inode(h.PUBLIC_READER_RUNTIME) == before
+
+
+def test_prepared_unit_unlinks_before_reload_preserve_unknown_without_reloading(prepared_lifecycle, monkeypatch):
+    p, h = prepared_lifecycle, prepared_lifecycle.h
+    original = h.run
+    def lost_before_reload(*args, **kwargs):
+        if args == ('systemctl', 'daemon-reload') and not any(path.exists() for path in h.public_reader_paths()[:2]):
+            raise OSError('interrupted before manager reload')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(h, 'run', lost_before_reload)
+    with pytest.raises(OSError):
+        h.rollback_prepared_public_reader(p.sha)
+    assert h.public_reader_load(p.sha)['state'] == 'prepared-units-restore-requested'
+    assert not p.manager['restored']
+    monkeypatch.setattr(h, 'run', original)
+    p.commands.clear()
+    with pytest.raises(h.Refused, match='manager'):
+        h.rollback_prepared_public_reader(p.sha)
+    assert not p.manager['restored'] and p.commands == []
+    assert h.public_reader_load(p.sha)['state'] == 'prepared-units-restore-requested'
+
+
+def test_retirement_refuses_cached_reader_units_before_archival(prepared_lifecycle):
+    p, h = prepared_lifecycle, prepared_lifecycle.h
+    h.rollback_prepared_public_reader(p.sha)
+    p.manager['restored'] = False
+    p.commands.clear()
+    with pytest.raises(h.Refused, match='manager'):
+        h.retire_public_reader(p.sha)
+    assert p.commands == [] and h.PUBLIC_READER_ROOT.parent.exists() and h.PUBLIC_READER_PLAN.exists()
+    assert not (h.PUBLIC_READER_RETIRED / p.sha).exists()

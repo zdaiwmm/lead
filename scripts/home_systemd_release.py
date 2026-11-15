@@ -1181,6 +1181,7 @@ def verify_public_reader_runtime(sha=None):
     manifest = json.loads(raw)
     require(manifest.get('version') == 1 and SHA.fullmatch(manifest.get('sha', ''))
             and manifest.get('source') == public_reader_runtime_source(), 'reader runtime source provenance differs')
+    require(sha is None or manifest['sha'] == sha, 'reader runtime installation revision differs')
     journal = json.loads(executor_host_file(STORE / 'public-reader-runtime' / (manifest['sha'] + '.json'), private=True))
     require(journal.get('sha') == manifest['sha'] and journal.get('plan_sha256') == manifest.get('plan_sha256')
             and journal.get('manifest_sha256') == executor_digest(raw)
@@ -1871,6 +1872,20 @@ def public_reader_stopped_original(record):
                 'stopped reader socket remains visible in original consumer')
 
 
+def public_reader_restored_unit_manager(record):
+    # First provisioning only permits originally absent reader units. File
+    # unlink completion alone does not prove systemd discarded its cached unit.
+    # Unknown reload outcomes remain read-only; never repeat stop or reload.
+    for path in public_reader_paths()[:2]:
+        require(record['previous']['files'][str(path)] is None and executor_file_backup(path) is None,
+                'reader restored unit preimage differs')
+        require(property_of(path.name, 'LoadState') == 'not-found'
+                and not property_of(path.name, 'FragmentPath')
+                and not property_of(path.name, 'DropInPaths')
+                and property_of(path.name, 'NeedDaemonReload') == 'no',
+                'reader restored manager state unknown; inspect without replaying')
+
+
 def rollback_prepared_public_reader(sha):
     require(os.geteuid() == 0 and SHA.fullmatch(sha), 'trusted node and exact SHA required')
     with (STORE / 'deploy.lock').open('a') as lock:
@@ -1926,6 +1941,7 @@ def rollback_prepared_public_reader(sha):
         public_reader_stopped_original(record)
         require(all(executor_file_backup(path) == record['previous']['files'][str(path)]
                     for path in public_reader_paths()), 'prepared reader restored file preimages differ')
+        public_reader_restored_unit_manager(record)
         public_reader_original_consumers(record, pending=False)
         if record['state'] != 'rolled-back':
             public_reader_save(record, 'rolled-back')
@@ -1960,6 +1976,7 @@ def retire_public_reader(sha):
         else:
             public_reader_original_consumers(record, pending=False)
             public_reader_stopped_original(record)
+            public_reader_restored_unit_manager(record)
             require(public_reader_inode(PUBLIC_READER_ROOT.parent) == pins['root_parent']
                     and public_reader_inode(PUBLIC_READER_ROOT) == pins['root']
                     and public_reader_inode(PUBLIC_READER_PLAN) == pins['plan']
@@ -1977,9 +1994,10 @@ def retire_public_reader(sha):
             executor_sync(archive.parent)
         require(retirement['state'] in ('root-move-requested', 'plan-copy-requested', 'plan-unlink-requested', 'runtime-remove-requested'),
                 'reader retirement outcome unknown')
-        executor_directory(archive, create=True, private=True)
         public_reader_original_consumers(record, pending=False)
         public_reader_stopped_original(record)
+        public_reader_restored_unit_manager(record)
+        executor_directory(archive, create=True, private=True)
         # An interrupted old retirement must reject every reused live path
         # before touching any of them, even if a different pinned path remains.
         if os.path.lexists(PUBLIC_READER_ROOT.parent):
