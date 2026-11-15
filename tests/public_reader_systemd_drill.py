@@ -34,7 +34,14 @@ def main():
     prefix = Path(os.environ['LEAD_PUBLIC_READER_PYTHON'])
     hook.PUBLIC_READER_PYTHON = prefix
     hook.PUBLIC_READER_SITE = prefix / 'lib/python3.12/site-packages'
-    hook.public_reader_python()
+    try:
+        hook.public_reader_python()
+    except hook.Refused:
+        print(json.dumps({'runtime_ancestors': [
+            {'path': str(path), 'uid': path.lstat().st_uid, 'mode': oct(path.lstat().st_mode & 0o777)}
+            for path in (prefix, prefix / 'bin', *prefix.parents)
+        ]}), file=sys.stderr)
+        raise
     units = ('lead-home-net.service', 'lead-home-api.service', 'lead-home-worker.service',
              hook.PUBLIC_READER_SERVICE, hook.PUBLIC_READER_SOCKET, 'lead-public-reader-drill-fence.service')
     for name in units:
