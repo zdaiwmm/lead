@@ -33,6 +33,7 @@ def main():
     spec.loader.exec_module(hook)
     prefix = Path(os.environ['LEAD_PUBLIC_READER_PYTHON'])
     hook.PUBLIC_READER_PYTHON = prefix
+    hook.PUBLIC_READER_SITE = prefix / 'lib/python3.12/site-packages'
     hook.public_reader_python()
     units = ('lead-home-net.service', 'lead-home-api.service', 'lead-home-worker.service',
              hook.PUBLIC_READER_SERVICE, hook.PUBLIC_READER_SOCKET, 'lead-public-reader-drill-fence.service')
@@ -80,6 +81,13 @@ def main():
             hook.current = lambda: selected['sha']
             hook.image = lambda revision: release if revision == sha else root / old
             hook.public_reader_sources = lambda revision: release
+            hook.public_reader_blobs = lambda revision: {name: 'd' * 40 for name in hook.PUBLIC_READER_REUSE_FILES}
+            original_run = hook.run
+            def fixture_run(*args, **kwargs):
+                if args[0] == 'git' and args[-1] == sha + ':requirements.lock.txt':
+                    return (repo / 'requirements.lock.txt').read_text()
+                return original_run(*args, **kwargs)
+            hook.run = fixture_run
             net = ('[Service]\nType=simple\nPrivateNetwork=yes\n'
                    'ExecStart=/usr/bin/sleep infinity\n')
             Path('/run/systemd/system/lead-home-net.service').write_text(net)
@@ -138,6 +146,10 @@ def main():
             selected['sha'] = sha
             activated = hook.verify_public_reader(sha)
             assert activated['consumers_verified'] is True
+            selected['sha'] = 'c' * 40
+            reused = hook.verify_public_reader_application('c' * 40)
+            assert reused['reader_sha'] == sha and reused['application_sha'] == 'c' * 40
+            selected['sha'] = sha
             pid = hook.property_of('api', 'MainPID')
             probe = '''import json,socket,sys
 try:

@@ -4,8 +4,8 @@ import importlib.util
 import io
 import json
 import tarfile
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -84,7 +84,7 @@ def test_health_requires_integer_protocol_not_json_boolean(hook):
 
 def test_public_reader_formal_cli_dispatches_without_implicit_actions(hook, monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr(hook, 'verify_public_reader', lambda sha: calls.append(sha) or {'ok': True})
+    monkeypatch.setattr(hook, 'verify_public_reader_application', lambda sha: calls.append(sha) or {'ok': True}, raising=False)
     monkeypatch.setattr('sys.argv', ['hook', 'verify-public-reader', 'b' * 40])
     hook.main()
     assert calls == ['b' * 40]
@@ -166,9 +166,19 @@ def provision(hook, tmp_path, monkeypatch):
     monkeypatch.setattr(h, 'executor_host_file', lambda p, **_kwargs: p.read_bytes())
     monkeypatch.setattr(h, 'current', lambda: old)
     snapshots = {role: {'MainPID': str(100 + index), 'InvocationID': role,
-                       'uid': 995, 'gid': 983, 'route': None}
+                       'uid': 995, 'gid': 983, 'route': None, 'PrivateNetwork': 'yes',
+                       'JoinsNamespaceOf': 'lead-home-net.service', 'BindPaths': '',
+                       'BindReadOnlyPaths': '/original:/original', 'unit_files': {'original-unit': 'd' * 64}}
                  for index, role in enumerate(h.PUBLIC_READER_CONSUMERS)}
-    monkeypatch.setattr(h, 'public_reader_consumer', lambda role: dict(snapshots[role]))
+    def consumer(role):
+        data = {**snapshots[role], 'unit_files': dict(snapshots[role]['unit_files'])}
+        path = h.public_reader_paths()[2 + h.PUBLIC_READER_CONSUMERS.index(role)]
+        if path.exists():
+            data['unit_files'][str(path)] = h.executor_digest(path.read_bytes())
+            data['route'] = str(h.PUBLIC_READER_RUNTIME / 'reader.sock')
+            data['BindReadOnlyPaths'] += ' ' + str(h.PUBLIC_READER_RUNTIME) + ':' + str(h.PUBLIC_READER_RUNTIME)
+        return data
+    monkeypatch.setattr(h, 'public_reader_consumer', consumer)
     def prop(service, name):
         if service in snapshots:
             return snapshots[service][name]
@@ -181,6 +191,9 @@ def provision(hook, tmp_path, monkeypatch):
     for service in (h.PUBLIC_READER_SERVICE, h.PUBLIC_READER_SOCKET):
         (folder / (service + '.in')).write_text('@IMAGE@ @PYTHON@ @UID@ @GID@ @SHA@\n')
     monkeypatch.setattr(h, 'public_reader_sources', lambda _sha: release)
+    monkeypatch.setattr(h, 'public_reader_blobs', lambda _sha: {'source': 'd' * 40})
+    monkeypatch.setattr(h, 'public_reader_runtime', lambda _sha: {'runtime': 'synthetic'})
+    monkeypatch.setattr(h, 'public_reader_account_unused', lambda: None)
     monkeypatch.setattr(h, 'public_reader_empty_root', lambda path: None)
     commands, checks = [], []
     monkeypatch.setattr(h, 'run', lambda *args, **_kwargs: commands.append(args) or '')
@@ -346,3 +359,154 @@ def test_prepared_readback_rejects_unexpected_application_restart(provision, mon
     p.snapshots['api']['InvocationID'] = 'new-unexpected-invocation'
     with pytest.raises(p.h.Refused, match='original application'):
         p.h.verify_public_reader_prepared(p.sha)
+
+
+def test_later_application_reuses_only_identical_reader_inputs(hook, tmp_path, monkeypatch):
+    assert hasattr(hook, 'public_reader_for_application'), 'same-input reader reuse is missing'
+    reader, app = 'b' * 40, 'c' * 40
+    folder = hook.public_reader_journal(reader).parent
+    folder.mkdir()
+    hook.public_reader_journal(reader).write_text('{}')
+    blobs = {'source': 'd' * 40}
+    record = {'version': 1, 'sha': reader, 'state': 'ready', 'source_blobs': blobs}
+    monkeypatch.setattr(hook, 'public_reader_load', lambda sha: record)
+    monkeypatch.setattr(hook, 'public_reader_blobs', lambda sha: blobs)
+    assert hook.public_reader_for_application(app) == record
+    monkeypatch.setattr(hook, 'public_reader_blobs', lambda sha: {'source': 'e' * 40})
+    with pytest.raises(hook.Refused, match='unchanged reader'):
+        hook.public_reader_for_application(app)
+
+
+def test_same_input_reuse_refuses_ambiguous_or_restored_journal(hook, monkeypatch):
+    assert hasattr(hook, 'public_reader_for_application'), 'same-input reader reuse is missing'
+    folder = hook.public_reader_journal('b' * 40).parent
+    folder.mkdir()
+    for sha in ('b' * 40, 'd' * 40):
+        hook.public_reader_journal(sha).write_text('{}')
+    monkeypatch.setattr(hook, 'public_reader_blobs', lambda sha: {'source': 'e' * 40})
+    monkeypatch.setattr(hook, 'public_reader_load', lambda sha: {'sha': sha, 'state': 'ready',
+        'source_blobs': {'source': 'e' * 40}})
+    with pytest.raises(hook.Refused, match='unique unchanged reader'):
+        hook.public_reader_for_application('c' * 40)
+    monkeypatch.setattr(hook, 'public_reader_load', lambda sha: {'sha': sha, 'state': 'rolled-back',
+        'source_blobs': {'source': 'e' * 40}})
+    with pytest.raises(hook.Refused, match='unchanged reader'):
+        hook.public_reader_for_application('c' * 40)
+
+
+def test_reused_service_health_keeps_reader_revision_and_actual_application_revision(hook, monkeypatch):
+    assert hasattr(hook, 'verify_public_reader_application'), 'same-input reader verification is missing'
+    app, reader = 'c' * 40, 'b' * 40
+    monkeypatch.setattr(hook, 'public_reader_for_application', lambda sha: {'sha': reader})
+    calls = []
+    monkeypatch.setattr(hook, 'verify_public_reader', lambda sha, **kwargs:
+        calls.append((sha, kwargs)) or {'sha': sha, 'consumers_verified': True})
+    result = hook.verify_public_reader_application(app)
+    assert calls == [(reader, {'application_sha': app})]
+    assert result['application_sha'] == app and result['reader_sha'] == reader
+
+
+@pytest.mark.parametrize('changed', (
+    'services/api/lead_app/public_reader.py', 'services/api/lead_app/fetch.py',
+    'services/public_reader/systemd/lead-public-reader.service.in',
+    'services/public_reader/systemd/lead-public-reader.socket.in',
+    'pyproject.toml', 'requirements.lock.txt',
+))
+def test_changed_reader_or_dependency_input_cannot_reuse_old_service(hook, monkeypatch, changed):
+    reader, app = 'b' * 40, 'c' * 40
+    blobs = {name: 'd' * 40 for name in hook.PUBLIC_READER_REUSE_FILES}
+    assert changed in blobs
+    hook.public_reader_journal(reader).parent.mkdir()
+    hook.public_reader_journal(reader).write_text('{}')
+    monkeypatch.setattr(hook, 'public_reader_load', lambda sha: {'sha': reader, 'state': 'ready', 'source_blobs': blobs})
+    def git(*args):
+        revision, name = args[-1].split(':', 1)
+        return 'e' * 40 if revision == app and name == changed else blobs[name]
+    monkeypatch.setattr(hook, 'run', git)
+    with pytest.raises(hook.Refused, match='unchanged reader'):
+        hook.public_reader_for_application(app)
+
+
+@pytest.mark.parametrize('drift', ('unit', 'read-mount', 'write-mount', 'network'))
+def test_prepared_readback_refuses_reload_only_consumer_drift(provision, drift):
+    p = provision
+    p.h.provision_public_reader(p.sha, p.h.PUBLIC_READER_PLAN)
+    if drift == 'unit':
+        p.snapshots['worker']['unit_files']['new-foreign-dropin'] = 'e' * 64
+    elif drift == 'read-mount':
+        p.snapshots['worker']['BindReadOnlyPaths'] += ' /foreign:/foreign'
+    elif drift == 'write-mount':
+        p.snapshots['worker']['BindPaths'] = '/foreign:/foreign'
+    else:
+        p.snapshots['worker']['JoinsNamespaceOf'] = 'other.service'
+    with pytest.raises(p.h.Refused, match='consumer.*changed|consumer.*drift'):
+        p.h.verify_public_reader_prepared(p.sha)
+
+
+def test_changed_reader_is_refused_before_maintenance_or_application_restart(hook, monkeypatch):
+    new, old = 'b' * 40, 'a' * 40
+    class Store(type(hook.STORE)):
+        def stat(self, **kwargs):
+            value = super().stat(**kwargs)
+            return SimpleNamespace(st_uid=0, st_mode=value.st_mode)
+    monkeypatch.setattr(hook, 'STORE', Store(hook.STORE))
+    source = hook.STORE / new / hook.PUBLIC_READER_SOURCE_FILES[0]
+    source.parent.mkdir(parents=True)
+    source.write_text('new source')
+    monkeypatch.setattr(hook.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(hook, 'current', lambda: old)
+    monkeypatch.setattr(hook, 'safe_layout', lambda: None)
+    monkeypatch.setattr(hook, 'verify', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hook, 'image', lambda sha: hook.STORE / sha)
+    monkeypatch.setattr(hook, 'sync_public_main', lambda *_args: None)
+    monkeypatch.setattr(hook, 'public_reader_for_application', lambda sha:
+        (_ for _ in ()).throw(hook.Refused('unchanged reader proof required')))
+    monkeypatch.setattr(hook, 'restart_and_verify', lambda *_args: None)
+    commands = []
+    monkeypatch.setattr(hook, 'run', lambda *args, **_kwargs:
+        commands.append(args) or (str(hook.VAULT) if args[0] == 'findmnt' else ''))
+    with pytest.raises(hook.Refused, match='unchanged reader proof'):
+        hook.deploy(new)
+    assert not any(args[:2] == ('systemctl', 'start') for args in commands)
+
+
+def test_render_binds_fixed_shared_application_site(hook):
+    assert hasattr(hook, 'PUBLIC_READER_SITE'), 'separate shared site runtime is missing'
+    assert hook.public_reader_render('@SITE@', 'b' * 40, 995, 983) == str(hook.PUBLIC_READER_SITE)
+
+
+@pytest.mark.parametrize('field', ('uid', 'gid', 'groups'))
+def test_reader_cannot_reuse_business_os_identity(hook, field):
+    assert hasattr(hook, 'public_reader_process_identity'), 'reader identity separation is missing'
+    uid, gid, groups = ('995', '62001', '62001') if field == 'uid' else (
+        ('62001', '983', '62001') if field == 'gid' else ('62001', '62001', '62001 983'))
+    status = f'Uid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\nGroups:\t{groups}\n'
+    with pytest.raises(hook.Refused):
+        hook.public_reader_process_identity(status, 995, 983)
+
+
+def test_first_provision_rejects_static_reader_account_collision(hook, monkeypatch):
+    assert hasattr(hook, 'public_reader_account_unused'), 'dynamic identity collision guard missing'
+    monkeypatch.setattr(hook.pwd, 'getpwnam', lambda name: SimpleNamespace(pw_uid=995))
+    with pytest.raises(hook.Refused, match='identity already exists'):
+        hook.public_reader_account_unused()
+
+
+def test_metadata_dependency_versions_must_match_candidate_lock(hook, tmp_path, monkeypatch):
+    assert hasattr(hook, 'public_reader_dependencies'), 'shared site dependency proof is missing'
+    monkeypatch.setattr(hook, 'PUBLIC_READER_SITE', tmp_path / 'site')
+    hook.PUBLIC_READER_SITE.mkdir()
+    lock = ''
+    for name in hook.PUBLIC_READER_DEPENDENCIES:
+        folder = hook.PUBLIC_READER_SITE / (name.replace('-', '_') + '-1.0.dist-info')
+        folder.mkdir()
+        (folder / 'METADATA').write_text(f'Name: {name}\nVersion: 1.0\n')
+        lock += name + '==1.0\n'
+    monkeypatch.setattr(hook, 'executor_directory', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hook, 'executor_host_file', lambda path: path.read_bytes())
+    monkeypatch.setattr(hook, 'run', lambda *_args, **_kwargs: lock)
+    result = hook.public_reader_dependencies('b' * 40)
+    assert len(result) == 10 and all(value['version'] == '1.0' for value in result.values())
+    next(hook.PUBLIC_READER_SITE.glob('httpx-*.dist-info/METADATA')).write_text('Name: httpx\nVersion: 2.0\n')
+    with pytest.raises(hook.Refused, match='dependency.*differ'):
+        hook.public_reader_dependencies('b' * 40)

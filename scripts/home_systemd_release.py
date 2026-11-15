@@ -12,7 +12,6 @@ import os
 import pwd
 import re
 import shlex
-import socket
 import stat
 import subprocess
 import sys
@@ -21,6 +20,7 @@ import tempfile
 import time
 import urllib.request
 from contextlib import contextmanager
+from email.parser import BytesParser
 from pathlib import Path
 from uuid import UUID
 
@@ -911,12 +911,16 @@ PUBLIC_READER_ROOT = Path('/var/lib/lead-public-reader/root')
 PUBLIC_READER_SYSTEMD = Path('/etc/systemd/system')
 PUBLIC_READER_PLAN = Path('/etc/lead-home-release/public-reader-provision.json')
 PUBLIC_READER_PYTHON = EXECUTOR_PYTHON_SOURCE.parents[1]
+PUBLIC_READER_SITE = EXECUTOR_PYTHON_SOURCE.parents[2] / 'site'
+PUBLIC_READER_DEPENDENCIES = frozenset(('httpx', 'httpcore', 'anyio', 'certifi', 'idna',
+    'h11', 'sniffio', 'beautifulsoup4', 'soupsieve', 'typing-extensions'))
 PUBLIC_READER_CONSUMERS = ('api', 'worker')
 PUBLIC_READER_SOURCE_FILES = (
     'services/api/lead_app/public_reader.py', 'services/api/lead_app/fetch.py',
     'services/public_reader/systemd/lead-public-reader.service.in',
     'services/public_reader/systemd/lead-public-reader.socket.in',
 )
+PUBLIC_READER_REUSE_FILES = (*PUBLIC_READER_SOURCE_FILES, 'pyproject.toml', 'requirements.lock.txt')
 PUBLIC_READER_CONNECTOR_REVISION = '1d46e4562ab2c23a20f0f177cfb251394fd5cf5d'
 PUBLIC_READER_CONNECTOR_FILES = {
     'services/local-executor/src/runner.ts': 'b0ef9ab2a6bae948795a24d97889db782ae2a4ec',
@@ -942,7 +946,7 @@ def public_reader_paths():
 def public_reader_render(template, sha, uid, gid):
     require(SHA.fullmatch(sha) and type(uid) is int and type(gid) is int and uid > 0 and gid > 0,
             'invalid public reader identity')
-    values = {'@IMAGE@': str(STORE / sha), '@PYTHON@': str(PUBLIC_READER_PYTHON),
+    values = {'@IMAGE@': str(STORE / sha), '@PYTHON@': str(PUBLIC_READER_PYTHON), '@SITE@': str(PUBLIC_READER_SITE),
               '@UID@': str(uid), '@GID@': str(gid), '@SHA@': sha}
     placeholders = set(re.findall(r'@[A-Z_]+@', template))
     require(placeholders and placeholders <= values.keys(), 'unexpected public reader template parameter')
@@ -984,6 +988,34 @@ def public_reader_consumer(role):
     return result
 
 
+def public_reader_bindings(value):
+    result = set()
+    for item in value.split():
+        parts = item.split(':')
+        require(len(parts) in (2, 3) and (len(parts) == 2 or parts[2] == 'rbind'),
+                'unsupported public reader consumer binding')
+        result.add((str(executor_path(parts[0])), str(executor_path(parts[1]))))
+    return result
+
+
+def public_reader_assert_consumer(record, role, *, activated):
+    before = record['previous']['consumers'][role]
+    now = public_reader_consumer(role)
+    append = public_reader_paths()[2 + PUBLIC_READER_CONSUMERS.index(role)]
+    files = {**before['unit_files'], str(append): record['installed'][str(append)]}
+    require(now['unit_files'] == files
+            and all(now.get(key) == before.get(key) for key in
+                    ('uid', 'gid', 'PrivateNetwork', 'JoinsNamespaceOf', 'BindPaths', 'FragmentPath'))
+            and public_reader_bindings(now['BindReadOnlyPaths']) ==
+                public_reader_bindings(before['BindReadOnlyPaths']) | {(str(PUBLIC_READER_RUNTIME), str(PUBLIC_READER_RUNTIME))}
+            and now['route'] == str(PUBLIC_READER_RUNTIME / 'reader.sock'),
+            'public reader consumer configuration changed from approved preimage')
+    require((now['InvocationID'] != before['InvocationID']) if activated else
+            (now['InvocationID'] == before['InvocationID'] and now['MainPID'] == before['MainPID']),
+            'public reader consumer invocation changed unexpectedly')
+    return now
+
+
 def public_reader_journal(sha):
     require(SHA.fullmatch(sha), 'invalid public reader revision')
     return STORE / 'public-reader' / (sha + '.json')
@@ -998,6 +1030,7 @@ def public_reader_load(sha):
 
 def public_reader_plan(sha):
     require(os.geteuid() == 0 and SHA.fullmatch(sha), 'trusted node and exact SHA required')
+    public_reader_account_unused()
     consumers = {role: public_reader_consumer(role) for role in PUBLIC_READER_CONSUMERS}
     identities = {(data['uid'], data['gid']) for data in consumers.values()}
     require(len(identities) == 1, 'public reader consumers require one actual UID/GID')
@@ -1038,6 +1071,59 @@ def public_reader_python():
     info = executable.lstat()
     require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_mode & 0o111
             and not info.st_mode & 0o022, 'public reader interpreter must be a trusted in-prefix executable')
+
+
+def public_reader_account_unused():
+    for lookup in (pwd.getpwnam, grp.getgrnam):
+        try:
+            lookup('lead-public-reader')
+        except KeyError:
+            continue
+        raise Refused('public reader static identity already exists')
+
+
+def public_reader_process_identity(status, client_uid, client_gid):
+    fields = {key: value.split() for key, value in
+              (line.split(':', 1) for line in status.splitlines() if ':' in line)}
+    uids, gids, groups = fields.get('Uid', []), fields.get('Gid', []), fields.get('Groups', [])
+    require(len(uids) == len(gids) == 4 and all(value.isdecimal() for value in uids + gids + groups),
+            'public reader actual identity unavailable')
+    require(len(set(uids)) == len(set(gids)) == 1 and int(uids[0]) > 0 and int(gids[0]) > 0
+            and int(uids[0]) != client_uid and int(gids[0]) != client_gid
+            and all(int(value) == int(gids[0]) and int(value) != client_gid for value in groups),
+            'public reader actual identity overlaps a business identity')
+
+
+def public_reader_dependencies(sha):
+    executor_directory(PUBLIC_READER_SITE)
+    lock = run('git', '--git-dir', STORE / 'lead.git', 'show', f'{sha}:requirements.lock.txt')
+    expected = {}
+    for name, version in re.findall(r'(?m)^([a-zA-Z0-9_.-]+)==([^\s;]+)\s*$', lock):
+        name = name.lower().replace('_', '-').replace('.', '-')
+        if name in PUBLIC_READER_DEPENDENCIES:
+            require(name not in expected, 'ambiguous public reader dependency lock')
+            expected[name] = version
+    require(expected.keys() == PUBLIC_READER_DEPENDENCIES, 'public reader dependency lock incomplete')
+    result = {}
+    for path in PUBLIC_READER_SITE.glob('*.dist-info/METADATA'):
+        name = path.parent.name.removesuffix('.dist-info').rsplit('-', 1)[0].lower().replace('_', '-').replace('.', '-')
+        if name not in PUBLIC_READER_DEPENDENCIES:
+            continue
+        raw = executor_host_file(path)
+        metadata = BytesParser().parsebytes(raw, headersonly=True)
+        names, versions = metadata.get_all('Name', []), metadata.get_all('Version', [])
+        require(len(names) == len(versions) == 1 and name not in result
+                and names[0].lower().replace('_', '-').replace('.', '-') == name
+                and versions[0] == expected[name], 'public reader dependency versions differ from candidate lock')
+        result[name] = {'version': versions[0], 'metadata_sha256': executor_digest(raw)}
+    require(result.keys() == PUBLIC_READER_DEPENDENCIES, 'public reader dependency metadata incomplete')
+    return result
+
+
+def public_reader_runtime(sha):
+    public_reader_python()
+    return {'python_sha256': executor_digest((PUBLIC_READER_PYTHON / 'bin/python3.12').read_bytes()),
+            'dependencies': public_reader_dependencies(sha)}
 
 
 def public_reader_empty_root(path):
@@ -1086,6 +1172,41 @@ def public_reader_sources(sha):
     return release
 
 
+def public_reader_blobs(sha):
+    require(SHA.fullmatch(sha), 'invalid public reader source revision')
+    result = {name: run('git', '--git-dir', STORE / 'lead.git', 'rev-parse', f'{sha}:{name}')
+              for name in PUBLIC_READER_REUSE_FILES}
+    require(all(SHA.fullmatch(value) for value in result.values()), 'public reader source proof unavailable')
+    return result
+
+
+def public_reader_for_application(sha):
+    expected = public_reader_blobs(sha)
+    direct = public_reader_journal(sha)
+    if os.path.lexists(direct):
+        record = public_reader_load(sha)
+        require(record.get('state') == 'ready' and record.get('source_blobs') == expected,
+                'unchanged reader proof unavailable for application')
+        return record
+    # A later UI/docs-only application can reuse the existing transport. Never
+    # relabel the reader's own revision, create a new installation journal or
+    # accept a different fetcher/template/dependency input as compatible.
+    candidates = []
+    for path in direct.parent.glob('*.json'):
+        require(SHA.fullmatch(path.stem), 'unexpected public reader journal')
+        record = public_reader_load(path.stem)
+        if record.get('state') == 'ready' and record.get('source_blobs') == expected:
+            candidates.append(record)
+    require(len(candidates) == 1, 'unique unchanged reader proof required for application')
+    return candidates[0]
+
+
+def verify_public_reader_application(sha):
+    record = public_reader_for_application(sha)
+    proof = verify_public_reader(record['sha'], application_sha=sha)
+    return {**proof, 'application_sha': sha, 'reader_sha': record['sha']}
+
+
 def public_reader_save(record, state):
     record['state'] = state
     executor_atomic(public_reader_journal(record['sha']), executor_json(record))
@@ -1119,6 +1240,8 @@ def provision_public_reader(sha, plan_path):
         rendered.update({str(path): public_reader_dropin() for path in public_reader_paths()[2:]})
         executor_directory(journal.parent, create=True, private=True)
         record = dict(version=1, sha=sha, plan_sha256=executor_digest(raw), previous=plan,
+                      source_blobs=public_reader_blobs(sha),
+                      runtime=public_reader_runtime(sha),
                       installed={name: executor_digest(value) for name, value in rendered.items()})
         public_reader_save(record, 'prepared')
         require(public_reader_plan(sha) == plan and executor_config(PUBLIC_READER_PLAN) == raw,
@@ -1148,6 +1271,8 @@ def provision_public_reader(sha, plan_path):
                 and all(property_of(role, 'MainPID') == before['MainPID']
                     and property_of(role, 'InvocationID') == before['InvocationID']
                     for role, before in plan['consumers'].items()), 'application changed during reader preparation')
+        for role in PUBLIC_READER_CONSUMERS:
+            public_reader_assert_consumer(record, role, activated=False)
         public_reader_save(record, 'ready')
         return proof
 
@@ -1162,7 +1287,7 @@ def public_reader_mount(proc, target, source):
     require(view.samefile(source), 'public reader binding inode differs')
 
 
-def verify_public_reader(sha, *, consumers=True):
+def verify_public_reader(sha, *, consumers=True, application_sha=None):
     record = public_reader_load(sha)
     require(record['state'] not in ('rolled-back', 'rolling-back'), 'public reader is restored')
     plan = record['previous']
@@ -1183,12 +1308,12 @@ def verify_public_reader(sha, *, consumers=True):
             and property_of(PUBLIC_READER_SERVICE, 'NeedDaemonReload') == 'no'
             and not property_of(PUBLIC_READER_SERVICE, 'EnvironmentFiles'), 'public reader sandbox differs')
     proc = process(PUBLIC_READER_SERVICE)
-    ids = next(line.split()[1:] for line in (proc / 'status').read_text().splitlines() if line.startswith('Uid:'))
-    require(len(ids) == 4 and all(value.isdecimal() and int(value) > 0 for value in ids),
-            'public reader actual process cannot be root')
+    public_reader_process_identity((proc / 'status').read_text(), plan['client_uid'], plan['client_gid'])
     require((proc / 'root').samefile(PUBLIC_READER_ROOT), 'public reader actual root differs')
     public_reader_mount(proc, Path('/app/lead_app'), release / 'services/api/lead_app')
     public_reader_mount(proc, Path('/python'), PUBLIC_READER_PYTHON)
+    public_reader_mount(proc, Path('/site'), PUBLIC_READER_SITE)
+    require(public_reader_runtime(sha) == record.get('runtime'), 'public reader runtime changed after provisioning')
     require((proc / 'ns/net').readlink() == Path('/proc/self/ns/net').readlink(), 'public reader not in host network')
     for private in ('srv', 'home', 'root', 'run/lead-home', 'run/credentials', 'etc/lead-home-release'):
         require(not (proc / 'root' / private).exists(), 'public reader private path visible')
@@ -1200,13 +1325,9 @@ def verify_public_reader(sha, *, consumers=True):
             'public reader socket ownership or permissions differ')
     health = public_reader_health(sha, plan['client_uid'], plan['client_gid'])
     if consumers:
-        require(current() == sha, 'public reader application not activated')
+        require(current() == (application_sha or sha), 'public reader application not activated')
         for role, before in plan['consumers'].items():
-            now = public_reader_consumer(role)
-            require((now['uid'], now['gid']) == (plan['client_uid'], plan['client_gid'])
-                    and now['InvocationID'] != before['InvocationID']
-                    and now['route'] == str(PUBLIC_READER_RUNTIME / 'reader.sock'),
-                    'public reader consumer has not activated its route')
+            public_reader_assert_consumer(record, role, activated=True)
             consumer = process(role)
             public_reader_mount(consumer, PUBLIC_READER_RUNTIME, PUBLIC_READER_RUNTIME)
             # Read only the non-secret selected route from the actual process;
@@ -1246,6 +1367,8 @@ def verify_public_reader_prepared(sha):
                 and property_of(role, 'InvocationID') == before['InvocationID']
                 for role, before in record['previous']['consumers'].items()),
             'original application changed after reader preparation')
+    for role in PUBLIC_READER_CONSUMERS:
+        public_reader_assert_consumer(record, role, activated=False)
     return {**proof, 'application_sha': record['previous']['expected_app'], 'state': 'prepared'}
 
 
@@ -1403,7 +1526,7 @@ def verify_frames(release, *, running_web=None):
 def verify(sha, *, fenced=False, require_idle=True):
     require(current() == sha, "running SHA mismatch")
     if (STORE / sha / PUBLIC_READER_SOURCE_FILES[0]).is_file():
-        verify_public_reader(sha)
+        verify_public_reader_application(sha)
     verify_frames(STORE / sha)
     intake = run("systemctl", "show", "lead-home-ingress.socket", "-p", "ActiveState", "--value")
     require(intake == ("inactive" if fenced else "active"), "unexpected ingress state")
@@ -2350,6 +2473,9 @@ def deploy(sha):
                     "release requires separate compatibility review")
             run("git", "--git-dir", mirror, "diff", "--exit-code", reviewed, sha, "--", *sorted(extra))
             verify_frames(image(sha), running_web=image(old) / "web")
+        if (STORE / sha / PUBLIC_READER_SOURCE_FILES[0]).is_file():
+            reader = public_reader_for_application(sha)
+            verify_public_reader(reader['sha'], consumers=False)
         # The node's maintenance fence outlives this process. It must remain held across recovery.
         with maintenance_window(old, sha) as (fence, check):
             run("systemctl", "start", fence)
@@ -2416,7 +2542,7 @@ def main():
         elif args.action == 'provision-public-reader':
             print(json.dumps(provision_public_reader(args.sha, args.plan), sort_keys=True))
         elif args.action == 'verify-public-reader':
-            print(json.dumps(verify_public_reader(args.sha), sort_keys=True))
+            print(json.dumps(verify_public_reader_application(args.sha), sort_keys=True))
         elif args.action == 'verify-public-reader-prepared':
             print(json.dumps(verify_public_reader_prepared(args.sha), sort_keys=True))
         elif args.action == 'rollback-public-reader':
