@@ -9,6 +9,7 @@ import { ServerWorker, validateServerBinding, scopeStoreFolder } from "../src/se
 import { BrokerError } from "../src/broker-client.ts";
 import { sharedCliEnvironment, sharedNativeArgs } from "../src/shared-runtime.ts";
 import { AppServer } from "../src/rpc.ts";
+import { RequestBridge } from "../src/request-bridge.ts";
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const binding = (n = 1) => ({ version: 2 as const, transport: "unix-broker" as const,
@@ -254,4 +255,38 @@ test("shared recovery waits for account readiness before starting a prepared req
   assert.equal(rpcs[0].calls.filter(call => call.method === "turn/start").length, 1);
   await worker.tick();
   assert.equal(rpcs[0].calls.filter(call => call.method === "turn/start").length, 1);
+});
+
+
+test("shared read approvals apply only to declared fixed Lead tools on start and resume", async t => {
+  for (const { resume, names, approved } of [
+    { resume: false, names: ["lead_public_read", "browser_click", "lead_public_read_other"],
+      approved: { lead_public_read: { approval_mode: "approve" }, browser_click: { approval_mode: "prompt" },
+        lead_public_read_other: { approval_mode: "prompt" } } },
+    { resume: true, names: ["lead_document_read", "lead_task_read", "browser_click"],
+      approved: { lead_document_read: { approval_mode: "approve" }, lead_task_read: { approval_mode: "approve" },
+        browser_click: { approval_mode: "prompt" } } },
+  ]) await t.test(resume ? "resume" : "start", async t => {
+    const root = home(t), store = new Store(join(root, "scope")); store.bindServer(binding());
+    if (resume) store.setThread("same-session", "thread-1");
+    const bridge = new RequestBridge(join(root, "r.sock"), "generation");
+    await bridge.start(); t.after(() => bridge.close());
+    const rpc = new Rpc();
+    const runner = new Runner(store, () => rpc, { bridge, client: { async call() {
+      throw new Error("no tool is executed by this protocol fixture");
+    } } });
+    t.after(() => runner.close());
+    await runner.command({ id: "start", request_id: "request", kind: "run", payload: {
+      ...payload, tools: names.map(name => ({
+        name, description: "synthetic tool", inputSchema: { type: "object" },
+      })),
+    } });
+    const call = rpc.calls.find(c => c.method === (resume ? "thread/resume" : "thread/start"));
+    assert.ok(call);
+    const lead = call.params.config.mcp_servers.lead;
+    assert.equal(lead.default_tools_approval_mode, "prompt");
+    assert.deepEqual(lead.tools, approved);
+    assert.equal(call.params.config.approval_policy, "never");
+    assert.equal(call.params.permissions, "lead_shared");
+  });
 });

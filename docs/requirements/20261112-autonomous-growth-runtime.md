@@ -861,3 +861,27 @@ PR #53、#54 已合并。#54 修正真实节点的 Telegram 配置入口：从�
 另起 SSH 独立回读确认持久目录归属正确、模式和 inode 未变，实际应用仍为 M8276。原请求于 `2026-11-15T08:28:10.758415Z` 自然完成：399条原事件全部保存为服务端399条唯一事件，原请求 outbox和原 scope outbox均0、未ACK命令0；原唯一请求及 thread/turn 与本地完成记录一致，结果存在。原 growth.decision 于08:28:12.132240Z成功处理，status=waiting_for_change，continuation四字段完整，producer=evidence_added、responsibility=owner，条件为新增来源/需求证据，下一步包括证据、需求及分发可行性的重新判断。accepted/rejected组均0，pending_work=false，没有再派工作或再次能力唤醒。修复后的30秒既有请求观察没有同目录EACCES，但也没有新的临时文件打开；解除依据是原大回执的真实完整回传，不以空观察冒充压力验证。
 
 原请求回传与原经营判断已完成；本次未获得新原文、有效需求学习或业务进展，仍没有本次社媒动作。Facebook关闭、X未验证、Reddit/Telegram原权限和旧恢复账本继续保留。等待新事实是当前明确业务条件，不再是技术上卡在queued；不把它描述成已经持续产生运营成果。
+
+
+### 2026-11-15 Chamber 新运营指令与原文读取审批阻塞
+
+本轮接续用户“合并部署后继续推进 Chamber 持续运营并解决阻塞”的真实要求。开工以 GitHub 实时 main `0d16932f1000af7df298c8817aa573f417188cc6` 核实规则；共享目录仍为旧 HEAD `d887831`、261 项其他任务改动，完整保留。本次独立目录 `chamber-operations-20261115/lead agent`、分支 `codex/chamber-public-read-approval-20261115`。线上 App/Telegram/Reddit 仍为 `8276c7c`，上一批发布和399条原回执恢复继续有效，不重复发布或重投旧模型。
+
+**新的真实运行证据：**原决策具备 live search、`lead_public_read`、完整文档/任务读取工具；冻结上下文包含12份文档、12个已关闭实验和47次检查/3次尝试且已停止的旧恢复路径。原399事件未见已识别公开工具调用，另有未分类条目，不能由“没有新增资料”反推所有公开来源不可行。现有问题预算只限制重复无进展实验，不禁止当前决策自行寻找新原文；旧正文重读仍保留原ID与时间。
+
+北京时间16:50:55，仅把用户本次要求经原 `ensure_decision` 传入一次真实 `owner_direction`；先持久保存唯一 intent，原引用和正文留服务器。没有再次消费旧 `capability_changed`、手工创建研究/内容/渠道任务、重置账本或扩大账号权限。新决策实际执行4次原生公开搜索、2次 `lead_public_read`，两次均在工具执行前失败，原错误相同：`MCP tool call requires approval, but approval policy is never`。原请求于16:52:02自然完成，经营结果为 `waiting_for_change`、`resource_recovered`、`platform`，accepted/rejected均0、pending_work=false；未保存新原文、未形成已接受后续、无新社媒动作。搜索摘要不能替代原文，这次停止已有具体平台依据，不能再机械要求用户提供来源。
+
+**已定位的工程原因和最小补正：**共用连接器固定 `approval_policy=never`，但其固定 Lead MCP 服务没有给已获业务读取权限的工具声明精确审批策略；无注释工具默认需审批，运行时在请求审批前即拒绝，所以没有 `server/requestDenied`，也尚未进入 Broker/HTTP/来源读取。实际服务器与本地均为 Codex CLI `0.167.0-alpha.4.1`、Node `24.14.1`，SDK锁定 `1.32.2`。已查询 Context7 和[官方MCP配置](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)，以同版真实运行时正负对照确认兼容，不能拿较早文档或仅配置可解析当执行证明。
+
+候选只给固定 `lead` 服务、当前请求实际声明的 `lead_public_read`、`lead_document_read`、`lead_task_read` 设置逐工具 `approval_mode=approve`，其余当前声明工具显式 `prompt`、服务默认也为 `prompt`，共享全局仍为 `never`。这样不会继承HOME或旧线程中同名工具的历史放行。不放开其他服务、浏览器写入、命令、文件、权限申请或 elicitation；原请求/项目/grant/generation/attempt/lease/URL和网络后重验均不改。`lead_public_read` 会在本地保存真实资料，不伪标无环境副作用的 `readOnlyHint=true` 来绕过审批。个人连接器配置不变，启动与原线程续接均使用同一受限策略。
+
+**验证与交付边界：**启动/续接回归先在旧源码上失败，后在候选通过；连接器完整本地回归、类型检查及真实CLI机械执行结果见本节后续收尾。机械执行只用空白假HOME/CODEX_HOME、loopback假模型与假MCP，不读真实认证，不发真实模型或社媒。固定三读工具逐项执行，未批准同服务工具、另一服务同名工具和未声明工具均拒绝；真实同版行为与原现场错误一致。工程修复不等于生产已激活、模型经营判断已改善或获客成功。
+
+本批尚无新的合并/生产激活授权。修复位于连接器进程已加载的 Runner；单切App不会更新它，需本批精确main完整应用CI、同轮连接器产物及一次受控worker更新/重启才能生效。本轮明确“不重装、重新配对、重启共享Node”的约束继续有效；先完成可审候选、验证与PR，再请求仅本批连接器激活的具体授权。不改私有Codex配置绕过交付，不沿旧0034→0035迁移入口重放DDL，也不重建Node或授权grant。获准后仍须独立回读真实连接器版本、原请求边界及账号状态；仅确实生效的新能力事实可触发一次正常经营判断，再分别核验原文、后续工作和真实业务效果。
+
+
+**本地与独立核验收尾：**最终连接器完整39项通过，类型检查通过；交付范围合同43项通过，全仓Ruff、1,017个tracked文件凭据扫描和差异检查通过。实际同版CLI机械矩阵9项通过：默认配置精确复现原错误、三读逐项成功、同服务未批准/其他服务/未声明三负例拒绝、app-server动态thread/start配置正负对照；18次loopback假模型响应、4次假工具调用、真实模型0。续接配置另由真实Runner协议回归覆盖。专项再确认配置合并风险：HOME旧同名批准会越过仅default prompt的候选；当前声明工具显式prompt使实际调用从1归零（2项、4次loopback假响应），未修改共享HOME或生产配置。独立审查据此仅复核受影响增量，不重跑无关真实模型评估。
+
+17:06:50新SSH独立回读：实际App仍M8276，五项原服务active/running、自动重启计数0；原请求仍completed、399条唯一事件；按原冻结上下文中的精确旧根引用核对probes47/attempts3/stopped及相关计数未变，消除了旧观察器“两候选无法唯一对账”的本轮证据缺口。新经营决策的两次错误与固定原错误字符串精确相等，仍无新资料、后续或社媒动作。Facebook关闭、X未验证、Reddit/Telegram原状态及零target grant保留。
+
+私有证据根为 `/private/tmp/lead-chamber-operations-20261115`：`final-readback.json`、`owner-observation-3.json`、`cli-proof/verified.json`、`cli-proof/merge-verified.json`及对应固定脚本/逐例输出；标识与来源正文仍留服务器。修复未激活，不宣称持续运营或获客已恢复；本批PR精确head快速检查、获准后的精确main全量与同轮连接器产物、受控worker更新/重启和再次业务回读仍分别放行。

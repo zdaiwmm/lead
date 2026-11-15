@@ -220,7 +220,16 @@ export class Runner {
                 LEAD_EXECUTOR_HOME: this.store.folder, LEAD_EXECUTOR_REQUEST: record.id,
               }),
             },
-            ...(bridgeLease ? { env_vars: [] } : {}),
+            ...(bridgeLease ? {
+              env_vars: [],
+              // Only the original request's fixed read tools are preauthorized.
+              // All other MCP tools retain an approval barrier under Never.
+              default_tools_approval_mode: "prompt",
+              tools: Object.fromEntries(payload.tools.map(tool => [tool.name, {
+                approval_mode: ["lead_public_read", "lead_document_read", "lead_task_read"].includes(tool.name)
+                  ? "approve" : "prompt",
+              }])),
+            } : {}),
             required: true,
           },
         };
