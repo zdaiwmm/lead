@@ -6,14 +6,41 @@ on:
       - .github/workflows/ci.yml
       - services/api/lead_app/public_reader.py
       - services/api/lead_app/fetch.py
+      - services/api/lead_app/local_executor_tools.py
+      - services/api/lead_app/executor_studio.py
+      - services/api/lead_app/local_executor.py
+      - services/api/lead_app/executor_nodes_api.py
       - services/public_reader/**
       - scripts/home_systemd_release.py
       - tests/public_reader_systemd_drill.py
+      - tests/test_public_reader_transport.py
+      - tests/test_public_reader_integration.py
+      - tests/test_public_reader_release.py
+      - pyproject.toml
       - requirements.lock.txt
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
+  reader-regressions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      LEAD_STATE_DIR: ${{ runner.temp }}/lead-reader-test-state
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.14'
+          cache: pip
+      - name: Install the locked test dependencies
+        run: python -m pip install -r requirements.lock.txt
+      - name: Prepare disposable test configuration
+        run: python scripts/bootstrap.py
+      - name: Run all public reader regressions without database or model calls
+        run: python -m pytest --noconftest -q --maxfail=1 tests/test_public_reader_transport.py tests/test_public_reader_integration.py tests/test_public_reader_release.py
   public-reader-native:
     runs-on: ubuntu-24.04
     timeout-minutes: 8
