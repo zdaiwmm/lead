@@ -566,3 +566,15 @@ def test_direct_deploy_refuses_consumer_drift_before_application_switch(provisio
     assert activations == []
     if not during_backup:
         assert not any(args[:2] == ('systemctl', 'start') for args in p.commands)
+
+
+@pytest.mark.parametrize(('role', 'expected'), [
+    ('api', 'lead-home-api.service'),
+    ('lead-public-reader.service', 'lead-public-reader.service'),
+    ('lead-public-reader.socket', 'lead-public-reader.socket'),
+])
+def test_status_readback_queries_the_actual_unit(hook, monkeypatch, role, expected):
+    calls = []
+    monkeypatch.setattr(hook, 'run', lambda *args: calls.append(args) or 'active')
+    assert hook.property_of(role, 'ActiveState') == 'active'
+    assert calls == [('systemctl', 'show', expected, '-p', 'ActiveState', '--value')]

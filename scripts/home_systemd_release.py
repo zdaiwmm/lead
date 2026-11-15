@@ -106,7 +106,7 @@ def sync_public_main(mirror, sha):
 
 
 def unit(role):
-    return role if role.endswith(".service") else f"lead-home-{role}.service"
+    return role if role.endswith((".service", ".socket")) else f"lead-home-{role}.service"
 
 
 def property_of(role, prop):
