@@ -1,0 +1,53 @@
+name: Public reader native check
+on:
+  pull_request:
+    paths:
+      - .github/workflows/public-reader-check.yml
+      - services/api/lead_app/public_reader.py
+      - services/api/lead_app/fetch.py
+      - services/public_reader/**
+      - scripts/home_systemd_release.py
+      - tests/public_reader_systemd_drill.py
+      - requirements.lock.txt
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  public-reader-native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Prepare the locked public reader runtime
+        run: |
+          sudo apt-get install -y python3-venv
+          /usr/bin/python3 -IB - <<'PY'
+          import os
+          from pathlib import Path
+          names = {'httpx', 'httpcore', 'anyio', 'certifi', 'idna', 'h11',
+                   'sniffio', 'beautifulsoup4', 'soupsieve', 'typing-extensions'}
+          lines = [line for line in Path('requirements.lock.txt').read_text().splitlines()
+                   if line.split('==')[0].replace('_', '-') in names]
+          assert {line.split('==')[0].replace('_', '-') for line in lines} == names
+          Path(os.environ['RUNNER_TEMP'], 'public-reader.lock').write_text('\n'.join(lines) + '\n')
+          PY
+          sudo /usr/bin/python3 -IB - "$RUNNER_TEMP/public-reader.lock" <<'PY'
+          import os
+          import stat
+          import subprocess
+          import sys
+          from pathlib import Path
+          prefix = Path('/run/lead-public-reader-python')
+          assert not os.path.lexists(prefix)
+          os.umask(0o022)
+          subprocess.run(['/usr/bin/python3', '-m', 'venv', '--copies', str(prefix)], check=True)
+          for path in (prefix, prefix / 'bin', *prefix.parents):
+              info = path.lstat()
+              assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+          subprocess.run([str(prefix / 'bin/python'), '-m', 'pip', 'install', '--no-deps',
+                          '--no-cache-dir', '-r', sys.argv[1]], check=True)
+          PY
+      - name: Run the isolated public reader drill
+        run: sudo env LEAD_DISPOSABLE_RUNNER=1 LEAD_PUBLIC_READER_PYTHON=/run/lead-public-reader-python /usr/bin/python3 -IB tests/public_reader_systemd_drill.py
