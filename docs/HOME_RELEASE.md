@@ -12,7 +12,7 @@ API与worker保留 `PrivateNetwork=yes` 及原 `JoinsNamespaceOf`；隔离空间
 
 首次置备采用以下次序，全部使用本需求已批准且完整应用验证通过的精确SHA；同轮工具包与原镜像分别留证，不能用工具/docs检查代替应用放行：
 
-1. 通过 `tool_release.py <SHA> --tool home_systemd_release.py --install` 安装同轮正式工具并独立回读；镜像仍由原 `mount-image` 核同一CI/run/attempt及原包，保持永久只读挂载。
+1. 通过 `tool_release.py <工具SHA> --tool home_systemd_release.py --install` 安装正式工具并独立回读。工具修复与冻结应用候选分别记录，工具证明不能替代应用证明。镜像保持永久只读挂载：安装了 `mount-image` 的节点由该入口核同一CI/run/attempt及原包；既有维护电脑取件布局先用 `prepare_home_image.py <应用SHA> <私有暂存目录> --archive-only --cache-dir <私有缓存目录>` 取得原ZIP，再按原节点导入流程独立重核精确应用CI、GitHub归档摘要和REVISION后挂载。通道置备与原deploy一样复用该正式挂载，仍核root属主、squashfs/只读、REVISION、main祖先、运行时与逐文件Git blob；缺少挂载及下载入口时明确拒绝，不直接信任目录或跳过证明。
 2. 在节点以管理员执行 `home_systemd_release.py public-reader-plan <SHA>`，只读冻结实际API/worker身份、原单元/挂载/进程及当前App。将该JSON以root私有、0600、不可覆盖方式写入固定 `/etc/lead-home-release/public-reader-provision.json`；本机业务标识与配置不进入公开仓库。
 3. 执行 `home_systemd_release.py provision-public-reader <SHA> /etc/lead-home-release/public-reader-provision.json`。工具持原deploy.lock，核对私有计划与全部原字节，只向固定目标安装socket/service和末尾consumer drop-in，不清空原Bind列表；仅启动新增服务，原App及API/worker进程不重启。另起连接执行 `verify-public-reader-prepared <SHA>`，核同版本服务、真实沙箱/依赖/健康以及原App/consumer未变。已有其他候选、路径或身份不匹配即拒绝。
 4. 经原受保护应用入口切换同一SHA及原渠道。正式部署在维护前和切换前复核consumer预像；正式verify除原应用、渠道、持久工作流和维护条件外，强制核API/worker实际进程已获得固定只读socket目录及路由，读取服务仍用独立身份、固定沙箱和对应源码。另起连接执行 `verify-public-reader <SHA>`，不能把待生效drop-in或服务active当成应用已接入。

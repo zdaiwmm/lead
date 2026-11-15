@@ -78,6 +78,87 @@ def test_live_mounts_overrule_selector(hook, monkeypatch):
         hook.current()
 
 
+@pytest.mark.parametrize("mounted", (False, True))
+def test_reader_sources_use_prepared_image_without_requiring_node_downloader(hook, monkeypatch, mounted):
+    sha = "b" * 40
+    release = hook.STORE / sha
+    for name in hook.PUBLIC_READER_SOURCE_FILES:
+        path = release / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("reviewed public source")
+    original_mount = Path.is_mount
+    monkeypatch.setattr(Path, "is_mount", lambda path: mounted if path == release else original_mount(path))
+    commands = []
+
+    def run(*args, **kwargs):
+        commands.append(args)
+        if args[0] == hook.TOOLS / "mount-image":
+            raise FileNotFoundError("this node uses operator-prepared images")
+        return "c" * 40
+
+    monkeypatch.setattr(hook, "run", run)
+    checked = []
+    monkeypatch.setattr(hook, "image", lambda revision: checked.append(revision) or release)
+    monkeypatch.setattr(hook, "sync_public_main", lambda *args: checked.append(args))
+    monkeypatch.setattr(hook, "public_reader_python", lambda: checked.append("runtime"))
+    if not mounted:
+        with pytest.raises(hook.Refused, match="prepare.*original CI artifact"):
+            hook.public_reader_sources(sha)
+        assert not checked and not commands
+    else:
+        assert hook.public_reader_sources(sha) == release
+        assert checked == [sha, (hook.STORE / "lead.git", sha), "runtime"]
+        assert len(commands) == 2 * len(hook.PUBLIC_READER_SOURCE_FILES)
+
+
+def test_reader_sources_recheck_prepared_image_identity(hook, monkeypatch):
+    sha = "b" * 40
+    monkeypatch.setattr(Path, "is_mount", lambda path: path == hook.STORE / sha)
+    monkeypatch.setattr(hook, "run", lambda *args, **kwargs: pytest.fail("no promotion or source read before image proof"))
+
+    def refuse(revision):
+        assert revision == sha
+        raise hook.Refused("unsealed release image")
+
+    monkeypatch.setattr(hook, "image", refuse)
+    with pytest.raises(hook.Refused, match="unsealed release image"):
+        hook.public_reader_sources(sha)
+
+
+def test_reader_sources_use_installed_promoter_then_still_verify_image(hook, monkeypatch):
+    sha = "b" * 40
+    hook.TOOLS.mkdir()
+    promoter = hook.TOOLS / "mount-image"
+    promoter.write_text("synthetic promotion entry")
+    monkeypatch.setattr(Path, "is_mount", lambda path: False)
+    commands = []
+    monkeypatch.setattr(hook, "run", lambda *args, **kwargs: commands.append((args, kwargs)))
+
+    def refuse(revision):
+        assert revision == sha
+        raise hook.Refused("unsealed release image")
+
+    monkeypatch.setattr(hook, "image", refuse)
+    with pytest.raises(hook.Refused, match="unsealed release image"):
+        hook.public_reader_sources(sha)
+    assert commands == [((promoter, sha), {"timeout": 1800})]
+
+
+def test_reader_sources_refuse_prepared_image_with_different_source_blob(hook, monkeypatch):
+    sha = "b" * 40
+    release = hook.STORE / sha
+    first = release / hook.PUBLIC_READER_SOURCE_FILES[0]
+    first.parent.mkdir(parents=True)
+    first.write_text("different source")
+    monkeypatch.setattr(Path, "is_mount", lambda path: path == release)
+    monkeypatch.setattr(hook, "image", lambda revision: release)
+    monkeypatch.setattr(hook, "sync_public_main", lambda *args: None)
+    monkeypatch.setattr(hook, "public_reader_python", lambda: None)
+    monkeypatch.setattr(hook, "run", lambda *args, **kwargs: "c" * 40 if "hash-object" in args else "d" * 40)
+    with pytest.raises(hook.Refused, match="source differs"):
+        hook.public_reader_sources(sha)
+
+
 def test_shared_layout_refuses_before_mutation(hook, monkeypatch):
     monkeypatch.setattr(hook, "property_of", lambda *_: "chamber-workspace-releases/build")
     with pytest.raises(hook.Refused, match="Chamber"):

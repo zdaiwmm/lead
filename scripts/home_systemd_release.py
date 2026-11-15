@@ -1171,9 +1171,13 @@ def public_reader_existing(record, sha):
 
 
 def public_reader_sources(sha):
-    # The canonical node promotion independently rechecks exact main CI and the
-    # original artifact, even if its permanent mount already exists.
-    run(TOOLS / 'mount-image', sha, timeout=1800)
+    # As in deploy(), an operator may have already promoted the original CI
+    # artifact on a node without the optional downloader. Always recheck the
+    # sealed image, main ancestry, runtime and exact source bytes below.
+    if not (STORE / sha).is_mount():
+        require((TOOLS / 'mount-image').is_file(),
+                'verified release image is not mounted; prepare the original CI artifact before provisioning')
+        run(TOOLS / 'mount-image', sha, timeout=1800)
     release = image(sha)
     mirror = STORE / 'lead.git'
     sync_public_main(mirror, sha)
