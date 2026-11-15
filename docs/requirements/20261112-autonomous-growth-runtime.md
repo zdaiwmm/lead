@@ -877,7 +877,7 @@ PR #53、#54 已合并。#54 修正真实节点的 Telegram 配置入口：从�
 
 **验证与交付边界：**启动/续接回归先在旧源码上失败，后在候选通过；连接器完整本地回归、类型检查及真实CLI机械执行结果见本节后续收尾。机械执行只用空白假HOME/CODEX_HOME、loopback假模型与假MCP，不读真实认证，不发真实模型或社媒。固定三读工具逐项执行，未批准同服务工具、另一服务同名工具和未声明工具均拒绝；真实同版行为与原现场错误一致。工程修复不等于生产已激活、模型经营判断已改善或获客成功。
 
-本批尚无新的合并/生产激活授权。修复位于连接器进程已加载的 Runner；单切App不会更新它，需本批精确main完整应用CI、同轮连接器产物及一次受控worker更新/重启才能生效。本轮明确“不重装、重新配对、重启共享Node”的约束继续有效；先完成可审候选、验证与PR，再请求仅本批连接器激活的具体授权。不改私有Codex配置绕过交付，不沿旧0034→0035迁移入口重放DDL，也不重建Node或授权grant。获准后仍须独立回读真实连接器版本、原请求边界及账号状态；仅确实生效的新能力事实可触发一次正常经营判断，再分别核验原文、后续工作和真实业务效果。
+提交PR时尚无本批新的合并/生产激活授权。修复位于连接器进程已加载的 Runner；单切App不会更新它，需本批精确main完整应用CI、同轮连接器产物及一次受控worker更新/重启才能生效。本轮明确“不重装、重新配对、重启共享Node”的约束继续有效；先完成可审候选、验证与PR，再请求仅本批连接器激活的具体授权。不改私有Codex配置绕过交付，不沿旧0034→0035迁移入口重放DDL，也不重建Node或授权grant。获准后仍须独立回读真实连接器版本、原请求边界及账号状态；仅确实生效的新能力事实可触发一次正常经营判断，再分别核验原文、后续工作和真实业务效果。
 
 
 **本地与独立核验收尾：**最终连接器完整39项通过，类型检查通过；交付范围合同43项通过，全仓Ruff、1,017个tracked文件凭据扫描和差异检查通过。实际同版CLI机械矩阵9项通过：默认配置精确复现原错误、三读逐项成功、同服务未批准/其他服务/未声明三负例拒绝、app-server动态thread/start配置正负对照；18次loopback假模型响应、4次假工具调用、真实模型0。续接配置另由真实Runner协议回归覆盖。专项再确认配置合并风险：HOME旧同名批准会越过仅default prompt的候选；当前声明工具显式prompt使实际调用从1归零（2项、4次loopback假响应），未修改共享HOME或生产配置。独立审查据此仅复核受影响增量，不重跑无关真实模型评估。
@@ -887,4 +887,24 @@ PR #53、#54 已合并。#54 修正真实节点的 Telegram 配置入口：从�
 私有证据根为 `/private/tmp/lead-chamber-operations-20261115`：`final-readback.json`、`owner-observation-3.json`、`cli-proof/verified.json`、`cli-proof/merge-verified.json`及对应固定脚本/逐例输出；标识与来源正文仍留服务器。修复未激活，不宣称持续运营或获客已恢复；本批PR精确head快速检查、获准后的精确main全量与同轮连接器产物、受控worker更新/重启和再次业务回读仍分别放行。
 
 
-**待批准交付：**本需求已建[PR88](https://github.com/zdaiwmm/lead/pull/88)，源分支保持独立；PR精确候选快速检查与本地证据共同供审核，不能替代合并后的精确main完整应用CI。实际已安装连接器仍为 `3fb46ece212d4da88b9609091af4199bca20eb53`，已只读核实其Runner没有本次审批配置；当前应用仍M8276。未合并、安装或重启，不把PR通过描述成线上修复。下一步需用户批准本批合并及空闲窗口内一次连接器worker更新/重启，再按同轮产物和独立回读接续真实经营。
+**授权前交接：**本需求已建[PR88](https://github.com/zdaiwmm/lead/pull/88)，源分支保持独立；PR精确候选快速检查与本地证据共同供审核，不能替代合并后的精确main完整应用CI。当时实际已安装连接器仍为 `3fb46ece212d4da88b9609091af4199bca20eb53`，已只读核实其Runner没有本次审批配置；当前应用仍M8276。当时未合并、安装或重启；后续本次明确确认及交付结果见下节。
+
+### 2026-11-15 Chamber 审批修复激活与真实业务回读
+
+用户明确回复“确认，并继续核验”，覆盖PR88合并、精确main完整验证、同轮连接器更新、空闲窗口内一次worker停启、独立回读及真实业务核验；未包含新增网络通道、迁移、重新登记、认证读取或账号权限扩展。本轮收尾分支从已再次核实的GitHub main `1d46e4562ab2c23a20f0f177cfb251394fd5cf5d` 在原独立目录建立，原共享目录内容继续保留。
+
+**精确交付证明：**PR最终head `12ab2f46b7493f00c783c3e0dde0a83500c69fd1` 的快速检查 `43698191228` 全部完成（4成功、4按范围跳过）后合入M=`1d46e4562ab2c23a20f0f177cfb251394fd5cf5d`。[main CI43700756591/1](https://github.com/zdaiwmm/lead/actions/runs/43700756591)的scope/checks/frontend/namespace/backend/verified及工具包成功，Application verification明确通过；后端2894 passed、1 skipped、102 subtests，3050.41秒，独立启动回归1项通过。没有重跑该轮全量或重建发布包。
+
+原Home artifact `14156561083`，ZIP为368136332字节、SHA256 `e8eb3a5ea0e15383bb775b4a26fa0312f5c0734a89663a11cd0d9fd0ba30883f`。维护电脑用正式archive-only入口核验同一SHA/run/attempt及原ZIP，再从该镜像读取原连接器tgz；内镜像及tgz的REVISION均为M，提取后再次核验最新精确CI与artifact未变。仅传送原tgz（3456825字节、SHA256 `9b3224ab63a0871ebee2ca4492d8757cdf9bb52ef5b709dd662c7fa0b368b58a`）；服务器核对该固定子件的大小、摘要、全部文件与模式，未在服务器重验整份新ZIP或挂载/切换新App。相对已安装3fb包，仅REVISION与dist/runner.js不同，依赖、CLI、broker、egress及单元不变。
+
+**一次停启及实际等待：**原两个项目scope和独立studio scope全部空闲，outbox/controls与未ACK为0；四张请求/命令表以短事务SHARE NOWAIT封住接单。原scope、Node/grant/策略身份摘要、原服务PID/Invocation及固定worker单元均已冻结。准备阶段先遇到维护检查误把socket当普通进程读取MainPID，独立回读证明尚未停启、旧版本和暂存原件完整；8项回归及窄审后仅从原preparing journal续行。北京时间19:05:40执行唯一一次stop；旧worker在关闭收尾以退出码1结束，systemd标failed而非inactive，保护入口因此暂停。原PID已为0、cgroup空、原Invocation/重启计数不变；固定停止窗口日志确认原worker关闭错误及exit1，未见超时/强杀，DB与scope精确等于停止前快照。11项回归和独立窄审后从原stop_requested继续，未再stop、reset-failed或重建基线；19:11:11执行唯一一次start，19:11:12完成安装记录。停启间约5分31秒，不能描述为零等待；期间App/API及其他原服务未停启。旧连接器目录、原包与同一journal均保留。
+
+新SSH独立回读全树与同轮原tgz一致，真实能力心跳报告连接器M、ready=true、auth_type=chatgpt且未过期；worker只有一次新Invocation、自动重启0，其他服务PID/Invocation未变，三个scope原JSON及原Node/grant/策略身份精确保留。**实际连接器为M，实际App、Telegram/Reddit仍为 `8276c7cd4c300e1e7fc2a7bfc5cb7be7edc65d88`**；这不是一次App发布，也没有重复旧生产迁移或受保护应用请求。
+
+**真实业务核验：**独立回读通过后，19:12:35只经原ensure_decision提交一次新的resource_recovered事实，resource=`growth:mcp-evidence-read`、condition_revision=`connector:M`；完整原文与引用留服务器，记录中保存独立证明。未重发旧owner_direction/capability_changed、复活旧实验、手工创建研究/社媒任务或补造验收内容。按精确reason/source_ref/condition_revision唯一解析到实际消费该事实的决策，确认返回引用与实际一致。原生请求19:12:37开始、19:13:05自然完成，394条事件，实际调用1次lead_public_read；原“需要审批但策略never”错误未再出现。19:13:08决策完成为waiting_for_change、resource_recovered/platform，四字段继续条件完整，accepted/rejected均0、pending_work=false；新增原文、finding、accepted后续和社媒动作均0，不能宣称获客或持续产出恢复。
+
+**已定位的下一处阻断：**本次工具结果含固定request_tool_unavailable；同一时间窗API真实堆栈已进入scope_tools→local_executor_tools.call→fetch_product→pinned_get→resolve_public→public_addresses中的socket.getaddrinfo，原异常为socket.gaierror(-3)。据此可确认请求已穿过审批、桥接、broker及原API权限检查，当前失败发生在DNS，不能笼统声称所有原文来源失败。只读对照在API实际网络空间、实际UID和相同resolv.conf下进行：原站域名及example.com/cloudflare.com均返回-3；同UID在宿主网络解析example.com成功。API与worker实际均PrivateNetwork=yes、JoinsNamespaceOf=lead-home-net.service；共享空间只有回环接口、无默认路由，resolv.conf为127.0.0.53但空间内无UDP53监听，现有上游DNS在该空间亦无有效回复。仅更换域名、重复模型或改一个nameserver不能补上缺失的网络通道。
+
+原生读取边界还把这个DNS异常折成通用工具错误；已有普通research调用方的OSError处理约定可供后续修复参考，但不得吞掉权限/私网/租约拒绝、借用账号代理或重启旧47/3恢复路径。公开读取通道应保留API/worker现有隔离，在隔离外提供受控的公开读取能力，继续核对公开地址、重定向与原请求前后权限，并把有限传输错误交给原决策判断。该网络/应用/服务变化超出本次连接器激活范围，已单独提出确认；本轮没有修改网络、DNS、API服务配置或新增通道，也不重发刚完成的恢复事实。
+
+19:16:57再次独立核对：原请求仍completed、399条唯一事件；从原冻结上下文精确根引用核对probes47/attempts3/stopped及相关计数未变。Facebook自动化关闭、X未验证，Reddit/Telegram原状态及零target grant保留，五项原运行服务active/running、自动重启0。私有证据延续 `/private/tmp/lead-chamber-operations-20261115`：原包/提取清单、activation与分阶段续行记录、connector-independent-readback、resource-observation-2、resource-failure-diagnostic-2、public-dns-inspection、dns-namespace-cause、api-network-shape及postactivation-original-boundary-readback。公开文档不保存来源正文、业务标识或认证资料；本次文档收尾不重建或再发布App。
