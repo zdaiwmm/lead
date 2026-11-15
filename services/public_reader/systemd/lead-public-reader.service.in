@@ -11,6 +11,7 @@ MountAPIVFS=yes
 WorkingDirectory=/app
 BindReadOnlyPaths=@IMAGE@/services/api/lead_app:/app/lead_app
 BindReadOnlyPaths=@PYTHON@:/python
+BindReadOnlyPaths=@SITE@:/site
 BindReadOnlyPaths=/usr/lib:/usr/lib
 BindReadOnlyPaths=-/lib:/lib -/lib64:/lib64
 BindReadOnlyPaths=/etc/resolv.conf:/etc/resolv.conf

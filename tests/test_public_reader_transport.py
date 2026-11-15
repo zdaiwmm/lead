@@ -1,11 +1,15 @@
 """Public reader protocol security boundaries; no model, database or public network."""
 
 import asyncio
+import builtins
 import importlib
 import json
 import os
+import shlex
+import shutil
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -517,3 +521,108 @@ async def test_read_child_candidate_filter_still_rejects_unknown_schema(pr, monk
     monkeypatch.setattr(pr, "__file__", str(script))
     result = await pr._run_child({"v": 1, "action": "read", "url": "https://example.com/product", "discover_links": False, "external_links": True})
     assert result == {"v": 1, "ok": False, "error": {"code": "source_policy_denied", "category": "policy"}}
+
+
+def template_bindings():
+    template = Path(__file__).resolve().parents[1] / "services/public_reader/systemd/lead-public-reader.service.in"
+    return [
+        entry.split(":", 1)
+        for line in template.read_text().splitlines() if line.startswith("BindReadOnlyPaths=")
+        for entry in shlex.split(line.partition("=")[2]) if ":" in entry
+    ]
+
+
+def test_service_template_maps_explicit_separate_python_site():
+    bindings = template_bindings()
+    assert [entry for entry in bindings if entry[0] == "@SITE@"] == [
+        ["@SITE@", "/site"],
+    ]
+
+
+def test_isolated_python_reads_fetch_dependencies_from_separate_site(pr, tmp_path):
+    prefix = tmp_path / "python"
+    independent_site = tmp_path / "site"
+    env = {"PATH": "/python/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "LD_LIBRARY_PATH": str(prefix / "lib")}
+    subprocess.run([sys.executable, "-I", "-B", "-m", "venv", "--copies", "--without-pip", str(prefix)], env=pr._child_environment(), check=True, timeout=15, stderr=subprocess.DEVNULL)
+    python = prefix / "bin/python"
+    assert python.is_file() and not python.is_symlink()
+    subprocess.run([str(python), "-I", "-B", "-c", "import importlib.util; assert importlib.util.find_spec('httpx') is None; assert importlib.util.find_spec('bs4') is None"], env=env, check=True, timeout=5, stderr=subprocess.DEVNULL)
+    independent_site.mkdir()
+    for name in ("httpx", "httpcore", "anyio", "h11", "certifi", "idna", "sniffio", "typing_extensions", "bs4", "soupsieve"):
+        spec = importlib.util.find_spec(name)
+        source = Path(spec.origin)
+        if spec.submodule_search_locations:
+            shutil.copytree(source.parent, independent_site / name, ignore=shutil.ignore_patterns("__pycache__"))
+        else:
+            shutil.copy2(source, independent_site / source.name)
+    site_binding = [target for source, target in template_bindings() if source == "@SITE@"]
+    assert site_binding == ["/site"]
+    script = tmp_path / "public_reader.py"
+    script.write_bytes(Path(pr.__file__).read_bytes())
+    (tmp_path / "fetch.py").write_text(
+        "import httpx\nfrom bs4 import BeautifulSoup\n"
+        "async def _fetch_direct(url, *, discover_links, external_links):\n"
+        "    transport=httpx.MockTransport(lambda request:httpx.Response(200,text='<title>Independent site</title><p>Observed page</p>'))\n"
+        "    async with httpx.AsyncClient(transport=transport,trust_env=False) as client:\n"
+        "        response=await client.get(url)\n"
+        "    soup=BeautifulSoup(response.text,'html.parser')\n"
+        "    return {'url':url,'title':soup.title.get_text(),'text':soup.get_text(' ',strip=True),'requires_javascript':False}\n"
+    )
+    # A path-constant patch models /site on macOS without changing the production
+    # CLI. The Linux drill separately verifies the real root-owned read-only bind.
+    bootstrap = (
+        "import importlib.util,sys;"
+        "spec=importlib.util.spec_from_file_location('reader',sys.argv[1]);"
+        "reader=importlib.util.module_from_spec(spec);spec.loader.exec_module(reader);"
+        "reader.PUBLIC_READER_SITE=sys.argv[2];"
+        "reader._check_readiness();raise SystemExit(reader._read_main())"
+    )
+    result = subprocess.run([str(python), "-I", "-B", "-c", bootstrap, str(script), str(independent_site)], input=encode({"v": 1, "action": "read", "url": "https://example.com/product", "discover_links": False, "external_links": False}), env=env, capture_output=True, timeout=5)
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {
+        "v": 1, "ok": True,
+        "observed": {"url": "https://example.com/product", "title": "Independent site", "text": "Independent site Observed page", "requires_javascript": False},
+    }
+
+
+@pytest.mark.parametrize("failure", ["missing_dependency", "unreadable_ca"])
+async def test_serve_rejects_missing_dependency_or_ca_before_health(pr, monkeypatch, tmp_path, failure):
+    script = tmp_path / "public_reader.py"
+    script.write_text("")
+    (tmp_path / "fetch.py").write_text(
+        "import missing_public_reader_dependency\n" if failure == "missing_dependency"
+        else "import httpx\nfrom bs4 import BeautifulSoup\n"
+    )
+    monkeypatch.setattr(pr, "__file__", str(script))
+    if failure == "unreadable_ca":
+        import certifi
+        monkeypatch.setattr(certifi, "where", lambda: str(tmp_path / "missing-public-ca.pem"))
+    activated = False
+
+    def activation():
+        nonlocal activated
+        activated = True
+        raise RuntimeError("listener must not become available")
+
+    monkeypatch.setattr(pr, "_activation_socket", activation)
+    with pytest.raises(pr.PublicReaderUnavailable) as exc:
+        await pr._serve(os.geteuid(), "a" * 40)
+    assert exc.value.code == "reader_unavailable"
+    assert not activated
+
+
+def test_readiness_loads_pure_fetch_without_business_config_or_network(pr, monkeypatch):
+    original_import = builtins.__import__
+
+    def guarded_import(name, global_scope=None, local_scope=None, fromlist=(), level=0):
+        if name == "lead_app.config" or (name == "lead_app" and "config" in fromlist):
+            raise AssertionError("business configuration must remain unreachable")
+        return original_import(name, global_scope, local_scope, fromlist, level)
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("readiness must not use network")
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(socket, "getaddrinfo", no_network)
+    monkeypatch.setattr(socket.socket, "connect", no_network)
+    assert pr._check_readiness() is None

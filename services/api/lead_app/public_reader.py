@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 PUBLIC_READER_SOCKET = "/run/lead-public-reader/reader.sock"
+PUBLIC_READER_SITE = "/site"
 PROTOCOL = 1
 MAX_REQUEST = 16 * 1024
 MAX_RESPONSE = 4 * 1024 * 1024
@@ -430,6 +431,7 @@ def _activation_socket():
 
 
 async def _serve(uid, revision):
+    _check_readiness()
     listener = _activation_socket()
     handler = _ReaderServer(uid, revision)
     loop = asyncio.get_running_loop()
@@ -437,16 +439,35 @@ async def _serve(uid, revision):
         await server.serve_forever()
 
 
+def _load_fetch():
+    # The root-owned, read-only /site bind supplies the reader's locked packages.
+    # API clients do not call this loader; no environment override is read.
+    if Path(PUBLIC_READER_SITE).is_dir() and PUBLIC_READER_SITE not in sys.path:
+        sys.path.insert(0, PUBLIC_READER_SITE)
+    # Load only this pure module, never business/model configuration.
+    spec = importlib.util.spec_from_file_location("_lead_public_fetch", Path(__file__).with_name("fetch.py"))
+    fetch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fetch)
+    return fetch
+
+
+def _check_readiness():
+    try:
+        fetch = _load_fetch()
+        # Building the default verified transport reads CA files but performs no
+        # network requests. Dependency/CA failure must precede any healthy reply.
+        with fetch.httpx.Client(trust_env=False):
+            pass
+    except Exception:
+        raise PublicReaderUnavailable() from None
+
+
 def _read_main():
     try:
         request = _validate_request(_decode(sys.stdin.buffer.readline(MAX_REQUEST + 1), MAX_REQUEST))
         if request["action"] != "read":
             raise PublicReaderPolicyError()
-        # Load only this pure module. Importing lead_app/config would expose
-        # business state and model credentials to a public-network process.
-        spec = importlib.util.spec_from_file_location("_lead_public_fetch", Path(__file__).with_name("fetch.py"))
-        fetch = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(fetch)
+        fetch = _load_fetch()
         observed = asyncio.run(fetch._fetch_direct(
             request["url"], discover_links=request["discover_links"], external_links=request["external_links"],
         ))
