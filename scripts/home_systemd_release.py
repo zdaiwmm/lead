@@ -13,6 +13,7 @@ import pwd
 import re
 import shlex
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -910,7 +911,12 @@ PUBLIC_READER_RUNTIME = Path('/run/lead-public-reader')
 PUBLIC_READER_ROOT = Path('/var/lib/lead-public-reader/root')
 PUBLIC_READER_SYSTEMD = Path('/etc/systemd/system')
 PUBLIC_READER_PLAN = Path('/etc/lead-home-release/public-reader-provision.json')
-PUBLIC_READER_PYTHON = EXECUTOR_PYTHON_SOURCE.parents[1]
+PUBLIC_READER_PYTHON = Path('/var/lib/lead-public-reader-runtime')
+PUBLIC_READER_RUNTIME_PLAN = Path('/etc/lead-home-release/public-reader-runtime-provision.json')
+PUBLIC_READER_OS_PYTHONS = (('3.14', Path('/usr/bin/python3.14')), ('3.12', Path('/usr/bin/python3.12')))
+PUBLIC_READER_PUBLIC_USR = Path('/usr')
+PUBLIC_READER_RETIRED = Path('/var/lib/lead-public-reader-retired')
+PUBLIC_READER_MOUNTINFO = Path('/proc/self/mountinfo')
 PUBLIC_READER_SITE = EXECUTOR_PYTHON_SOURCE.parents[2] / 'site'
 PUBLIC_READER_INACCESSIBLE = Path('/run/systemd/inaccessible/dir')
 PUBLIC_READER_DEPENDENCIES = frozenset(('httpx', 'httpcore', 'anyio', 'certifi', 'idna',
@@ -1068,13 +1074,190 @@ def public_reader_health_result(raw, sha):
     return result
 
 
+def public_reader_nx_stack(raw):
+    require(len(raw) >= 64 and raw[:5] == b'\x7fELF\x02' and raw[5] in (1, 2),
+            'public reader requires a 64-bit ELF interpreter')
+    order = '<' if raw[5] == 1 else '>'
+    offset = struct.unpack_from(order + 'Q', raw, 32)[0]
+    size, count = struct.unpack_from(order + 'HH', raw, 54)
+    require(size >= 56 and 0 < count <= 256 and offset + size * count <= len(raw),
+            'public reader ELF program headers invalid')
+    stacks = [struct.unpack_from(order + 'II', raw, offset + size * index)[1]
+              for index in range(count)
+              if struct.unpack_from(order + 'I', raw, offset + size * index)[0] == 0x6474e551]
+    require(stacks == [6], 'public reader requires an explicit non-executable GNU stack')
+
+
+def public_reader_source_path(path):
+    resolved = path.resolve(strict=True)
+    require(resolved.is_relative_to(PUBLIC_READER_PUBLIC_USR), 'reader runtime source outside public OS files')
+    executor_directory(resolved if resolved.is_dir() else resolved.parent)
+    info = resolved.lstat()
+    require(info.st_uid == 0 and not info.st_mode & 0o7022
+            and ((stat.S_ISDIR(info.st_mode) and info.st_mode & 0o005 == 0o005)
+                 or (stat.S_ISREG(info.st_mode) and info.st_mode & 0o004)),
+            'untrusted reader runtime source')
+    return resolved
+
+
+def public_reader_python_probe(executable, prefix, version):
+    program = ('import json,sys,os,ssl,asyncio,threading; '
+               'print(json.dumps([list(sys.version_info[:2]),sys.prefix,sys.exec_prefix,os.__file__]))')
+    result = subprocess.run([str(executable), '-I', '-S', '-B', '-c', program], env={},
+                            stdin=subprocess.DEVNULL, capture_output=True, check=True, timeout=20)
+    value = json.loads(result.stdout)
+    require(value[:3] == [[int(part) for part in version.split('.')], str(prefix), str(prefix)]
+            and value[3] == str(prefix / ('lib/python' + version) / 'os.py'),
+            'reader runtime version or standard library prefix differs')
+
+
+def public_reader_runtime_source():
+    candidates = [(version, path) for version, path in PUBLIC_READER_OS_PYTHONS if path.exists()]
+    require(candidates, 'supported OS Python unavailable')
+    version, binary = candidates[0]
+    binary = public_reader_source_path(binary)
+    public_reader_nx_stack(binary.read_bytes())
+    stdlib = public_reader_source_path(PUBLIC_READER_PUBLIC_USR / ('lib/python' + version))
+    entries = {'bin': {'kind': 'directory', 'mode': 0o755},
+               'lib': {'kind': 'directory', 'mode': 0o755}}
+    total = 0
+
+    def visit(source, relative, ancestors=()):
+        nonlocal total
+        resolved = public_reader_source_path(source)
+        require(resolved not in ancestors and len(entries) < 12000, 'reader runtime source cycle or size limit')
+        info = resolved.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            entries[relative] = {'kind': 'directory', 'mode': 0o755, 'source': str(resolved)}
+            for child in sorted(resolved.iterdir()):
+                if child.name in {'site-packages', 'dist-packages', '__pycache__', 'sitecustomize.py', 'usercustomize.py'} or child.suffix in {'.pyc', '.pyo'}:
+                    continue
+                visit(child, relative + '/' + child.name, (*ancestors, resolved))
+        else:
+            total += info.st_size
+            require(info.st_size <= 128 * 1024**2 and total <= 1024**3, 'reader runtime source too large')
+            entries[relative] = {'kind': 'file', 'source': str(resolved), 'size': info.st_size,
+                                 'mode': stat.S_IMODE(info.st_mode),
+                                 'sha256': executor_digest(resolved.read_bytes())}
+    visit(binary, 'bin/python3')
+    visit(stdlib, 'lib/python' + version)
+    require('lib/python' + version + '/os.py' in entries, 'OS Python standard library landmark missing')
+    return {'version': version, 'binary': str(binary), 'stdlib': str(stdlib), 'entries': entries}
+
+
+def public_reader_runtime_plan(sha):
+    require(os.geteuid() == 0 and SHA.fullmatch(sha), 'trusted node and exact SHA required')
+    executor_directory(PUBLIC_READER_PYTHON.parent)
+    require(not os.path.lexists(PUBLIC_READER_PYTHON), 'reader runtime already exists; verify original installation')
+    return {'version': 1, 'sha': sha, 'expected_app': current(), 'source': public_reader_runtime_source()}
+
+
+def public_reader_runtime_tree(prefix, manifest):
+    executor_directory(prefix)
+    entries = manifest['source']['entries']
+    require({str(path.relative_to(prefix)) for path in prefix.rglob('*')} == entries.keys() | {'runtime-manifest.json'},
+            'reader runtime tree differs from manifest')
+    for relative, entry in entries.items():
+        require(relative and not Path(relative).is_absolute() and '..' not in Path(relative).parts,
+                'reader runtime manifest path invalid')
+        path = prefix / relative
+        info = path.lstat()
+        require(info.st_uid == 0 and info.st_gid == 0 and stat.S_IMODE(info.st_mode) == entry['mode']
+                and not info.st_mode & 0o7022, 'reader runtime metadata differs')
+        if entry['kind'] == 'directory':
+            require(stat.S_ISDIR(info.st_mode), 'reader runtime directory redirected')
+        else:
+            require(entry['kind'] == 'file' and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                    and info.st_size == entry['size'] and executor_digest(path.read_bytes()) == entry['sha256'],
+                    'reader runtime file differs')
+    public_reader_nx_stack((prefix / 'bin/python3').read_bytes())
+    public_reader_python_probe(prefix / 'bin/python3', prefix, manifest['source']['version'])
+
+
+def verify_public_reader_runtime(sha=None):
+    if sha is not None:
+        require(SHA.fullmatch(sha), 'exact reader runtime revision required')
+    raw = executor_host_file(PUBLIC_READER_PYTHON / 'runtime-manifest.json', private=True)
+    manifest = json.loads(raw)
+    require(manifest.get('version') == 1 and SHA.fullmatch(manifest.get('sha', ''))
+            and manifest.get('source') == public_reader_runtime_source(), 'reader runtime source provenance differs')
+    require(sha is None or manifest['sha'] == sha, 'reader runtime installation revision differs')
+    journal = json.loads(executor_host_file(STORE / 'public-reader-runtime' / (manifest['sha'] + '.json'), private=True))
+    require(journal.get('sha') == manifest['sha'] and journal.get('plan_sha256') == manifest.get('plan_sha256')
+            and journal.get('manifest_sha256') == executor_digest(raw)
+            and journal.get('state') in ('install-requested', 'ready'), 'reader runtime original journal differs')
+    public_reader_runtime_tree(PUBLIC_READER_PYTHON, manifest)
+    return {'runtime_revision': manifest['sha'], 'version': manifest['source']['version'],
+            'manifest_sha256': executor_digest(raw),
+            'python_sha256': manifest['source']['entries']['bin/python3']['sha256']}
+
+
 def public_reader_python():
-    executor_directory(PUBLIC_READER_PYTHON)
-    executable = PUBLIC_READER_PYTHON / 'bin/python3.12'
-    executor_directory(executable.parent)
-    info = executable.lstat()
-    require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_mode & 0o111
-            and not info.st_mode & 0o022, 'public reader interpreter must be a trusted in-prefix executable')
+    return verify_public_reader_runtime()
+
+
+def provision_public_reader_runtime(sha, plan_path):
+    require(os.geteuid() == 0 and SHA.fullmatch(sha) and Path(plan_path) == PUBLIC_READER_RUNTIME_PLAN,
+            'trusted node, exact SHA and fixed runtime plan required')
+    raw = executor_config(PUBLIC_READER_RUNTIME_PLAN)
+    require(not PUBLIC_READER_RUNTIME_PLAN.lstat().st_mode & 0o077, 'reader runtime plan is not private')
+    plan = json.loads(raw)
+    folder = STORE / 'public-reader-runtime'
+    with (STORE / 'deploy.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        executor_directory(folder, create=True, private=True)
+        journal = folder / (sha + '.json')
+        pending = PUBLIC_READER_PYTHON.with_name(PUBLIC_READER_PYTHON.name + '.' + sha + '.pending')
+        if os.path.lexists(journal):
+            record = json.loads(executor_host_file(journal, private=True))
+            require(record.get('plan_sha256') == executor_digest(raw) and record.get('state') in ('install-requested', 'ready')
+                    and not os.path.lexists(pending) and current() == plan['expected_app'],
+                    'reader runtime outcome unknown; inspect original journal')
+            proof = verify_public_reader_runtime(sha)
+            require(proof['runtime_revision'] == sha and proof['manifest_sha256'] == record.get('manifest_sha256'),
+                    'reader runtime installed outcome differs')
+            if record['state'] != 'ready':
+                record['state'] = 'ready'
+                executor_atomic(journal, executor_json(record))
+            return proof
+        require(public_reader_runtime_plan(sha) == plan and not os.path.lexists(pending),
+                'reader runtime plan or pending target changed')
+        sync_public_main(STORE / 'lead.git', sha)
+        record = {'version': 1, 'sha': sha, 'plan_sha256': executor_digest(raw), 'state': 'copying'}
+        executor_atomic(journal, executor_json(record))
+        pending.mkdir(mode=0o755)
+        pending.chmod(0o755)
+        os.chown(pending, 0, 0)
+        executor_sync(pending.parent)
+        for relative, entry in plan['source']['entries'].items():
+            destination = pending / relative
+            if entry['kind'] == 'directory':
+                destination.mkdir(mode=entry['mode'])
+                destination.chmod(entry['mode'])
+                os.chown(destination, 0, 0)
+            else:
+                with destination.open('xb') as stream:
+                    os.fchmod(stream.fileno(), entry['mode'])
+                    os.fchown(stream.fileno(), 0, 0)
+                    stream.write(Path(entry['source']).read_bytes())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        manifest = {'version': 1, 'sha': sha, 'plan_sha256': executor_digest(raw), 'source': plan['source']}
+        executor_atomic(pending / 'runtime-manifest.json', executor_json(manifest))
+        public_reader_runtime_tree(pending, manifest)
+        require(public_reader_runtime_plan(sha) == plan and executor_config(PUBLIC_READER_RUNTIME_PLAN) == raw,
+                'reader runtime source or baseline changed during copy')
+        for path in sorted((p for p in pending.rglob('*') if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+            executor_sync(path)
+        executor_sync(pending)
+        record.update(state='install-requested', manifest_sha256=executor_digest(executor_json(manifest)))
+        executor_atomic(journal, executor_json(record))
+        os.rename(pending, PUBLIC_READER_PYTHON)
+        executor_sync(PUBLIC_READER_PYTHON.parent)
+        proof = verify_public_reader_runtime(sha)
+        record['state'] = 'ready'
+        executor_atomic(journal, executor_json(record))
+        return proof
 
 
 def public_reader_account_unused():
@@ -1125,8 +1308,8 @@ def public_reader_dependencies(sha):
 
 
 def public_reader_runtime(sha):
-    public_reader_python()
-    return {'python_sha256': executor_digest((PUBLIC_READER_PYTHON / 'bin/python3.12').read_bytes()),
+    runtime = public_reader_python()
+    return {'python': runtime,
             'dependencies': public_reader_dependencies(sha)}
 
 
@@ -1597,6 +1780,300 @@ def rollback_public_reader(sha):
             run(*check, old, old)
             run('systemctl', 'stop', fence)
     return {'sha': sha, 'state': 'rolled-back', 'application_sha': old}
+
+
+def public_reader_inode(path):
+    info = path.lstat()
+    require(info.st_uid == 0 and not info.st_mode & 0o7022
+            and (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)), 'unsafe reader lifecycle preimage')
+    return {'device': info.st_dev, 'inode': info.st_ino, 'mode': info.st_mode,
+            'uid': info.st_uid, 'gid': info.st_gid}
+
+
+def public_reader_group_empty():
+    group = property_of(PUBLIC_READER_SERVICE, 'ControlGroup')
+    require(group in ('', '/system.slice/' + PUBLIC_READER_SERVICE), 'reader control group differs')
+    path = Path('/sys/fs/cgroup/system.slice') / PUBLIC_READER_SERVICE
+    if path.exists():
+        require(path.resolve() == path and all(not item.read_text().strip()
+                for item in path.rglob('cgroup.procs')), 'reader control group still contains processes')
+
+
+def public_reader_original_consumers(record, *, pending):
+    require(current() == record['previous']['expected_app'], 'reader original application changed')
+    old_image = image(record['previous']['expected_app'])
+    require(not (old_image / PUBLIC_READER_SOURCE_FILES[0]).exists(),
+            'prepared rollback requires the original application without a reader client')
+    for role, before in record['previous']['consumers'].items():
+        if pending:
+            public_reader_assert_consumer(record, role, activated=False)
+        else:
+            now = public_reader_consumer(role)
+            require(all(now.get(key) == before.get(key) for key in
+                ('MainPID', 'InvocationID', 'route', 'BindPaths', 'BindReadOnlyPaths', 'unit_files',
+                 'uid', 'gid', 'PrivateNetwork', 'JoinsNamespaceOf', 'FragmentPath')),
+                'reader original consumer instance or bindings changed')
+        proc = process(role)
+        mounts = [line.split()[4] for line in (proc / 'mountinfo').read_text().splitlines()]
+        require(not any(path == str(PUBLIC_READER_RUNTIME) or path.startswith(str(PUBLIC_READER_RUNTIME) + '/')
+                        for path in mounts)
+                and not any(value.startswith(b'LEAD_PUBLIC_READER_SOCKET=')
+                            for value in (proc / 'environ').read_bytes().split(b'\0')),
+                'prepared reader was activated in an original consumer')
+        require(process(role) == proc and property_of(role, 'InvocationID') == before['InvocationID'],
+                'reader consumer changed during lifecycle check')
+
+
+def public_reader_lifecycle_pins(record):
+    proc = process(PUBLIC_READER_SERVICE)
+    require(property_of(PUBLIC_READER_SERVICE, 'RootDirectory') == str(PUBLIC_READER_ROOT)
+            and (proc / 'root').samefile(PUBLIC_READER_ROOT), 'old reader root provenance differs')
+    for path in public_reader_paths()[:2]:
+        require(executor_digest(executor_host_file(path)) == record['installed'][str(path)],
+                'old reader unit provenance differs')
+        require(property_of(path.name, 'FragmentPath') == str(path)
+                and not property_of(path.name, 'DropInPaths')
+                and property_of(path.name, 'NeedDaemonReload') == 'no',
+                'old reader loaded unit provenance differs')
+    public_reader_mount(proc, Path('/app/lead_app'), image(record['sha']) / 'services/api/lead_app')
+    python = [source for source, target in public_reader_bindings(property_of(PUBLIC_READER_SERVICE, 'BindReadOnlyPaths'))
+              if target == '/python']
+    require(len(python) == 1 and python[0] in {str(PUBLIC_READER_PYTHON), str(EXECUTOR_PYTHON_SOURCE.parents[1])},
+            'old reader interpreter binding differs')
+    public_reader_mount(proc, Path('/python'), Path(python[0]))
+    raw = executor_config(PUBLIC_READER_PLAN)
+    require(executor_digest(raw) == record['plan_sha256'] and json.loads(raw) == record['previous'],
+            'old reader plan differs')
+    require(stat.S_IMODE(PUBLIC_READER_PLAN.lstat().st_mode) == 0o600
+            and PUBLIC_READER_PLAN.lstat().st_nlink == 1
+            and property_of(PUBLIC_READER_SERVICE, 'ControlGroup') == '/system.slice/' + PUBLIC_READER_SERVICE,
+            'old reader private plan or control group differs')
+    return {'root_parent': public_reader_inode(PUBLIC_READER_ROOT.parent),
+            'root': public_reader_inode(PUBLIC_READER_ROOT),
+            'runtime': public_reader_inode(PUBLIC_READER_RUNTIME),
+            'plan': public_reader_inode(PUBLIC_READER_PLAN), 'plan_sha256': executor_digest(raw),
+            'service_pid': proc.name, 'invocation': property_of(PUBLIC_READER_SERVICE, 'InvocationID'),
+            'control_group': property_of(PUBLIC_READER_SERVICE, 'ControlGroup')}
+
+
+def public_reader_stopped_original(record):
+    pins = record['prepared_rollback']
+    require(property_of(PUBLIC_READER_SERVICE, 'MainPID') == '0'
+            and property_of(PUBLIC_READER_SERVICE, 'ActiveState') in ('inactive', 'failed')
+            and property_of(PUBLIC_READER_SOCKET, 'ActiveState') in ('inactive', 'failed')
+            and not os.path.lexists(PUBLIC_READER_RUNTIME / 'reader.sock'),
+            'old reader stop outcome unknown; inspect without replaying')
+    invocation = property_of(PUBLIC_READER_SERVICE, 'InvocationID')
+    require(invocation in ('', pins['invocation']), 'different reader invocation replaced stopped instance')
+    public_reader_group_empty()
+    for role in PUBLIC_READER_CONSUMERS:
+        proc = process(role)
+        require(not (proc / 'root' / PUBLIC_READER_RUNTIME.relative_to('/') / 'reader.sock').exists(),
+                'stopped reader socket remains visible in original consumer')
+
+
+def public_reader_restored_unit_manager(record):
+    # First provisioning only permits originally absent reader units. File
+    # unlink completion alone does not prove systemd discarded its cached unit.
+    # Unknown reload outcomes remain read-only; never repeat stop or reload.
+    for path in public_reader_paths()[:2]:
+        require(record['previous']['files'][str(path)] is None and executor_file_backup(path) is None,
+                'reader restored unit preimage differs')
+        require(property_of(path.name, 'LoadState') == 'not-found'
+                and not property_of(path.name, 'FragmentPath')
+                and not property_of(path.name, 'DropInPaths')
+                and property_of(path.name, 'NeedDaemonReload') == 'no',
+                'reader restored manager state unknown; inspect without replaying')
+
+
+def rollback_prepared_public_reader(sha):
+    require(os.geteuid() == 0 and SHA.fullmatch(sha), 'trusted node and exact SHA required')
+    with (STORE / 'deploy.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        record = public_reader_load(sha)
+        if record['state'] == 'ready':
+            public_reader_original_consumers(record, pending=True)
+            record['prepared_rollback'] = public_reader_lifecycle_pins(record)
+            public_reader_original_consumers(record, pending=True)
+            public_reader_save(record, 'prepared-restore-requested')
+            for path in public_reader_paths()[2:]:
+                executor_restore_file(path, record['previous']['files'][str(path)])
+            run('systemctl', 'daemon-reload')
+        require(record['state'] in ('prepared-restore-requested', 'prepared-socket-stop-requested',
+                'prepared-service-stop-requested', 'prepared-service-stop-observed', 'prepared-units-restore-requested', 'rolled-back')
+                and 'prepared_rollback' in record, 'prepared reader rollback needs its original pinned journal')
+        public_reader_original_consumers(record, pending=False)
+        pins = record['prepared_rollback']
+        require(public_reader_inode(PUBLIC_READER_ROOT.parent) == pins['root_parent']
+                and public_reader_inode(PUBLIC_READER_ROOT) == pins['root']
+                and public_reader_inode(PUBLIC_READER_RUNTIME) == pins['runtime']
+                and public_reader_inode(PUBLIC_READER_PLAN) == pins['plan']
+                and executor_digest(executor_config(PUBLIC_READER_PLAN)) == pins['plan_sha256'],
+                'prepared reader lifecycle paths changed')
+        if record['state'] == 'prepared-restore-requested':
+            require(public_reader_lifecycle_pins(record) == pins,
+                    'prepared reader instance changed before stop')
+            public_reader_save(record, 'prepared-socket-stop-requested')
+            run('systemctl', 'disable', '--now', PUBLIC_READER_SOCKET)
+        if record['state'] == 'prepared-socket-stop-requested':
+            require(property_of(PUBLIC_READER_SOCKET, 'ActiveState') in ('inactive', 'failed')
+                    and not os.path.lexists(PUBLIC_READER_RUNTIME / 'reader.sock'),
+                    'prepared reader socket stop unknown; inspect without replaying')
+            # Requires=socket can stop the service as part of the same socket
+            # job. Observe that completed result instead of sending a second stop.
+            if property_of(PUBLIC_READER_SERVICE, 'MainPID') == '0':
+                public_reader_stopped_original(record)
+                public_reader_save(record, 'prepared-service-stop-observed')
+            else:
+                require(property_of(PUBLIC_READER_SERVICE, 'MainPID') == pins['service_pid']
+                        and property_of(PUBLIC_READER_SERVICE, 'InvocationID') == pins['invocation'],
+                        'prepared reader instance changed before service stop')
+                public_reader_save(record, 'prepared-service-stop-requested')
+                run('systemctl', 'stop', PUBLIC_READER_SERVICE)
+        if record['state'] in ('prepared-service-stop-requested', 'prepared-service-stop-observed'):
+            public_reader_stopped_original(record)
+            public_reader_save(record, 'prepared-units-restore-requested')
+            for path in public_reader_paths()[:2]:
+                require(executor_digest(executor_host_file(path)) == record['installed'][str(path)],
+                        'old reader unit changed before restore')
+                executor_restore_file(path, record['previous']['files'][str(path)])
+            run('systemctl', 'daemon-reload')
+        public_reader_stopped_original(record)
+        require(all(executor_file_backup(path) == record['previous']['files'][str(path)]
+                    for path in public_reader_paths()), 'prepared reader restored file preimages differ')
+        public_reader_restored_unit_manager(record)
+        public_reader_original_consumers(record, pending=False)
+        if record['state'] != 'rolled-back':
+            public_reader_save(record, 'rolled-back')
+        return {'sha': sha, 'state': 'rolled-back', 'consumer_restarts': 0}
+
+
+def retire_public_reader(sha):
+    require(os.geteuid() == 0 and SHA.fullmatch(sha), 'trusted node and exact SHA required')
+    with (STORE / 'deploy.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        record = public_reader_load(sha)
+        require(record['state'] == 'rolled-back' and 'prepared_rollback' in record,
+                'retire only a pinned prepared rollback')
+        pins = record['prepared_rollback']
+        archive = PUBLIC_READER_RETIRED / sha
+        journal_folder = STORE / 'public-reader/retirement'
+        journal_path = journal_folder / (sha + '.json')
+        archived_root, archived_plan = archive / 'root-parent', archive / 'original-plan.json'
+        old_journal_hash = executor_digest(executor_host_file(public_reader_journal(sha), private=True))
+        if os.path.lexists(journal_path):
+            retirement = json.loads(executor_host_file(journal_path, private=True))
+            require(retirement.get('version') == 1 and retirement.get('sha') == sha
+                    and retirement.get('reader_journal_sha256') == old_journal_hash
+                    and retirement.get('pins') == pins, 'reader retirement identity differs')
+            if retirement.get('state') == 'retired':
+                require(public_reader_inode(archived_root) == pins['root_parent']
+                        and public_reader_inode(archived_root / PUBLIC_READER_ROOT.name) == pins['root']
+                        and executor_digest(executor_host_file(archived_plan, private=True)) == pins['plan_sha256'],
+                        'retired reader archive differs')
+                # Never inspect/mutate reused live paths after retirement completed.
+                return {'sha': sha, 'state': 'retired', 'archive_verified': True}
+        else:
+            public_reader_original_consumers(record, pending=False)
+            public_reader_stopped_original(record)
+            public_reader_restored_unit_manager(record)
+            require(public_reader_inode(PUBLIC_READER_ROOT.parent) == pins['root_parent']
+                    and public_reader_inode(PUBLIC_READER_ROOT) == pins['root']
+                    and public_reader_inode(PUBLIC_READER_PLAN) == pins['plan']
+                    and executor_digest(executor_config(PUBLIC_READER_PLAN)) == pins['plan_sha256']
+                    and not os.path.lexists(archive), 'reader retirement preimage changed')
+            if os.path.lexists(PUBLIC_READER_RUNTIME):
+                require(public_reader_inode(PUBLIC_READER_RUNTIME) == pins['runtime']
+                        and not any(PUBLIC_READER_RUNTIME.iterdir()), 'old reader runtime is not the pinned empty directory')
+            executor_directory(journal_folder, create=True, private=True)
+            executor_directory(PUBLIC_READER_RETIRED, create=True, private=True)
+            retirement = {'version': 1, 'sha': sha, 'reader_journal_sha256': old_journal_hash,
+                          'pins': pins, 'state': 'root-move-requested'}
+            executor_atomic(journal_path, executor_json(retirement))
+            archive.mkdir(mode=0o700)
+            executor_sync(archive.parent)
+        require(retirement['state'] in ('root-move-requested', 'plan-copy-requested', 'plan-unlink-requested', 'runtime-remove-requested'),
+                'reader retirement outcome unknown')
+        public_reader_original_consumers(record, pending=False)
+        public_reader_stopped_original(record)
+        public_reader_restored_unit_manager(record)
+        executor_directory(archive, create=True, private=True)
+        # An interrupted old retirement must reject every reused live path
+        # before touching any of them, even if a different pinned path remains.
+        if os.path.lexists(PUBLIC_READER_ROOT.parent):
+            require(not os.path.lexists(archived_root)
+                    and public_reader_inode(PUBLIC_READER_ROOT.parent) == pins['root_parent']
+                    and public_reader_inode(PUBLIC_READER_ROOT) == pins['root'],
+                    'reader root path reused during retirement')
+        else:
+            require(public_reader_inode(archived_root) == pins['root_parent']
+                    and public_reader_inode(archived_root / PUBLIC_READER_ROOT.name) == pins['root'],
+                    'reader archived root identity differs')
+        if os.path.lexists(PUBLIC_READER_PLAN):
+            require(public_reader_inode(PUBLIC_READER_PLAN) == pins['plan']
+                    and executor_digest(executor_config(PUBLIC_READER_PLAN)) == pins['plan_sha256'],
+                    'reader plan path reused during retirement')
+        else:
+            require(retirement['state'] in ('plan-unlink-requested', 'runtime-remove-requested')
+                    and executor_digest(executor_host_file(archived_plan, private=True)) == pins['plan_sha256'],
+                    'reader plan disappeared before archival')
+        if os.path.lexists(PUBLIC_READER_RUNTIME):
+            require(public_reader_inode(PUBLIC_READER_RUNTIME) == pins['runtime']
+                    and not any(PUBLIC_READER_RUNTIME.iterdir()), 'reader runtime path reused during retirement')
+        if retirement['state'] == 'root-move-requested':
+            if not os.path.lexists(archived_root):
+                require(public_reader_inode(PUBLIC_READER_ROOT.parent) == pins['root_parent']
+                        and public_reader_inode(PUBLIC_READER_ROOT) == pins['root'], 'reader root changed before archive')
+                mounts = [line.split()[4] for line in PUBLIC_READER_MOUNTINFO.read_text().splitlines()]
+                require(not any(path == str(PUBLIC_READER_ROOT.parent) or path.startswith(str(PUBLIC_READER_ROOT.parent) + '/')
+                                for path in mounts), 'reader root is still mounted')
+                require(PUBLIC_READER_ROOT.parent.stat().st_dev == archive.stat().st_dev,
+                        'reader root archive must share the original filesystem')
+                os.rename(PUBLIC_READER_ROOT.parent, archived_root)
+                executor_sync(PUBLIC_READER_ROOT.parent.parent)
+                executor_sync(archive)
+            require(not os.path.lexists(PUBLIC_READER_ROOT.parent)
+                    and public_reader_inode(archived_root) == pins['root_parent']
+                    and public_reader_inode(archived_root / PUBLIC_READER_ROOT.name) == pins['root'],
+                    'reader archived root identity differs')
+            retirement['state'] = 'plan-copy-requested'
+            executor_atomic(journal_path, executor_json(retirement))
+        if retirement['state'] == 'plan-copy-requested':
+            require(public_reader_inode(PUBLIC_READER_PLAN) == pins['plan'], 'reader plan inode changed before archive')
+            raw = executor_config(PUBLIC_READER_PLAN)
+            require(executor_digest(raw) == pins['plan_sha256'], 'reader plan bytes changed before archive')
+            if not os.path.lexists(archived_plan):
+                with archived_plan.open('xb') as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                executor_sync(archive)
+            require(executor_digest(executor_host_file(archived_plan, private=True)) == pins['plan_sha256'],
+                    'reader archived plan differs')
+            retirement['state'] = 'plan-unlink-requested'
+            executor_atomic(journal_path, executor_json(retirement))
+        if retirement['state'] == 'plan-unlink-requested':
+            require(executor_digest(executor_host_file(archived_plan, private=True)) == pins['plan_sha256'],
+                    'reader archived plan differs')
+            if os.path.lexists(PUBLIC_READER_PLAN):
+                require(public_reader_inode(PUBLIC_READER_PLAN) == pins['plan']
+                        and executor_digest(executor_config(PUBLIC_READER_PLAN)) == pins['plan_sha256'],
+                        'reader plan replaced before removal')
+                PUBLIC_READER_PLAN.unlink()
+                executor_sync(PUBLIC_READER_PLAN.parent)
+            retirement['state'] = 'runtime-remove-requested'
+            executor_atomic(journal_path, executor_json(retirement))
+        if os.path.lexists(PUBLIC_READER_RUNTIME):
+            require(public_reader_inode(PUBLIC_READER_RUNTIME) == pins['runtime']
+                    and not any(PUBLIC_READER_RUNTIME.iterdir()), 'reader runtime replaced or not empty')
+            PUBLIC_READER_RUNTIME.rmdir()
+            executor_sync(PUBLIC_READER_RUNTIME.parent)
+        require(not os.path.lexists(PUBLIC_READER_ROOT.parent) and not os.path.lexists(PUBLIC_READER_PLAN),
+                'reader fixed paths reused during retirement')
+        retirement['state'] = 'retired'
+        executor_atomic(journal_path, executor_json(retirement))
+        return {'sha': sha, 'state': 'retired', 'archive_verified': True}
 
 
 def public_reader_connector_tree(root, data):
@@ -2685,7 +3162,7 @@ def deploy(sha):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("current", "deploy", "verify", "preflight", "finalize-cutover", "verify-cutover", "executors", "provision-executor", "register-executors", "public-reader-plan", "provision-public-reader", "verify-public-reader", "verify-public-reader-prepared", "rollback-public-reader"))
+    parser.add_argument("action", choices=("current", "deploy", "verify", "preflight", "finalize-cutover", "verify-cutover", "executors", "provision-executor", "register-executors", "public-reader-plan", "provision-public-reader", "verify-public-reader", "verify-public-reader-prepared", "rollback-public-reader", "public-reader-runtime-plan", "provision-public-reader-runtime", "verify-public-reader-runtime", "rollback-prepared-public-reader", "retire-public-reader"))
     parser.add_argument("sha", nargs="?")
     parser.add_argument("plan", nargs="?")
     args = parser.parse_args()
@@ -2693,7 +3170,7 @@ def main():
         args.action != "current" and not SHA.fullmatch(args.sha or "")
     ):
         parser.error("current takes no arguments; deploy, verify and executors require a full SHA")
-    if (args.action in ('provision-executor', 'provision-public-reader')) != (args.plan is not None):
+    if (args.action in ('provision-executor', 'provision-public-reader', 'provision-public-reader-runtime')) != (args.plan is not None):
         parser.error('only provision operations require a private plan path')
     try:
         if args.action == "current":
@@ -2726,6 +3203,16 @@ def main():
             print(json.dumps(verify_public_reader_prepared(args.sha), sort_keys=True))
         elif args.action == 'rollback-public-reader':
             print(json.dumps(rollback_public_reader(args.sha), sort_keys=True))
+        elif args.action == 'public-reader-runtime-plan':
+            print(json.dumps(public_reader_runtime_plan(args.sha), sort_keys=True))
+        elif args.action == 'provision-public-reader-runtime':
+            print(json.dumps(provision_public_reader_runtime(args.sha, args.plan), sort_keys=True))
+        elif args.action == 'verify-public-reader-runtime':
+            print(json.dumps(verify_public_reader_runtime(args.sha), sort_keys=True))
+        elif args.action == 'rollback-prepared-public-reader':
+            print(json.dumps(rollback_prepared_public_reader(args.sha), sort_keys=True))
+        elif args.action == 'retire-public-reader':
+            print(json.dumps(retire_public_reader(args.sha), sort_keys=True))
         else:
             deploy(args.sha)
             kind=cutover_kind(args.sha)

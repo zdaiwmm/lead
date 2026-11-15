@@ -16,7 +16,9 @@ import signal
 import socket
 import stat
 import struct
+import subprocess
 import sys
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -29,6 +31,8 @@ HANDSHAKE_TIMEOUT = 3
 CHILD_TIMEOUT = 30
 CLIENT_TIMEOUT = 35
 MAX_CHILDREN = 4
+SELF_TEST_TIMEOUT = 5
+_UNREAPED_CHILDREN = {}
 TRANSPORT_CODES = frozenset({
     "source_dns_unavailable", "source_transport_unavailable", "source_timeout",
     "reader_busy", "reader_unavailable", "reader_invalid_response",
@@ -281,68 +285,137 @@ def _child_environment():
     return {"PATH": "/python/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "LD_LIBRARY_PATH": str(prefix / "lib")}
 
 
+async def _wait_owned(process, timeout):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while process.poll() is None:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError()
+        await asyncio.sleep(0.01)
+
+
 async def _stop_child(process):
-    # Each child has its own session. Never signal a shared worker/process group.
+    # Each Popen starts its own session, and its PID is owned before any await.
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
     try:
-        await asyncio.wait_for(process.wait(), 0.5)
+        await _wait_owned(process, 0.5)
     except TimeoutError:
         pass
-    # The session leader can exit while a descendant ignores SIGTERM and has
-    # already closed its inherited pipes. Reap that entire owned group anyway.
+    # A leader may exit while descendants ignore TERM and close inherited pipes.
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    await _wait_owned(process, 1)
+
+
+class _ChildResponseTooLarge(ValueError):
+    pass
+
+
+async def _communicate_owned(process, payload, timeout):
+    """Bounded nonblocking pipes; no subprocess watcher or executor thread."""
+    os.set_blocking(process.stdin.fileno(), False)
+    os.set_blocking(process.stdout.fileno(), False)
+    pending = memoryview(payload)
+    received = bytearray()
+    eof = False
+    async with asyncio.timeout(timeout):
+        while True:
+            if not process.stdin.closed:
+                if pending:
+                    try:
+                        count = os.write(process.stdin.fileno(), pending)
+                        pending = pending[count:]
+                    except BlockingIOError:
+                        pass
+                if not pending:
+                    process.stdin.close()
+            if not eof:
+                while True:
+                    try:
+                        chunk = os.read(process.stdout.fileno(), min(65536, MAX_RESPONSE + 1 - len(received)))
+                    except BlockingIOError:
+                        break
+                    if not chunk:
+                        eof = True
+                        break
+                    received.extend(chunk)
+                    if len(received) > MAX_RESPONSE:
+                        raise _ChildResponseTooLarge()
+            returncode = process.poll()
+            if eof and returncode is not None:
+                return returncode, bytes(received)
+            await asyncio.sleep(0.01)
+
+
+async def _run_process(mode, payload, timeout):
+    if mode not in ("--read", "--self-test") or _UNREAPED_CHILDREN:
+        raise PublicReaderUnavailable()
+    # Popen gives us the PID directly. asyncio.create_subprocess_exec can fork,
+    # then fail while registering a threaded watcher before returning ownership.
+    deadline = asyncio.get_running_loop().time() + timeout
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-S", "-B", str(Path(__file__).resolve()), mode],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=_child_environment(), start_new_session=True, close_fds=True, bufsize=0,
+    )
     try:
-        await asyncio.wait_for(process.wait(), 1)
-    except TimeoutError:
-        pass
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError()
+        return await _communicate_owned(process, payload, remaining)
+    finally:
+        try:
+            # Even a normally exited leader can leave closed-stdio descendants.
+            await _stop_child(process)
+        except asyncio.CancelledError:
+            _UNREAPED_CHILDREN[process.pid] = process
+            raise
+        except Exception:
+            # Retain ownership and refuse new work/healthy replies if the
+            # kernel has not confirmed cleanup. Never lose an unknown PID.
+            _UNREAPED_CHILDREN[process.pid] = process
+            raise PublicReaderUnavailable() from None
+        finally:
+            process.stdin.close()
+            process.stdout.close()
 
 
 async def _run_child(request):
-    process = None
     try:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--read",
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, env=_child_environment(), start_new_session=True,
-        )
-        async with asyncio.timeout(CHILD_TIMEOUT):
-            process.stdin.write(_encode(request, MAX_REQUEST))
-            await process.stdin.drain()
-            process.stdin.close()
-            data = bytearray()
-            while True:
-                chunk = await process.stdout.read(min(65536, MAX_RESPONSE + 1 - len(data)))
-                if not chunk:
-                    break
-                data.extend(chunk)
-                if len(data) > MAX_RESPONSE:
-                    await _stop_child(process)
-                    return _error("reader_invalid_response")
-            await process.wait()
-            if process.returncode != 0:
-                return _error("reader_unavailable")
-            try:
-                return _response(_decode(bytes(data), MAX_RESPONSE))
-            except PublicReaderPolicyError:
-                return _error("reader_invalid_response")
+        returncode, data = await _run_process("--read", _encode(request, MAX_REQUEST), CHILD_TIMEOUT)
+        if returncode != 0:
+            return _error("reader_unavailable")
+        try:
+            return _response(_decode(data, MAX_RESPONSE))
+        except PublicReaderPolicyError:
+            return _error("reader_invalid_response")
     except TimeoutError:
-        if process is not None:
-            await _stop_child(process)
         return _error("source_timeout")
+    except _ChildResponseTooLarge:
+        return _error("reader_invalid_response")
     except asyncio.CancelledError:
-        if process is not None:
-            await _stop_child(process)
         raise
-    except (OSError, ValueError):
-        if process is not None:
-            await _stop_child(process)
+    except Exception:
         return _error("reader_unavailable")
+
+
+async def _check_subprocess_readiness():
+    try:
+        returncode, data = await _run_process("--self-test", b"", SELF_TEST_TIMEOUT)
+        value = _decode(data, MAX_RESPONSE)
+        if (returncode != 0 or not isinstance(value, dict)
+                or set(value) != {"v", "ok", "self_test"}
+                or type(value["v"]) is not int or value["v"] != PROTOCOL
+                or value["ok"] is not True or value["self_test"] is not True):
+            raise PublicReaderUnavailable()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise PublicReaderUnavailable() from None
 
 
 def _peer_uid(sock):
@@ -368,7 +441,8 @@ class _ReaderServer:
                 value = _error("source_policy_denied", "policy")
             else:
                 if request["action"] == "health":
-                    value = {"v": PROTOCOL, "ok": True, "protocol": PROTOCOL, "revision": self.revision}
+                    value = (_error("reader_unavailable") if _UNREAPED_CHILDREN else
+                             {"v": PROTOCOL, "ok": True, "protocol": PROTOCOL, "revision": self.revision})
                 elif self.active >= MAX_CHILDREN:
                     value = _error("reader_busy")
                 else:
@@ -432,6 +506,7 @@ def _activation_socket():
 
 async def _serve(uid, revision):
     _check_readiness()
+    await _check_subprocess_readiness()
     listener = _activation_socket()
     handler = _ReaderServer(uid, revision)
     loop = asyncio.get_running_loop()
@@ -453,21 +528,30 @@ def _load_fetch():
 
 def _check_readiness():
     try:
+        if sys.implementation.name != "cpython" or sys.version_info[:2] not in ((3, 12), (3, 14)):
+            raise PublicReaderUnavailable()
         fetch = _load_fetch()
         # Building the default verified transport reads CA files but performs no
         # network requests. Dependency/CA failure must precede any healthy reply.
         with fetch.httpx.Client(trust_env=False):
             pass
+        # An executable-stack runtime can start Python but fail on its first
+        # pthread under MemoryDenyWriteExecute. Detect that before any fork.
+        thread = threading.Thread(target=lambda: None, daemon=True)
+        thread.start()
+        thread.join(timeout=1)
+        if thread.is_alive():
+            raise PublicReaderUnavailable()
     except Exception:
         raise PublicReaderUnavailable() from None
 
 
 def _read_main():
     try:
+        fetch = _load_fetch()
         request = _validate_request(_decode(sys.stdin.buffer.readline(MAX_REQUEST + 1), MAX_REQUEST))
         if request["action"] != "read":
             raise PublicReaderPolicyError()
-        fetch = _load_fetch()
         observed = asyncio.run(fetch._fetch_direct(
             request["url"], discover_links=request["discover_links"], external_links=request["external_links"],
         ))
@@ -488,8 +572,23 @@ def _read_main():
         value = {"v": PROTOCOL, "ok": True, "observed": _observed(observed)}
         frame = _encode(value, MAX_RESPONSE)
     except Exception as exc:
-        frame = _encode(_source_error(exc), MAX_RESPONSE)
+        try:
+            value = _source_error(exc)
+        except ImportError:
+            value = _error("reader_unavailable")
+        frame = _encode(value, MAX_RESPONSE)
     sys.stdout.buffer.write(frame)
+    sys.stdout.buffer.flush()
+    return 0
+
+
+def _self_test_main():
+    try:
+        _check_readiness()
+        value = {"v": PROTOCOL, "ok": True, "self_test": True}
+    except Exception:
+        value = _error("reader_unavailable")
+    sys.stdout.buffer.write(_encode(value, MAX_RESPONSE))
     sys.stdout.buffer.flush()
     return 0
 
@@ -497,6 +596,8 @@ def _read_main():
 def main():
     if sys.argv[1:] == ["--read"]:
         return _read_main()
+    if sys.argv[1:] == ["--self-test"]:
+        return _self_test_main()
     parser = argparse.ArgumentParser(description="Controlled public-page reader")
     sub = parser.add_subparsers(dest="mode", required=True)
     serve = sub.add_parser("serve")

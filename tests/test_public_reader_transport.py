@@ -27,6 +27,17 @@ def pr():
     return importlib.import_module("lead_app.public_reader")
 
 
+
+def write_reader_script(path, pr):
+    # Tests map the fixed /site path to installed locked packages. Production has
+    # no environment/CLI override; the native drill verifies the real /site bind.
+    packages = str(Path(importlib.util.find_spec("httpx").origin).parent.parent)
+    source = Path(pr.__file__).read_text().replace(
+        'PUBLIC_READER_SITE = "/site"', "PUBLIC_READER_SITE = " + repr(packages),
+    )
+    path.write_text(source)
+
+
 def encode(value):
     return json.dumps(value, ensure_ascii=True).encode() + b"\n"
 
@@ -371,7 +382,7 @@ async def test_child_timeout_kills_descendants_that_ignore_term(pr, monkeypatch,
 
 async def test_real_read_child_only_loads_neighboring_pure_fetch_module(pr, monkeypatch, tmp_path):
     script = tmp_path / "public_reader.py"
-    script.write_bytes(Path(pr.__file__).read_bytes())
+    write_reader_script(script, pr)
     (tmp_path / "fetch.py").write_text(
         "import os\n"
         "async def _fetch_direct(url, *, discover_links, external_links):\n"
@@ -410,7 +421,7 @@ async def test_service_enforces_four_real_children(socket_path, pr, monkeypatch,
     if not hasattr(socket, "SO_PEERCRED"):
         monkeypatch.setattr(pr, "_peer_uid", lambda sock: os.geteuid())
     script = tmp_path / "public_reader.py"
-    script.write_bytes(Path(pr.__file__).read_bytes())
+    write_reader_script(script, pr)
     release = tmp_path / "release"
     (tmp_path / "fetch.py").write_text(
         "import asyncio,os\nfrom pathlib import Path\n"
@@ -481,7 +492,7 @@ def test_socket_trust_rejects_symlink_instead_of_socket(socket_path, pr):
 
 async def test_read_child_filters_unsafe_candidate_links_without_losing_page(pr, monkeypatch, tmp_path):
     script = tmp_path / "public_reader.py"
-    script.write_bytes(Path(pr.__file__).read_bytes())
+    write_reader_script(script, pr)
     # Exercise the existing candidate extraction: these hrefs are observations,
     # not requests, so private/odd-port hrefs can legitimately appear here.
     hrefs = [
@@ -514,7 +525,7 @@ async def test_read_child_filters_unsafe_candidate_links_without_losing_page(pr,
 ])
 async def test_read_child_candidate_filter_still_rejects_unknown_schema(pr, monkeypatch, tmp_path, change):
     script = tmp_path / "public_reader.py"
-    script.write_bytes(Path(pr.__file__).read_bytes())
+    write_reader_script(script, pr)
     (tmp_path / "fetch.py").write_text(
         "async def _fetch_direct(url, *, discover_links, external_links):\n"
         "    return " + repr({**OBSERVED, **change}) + "\n"
@@ -559,7 +570,7 @@ def test_isolated_python_reads_fetch_dependencies_from_separate_site(pr, tmp_pat
     site_binding = [target for source, target in template_bindings() if source == "@SITE@"]
     assert site_binding == ["/site"]
     script = tmp_path / "public_reader.py"
-    script.write_bytes(Path(pr.__file__).read_bytes())
+    write_reader_script(script, pr)
     (tmp_path / "fetch.py").write_text(
         "import httpx\nfrom bs4 import BeautifulSoup\n"
         "async def _fetch_direct(url, *, discover_links, external_links):\n"
@@ -627,3 +638,249 @@ def test_readiness_loads_pure_fetch_without_business_config_or_network(pr, monke
     monkeypatch.setattr(socket, "getaddrinfo", no_network)
     monkeypatch.setattr(socket.socket, "connect", no_network)
     assert pr._check_readiness() is None
+
+
+async def test_watcher_failure_after_spawn_cannot_orphan_reader_child(pr, monkeypatch, tmp_path):
+    script = tmp_path / "read.py"
+    script.write_text("import sys\nsys.stdin.buffer.readline()\nsys.stdout.buffer.write(" + repr(encode({"v": 1, "ok": True, "observed": OBSERVED})) + ")\n")
+    monkeypatch.setattr(pr, "__file__", str(script))
+    orphaned = []
+
+    async def broken_watcher(*args, **kwargs):
+        # CPython can create the PID before a ThreadedChildWatcher.start fails.
+        process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, start_new_session=True, env=kwargs["env"])
+        orphaned.append(process)
+        raise RuntimeError("synthetic watcher thread failure")
+
+    monkeypatch.setattr(pr.asyncio, "create_subprocess_exec", broken_watcher)
+    try:
+        result = await pr._run_child({"v": 1, "action": "read", "url": "https://example.com", "discover_links": False, "external_links": False})
+        assert result == {"v": 1, "ok": True, "observed": OBSERVED}
+    finally:
+        for process in orphaned:
+            os.killpg(process.pid, 9)
+            process.wait(timeout=2)
+            process.stdin.close()
+            process.stdout.close()
+
+
+async def test_owned_child_is_reaped_after_postspawn_runtime_failure(pr, monkeypatch, tmp_path):
+    script = tmp_path / "sleep.py"
+    script.write_text("import time\ntime.sleep(10)\n")
+    monkeypatch.setattr(pr, "__file__", str(script))
+    processes = []
+    real_popen = subprocess.Popen
+
+    def launch(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    async def broken_pipe_collection(*args, **kwargs):
+        raise RuntimeError("synthetic postspawn pipe failure")
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(pr, "_communicate_owned", broken_pipe_collection, raising=False)
+    result = await pr._run_child({"v": 1, "action": "read", "url": "https://example.com", "discover_links": False, "external_links": False})
+    assert result == {"v": 1, "ok": False, "error": {"code": "reader_unavailable", "category": "transport"}}
+    assert len(processes) == 1
+    with pytest.raises(ProcessLookupError):
+        os.kill(processes[0].pid, 0)
+
+
+@pytest.mark.parametrize("kind", [RuntimeError, ImportError, AttributeError])
+async def test_launch_failure_returns_finite_error(pr, monkeypatch, kind):
+    def rejected(*args, **kwargs):
+        raise kind("private launch detail")
+
+    monkeypatch.setattr(subprocess, "Popen", rejected)
+    result = await pr._run_child({"v": 1, "action": "read", "url": "https://example.com", "discover_links": False, "external_links": False})
+    assert result == {"v": 1, "ok": False, "error": {"code": "reader_unavailable", "category": "transport"}}
+
+
+async def test_parent_thread_failure_rejects_health_before_child_launch(pr, monkeypatch):
+    import threading
+
+    def no_thread(*args, **kwargs):
+        raise RuntimeError("synthetic executable stack restriction")
+
+    def no_activation():
+        raise AssertionError("unready runtime must not accept health")
+
+    monkeypatch.setattr(threading.Thread, "start", no_thread)
+    monkeypatch.setattr(pr, "_activation_socket", no_activation)
+    with pytest.raises(pr.PublicReaderUnavailable):
+        await pr._serve(os.geteuid(), "a" * 40)
+
+
+async def test_failed_same_environment_self_test_rejects_health(pr, monkeypatch, tmp_path):
+    script = tmp_path / "unready.py"
+    script.write_text("raise SystemExit(1)\n")
+    monkeypatch.setattr(pr, "__file__", str(script))
+    monkeypatch.setattr(pr, "_check_readiness", lambda: None)
+
+    def no_activation():
+        raise AssertionError("child runtime must be ready before health")
+
+    monkeypatch.setattr(pr, "_activation_socket", no_activation)
+    with pytest.raises(pr.PublicReaderUnavailable):
+        await pr._serve(os.geteuid(), "a" * 40)
+
+
+def test_service_uses_copied_generic_python_without_site_startup():
+    template = Path(__file__).resolve().parents[1] / "services/public_reader/systemd/lead-public-reader.service.in"
+    lines = template.read_text().splitlines()
+    command = next(line.partition("=")[2] for line in lines if line.startswith("ExecStart="))
+    assert shlex.split(command)[:5] == ["/python/bin/python3", "-I", "-S", "-B", "/app/lead_app/public_reader.py"]
+    assert "MemoryDenyWriteExecute=yes" in lines
+
+
+async def test_internal_self_test_uses_same_environment_without_site_startup(pr, monkeypatch, tmp_path):
+    script = tmp_path / "public_reader.py"
+    write_reader_script(script, pr)
+    (tmp_path / "fetch.py").write_text(
+        "import httpx\nfrom bs4 import BeautifulSoup\n"
+        "async def _fetch_direct(*args,**kwargs):\n    raise AssertionError('self-test must never read a URL')\n"
+    )
+    monkeypatch.setattr(pr, "__file__", str(script))
+    launched = []
+    real_popen = subprocess.Popen
+
+    def launch(args, **kwargs):
+        launched.append((args, kwargs["env"]))
+        return real_popen(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    assert await pr._check_subprocess_readiness() is None
+    assert launched[0][0] == [sys.executable, "-I", "-S", "-B", str(script), "--self-test"]
+    assert launched[0][1] == pr._child_environment()
+
+
+async def test_cancelled_read_reaps_owned_child(pr, monkeypatch, tmp_path):
+    script = tmp_path / "sleep.py"
+    script.write_text("import time\ntime.sleep(10)\n")
+    monkeypatch.setattr(pr, "__file__", str(script))
+    processes = []
+    real_popen = subprocess.Popen
+
+    def launch(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    task = asyncio.create_task(pr._run_child({"v": 1, "action": "read", "url": "https://example.com", "discover_links": False, "external_links": False}))
+    while not processes:
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(ProcessLookupError):
+        os.kill(processes[0].pid, 0)
+
+
+async def test_unknown_cleanup_keeps_pid_and_refuses_more_reads_or_health(socket_path, pr, monkeypatch, tmp_path):
+    if not hasattr(socket, "SO_PEERCRED"):
+        monkeypatch.setattr(pr, "_peer_uid", lambda sock: os.geteuid())
+    monkeypatch.setattr(pr, "_UNREAPED_CHILDREN", {})
+    script = tmp_path / "sleep.py"
+    script.write_text("import time\ntime.sleep(10)\n")
+    monkeypatch.setattr(pr, "__file__", str(script))
+    processes = []
+    real_popen = subprocess.Popen
+
+    def launch(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    async def unknown(*args, **kwargs):
+        raise RuntimeError("synthetic cleanup failure")
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(pr, "_communicate_owned", unknown)
+    monkeypatch.setattr(pr, "_stop_child", unknown)
+    request = {"v": 1, "action": "read", "url": "https://example.com", "discover_links": False, "external_links": False}
+    try:
+        assert (await pr._run_child(request))["error"]["code"] == "reader_unavailable"
+        assert processes[0].pid in pr._UNREAPED_CHILDREN
+        assert (await pr._run_child(request))["error"]["code"] == "reader_unavailable"
+        assert len(processes) == 1
+        result = await run_service(socket_path, pr, os.geteuid(), lambda _: raw_request(socket_path, encode({"v": 1, "action": "health"})))
+        assert json.loads(result) == {"v": 1, "ok": False, "error": {"code": "reader_unavailable", "category": "transport"}}
+    finally:
+        for process in processes:
+            os.killpg(process.pid, 9)
+            process.wait(timeout=2)
+
+
+async def test_child_thread_probe_runs_after_loading_reader_dependencies(pr, monkeypatch, tmp_path):
+    script = tmp_path / "public_reader.py"
+    write_reader_script(script, pr)
+    (tmp_path / "fetch.py").write_text(
+        "import httpx,threading\nfrom bs4 import BeautifulSoup\n"
+        "def restricted(*args,**kwargs):\n    raise RuntimeError('synthetic loaded runtime restriction')\n"
+        "threading.Thread.start=restricted\n"
+    )
+    monkeypatch.setattr(pr, "__file__", str(script))
+    with pytest.raises(pr.PublicReaderUnavailable):
+        await pr._check_subprocess_readiness()
+
+
+def test_dependency_import_failure_still_emits_finite_child_frame(pr, tmp_path):
+    script = tmp_path / "public_reader.py"
+    script.write_text(Path(pr.__file__).read_text().replace('PUBLIC_READER_SITE = "/site"', "PUBLIC_READER_SITE = " + repr(str(tmp_path / "missing-site"))))
+    (tmp_path / "fetch.py").write_text("import missing_reader_dependency\n")
+    result = subprocess.run([sys.executable, "-I", "-S", "-B", str(script), "--read"],
+        input=encode({"v": 1, "action": "health"}), env=pr._child_environment(), capture_output=True, timeout=5)
+    assert result.returncode == 0 and result.stderr == b""
+    assert json.loads(result.stdout) == {"v": 1, "ok": False, "error": {"code": "reader_unavailable", "category": "transport"}}
+
+
+async def test_completed_leader_cannot_leave_closed_stdio_descendant(pr, monkeypatch, tmp_path):
+    pidfile = tmp_path / "descendant.pid"
+    script = tmp_path / "leader.py"
+    descendant = (
+        "import os,signal,time\nfrom pathlib import Path\n"
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN)\nPath(" + repr(str(pidfile)) + ").write_text(str(os.getpid()))\ntime.sleep(10)"
+    )
+    script.write_text(
+        "import subprocess,sys,time\nfrom pathlib import Path\n"
+        "subprocess.Popen([sys.executable,'-c'," + repr(descendant) + "],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        "while not Path(" + repr(str(pidfile)) + ").exists():time.sleep(.01)\n"
+    )
+    monkeypatch.setattr(pr, "__file__", str(script))
+    try:
+        assert (await pr._run_child({"v": 1, "action": "read", "url": "https://example.com", "discover_links": False, "external_links": False}))["error"]["code"] == "reader_invalid_response"
+        pid = int(pidfile.read_text())
+        await asyncio.sleep(0.05)
+        procstat = Path(f"/proc/{pid}/stat")
+        try:
+            if procstat.read_text().split()[2] == "Z":
+                return
+        except FileNotFoundError:
+            pass
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), 9)
+            except ProcessLookupError:
+                pass
+
+
+def test_unreviewed_python_runtime_cannot_become_ready(pr, monkeypatch):
+    from collections import namedtuple
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    version = namedtuple("Version", "major minor micro releaselevel serial")
+    monkeypatch.setattr(sys, "version_info", version(3, 13, 0, "final", 0))
+    # Isolate version admission from dependency imports' own version branches.
+    monkeypatch.setattr(pr, "_load_fetch", lambda: SimpleNamespace(
+        httpx=SimpleNamespace(Client=lambda **kwargs: nullcontext()),
+    ))
+    with pytest.raises(pr.PublicReaderUnavailable):
+        pr._check_readiness()

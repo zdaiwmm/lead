@@ -18,7 +18,7 @@ BindReadOnlyPaths=/etc/resolv.conf:/etc/resolv.conf
 BindReadOnlyPaths=-/etc/hosts:/etc/hosts -/etc/nsswitch.conf:/etc/nsswitch.conf
 BindReadOnlyPaths=-/etc/ssl/certs:/etc/ssl/certs
 BindReadOnlyPaths=-/etc/ca-certificates/extracted:/etc/ca-certificates/extracted
-ExecStart=/python/bin/python3.12 -I -B /app/lead_app/public_reader.py serve --client-uid @UID@ --revision @SHA@
+ExecStart=/python/bin/python3 -I -S -B /app/lead_app/public_reader.py serve --client-uid @UID@ --revision @SHA@
 Environment=LANG=C.UTF-8
 Environment=LD_LIBRARY_PATH=/python/lib
 PrivateNetwork=no

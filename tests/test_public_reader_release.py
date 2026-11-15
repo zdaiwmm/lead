@@ -4,12 +4,154 @@ import importlib.util
 import io
 import json
 import stat
+import struct
 import subprocess
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+def elf_stack(flags=6, present=True):
+    raw = bytearray(120)
+    raw[:6] = b'\x7fELF\x02\x01'
+    struct.pack_into('<Q', raw, 32, 64)
+    struct.pack_into('<HH', raw, 54, 56, 1)
+    struct.pack_into('<II', raw, 64, 0x6474e551 if present else 1, flags)
+    return bytes(raw)
+
+
+@pytest.mark.parametrize('raw', [elf_stack(7), elf_stack(present=False), b'not an ELF', elf_stack()[:80]])
+def test_reader_runtime_refuses_executable_missing_or_truncated_stack(hook, raw):
+    with pytest.raises(hook.Refused):
+        hook.public_reader_nx_stack(raw)
+
+
+def test_reader_runtime_accepts_only_explicit_nx_stack(hook):
+    hook.public_reader_nx_stack(elf_stack())
+
+
+def test_reader_runtime_and_prepared_retirement_have_explicit_entrypoints(hook):
+    for name in ('public_reader_runtime_plan', 'provision_public_reader_runtime',
+                 'verify_public_reader_runtime', 'rollback_prepared_public_reader', 'retire_public_reader'):
+        assert callable(getattr(hook, name, None)), name
+
+
+@pytest.fixture
+def runtime_install(hook, tmp_path, monkeypatch):
+    h = hook
+    prefix = tmp_path / 'runtime'
+    source = tmp_path / 'public-os'
+    source.mkdir()
+    binary, module = source / 'python3.12', source / 'os.py'
+    binary.write_bytes(elf_stack())
+    binary.chmod(0o755)
+    module.write_text('public synthetic standard library')
+    entries = {'bin': {'kind': 'directory', 'mode': 0o755}, 'lib': {'kind': 'directory', 'mode': 0o755},
+        'bin/python3': {'kind': 'file', 'mode': 0o755, 'source': str(binary), 'size': binary.stat().st_size,
+                        'sha256': h.executor_digest(binary.read_bytes())},
+        'lib/python3.12': {'kind': 'directory', 'mode': 0o755, 'source': str(source)},
+        'lib/python3.12/os.py': {'kind': 'file', 'mode': 0o644, 'source': str(module), 'size': module.stat().st_size,
+                               'sha256': h.executor_digest(module.read_bytes())}}
+    inventory = {'version': '3.12', 'binary': str(binary), 'stdlib': str(source), 'entries': entries}
+    config = tmp_path / 'config'
+    config.mkdir(mode=0o700)
+    monkeypatch.setattr(h, 'PUBLIC_READER_PYTHON', prefix)
+    monkeypatch.setattr(h, 'PUBLIC_READER_RUNTIME_PLAN', config / 'public-reader-runtime-provision.json')
+    monkeypatch.setattr(h, 'EXECUTOR_REGISTRY', config / 'executors.json')
+    monkeypatch.setattr(h, 'current', lambda: 'a' * 40)
+    monkeypatch.setattr(h, 'sync_public_main', lambda *_args: None)
+    monkeypatch.setattr(h, 'public_reader_runtime_source', lambda: inventory)
+    monkeypatch.setattr(h.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(h.os, 'chown', lambda *_args: None)
+    monkeypatch.setattr(h.os, 'fchown', lambda *_args: None)
+    def directory(path, *, create=False, private=False):
+        if create:
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        assert path.is_dir() and not path.is_symlink()
+    monkeypatch.setattr(h, 'executor_directory', directory)
+    monkeypatch.setattr(h, 'executor_host_file', lambda path, **_kwargs: path.read_bytes())
+    monkeypatch.setattr(h, 'executor_config', lambda path: path.read_bytes())
+    real_lstat = Path.lstat
+    def trusted_stat(path):
+        value = real_lstat(path)
+        return SimpleNamespace(st_mode=value.st_mode, st_uid=0, st_gid=0, st_nlink=value.st_nlink,
+            st_size=value.st_size, st_dev=value.st_dev, st_ino=value.st_ino)
+    monkeypatch.setattr(Path, 'lstat', trusted_stat)
+    probes = []
+    monkeypatch.setattr(h, 'public_reader_python_probe', lambda *args: probes.append(args))
+    sha = 'b' * 40
+    plan = h.public_reader_runtime_plan(sha)
+    h.PUBLIC_READER_RUNTIME_PLAN.write_bytes(h.executor_json(plan))
+    h.PUBLIC_READER_RUNTIME_PLAN.chmod(0o600)
+    return SimpleNamespace(h=h, sha=sha, prefix=prefix, plan=plan, source=source, probes=probes)
+
+
+def test_runtime_plan_is_read_only_and_full_manifest_is_required(runtime_install):
+    p = runtime_install
+    before = sorted(p.h.STORE.rglob('*'))
+    assert p.h.public_reader_runtime_plan(p.sha) == p.plan
+    assert sorted(p.h.STORE.rglob('*')) == before and not p.prefix.exists()
+    proof = p.h.provision_public_reader_runtime(p.sha, p.h.PUBLIC_READER_RUNTIME_PLAN)
+    assert proof['runtime_revision'] == p.sha
+    assert p.h.public_reader_python() == proof
+    assert p.probes and p.probes[-1][0] == p.prefix / 'bin/python3'
+    (p.prefix / 'runtime-manifest.json').unlink()
+    with pytest.raises(FileNotFoundError):
+        p.h.public_reader_python()
+
+
+@pytest.mark.parametrize('change', ['bytes', 'mode', 'extra', 'symlink'])
+def test_runtime_verify_rejects_copy_drift(runtime_install, change):
+    p = runtime_install
+    p.h.provision_public_reader_runtime(p.sha, p.h.PUBLIC_READER_RUNTIME_PLAN)
+    module = p.prefix / 'lib/python3.12/os.py'
+    if change == 'bytes':
+        module.write_text('changed')
+    elif change == 'mode':
+        module.chmod(0o666)
+    elif change == 'extra':
+        (p.prefix / 'unexpected-config').write_text('unexpected')
+    else:
+        module.unlink()
+        module.symlink_to(p.source / 'os.py')
+    with pytest.raises(p.h.Refused):
+        p.h.verify_public_reader_runtime(p.sha)
+
+
+def test_runtime_unknown_install_only_reconciles_exact_completed_copy(runtime_install, monkeypatch):
+    p = runtime_install
+    original = p.h.verify_public_reader_runtime
+    monkeypatch.setattr(p.h, 'verify_public_reader_runtime', lambda *_args: (_ for _ in ()).throw(OSError('lost reply')))
+    with pytest.raises(OSError):
+        p.h.provision_public_reader_runtime(p.sha, p.h.PUBLIC_READER_RUNTIME_PLAN)
+    inode = p.prefix.stat().st_ino
+    monkeypatch.setattr(p.h, 'verify_public_reader_runtime', original)
+    assert p.h.provision_public_reader_runtime(p.sha, p.h.PUBLIC_READER_RUNTIME_PLAN)['runtime_revision'] == p.sha
+    assert p.prefix.stat().st_ino == inode
+    journal = p.h.STORE / 'public-reader-runtime' / (p.sha + '.json')
+    record = json.loads(journal.read_bytes())
+    record['state'] = 'copying'
+    journal.write_bytes(p.h.executor_json(record))
+    with pytest.raises(p.h.Refused, match='outcome unknown'):
+        p.h.provision_public_reader_runtime(p.sha, p.h.PUBLIC_READER_RUNTIME_PLAN)
+
+
+def test_runtime_refuses_source_change_before_any_final_install(runtime_install):
+    p = runtime_install
+    (p.source / 'os.py').write_text('mutated during copy')
+    with pytest.raises(p.h.Refused, match='file differs'):
+        p.h.provision_public_reader_runtime(p.sha, p.h.PUBLIC_READER_RUNTIME_PLAN)
+    assert not p.prefix.exists()
+
+
+def test_explicit_runtime_verification_rejects_another_installation_revision(runtime_install):
+    p = runtime_install
+    p.h.provision_public_reader_runtime(p.sha, p.h.PUBLIC_READER_RUNTIME_PLAN)
+    with pytest.raises(p.h.Refused, match='revision'):
+        p.h.verify_public_reader_runtime('c' * 40)
+    assert p.h.verify_public_reader_runtime()['runtime_revision'] == p.sha
 
 
 @pytest.fixture
@@ -718,3 +860,224 @@ def test_systemd_optional_bind_source_is_a_modifier_not_a_relative_path(hook):
 def test_optional_bind_modifier_never_bypasses_canonical_path_guard(hook, binding):
     with pytest.raises(hook.Refused):
         hook.public_reader_bindings(binding)
+
+
+@pytest.fixture
+def prepared_lifecycle(provision, tmp_path, monkeypatch):
+    p, h = provision, provision.h
+    h.provision_public_reader(p.sha, h.PUBLIC_READER_PLAN)
+    h.PUBLIC_READER_RUNTIME.mkdir(mode=0o755)
+    (h.PUBLIC_READER_RUNTIME / 'reader.sock').write_text('synthetic socket leaf')
+    (h.STORE / p.old).mkdir()
+    monkeypatch.setattr(h, 'image', lambda sha: h.STORE / sha)
+    monkeypatch.setattr(h, 'PUBLIC_READER_RETIRED', tmp_path / 'retired')
+    mountinfo = tmp_path / 'host-mountinfo'
+    mountinfo.write_text('')
+    monkeypatch.setattr(h, 'PUBLIC_READER_MOUNTINFO', mountinfo)
+    procs = {}
+    for role, before in p.snapshots.items():
+        proc = tmp_path / 'proc' / before['MainPID']
+        proc.mkdir(parents=True)
+        (proc / 'mountinfo').write_text('')
+        (proc / 'environ').write_bytes(b'OTHER_PUBLIC_SETTING=1\0')
+        view = proc / 'root' / h.PUBLIC_READER_RUNTIME.relative_to('/')
+        view.parent.mkdir(parents=True)
+        view.symlink_to(h.PUBLIC_READER_RUNTIME, target_is_directory=True)
+        procs[role] = proc
+    reader_proc = tmp_path / 'proc/444'
+    reader_proc.mkdir()
+    (reader_proc / 'root').symlink_to(h.PUBLIC_READER_ROOT, target_is_directory=True)
+    procs[h.PUBLIC_READER_SERVICE] = reader_proc
+    monkeypatch.setattr(h, 'process', lambda role: procs[role])
+    monkeypatch.setattr(h, 'public_reader_mount', lambda *_args: None)
+    monkeypatch.setattr(h, 'public_reader_group_empty', lambda: None)
+    def inode(path):
+        info = path.lstat()
+        return {'device': info.st_dev, 'inode': info.st_ino, 'mode': info.st_mode, 'uid': 0, 'gid': 0}
+    monkeypatch.setattr(h, 'public_reader_inode', inode)
+    original_property = h.property_of
+    props = {'MainPID': '444', 'InvocationID': 'f' * 32, 'ActiveState': 'active',
+             'RootDirectory': str(h.PUBLIC_READER_ROOT), 'ControlGroup': '/system.slice/' + h.PUBLIC_READER_SERVICE,
+             'BindReadOnlyPaths': str(h.EXECUTOR_PYTHON_SOURCE.parents[1]) + ':/python'}
+    socket_state = {'active': True}
+    manager = {'restored': False}
+    def prop(role, name):
+        if role in (h.PUBLIC_READER_SERVICE, h.PUBLIC_READER_SOCKET) and name in ('FragmentPath', 'DropInPaths', 'NeedDaemonReload', 'LoadState'):
+            return {'FragmentPath': '' if manager['restored'] else str(h.PUBLIC_READER_SYSTEMD / role),
+                    'DropInPaths': '', 'NeedDaemonReload': 'no',
+                    'LoadState': 'not-found' if manager['restored'] else 'loaded'}[name]
+        if role == h.PUBLIC_READER_SERVICE:
+            return props[name]
+        if role == h.PUBLIC_READER_SOCKET:
+            assert name == 'ActiveState'
+            return 'active' if socket_state['active'] else 'inactive'
+        return original_property(role, name)
+    monkeypatch.setattr(h, 'property_of', prop)
+    p.commands.clear()
+    def run(*args, **_kwargs):
+        p.commands.append(args)
+        if args == ('systemctl', 'disable', '--now', h.PUBLIC_READER_SOCKET):
+            socket_state['active'] = False
+            (h.PUBLIC_READER_RUNTIME / 'reader.sock').unlink()
+            props.update(MainPID='0', ActiveState='inactive')
+        if args == ('systemctl', 'daemon-reload') and not any(path.exists() for path in h.public_reader_paths()[:2]):
+            manager['restored'] = True
+        return ''
+    monkeypatch.setattr(h, 'run', run)
+    p.procs, p.props, p.socket_state = procs, props, socket_state
+    p.manager = manager
+    return p
+
+
+def test_prepared_rollback_allows_unused_socket_visibility_without_consumer_restart(prepared_lifecycle):
+    p, h = prepared_lifecycle, prepared_lifecycle.h
+    assert (p.procs['api'] / 'root' / h.PUBLIC_READER_RUNTIME.relative_to('/') / 'reader.sock').exists()
+    result = h.rollback_prepared_public_reader(p.sha)
+    assert result['consumer_restarts'] == 0 and h.public_reader_load(p.sha)['state'] == 'rolled-back'
+    assert p.commands == [('systemctl', 'daemon-reload'),
+                          ('systemctl', 'disable', '--now', h.PUBLIC_READER_SOCKET),
+                          ('systemctl', 'daemon-reload')]
+    assert all(p.snapshots[role]['MainPID'] == h.public_reader_consumer(role)['MainPID'] for role in h.PUBLIC_READER_CONSUMERS)
+
+
+@pytest.mark.parametrize('change', ['pid', 'invocation', 'environment', 'mount', 'client'])
+def test_prepared_rollback_refuses_activated_or_changed_original_consumer(prepared_lifecycle, change):
+    p, h = prepared_lifecycle, prepared_lifecycle.h
+    if change in ('pid', 'invocation'):
+        p.snapshots['api']['MainPID' if change == 'pid' else 'InvocationID'] = 'changed'
+    elif change == 'environment':
+        (p.procs['api'] / 'environ').write_bytes(b'LEAD_PUBLIC_READER_SOCKET=unused\0')
+    elif change == 'mount':
+        (p.procs['api'] / 'mountinfo').write_text('1 0 0:0 / ' + str(h.PUBLIC_READER_RUNTIME) + ' ro - tmpfs tmpfs ro\n')
+    else:
+        path = h.STORE / p.old / h.PUBLIC_READER_SOURCE_FILES[0]
+        path.parent.mkdir(parents=True)
+        path.write_text('client exists')
+    with pytest.raises(h.Refused):
+        h.rollback_prepared_public_reader(p.sha)
+    assert p.commands == [] and h.public_reader_load(p.sha)['state'] == 'ready'
+
+
+def test_unknown_prepared_socket_stop_never_reissues_stop(prepared_lifecycle, monkeypatch):
+    p, h = prepared_lifecycle, prepared_lifecycle.h
+    original = h.run
+    def lost_stop(*args, **kwargs):
+        if args == ('systemctl', 'disable', '--now', h.PUBLIC_READER_SOCKET):
+            p.commands.append(args)
+            raise OSError('stop result unknown')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(h, 'run', lost_stop)
+    with pytest.raises(OSError):
+        h.rollback_prepared_public_reader(p.sha)
+    assert h.public_reader_load(p.sha)['state'] == 'prepared-socket-stop-requested'
+    p.commands.clear()
+    with pytest.raises(h.Refused, match='socket stop unknown'):
+        h.rollback_prepared_public_reader(p.sha)
+    assert p.commands == []
+
+
+def test_prepared_stop_completed_without_reply_reconciles_without_another_stop(prepared_lifecycle, monkeypatch):
+    p, h = prepared_lifecycle, prepared_lifecycle.h
+    original = h.run
+    def lost_stop(*args, **kwargs):
+        value = original(*args, **kwargs)
+        if args == ('systemctl', 'disable', '--now', h.PUBLIC_READER_SOCKET):
+            raise OSError('completed stop acknowledgement lost')
+        return value
+    monkeypatch.setattr(h, 'run', lost_stop)
+    with pytest.raises(OSError):
+        h.rollback_prepared_public_reader(p.sha)
+    monkeypatch.setattr(h, 'run', original)
+    p.commands.clear()
+    assert h.rollback_prepared_public_reader(p.sha)['state'] == 'rolled-back'
+    assert p.commands == [('systemctl', 'daemon-reload')]
+
+
+def test_retirement_archives_pinned_instance_and_never_touches_reused_paths(prepared_lifecycle):
+    p, h = prepared_lifecycle, prepared_lifecycle.h
+    h.rollback_prepared_public_reader(p.sha)
+    pins = h.public_reader_load(p.sha)['prepared_rollback']
+    raw = h.PUBLIC_READER_PLAN.read_bytes()
+    assert h.retire_public_reader(p.sha)['state'] == 'retired'
+    archive = h.PUBLIC_READER_RETIRED / p.sha
+    assert h.public_reader_inode(archive / 'root-parent') == pins['root_parent']
+    assert (archive / 'original-plan.json').read_bytes() == raw
+    assert h.public_reader_load(p.sha)['state'] == 'rolled-back'
+    h.PUBLIC_READER_ROOT.mkdir(parents=True)
+    h.PUBLIC_READER_RUNTIME.mkdir()
+    h.PUBLIC_READER_PLAN.write_text('new unrelated plan')
+    before = h.public_reader_inode(h.PUBLIC_READER_ROOT)
+    assert h.retire_public_reader(p.sha)['archive_verified']
+    assert h.public_reader_inode(h.PUBLIC_READER_ROOT) == before
+    assert h.PUBLIC_READER_PLAN.read_text() == 'new unrelated plan'
+
+
+@pytest.mark.parametrize('change', ['root', 'plan', 'runtime', 'socket', 'processes'])
+def test_retirement_rejects_replaced_pins_or_live_resources(prepared_lifecycle, monkeypatch, change):
+    p, h = prepared_lifecycle, prepared_lifecycle.h
+    h.rollback_prepared_public_reader(p.sha)
+    if change == 'root':
+        h.PUBLIC_READER_ROOT.rename(h.PUBLIC_READER_ROOT.with_name('old-root'))
+        h.PUBLIC_READER_ROOT.mkdir()
+    elif change == 'plan':
+        h.PUBLIC_READER_PLAN.write_text('changed')
+    elif change == 'runtime':
+        h.PUBLIC_READER_RUNTIME.rename(h.PUBLIC_READER_RUNTIME.with_name('old-runtime'))
+        h.PUBLIC_READER_RUNTIME.mkdir()
+    elif change == 'socket':
+        (h.PUBLIC_READER_RUNTIME / 'reader.sock').write_text('new socket')
+    else:
+        monkeypatch.setattr(h, 'public_reader_group_empty', lambda: (_ for _ in ()).throw(h.Refused('live group')))
+    with pytest.raises(h.Refused):
+        h.retire_public_reader(p.sha)
+    assert h.PUBLIC_READER_ROOT.parent.exists() and h.PUBLIC_READER_PLAN.exists()
+
+
+def test_interrupted_retirement_refuses_new_root_before_removing_old_runtime(prepared_lifecycle, monkeypatch):
+    p, h = prepared_lifecycle, prepared_lifecycle.h
+    h.rollback_prepared_public_reader(p.sha)
+    original = Path.rmdir
+    def lost_remove(path):
+        if path == h.PUBLIC_READER_RUNTIME:
+            raise OSError('interrupted before runtime removal')
+        return original(path)
+    monkeypatch.setattr(Path, 'rmdir', lost_remove)
+    with pytest.raises(OSError):
+        h.retire_public_reader(p.sha)
+    monkeypatch.setattr(Path, 'rmdir', original)
+    h.PUBLIC_READER_ROOT.mkdir(parents=True)
+    before = h.public_reader_inode(h.PUBLIC_READER_RUNTIME)
+    with pytest.raises(h.Refused, match='root path reused'):
+        h.retire_public_reader(p.sha)
+    assert h.public_reader_inode(h.PUBLIC_READER_RUNTIME) == before
+
+
+def test_prepared_unit_unlinks_before_reload_preserve_unknown_without_reloading(prepared_lifecycle, monkeypatch):
+    p, h = prepared_lifecycle, prepared_lifecycle.h
+    original = h.run
+    def lost_before_reload(*args, **kwargs):
+        if args == ('systemctl', 'daemon-reload') and not any(path.exists() for path in h.public_reader_paths()[:2]):
+            raise OSError('interrupted before manager reload')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(h, 'run', lost_before_reload)
+    with pytest.raises(OSError):
+        h.rollback_prepared_public_reader(p.sha)
+    assert h.public_reader_load(p.sha)['state'] == 'prepared-units-restore-requested'
+    assert not p.manager['restored']
+    monkeypatch.setattr(h, 'run', original)
+    p.commands.clear()
+    with pytest.raises(h.Refused, match='manager'):
+        h.rollback_prepared_public_reader(p.sha)
+    assert not p.manager['restored'] and p.commands == []
+    assert h.public_reader_load(p.sha)['state'] == 'prepared-units-restore-requested'
+
+
+def test_retirement_refuses_cached_reader_units_before_archival(prepared_lifecycle):
+    p, h = prepared_lifecycle, prepared_lifecycle.h
+    h.rollback_prepared_public_reader(p.sha)
+    p.manager['restored'] = False
+    p.commands.clear()
+    with pytest.raises(h.Refused, match='manager'):
+        h.retire_public_reader(p.sha)
+    assert p.commands == [] and h.PUBLIC_READER_ROOT.parent.exists() and h.PUBLIC_READER_PLAN.exists()
+    assert not (h.PUBLIC_READER_RETIRED / p.sha).exists()
