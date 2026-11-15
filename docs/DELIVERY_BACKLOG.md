@@ -1,6 +1,6 @@
 # lead 开发工作项和验收清单
 
-2026-11-15 Chamber 持续运营修复候选：[同一运行时需求记录](requirements/20261112-autonomous-growth-runtime.md#2026-11-15-chamber-持续运营阻塞本次修复与验证尚未发布)。只读核实线上仍为3fb；最后三次判断 accepted0/rejected1（无进展路径已耗尽），共用Codex继承有效但尚无新请求。独立分支补原生公开搜索、真实原文引用登记、明确停止条件与恢复状态；312项定向覆盖经旧样例补正通过，43项发布范围契约与静态/类型/凭据及桌面/390px检查通过，专项审查增量已处理。保留失败/预算/账号限制，无生产写入或社媒发送。待精确候选PR及本次合并发布授权；旧rollout不重跑。
+2026-11-15 Chamber 持续运营修复交付中：[同一运行时需求记录](requirements/20261112-autonomous-growth-runtime.md#2026-11-15-chamber-持续运营阻塞本次修复与验证尚未发布)。本次合并发布已获批准，PR83 快检通过后合入 b354662；完整 CI43670237572/1 在测试前网络超时，/2 来源恢复集成用例超时（2680 passed、1 skipped、102 subtests）。隔离复现确认旧模拟空命令响应缺少新增 continuation，最小补齐后两参数恢复链均通过；应用实现与原恢复/去重/重放断言不改。待补正精确 main 完整验证及同轮产物；线上仍3fb，无取件、切换或社媒发送。原312项定向证据及43项发布契约、静态/类型/凭据与桌面/390px有效证据复用，保留失败/预算/账号限制，旧rollout不重跑。
 
 2026-11-15 共用Codex已实际启用：[第23.18节](requirements/20261112-unified-browser-research-memory.md#2318-mijiu-server-执行端2026-11-14本次授权已完成)。实际App、Telegram/Reddit执行器与连接器均为 `3fb46ece212d4da88b9609091af4199bca20eb53`（PR81）；精确CI `43632519797/2` 完整成功，2848 passed、1 skipped、102 subtests，63分22秒，同轮原Home/Tool与正式工具安装已独立回读。原受保护应用请求 `7793720681` 于21:07:48Z成功，schema0035沿用92轮已完成备份恢复及一次升级；最终维护hold0、原调度和入口恢复。旧404过期登记锁内对账撤销、独立回读后新登记，目录umask导致的启动前失败经原件字节/公开目录权限修正和真实运行用户回读解决，未触碰私有认证或WAL。socket/worker enabled+active，broker独立UID且active；真实ChatGPT/Sol/medium ready，工作室默认managed_node。当前工作室6个项目/2个活跃项目，2个均继承默认且无单独覆盖，2项目grant+1独立studio grant已核；新建Agent自动复用服务器，不再逐项目配对。验收不追加付费模型turn或社媒内容，旧任务/device/thread不迁移重发，旧费用/unknown不改写；本次文档回填不触发应用部署。
 

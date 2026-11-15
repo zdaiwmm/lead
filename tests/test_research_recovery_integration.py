@@ -150,7 +150,12 @@ async def test_original_source_recovery_through_real_outbox_temporal_and_current
                     experiment_id=experiment, payload=TaskSpec(kind='research', purpose=name, experiment_id=experiment,
                         payload={'urls': [url], 'question': 'What comparison need is documented?'},
                         review_at=utcnow()+ (timedelta(seconds=10) if expire_second and name == 'waiting-two' else timedelta(hours=4))).model_dump(mode='json')))
-        return schema(context_key=context['context_key'], rationale='Use a feasible independent source while the original resource remains blocked.', commands=commands)
+        continuation = None if commands else {
+            'condition': 'New original-source evidence about supplier comparisons is retained.',
+            'producer': 'evidence_added', 'responsibility': 'product',
+            'next_action': 'Evaluate that new evidence before choosing another bounded source action.'}
+        return schema(context_key=context['context_key'], rationale='Use a feasible independent source while the original resource remains blocked.',
+            commands=commands, continuation=continuation)
 
     monkeypatch.setattr(httpx.AsyncClient, 'send', forbidden_http)
     monkeypatch.setattr(fetch, 'pinned_get', response)
