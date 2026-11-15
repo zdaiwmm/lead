@@ -42,6 +42,10 @@ class ResearchInput(Contract):
         return self
 
 
+class PublicSourceCandidates(Contract):
+    urls: list[str] = Field(default_factory=list, max_length=4)
+
+
 class SourceFinding(Contract):
     document_id: UUID
     quote: str = Field(min_length=12,max_length=600)
@@ -213,7 +217,7 @@ def research_unavailable(errors, missing=False):
     return WorkResult(outcome="failed", failure_code="research_input_missing" if missing else "source_unavailable", output=output)
 
 
-async def _read_source(aid,row,data,url,*,external_links=False,check_resources=False,required_provider=None):
+async def _read_source(aid,row,data,url,*,external_links=False,check_resources=False,required_provider=None,allow_browser=True):
     from ..operating_work import unavailable_source
     scope = source_scope(url, data, operation="search" if external_links else "read")
     if data.access_mode == "public" and required_provider != "browser":
@@ -232,6 +236,11 @@ async def _read_source(aid,row,data,url,*,external_links=False,check_resources=F
             if condition := source_failure(page):
                 raise SourceReadError(scope, condition)
             return {**page, "access_mode": data.access_mode, "attempt_scope": scope}
+    if not allow_browser:
+        # An account-owned task cannot borrow its logged-in Profile for an
+        # unrelated public search or candidate. Its explicit account URLs keep
+        # their original browser scope; unavailable public HTTP remains local.
+        raise SourceReadError(scope, "capability_gap")
     from ..browser_tools import BrowserTools
     browser = BrowserTools(aid,data.question,task_id=str(row["id"]),mode="autonomous")
     state = "failed"
@@ -359,6 +368,7 @@ async def research(aid, row, spec, claim=None):
             business = one(c, "SELECT product_url FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
         if business and business["product_url"]:
             urls.append(business["product_url"])
+    explicit_urls = set(urls)
     errors = []
     local_pages,local_refs = [],[]
     provider_results = []
@@ -405,16 +415,42 @@ async def research(aid, row, spec, claim=None):
                 local_pages.append({"document_id":str(document["id"]),"url":document["source_ref"],"title":document["title"],
                     "excerpt":(document["excerpt"] or "")[:6000],"trust":"stored_source_claims"})
     from ..operating_work import unavailable_source
-    for query in data.queries:
-        index_url = "https://html.duckduckgo.com/html/?q="+quote_plus(query)
-        try:
-            index = await _read_source(aid,row,data,index_url,external_links=True,check_resources=True)
-            if not unavailable_source(index):
-                urls.extend(index.get("links",[])[:4])
-            else:
-                errors.append({"url":index_url,"code":"search_source_unavailable"})
-        except (ValueError,OSError,httpx.HTTPError) as error:
-            errors.append(read_error(error, index_url, data, operation="search"))
+    public_data = data.model_copy(update={"access_mode": "public", "account_id": None})
+    discovery_error = None
+    if data.queries:
+        from ..admin_settings import for_agent
+        from ..local_executor_client import uses_native
+        settings, _ = await asyncio.to_thread(for_agent, aid, "models")
+        if not settings["tools"]["public_web"]:
+            errors.append({"code": "public_web_disabled"})
+        elif uses_native(aid, task_id=str(row["id"])):
+            try:
+                candidates = await run_model(PublicSourceCandidates,
+                    {"question": data.question, "queries": data.queries}, agent_id=aid,
+                    purpose="research", call_key="source-discovery", system="""Use native live web search to find at most four
+public original source URLs relevant to this exact question and queries. Return [] if none is relevant.
+Return candidate URLs only, without factual conclusions, summaries, invented URLs or business decisions.
+Do not log in, submit content, bypass access controls or use social account pages.
+Search snippets are discovery hints; Lead must read the actual source before it can become evidence.""")
+                urls.extend(candidates.urls)
+            except Exception as error:
+                # A search outage must not discard independent source reads.
+                # Without real evidence below, preserve the original model
+                # exception and its existing recovery classification.
+                discovery_error = error
+                errors.append({"code": "search_model_unavailable", "error_type": type(error).__name__})
+        else:
+            for query in data.queries:
+                index_url = "https://html.duckduckgo.com/html/?q="+quote_plus(query)
+                try:
+                    index = await _read_source(aid,row,public_data,index_url,external_links=True,check_resources=True,
+                        allow_browser=data.access_mode == "public")
+                    if not unavailable_source(index):
+                        urls.extend(index.get("links",[])[:4])
+                    else:
+                        errors.append({"url":index_url,"code":"search_source_unavailable"})
+                except (ValueError,OSError,httpx.HTTPError) as error:
+                    errors.append(read_error(error, index_url, public_data, operation="search"))
     if not urls:
         if local_refs:
             return WorkResult(outcome="completed",evidence_refs=local_refs,output={"pages":local_pages,
@@ -429,23 +465,30 @@ async def research(aid, row, spec, claim=None):
                     (row["id"],j([{"kind":"business","id":str(provided["id"])}])))["ok"]
             return WorkResult(outcome="completed",evidence_refs=[{"kind":"business","id":provided["id"],"revision":provided["revision"]}],
                 output={"knowledge_progress":not seen,"learning_progress":not seen,"business_progress":False,"trust":"owner_asserted",
-                        "learning":"The owner supplied a product introduction; independent validation is still required."})
+                        "learning":"The owner supplied a product introduction; independent validation is still required.",
+                        "read_errors":errors})
+        if discovery_error:
+            raise discovery_error
         return research_unavailable(errors, missing=not errors)
     evidence, pages, progress = local_refs, local_pages, provider_progress
     # Direct/browser reads are bounded; the fallback owns only its public research run.
     for url in list(dict.fromkeys(urls))[:4]:
+        read_data = data if url in explicit_urls else public_data
         try:
-            page = await _read_source(aid,row,data,url,check_resources=True)
+            page = await _read_source(aid,row,read_data,url,check_resources=True,
+                allow_browser=data.access_mode == "public" or read_data.access_mode == "account")
             ref, added = await asyncio.to_thread(_remember, aid, page,
-                source_type="account_read" if data.access_mode == "account" else "public_read")
+                source_type="account_read" if read_data.access_mode == "account" else "public_read")
             if ref:
                 evidence.append(ref)
                 progress = progress or added
                 pages.append({"url": page["url"], "title": page.get("title"), "document_id": str(ref.id),
                               "observed_links": page.get("links", []), "trust": "observed_source_claims"})
         except (ValueError,OSError,httpx.HTTPError) as error:
-            errors.append(read_error(error, url, data))
+            errors.append(read_error(error, url, read_data))
     if not evidence:
+        if discovery_error:
+            raise discovery_error
         return research_unavailable(errors)
     findings,learning = [],False
     from ..config import any_model_configured
