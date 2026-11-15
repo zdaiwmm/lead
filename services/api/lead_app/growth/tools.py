@@ -135,7 +135,9 @@ def definitions():
             for name, schema in INPUTS.items()]
 
 
-def _remember(aid, page, *, source_type="public_read"):
+def _remember(aid, page, *, source_type="public_read", connection=None):
+    from contextlib import nullcontext
+
     text = (page.get("text") or "").strip()[:18000]
     if not text:
         return None, False
@@ -144,7 +146,7 @@ def _remember(aid, page, *, source_type="public_read"):
         return None, False
     sha = digest(text)
     source = page["url"]
-    with tx(aid) as c:
+    with tx(aid) if connection is None else nullcontext(connection) as c:
         # Different tasks can read independently. Only duplicate artifact insertion is serialized.
         c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (str(aid)+source+sha+source_type,))
         old = one(c, "SELECT id FROM lead.knowledge_documents WHERE source_ref=%s AND sha256=%s AND source_type=%s AND deleted_at IS NULL",
