@@ -52,6 +52,7 @@ export default function GrowthStatus({ aid, agent, readOnly }: { aid: string; ag
   const [selected, setSelected] = useState<Row | null>(null);
   const [history, setHistory] = useState(false);
   const current = data?.current_learning?.find((item: Row) => ["active", "observing"].includes(item.state));
+  const continuation = data?.continuation;
   const work: Row[] = [...(data?.current_work || []), ...(data?.waiting || [])];
   const shown = history ? [...work, ...(data?.recent_work || [])] : work.slice(0, 4);
   return <div className={styles.overview}>
@@ -61,11 +62,19 @@ export default function GrowthStatus({ aid, agent, readOnly }: { aid: string; ag
       {error && <p role="alert">{error} <button className="text-button" onClick={refresh}><RefreshCw size={14} />重新读取</button></p>}
       {data ? <>
         <p className={styles.objective}>{data.objective.description}</p>
+        {!current && !data.current_work?.length && continuation && ["blocked", "waiting_for_change", "needs_follow_up"].includes(continuation.status) && <div className={styles.learning}>
+          <span className="muted small">{continuation.status === "blocked" ? "当前下一步受阻" : continuation.status === "needs_follow_up" ? "下一步尚未形成" : "等待新的依据"}</span>
+          <p>{continuation.rationale || "原路径已停止，暂未形成可执行的新工作。"}</p>
+          {continuation.condition && <p>继续条件：{continuation.condition}</p>}
+          {continuation.next_action && <small>条件满足后：{continuation.next_action}</small>}
+          <small>{continuation.responsibility === "owner" ? "需要你补充相关条件。" : "由 Lead 处理并核对依据。"}</small>
+        </div>}
         {current && <div className={styles.learning}><span className="muted small">当前验证</span><p>{current.question}</p><small>观察依据：{current.learning_signal}</small></div>}
         {shown.length ? <ul className={styles.rows}>{shown.map(item => <li key={item.id}>
           {item.platform && <SocialIcon platform={item.platform} size={16} />}
           <div><button className={styles.openWork} onClick={() => setSelected(item)}>{item.title}<ArrowUpRight size={13} /></button>
             <span>{item.platform && `${socialNames[item.platform] || item.platform} · `}{item.wait ? reasons[item.wait.reason] || (item.wait.responsibility === "owner" ? "需要本人处理账号事项" : "平台正在处理这项等待") : probeStatus(item.probe) || states[item.state] || "推进中"}</span>
+            {item.wait?.automatic_checks === "stopped" && <small>{item.wait.resume_when}</small>}
           </div><small>{(item.wait?.check_at || item.probe?.next_check_at) ? `下次检查 ${new Date(item.wait?.check_at || item.probe.next_check_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : ""}</small>
         </li>)}</ul> : <p className={styles.empty}>{agent.desired_state === "paused" ? "项目已暂停。原操作的结果核对仍会继续。" : "当前没有待执行的工作。新资料、账号变化或真实结果会触发下一步判断。"}</p>}
         {!!data.owner_actions?.length && <p className={styles.owner}>有 {data.owner_actions.length} 项账号事项需要你处理，可从上方对应账号进入原窗口。</p>}

@@ -398,5 +398,8 @@ def accept_commands(aid, proposal, decision_task_id=None,*,business_snapshot=Non
                 reason = "invalid_scoped_reference" if isinstance(error,(DataError,IntegrityError)) else str(error)[:200]
                 rejected.append({"group": key, "reason": reason})
         audit(c, aid, "growth.decision_accepted", {"decision_task_id": decision_task_id,
-                                               "accepted": accepted, "rejected": rejected})
-    return {"decision_task_id": decision_task_id, "accepted": accepted, "rejected": rejected}
+            "accepted": accepted, "rejected": rejected, "rationale":proposal.rationale,
+            "continuation":proposal.continuation.model_dump(mode='json') if proposal.continuation else None})
+        pending_work = one(c,"""SELECT EXISTS(SELECT FROM lead.tasks WHERE type LIKE 'growth.%%'
+            AND type<>'growth.decision' AND state IN ('planned','queued','running','waiting_user','reconciling')) ok""")['ok']
+    return {"decision_task_id": decision_task_id, "accepted": accepted, "rejected": rejected,'pending_work':pending_work}

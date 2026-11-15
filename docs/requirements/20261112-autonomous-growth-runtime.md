@@ -800,3 +800,33 @@ PR #53、#54 已合并。#54 修正真实节点的 Telegram 配置入口：从�
 旧 DNS 任务获得恢复许可后若原来源再次失败，规范化的新错误码仍复用旧 episode，不覆盖其 fingerprint、root 或累计次数。这个边界的真实数据库反例先复现 fingerprint 被替换；补正后继续原 episode 的第四次失败并保留后续正常低频探测。
 
 隔离数据库与可控 BrowserTools RPC 的原实现反例为 11 项失败、8 项通过；独立去掉 learning 唤醒后，真实 probe→原任务链路另有一项按预期失败。修复后相关出口、项目隔离、只读传输、搜索来源、私网/跳转/权限拒绝、失败关闭、原任务恢复与费用上限、同问题重复学习，以及既有代理安全回归共 62 项通过。测试使用本任务新建数据库和状态，没有操作生产节点或其他工作树。这里证明本地恢复链路与边界；新精确候选仍须 PR/main 验证、同轮交付及生产原任务取得真实来源后的独立回读。
+
+### 2026-11-15 Chamber 持续运营阻塞（本次修复与验证，尚未发布）
+
+本次用户要求直接调查、必要修复并验证 Chamber 持续运营，不以进程在线、任务成功或内部统计作为运营验收。规则及开发基线为实时 GitHub main `fc52cd309484d843c8527d64b31cc54222cdc469`；共享目录 HEAD `d887831`、261 项未提交内容均保留。独立目录为 `chamber-continuity-20261115/lead agent`，分支 `codex/chamber-continuity-20261115`。旧共用 Codex rollout 已完成，本次不重装、重启或重复迁移；新候选的合并和生产发布仍需本次授权。
+
+**生产只读证据（北京时间 10:23–10:40）：**
+
+- 实际应用仍为 `3fb46ece212d4da88b9609091af4199bca20eb53`，API、应用 Worker、Codex Worker、Node、egress 五服务均 active/running、重启计数 0。旧 Agent heartbeat 不是停机判据。
+- Chamber desired=running、health=ready、growth generation=1，pending triggers=0，当前工作及 active/observing 实验均为 0。最后经营决策仍为 11 月 14 日 14:14:36。工作室默认 managed_node、项目无覆盖且有有效项目 grant，但该项目没有 local_executor_request；最后决策早于共用能力启用，不能据此判节点离线。
+- 最近三次经营决策 accepted=0、rejected=1、repair_exhausted，拒绝原因都是 `no_progress_path_exhausted`。它们没有接受可执行后续，succeeded 只证明判断处理完毕。
+- 历史 Reddit 来源根任务为 source_unavailable、blocked、probes_stopped，累计 probes=47、attempts=3，旧 next_check_at 停在 11 月 14 日 15:06。原错误列表为空，不能追认具体挑战页或网络封锁原因。几项名字含 authed 的后续任务实际 access_mode=public、未指定账号，终止于共享恢复已耗尽；名称不能证明走过登录态读取。
+- 最近两项成功的公开需求/Telegram 位置研究 findings=0、learning_progress=false；读到网页不等于取得相关需求。11 月 15 日的 reddit.workspace_review 仍只做内部复盘。近七天 confirmed action=0，最后 confirmed 为 11 月 4 日 05:40；当前没有 unknown/dispatching 动作。
+- Reddit/Telegram 已连接并启用自动运营；Facebook 自动运营关闭，X 未验证。本次保持既有权限，不以修复或验收为由开启账号或发送社媒内容。
+
+**实际断点及最小补正：**
+
+1. research 的 queries 仍固定抓 DuckDuckGo HTML；来源不足时在模型之前失败。现在 native 模式复用原 run_model 的有限公开实时搜索，候选最多四个，仍需实际读取正文及原有归纳；搜索摘要不成为证据。非 native 路线保留。账号任务的外站搜索使用匿名读取，不能借原登录态页面；明确账号 URL 继续原账号/绑定/出口，匿名浏览器不足时报告局部能力缺口。搜索模型失败仍允许独立来源继续；无实际资料时保留原模型异常。
+2. 普通 native 决策的 lead_public_read 没有 browser_run_id，因此没有保存可用于新实验的 document 引用。新增的原文登记限定真实 growth Task，复用入口的原请求/设备或节点/grant、项目控制、任务 generation/attempt 与显式账号检查，在网络之后的短事务重新核验并保存。网络读取期间不持业务锁；暂停、撤销、换代或迟到响应不能登记来源。重复正文复用旧引用及时间，不能绕过无进展门槛。搜索索引、登录/挑战/拦截页和 JavaScript 空壳不登记；聊天及独立工作室范围不扩大。
+3. 决策 rationale 以前被丢弃，恢复 scope 又可能被最近 24 条工作挤出。现在保存 rationale、accepted/rejected 的实际 disposition，并提供独立且有限的 blocked-resource 摘要。commands=[] 必须给出 continuation 的具体条件、真实生产者、责任与条件满足后的动作；缺失最多原有一次修正，不能伪装正常等待。修正后仍被拒绝显示 blocked/partial，保留实际错误；不再把“任务完成”投影为可继续运营。
+4. 已 stopped 的能力检查去掉不可执行的旧下次检查时间，明确原条件与处理责任。只读界面不派活。同步工作台运营流程图；不新增监督进程、无事实定时决策、不重置 episode 或问题预算、不复活已关闭实验。
+
+**分工及验证：**主负责人处理生产只读调查、决策/状态、整合与交付；固定源码上的来源路由及证据/权限边界可独立核验并实施，分别使用隔离分支。共享 tools.py 仅按函数分属，由主负责人顺序整合；生产和发布仍只有主负责人操作。新增行为先取得定向失败反例，再做临时 PostgreSQL/Temporal 上的真实隔离回归。实际最终提交、PR、用例数量及独立审查结果在本节后续回填，不能把分支结果当精确 main 或生产证明。
+
+验证环境首次完整任务链因临时 socket 目录过长出现 `AF_UNIX path too long`，缩短本轮合成状态目录后该用例通过；这是验证环境修正，没有改产品或生产目录。既有真实模型语义分数不迁移为新提示通过，本轮尚无新真实模型判断或社媒业务效果证明。
+
+**发布后原任务接续条件：**只有本次候选获准、精确 main 完整应用验证与同轮产物发布、独立回读完成后，才可通过原 ensure_decision/growth.wake 接收一次有依据的 `capability_changed`（resource=`growth:public-research`、condition_revision=实际部署 SHA）。同条件重复调用沿已消费触发去重；这只通知确实变化的研究/证据接线，不证明 Reddit 原故障解除，不重投旧任务。随后检查新决策是否真实进入共用 Node、是否保存原文、是否接受有依据的任务或明确具体停止条件。该任务不得用人造研究/发送内容让面板变绿；真实运营继续遵守现有账号和动作许可。新来源仍无需求或可行位置时保留反证和缺口，等待相应新事实，不无限研究。
+
+**本轮工程收口：**独立核验补出“仅关闭实验却无后续”和“命令全拒却没有条件”两个真实分支，均先复现再补正。以实际在途任务判断是否已有后续，已接受组不能重放；无在途任务且缺条件时，仅在原两轮内要求一次 continuation-only 修正，仍缺条件明确 needs_follow_up。证据登记另补合法 draft Task 一致性及原 lease 到期拒绝，均有真实隔离数据库反例与通过结果。两个专项核验者回看了修复增量；未见剩余阻断项，没有重复全量审查或真实模型评估。
+
+本地25模块共312项：首轮311通过、1项旧DeepSeek合成响应因缺新continuation失败；仅更新该响应样例后，受影响模块7项全部通过，其他输入及实现未变，复用其余已通过证据。另有发布范围契约43项通过、全仓Ruff/类型检查/凭据扫描/差异检查通过。真实浏览器合成界面15项检查通过，含桌面/390px、停止条件、无虚假下次检查、只读不派活和流程图；本机首次Turbopack因依赖链接在构建范围外失败，改用独立目录中的原依赖副本后通过，未改生产构建配置。证据位于本次私有临时验证目录，未导出账号或租户标识。上述为本地工程结果，PR精确head、合并后的main全量CI、同轮产物与生产回读仍分别放行。

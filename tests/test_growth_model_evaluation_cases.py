@@ -107,7 +107,9 @@ async def test_memory_case_admits_only_primary_and_existing_repair(evaluation,tm
     async def fake(schema,context,**kwargs):
         calls.append(kwargs['call_key'])
         key='wrong-context' if len(calls)==1 else context['context_key']
-        return DecisionProposal(context_key=key,rationale='A bounded synthetic proposal for mechanical validation.',commands=[])
+        return DecisionProposal(context_key=key,rationale='A bounded synthetic proposal for mechanical validation.',commands=[],
+            continuation={'condition':'New relevant evidence arrives.','producer':'evidence_added',
+                'next_action':'Reassess the original question.'})
     output=tmp_path/'result.json'
     await evaluation.evaluate(tmp_path,output,160000,case='memory_counterevidence',model_runner=fake)
     record=json.loads(output.read_text())['results'][0]
@@ -120,7 +122,9 @@ async def test_budget_stops_repair_without_an_additional_request(evaluation,tmp_
     calls=[]
     async def fake(schema,context,**kwargs):
         calls.append(kwargs['call_key'])
-        return DecisionProposal(context_key='wrong-context',rationale='A deliberately rejected synthetic proposal.',commands=[])
+        return DecisionProposal(context_key='wrong-context',rationale='A deliberately rejected synthetic proposal.',commands=[],
+            continuation={'condition':'New relevant evidence arrives.','producer':'evidence_added',
+                'next_action':'Reassess the original question.'})
     output=tmp_path/'result.json'
     with pytest.raises(SystemExit):
         await evaluation.evaluate(tmp_path,output,80000,case='memory_counterevidence',model_runner=fake)

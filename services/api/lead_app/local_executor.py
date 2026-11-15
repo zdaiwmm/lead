@@ -664,6 +664,10 @@ def tool_request(c, device, request_id, name, *, source='personal_v1', grant_id=
                     raise ValueError('executor_scope_changed')
         task = one(c, 'SELECT * FROM lead.tasks WHERE id=%s' + (' FOR UPDATE' if lock else ''), (request['task_id'],))
         runtime = (task.get('result') or {}).get('runtime', {}) if task else {}
+        if lock and task and task['type'].startswith('growth.'):
+            lease_until = runtime.get('lease_until')
+            if not lease_until or datetime.fromisoformat(lease_until) <= _now():
+                raise ValueError('executor_scope_changed')
         if (not task or task['state'] not in {'running', 'reconciling'}
                 or task['input'].get('task_generation', 1) != request['scope'].get('task_generation')
                 or runtime.get('attempt_token') != request['scope'].get('attempt_token')):

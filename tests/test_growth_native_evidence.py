@@ -61,7 +61,19 @@ async def test_growth_read_without_browser_returns_retained_document(growth_agen
     assert reread['structuredContent']['chunks'][0]['body'] == SOURCE['text']
 
 
-@pytest.mark.parametrize('change', ['control', 'generation', 'attempt', 'canceled', 'request', 'device', 'pause'])
+async def test_claimed_draft_work_keeps_the_runtime_read_contract(growth_agent, monkeypatch):
+    device, request = request_for(growth_agent)
+    with tx(growth_agent) as c:
+        c.execute("UPDATE lead.agents SET desired_state='draft' WHERE id=%s",(growth_agent,))
+    async def read(url, **kwargs):
+        return dict(SOURCE)
+    monkeypatch.setattr(fetch,'fetch_product',read)
+    result=await local_executor.call_tool(device['token'],device['epoch'],request['id'],
+        'lead_public_read',{'url':SOURCE['url']})
+    assert result['structuredContent']['evidence_ref']['kind']=='document'
+
+
+@pytest.mark.parametrize('change', ['control', 'generation', 'attempt', 'canceled', 'request', 'device', 'pause', 'lease'])
 async def test_late_read_after_fence_change_cannot_register_evidence(growth_agent, monkeypatch, change):
     device, request = request_for(growth_agent)
     async def read(url, **kwargs):
@@ -78,6 +90,9 @@ async def test_late_read_after_fence_change_cannot_register_evidence(growth_agen
                 c.execute("UPDATE lead.local_executor_requests SET state='canceled' WHERE id=%s", (request['id'],))
             elif change == 'device':
                 c.execute('UPDATE lead.local_executor_devices SET epoch=epoch+1 WHERE id=%s', (request['device_id'],))
+            elif change == 'lease':
+                c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,lease_until}',%s) WHERE id=%s",
+                    (j((utcnow()-timedelta(seconds=1)).isoformat()), request['task_id']))
             else:
                 c.execute("UPDATE lead.agents SET desired_state='paused' WHERE id=%s", (growth_agent,))
         return dict(SOURCE)

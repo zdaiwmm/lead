@@ -135,7 +135,9 @@ async def test_growth_deepseek_uses_structured_output_tool_at_provider_boundary(
         return httpx.Response(200,json={'id':'synthetic-json-mode','object':'chat.completion','created':1794441600,
             'model':'deepseek-flash','choices':[{'index':0,'finish_reason':'tool_calls','message':{'role':'assistant',
                 'content':None,'tool_calls':[{'id':'synthetic-output','type':'function','function':{'name':calls[-1]['tools'][0]['function']['name'],
-                    'arguments':json.dumps({'context_key':'captured','rationale':'No new fact requires another action.','commands':[]})}}]}}],
+                    'arguments':json.dumps({'context_key':'captured','rationale':'No new fact requires another action.','commands':[],
+                        'continuation':{'condition':'New relevant evidence arrives.','producer':'evidence_added',
+                            'next_action':'Reassess the original question.'}})}}]}}],
             'usage':{'prompt_tokens':30,'completion_tokens':20,'total_tokens':50}})
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         monkeypatch.setattr(model,'model_http_client',lambda *args:client)

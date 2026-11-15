@@ -98,7 +98,7 @@ def _growth_public_read(revalidate, observed=None):
         context = request['payload'].get('tool_context') or {}
         agent = require_agent(c, aid)
         if (context.get('kind') != 'model' or str(context.get('task_id')) != str(request['task_id'])
-                or task['state'] != 'running' or agent['desired_state'] != 'running' or not enabled(agent)):
+                or task['state'] != 'running' or agent['desired_state'] in {'paused','archived'} or not enabled(agent)):
             raise ValueError('executor_scope_changed')
         settings, _ = effective(c, 'models', aid)
         tools = settings['tools']

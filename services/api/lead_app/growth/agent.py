@@ -9,7 +9,7 @@ from ..model import run_model
 from .contracts import DecisionProposal, ExperimentSpec, TaskSpec, utcnow
 from .store import accept_commands, command_group, digest, objective_revision
 
-PROMPT_VERSION = "growth-v2.7"
+PROMPT_VERSION = "growth-v2.8"
 MAX_CONTEXT_BYTES = 48000
 
 
@@ -55,7 +55,14 @@ intervention only after evidence of its actual execution, relevant exposure and 
 No implementation or reachable audience means unknown effect, not an ineffective intervention.
 Keep rationale concise (at most 600 characters). Prefer one small runnable action.
 Always return commands explicitly. Use [] only for an intentional no-change/stop decision;
-do not describe an action in rationale and omit its command. With no usable channel, investigate
+when no executable follow-up is accepted, supply continuation with the specific condition,
+its real producer, responsible party and next_action after that condition changes. This is an
+event condition, not a timer or permission to resume a stopped task. Do not invent check times.
+Use blocked_resources and rejected reasons: exhausted paths need relevant new original evidence,
+not another renamed research task. Native public reads return document evidence_refs when retained;
+only those exact references may justify a new experiment. Search summaries are not original evidence.
+Write rationale and continuation in the project's user-facing language.
+Do not describe an executable action in rationale and omit its command. With no usable channel, investigate
 a reachable venue before preparing copy for an unspecified distribution action.
 question_type names the uncertainty, not the action medium: identifying who needs the product
 is audience; finding a delivery surface for an understood audience is distribution.
@@ -108,6 +115,14 @@ def build_context(aid, trigger_refs=None):
         contract = agent["onboarding_state"].get("operating_contract", {})
         experiments = all_rows(c, """SELECT id,revision,state,specification,conclusion
             FROM lead.growth_experiments ORDER BY updated_at DESC LIMIT 12""")
+        blocked = all_rows(c, """SELECT id,type,result#>'{runtime,recovery}' recovery,
+            result#>'{runtime,failure_scope}' failure_scope FROM lead.tasks
+            WHERE result#>>'{runtime,recovery,status}'='blocked'
+            ORDER BY completed_at DESC,id DESC LIMIT 8""")
+        for item in blocked:
+            item['recovery'] = {key:value for key,value in (item.get('recovery') or {}).items() if key in (
+                'status','reason','error_code','resource','probes','attempts','probes_stopped','paid_probes_stopped',
+                'next_check_at','condition_revision','failure_condition')}
         work = all_rows(c, """SELECT id,type,state,experiment_id,input->'spec' spec,result->'output' output,
             result->'runtime'->'wait' wait FROM lead.tasks WHERE type LIKE 'growth.%%'
             AND type<>'growth.decision' ORDER BY (id=ANY(%s::uuid[])) DESC,created_at DESC LIMIT 24""",(task_refs,))
@@ -166,6 +181,7 @@ def build_context(aid, trigger_refs=None):
     context = {
         "prompt_version": PROMPT_VERSION, "now": utcnow().isoformat(), "agent_id": str(aid),
         "goal": goal, "product": business or {}, "experiments": experiments, "work": work,
+        "blocked_resources": blocked,
         "accounts": accounts, "targets": targets, "capabilities": capabilities,
         "measurement": {"state": "configured" if events else "missing", "definitions": events},
         "outcomes": context_outcomes,
@@ -268,9 +284,23 @@ def decision_context(aid,task_id,claim,triggers):
     return context
 
 
+def decision_outcome(proposal, accepted, rejected, pending_work=None):
+    continuation = proposal.continuation.model_dump(mode='json') if proposal.continuation else None
+    status = ('partial' if accepted else 'blocked') if rejected else (
+        'accepted' if accepted else 'waiting_for_change' if continuation else 'needs_follow_up')
+    if pending_work is False:
+        if not continuation:
+            status = 'needs_follow_up'
+        elif not rejected:
+            status = 'waiting_for_change'
+    return {'status':status, 'rationale':proposal.rationale, 'continuation':continuation}
+
+
 async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=None):
     context = await asyncio.to_thread(decision_context,aid,decision_task_id,decision_claim,trigger_refs)
     accepted, rejected, repair = [], [], None
+    last_valid = None
+    pending_work = None
     valid_proposal = False
     for attempt in range(2):
         try:
@@ -279,20 +309,29 @@ async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=
             proposal = DecisionProposal.model_validate(proposal)
             if proposal.context_key != context["context_key"]:
                 raise ValueError("invalid_proposal_context")
+            if repair and repair.get('continuation_only') and proposal.commands:
+                raise ValueError('accepted_work_is_immutable_return_continuation_only')
             if repair and repair.get("groups") and any(command_group(cmd)
                     not in repair["groups"] for cmd in proposal.commands):
                 raise ValueError("repair_must_only_change_rejected_groups")
             valid_proposal = True
+            last_valid = proposal
             result = await asyncio.to_thread(accept_commands, aid, proposal, decision_task_id,
                 business_snapshot={"id":str(context["product"].get("id")) if context["product"] else None},decision_claim=decision_claim)
             if result.get("discarded"):
                 return {**result,"prompt_version":PROMPT_VERSION}
             accepted.extend(result["accepted"])
             rejected = result["rejected"]
+            pending_work = result.get('pending_work')
             if not rejected:
-                return {**result,"accepted":accepted,"prompt_version":PROMPT_VERSION}
+                if pending_work is False and proposal.continuation is None:
+                    repair = {'continuation_only':True,'accepted':accepted,
+                        'instruction':'Accepted changes are final. No executable work remains. Return commands=[] and a continuation with the exact missing condition, real producer, responsibility and next action. Do not replay accepted groups or create work just to avoid stopping.'}
+                    continue
+                return {**result,"accepted":accepted,"prompt_version":PROMPT_VERSION,
+                        **decision_outcome(proposal,accepted,rejected,pending_work)}
             repair = {"groups":[item["group"] for item in rejected],"errors":rejected,"accepted":accepted,
-                      "instruction":"Each rejected group was rolled back atomically. Resend the complete corrected rejected group, including experiment.create if it creates a new experiment. Accepted receipts are authoritative and immutable; never recreate accepted groups or invent dependency IDs."}
+                      "instruction":"Each rejected group was rolled back atomically. Resend the complete corrected rejected group, including experiment.create if it creates a new experiment. Accepted receipts are authoritative and immutable; never recreate accepted groups or invent dependency IDs. If no valid repair is feasible, return commands=[] and continuation with the specific real condition and next action; do not repeat exhausted paths."}
         except (ValidationError, ValueError) as error:
             repair = {"code":type(error).__name__, "errors":proposal_errors(error),
                 "instruction":"Correct the exact validation errors. Return valid JSON with the supplied context_key, explicit current goal_ref.revision and declared tool schemas."}
@@ -303,5 +342,6 @@ async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=
                 "instruction":"Correct the exact validation errors and matching JSON braces; no undeclared tools. Return the supplied context_key and explicit current goal_ref.revision."}
     if accepted or valid_proposal:
         return {"decision_task_id":decision_task_id,"accepted":accepted,"rejected":rejected,
-                "repair_exhausted":True,"prompt_version":PROMPT_VERSION}
+                "repair_exhausted":True,"prompt_version":PROMPT_VERSION,
+                **decision_outcome(last_valid,accepted,rejected,pending_work)}
     raise ValueError("invalid_proposal")
