@@ -134,6 +134,23 @@ export default function Check(){const [providers,setProviders]=useState({});retu
                 assert not await page.get_by_role("button",name="启用自动化",exact=False).count()
                 await page.get_by_role("button",name="连接另一个账号",exact=True).click()
                 assert json.loads(await page.title())["new_account"] is True
+                data.update(current_learning=[],current_work=[],owner_actions=[],waiting=[{
+                    'id':'stopped-source','title':'调查产品与真实需求','state':'failed',
+                    'wait':{'reason':'recovery_probe_limit','responsibility':'product','check_at':None,
+                        'automatic_checks':'stopped','resume_when':'修复原来源后核验真实条件变化。'}}],
+                    continuation={'status':'blocked','rationale':'原路径没有取得新证据，重复研究已停止。',
+                        'condition':'取得与原问题相关的新原文证据。','next_action':'核对新证据后再选择验证。',
+                        'responsibility':'product'})
+                await page.goto(base+'/growth-check',wait_until='networkidle')
+                await page.get_by_text('当前下一步受阻',exact=True).wait_for()
+                await page.get_by_text('继续条件：取得与原问题相关的新原文证据。',exact=True).wait_for()
+                await page.get_by_text('修复原来源后核验真实条件变化。',exact=True).wait_for()
+                assert not await page.get_by_text('下次检查',exact=False).count()
+                assert len(commands)==1  # Merely reading a blocked state never dispatches work.
+                for width,name in ((1440,'stopped-desktop'),(390,'stopped-narrow')):
+                    await page.set_viewport_size({'width':width,'height':1100})
+                    await page.screenshot(path=str(report_dir/(name+'.png')),full_page=True)
+                    assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth'),name
                 await page.goto(base+"/workflow-guide.html",wait_until="networkidle")
                 for width,name in ((1440,"guide-desktop"),(390,"guide-narrow")):
                     await page.set_viewport_size({"width":width,"height":1100})
@@ -144,7 +161,7 @@ export default function Check(){const [providers,setProviders]=useState({});retu
             finally:
                 await browser.close()
         (report_dir/"report.json").write_text(json.dumps({"ok":True,"fixture":"synthetic-only","external_actions":0,
-            "checks":["parallel_work_visible","owner_wait_local","unknown_outcome","no_period_plans","no_plan_requests","keyboard_dialog_focus","desktop","390px_no_overflow","exact_account_control","independent_new_account","capability_gap_visible","workflow_guide"],
+            "checks":["parallel_work_visible","owner_wait_local","unknown_outcome","no_period_plans","no_plan_requests","keyboard_dialog_focus","desktop","390px_no_overflow","exact_account_control","independent_new_account","capability_gap_visible","stopped_condition_visible","no_fictitious_next_check","blocked_read_dispatches_nothing","workflow_guide"],
             "requests":requests,"commands":commands,"page_errors":errors},ensure_ascii=False,indent=2))
         print(json.dumps({"ok":True,"report":str(report_dir/"report.json")},ensure_ascii=False))
     finally:

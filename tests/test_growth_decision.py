@@ -94,7 +94,9 @@ async def test_structured_repair_receives_exact_validation_error_without_source_
                 DecisionProposal.model_validate_json('{"untrusted_source":"fixture-text",}')
             except ValidationError as error:
                 raise UnexpectedModelBehavior('Exceeded maximum output retries (0)') from error
-        return DecisionProposal(context_key=context['context_key'],rationale='No new action is needed.',commands=[])
+        return DecisionProposal(context_key=context['context_key'],rationale='No new action is needed.',commands=[],
+            continuation={'condition':'New relevant evidence arrives.','producer':'evidence_added',
+                'next_action':'Reassess the original question.'})
     monkeypatch.setattr(agent,'run_model',provider)
     result=await agent.decide(growth_agent)
     assert result['accepted']==[] and len(calls)==2

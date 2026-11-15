@@ -35,7 +35,9 @@ def test_decision_commands_require_explicit_current_goal_revision():
 def test_missing_commands_cannot_silently_become_an_intentional_noop():
     with pytest.raises(ValidationError):
         DecisionProposal(context_key='captured',rationale='Run a bounded research action.')
-    assert DecisionProposal(context_key='captured',rationale='No new evidence requires work.',commands=[]).commands==[]
+    assert DecisionProposal(context_key='captured',rationale='No new evidence requires work.',commands=[],
+        continuation={'condition':'New relevant evidence arrives.','producer':'evidence_added',
+            'next_action':'Reassess the original question.'}).commands==[]
 
 
 def test_missing_wake_is_rejected():

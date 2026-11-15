@@ -122,10 +122,24 @@ class Command(Contract):
     payload: dict[str, Any]
 
 
+class Continuation(Contract):
+    condition: str = Field(min_length=3, max_length=1000)
+    producer: Literal['evidence_added', 'account_changed', 'objective_changed', 'resource_recovered', 'owner_direction']
+    next_action: str = Field(min_length=3, max_length=1000)
+    responsibility: Literal['owner', 'product', 'platform', 'resource'] = 'product'
+
+
 class DecisionProposal(Contract):
     context_key: str = Field(min_length=1, max_length=200)
     rationale: str = Field(min_length=3, max_length=3000)
     commands: list[Command] = Field(max_length=12)
+    continuation: Continuation | None = None
+
+    @model_validator(mode='after')
+    def no_action_has_condition(self):
+        if not self.commands and self.continuation is None:
+            raise ValueError('continuation_required: no-action decisions need a condition, producer and next action')
+        return self
 
 
 class WorkResult(Contract):

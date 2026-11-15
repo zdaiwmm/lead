@@ -36,6 +36,9 @@ def render_growth(aid):
         recent = all_rows(c,"""SELECT id,type,state,completed_at,result#>'{output,output}' probe_output FROM lead.tasks WHERE type LIKE 'growth.%%'
             AND type<>'growth.decision' AND state IN ('succeeded','failed','canceled')
             ORDER BY completed_at DESC,id DESC LIMIT 6""")
+        decision = one(c,"""SELECT completed_at,result#>'{output,output}' output FROM lead.tasks
+            WHERE type='growth.decision' AND state IN ('succeeded','failed')
+            ORDER BY completed_at DESC,id DESC LIMIT 1""")
     for item in work+recent:
         item["title"] = LABELS.get(item["type"].removeprefix("growth."),"推进工作")
         if item["type"] == "growth.recover":
@@ -48,15 +51,34 @@ def render_growth(aid):
             item.pop("probe_output", None)
         episode = item.get("recovery")
         if episode and episode.get("status")=="blocked":
+            stopped = bool(episode.get('probes_stopped'))
             item["wait"]={"reason":episode.get("reason") or "recovery_exhausted",
-                "responsibility":"product","check_at":episode.get("next_check_at"),
-                "escalation":"产品正在等待原能力修复；其他独立工作继续。"}
+                "responsibility":"product","check_at":None if stopped else episode.get("next_check_at"),
+                "automatic_checks":"stopped" if stopped else "scheduled",
+                "resume_when":"修复原来源或访问能力后验证真实条件变化；已结束的任务保持原记录。" if stopped else None,
+                "escalation":"本轮能力检查已停止，需要处理原阻塞；其他有依据的独立工作可继续。" if stopped
+                    else "产品正在等待原能力修复；其他独立工作继续。"}
     waits = [item for item in work if item.get("wait")]
+    output = (decision or {}).get('output') or {}
+    rejected = output.get('rejected') or []
+    continuation = {'status':output.get('status') or ('blocked' if rejected and not output.get('accepted') else 'unknown'),
+        'rationale':output.get('rationale'), 'condition':(output.get('continuation') or {}).get('condition'),
+        'producer':(output.get('continuation') or {}).get('producer'),
+        'next_action':(output.get('continuation') or {}).get('next_action'),
+        'responsibility':(output.get('continuation') or {}).get('responsibility','product'),
+        'rejected_reasons':list(dict.fromkeys(item.get('reason') for item in rejected if item.get('reason'))),
+        'decided_at':(decision or {}).get('completed_at')}
+    if continuation['status']=='unknown' and any(item['wait'].get('automatic_checks')=='stopped' for item in waits):
+        continuation.update(status='blocked', condition='原来源或访问能力发生可验证的变化。',
+            next_action='处理并核验原阻塞，再根据新证据判断可行路径；不重置旧恢复计数。')
+    if 'no_progress_path_exhausted' in continuation['rejected_reasons'] and not continuation['condition']:
+        continuation.update(condition='取得与原问题相关、尚未使用的新原文证据。',
+            next_action='核对新证据是否支持可行的验证，再决定后续工作；不重复已耗尽的路径。')
     return {"agent_id":str(aid),"objective":{"revision":objective_revision(agent),
         "description":contract.get("objective") or "让真正需要产品的人获得核心价值", "event_ref":contract.get("event_ref")},
         "current_work":[item for item in work if not item.get("wait")],"current_learning":experiments,
         "results":summarize(aid),"waiting":waits,"owner_actions":[item for item in waits if item["wait"].get("responsibility")=="owner"],
-        "recent_work":recent,"as_of":utcnow().isoformat()}
+        "recent_work":recent,"continuation":continuation,"as_of":utcnow().isoformat()}
 
 
 @router.get("/api/agents/{aid}/growth")

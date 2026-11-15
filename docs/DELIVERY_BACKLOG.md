@@ -1,5 +1,7 @@
 # lead 开发工作项和验收清单
 
+2026-11-15 Chamber 持续运营修复候选：[同一运行时需求记录](requirements/20261112-autonomous-growth-runtime.md#2026-11-15-chamber-持续运营阻塞本次修复与验证尚未发布)。只读核实线上仍为3fb；最后三次判断 accepted0/rejected1（无进展路径已耗尽），共用Codex继承有效但尚无新请求。独立分支补原生公开搜索、真实原文引用登记、明确停止条件与恢复状态；312项定向覆盖经旧样例补正通过，43项发布范围契约与静态/类型/凭据及桌面/390px检查通过，专项审查增量已处理。保留失败/预算/账号限制，无生产写入或社媒发送。待精确候选PR及本次合并发布授权；旧rollout不重跑。
+
 2026-11-15 共用Codex已实际启用：[第23.18节](requirements/20261112-unified-browser-research-memory.md#2318-mijiu-server-执行端2026-11-14本次授权已完成)。实际App、Telegram/Reddit执行器与连接器均为 `3fb46ece212d4da88b9609091af4199bca20eb53`（PR81）；精确CI `43632519797/2` 完整成功，2848 passed、1 skipped、102 subtests，63分22秒，同轮原Home/Tool与正式工具安装已独立回读。原受保护应用请求 `7793720681` 于21:07:48Z成功，schema0035沿用92轮已完成备份恢复及一次升级；最终维护hold0、原调度和入口恢复。旧404过期登记锁内对账撤销、独立回读后新登记，目录umask导致的启动前失败经原件字节/公开目录权限修正和真实运行用户回读解决，未触碰私有认证或WAL。socket/worker enabled+active，broker独立UID且active；真实ChatGPT/Sol/medium ready，工作室默认managed_node。当前工作室6个项目/2个活跃项目，2个均继承默认且无单独覆盖，2项目grant+1独立studio grant已核；新建Agent自动复用服务器，不再逐项目配对。验收不追加付费模型turn或社媒内容，旧任务/device/thread不迁移重发，旧费用/unknown不改写；本次文档回填不触发应用部署。
 
 2026-11-15 共用执行网页转发修正：92cfb03精确CI43623665678/1完整成功，2843项通过、102 subtests；原请求7792289820已成功完成App、0035及两渠道执行器，独立回读和维护恢复通过。随后共用Node登记被Next返回404，服务端只读确认仍pending、凭据未产生，默认未启用。根因为next.config仅转发v1，补精确v2并用真实Next与合成HTTP验证POST/鉴权头/请求体/查询串/409及未知协议404；Home仅为该精确blob增加已落地0035完整catalog与同轮原包核验，不重跑DDL或伪造cutover。待本修正精确main完整CI与原包发布后继续已批准启用；本人官方授权保留，无旧任务重放或社媒验收。

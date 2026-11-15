@@ -7,7 +7,7 @@ import httpx
 from .local_executor_browser import request_context
 
 
-async def call(device, request, name, arguments):
+async def call(device, request, name, arguments, *, revalidate=None):
     payload=request.get('payload') or {}
     context=payload.get('tool_context') or {}
     if context.get('kind') == 'model':
@@ -39,8 +39,12 @@ async def call(device, request, name, arguments):
             # The existing community researcher reads source pages, not Telegram.
             if (urlsplit(url).hostname or '').lower() in ('t.me','telegram.me','web.telegram.org','telegram.org'):
                 raise ValueError('community_source_access_unavailable')
+        growth_source = (revalidate is not None and request.get('task_id')
+                         and await asyncio.to_thread(_growth_public_read, revalidate))
         observed=await fetch_product(url,external_links=True)
         observed['producer']='codex-public-read'
+        if growth_source:
+            observed = await asyncio.to_thread(_growth_public_read, revalidate, observed)
         if context.get('browser_run_id'):
             observed=await asyncio.to_thread(_record_public_read,request,context,observed)
         # fetch_product enforces the existing public-network/redirect boundary.
@@ -63,6 +67,56 @@ async def call(device, request, name, arguments):
             failure={'code':'browser_tool_unavailable'}
         return {'isError':True,'content':[{'type':'text','text':json.dumps(failure,ensure_ascii=False)}]}
     return response.json()
+
+
+def _search_index(url):
+    from urllib.parse import urlsplit
+
+    from .operating_work import SITE_SEARCH
+    parsed = urlsplit(url)
+    host, path = (parsed.hostname or '').lower().removeprefix('www.'), parsed.path.rstrip('/')
+    if host == 'duckduckgo.com' or host.endswith('.duckduckgo.com'):
+        return path in {'', '/html', '/lite'}
+    if (host.startswith('google.') or host in {'bing.com', 'search.yahoo.com', 'search.brave.com'}):
+        return path in {'/search', '/web'}
+    return any(host == domain and path == urlsplit(prefix).path.rstrip('/')
+               for domain, prefix, _ in SITE_SEARCH.values())
+
+
+def _growth_public_read(revalidate, observed=None):
+    """Retain only a current growth Task's real source, under the original guard."""
+    from .admin_settings import effective
+    from .db import one, require_agent
+    from .growth.store import enabled
+    from .growth.tools import _remember, source_failure
+
+    with revalidate() as (c, request):
+        aid = str(request['agent_id'])
+        task = one(c, 'SELECT type,state FROM lead.tasks WHERE id=%s', (request['task_id'],))
+        if not task or not task['type'].startswith('growth.'):
+            return False if observed is None else observed
+        context = request['payload'].get('tool_context') or {}
+        agent = require_agent(c, aid)
+        if (context.get('kind') != 'model' or str(context.get('task_id')) != str(request['task_id'])
+                or task['state'] != 'running' or agent['desired_state'] in {'paused','archived'} or not enabled(agent)):
+            raise ValueError('executor_scope_changed')
+        settings, _ = effective(c, 'models', aid)
+        tools = settings['tools']
+        if (not tools.get('public_web')
+                or context.get('mode') == 'community_discovery' and not tools.get('community_research')
+                or context.get('requires_advanced_research') and not tools.get('advanced_research')):
+            raise ValueError('executor_public_research_disabled')
+        if observed is None:
+            return True
+        reason = (source_failure(observed) or ('javascript_required' if observed.get('requires_javascript') else None)
+                  or ('search_index' if _search_index(observed['url']) else None))
+        if reason:
+            return {**observed, 'source_state': reason, 'knowledge_progress': False}
+        reference, added = _remember(aid, observed, connection=c)
+        if not reference:
+            return {**observed, 'source_state': 'empty', 'knowledge_progress': False}
+        return {**observed, 'document_id': str(reference.id), 'evidence_ref': reference.model_dump(mode='json'),
+                'knowledge_progress': added, 'business_progress': False, 'trust': 'observed_source_claims'}
 
 
 def _business_read(request, name, reference):

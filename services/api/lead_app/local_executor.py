@@ -11,7 +11,7 @@ import re
 import secrets
 import shlex
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -636,10 +636,12 @@ def device_events(c, device, epoch, entries, *, source='personal_v1', grant_id=N
     return {"accepted": accepted, "epoch": epoch}
 
 
-def tool_request(c, device, request_id, name, *, source='personal_v1', grant_id=None, grant_generation=None):
+def tool_request(c, device, request_id, name, *, source='personal_v1', grant_id=None, grant_generation=None, lock=False):
     """Validate the original tool/Task fence after transport identity validation."""
     _source_parameters(source, grant_id, grant_generation)
-    request = _request(c, request_id, device)
+    if lock:
+        require_agent(c, str(device['agent_id']), True)
+    request = _request(c, request_id, device, lock=lock)
     _require_request_source(request, source, grant_id, grant_generation)
     if request['state'] in TERMINAL:
         raise ValueError('executor_request_terminal')
@@ -649,8 +651,23 @@ def tool_request(c, device, request_id, name, *, source='personal_v1', grant_id=
     if request['scope'].get('canceled') or request['scope'].get('control_version') != agent['control_version']:
         raise ValueError('executor_scope_changed')
     if request['task_id']:
-        task = one(c, 'SELECT * FROM lead.tasks WHERE id=%s', (request['task_id'],))
+        if lock:
+            scope_task = one(c, 'SELECT type,input FROM lead.tasks WHERE id=%s', (request['task_id'],))
+            account_id = (scope_task or {}).get('input', {}).get('spec', {}).get('account_id')
+            if scope_task and scope_task['type'].startswith('growth.') and account_id:
+                account = one(c, 'SELECT state,binding_version FROM lead.social_accounts WHERE id=%s FOR SHARE', (account_id,))
+                # The canonical intent writer locks this account first. Its
+                # read-only intent table deliberately grants no row-lock write privilege.
+                intent = one(c, 'SELECT desired FROM lead.account_operating_intents WHERE account_id=%s', (account_id,))
+                if (not account or account['state'] != 'connected' or not intent or intent['desired'] != 'running'
+                        or account['binding_version'] != scope_task['input'].get('binding_version')):
+                    raise ValueError('executor_scope_changed')
+        task = one(c, 'SELECT * FROM lead.tasks WHERE id=%s' + (' FOR UPDATE' if lock else ''), (request['task_id'],))
         runtime = (task.get('result') or {}).get('runtime', {}) if task else {}
+        if lock and task and task['type'].startswith('growth.'):
+            lease_until = runtime.get('lease_until')
+            if not lease_until or datetime.fromisoformat(lease_until) <= _now():
+                raise ValueError('executor_scope_changed')
         if (not task or task['state'] not in {'running', 'reconciling'}
                 or task['input'].get('task_generation', 1) != request['scope'].get('task_generation')
                 or runtime.get('attempt_token') != request['scope'].get('attempt_token')):
@@ -667,4 +684,14 @@ async def call_tool(bearer, epoch, request_id, name, arguments):
         # The adapter independently revalidates the original action/connection
         # at its actual barrier; do not keep a DB lock across browser/network IO.
         from .local_executor_tools import call
+        if (name == 'lead_public_read' and request.get('task_id')
+                and request['payload'].get('tool_context', {}).get('kind') == 'model'):
+            @contextmanager
+            def revalidate():
+                with tenant_scope(claims['tenant_id'], None), tx(claims['agent_id']) as c:
+                    require_agent(c, claims['agent_id'], True)
+                    current_device = _device(c, claims, bearer, epoch)
+                    current = tool_request(c, current_device, request_id, name, lock=True)
+                    yield c, current
+            return await call(device, request, name, arguments, revalidate=revalidate)
         return await call(device, request, name, arguments)
