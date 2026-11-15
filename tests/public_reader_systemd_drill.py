@@ -61,7 +61,7 @@ def diagnostic_readback(hook, sha, phase):
 
 
 def diagnostic_units(hook):
-    fields = ('MainPID', 'ActiveState', 'SubState', 'Result', 'ExecMainCode', 'ExecMainStatus',
+    fields = ('MainPID', 'UnitFileState', 'ActiveState', 'SubState', 'Result', 'ExecMainCode', 'ExecMainStatus',
               'User', 'Group', 'DynamicUser', 'RootDirectory', 'InvocationID')
     units = []
     for name in (hook.PUBLIC_READER_SERVICE, hook.PUBLIC_READER_SOCKET):
@@ -122,8 +122,9 @@ def main():
     protected = [Path('/var/lib/lead-public-reader'), hook.PUBLIC_READER_RUNTIME]
     assert all(not path.exists() and not path.is_symlink() for path in protected)
     for name in units:
-        assert not Path('/run/systemd/system', name).exists()
-        assert not Path('/run/systemd/system', name + '.d').exists()
+        for unit_root in (Path('/run/systemd/system'), hook.PUBLIC_READER_SYSTEMD):
+            assert not (unit_root / name).exists()
+            assert not (unit_root / (name + '.d')).exists()
     # This globally classified address belongs only to lo on this disposable
     # machine. The test never sends a packet to its actual Internet owner.
     address = '93.184.216.34'
@@ -154,7 +155,8 @@ def main():
             config.mkdir(mode=0o700)
             hook.EXECUTOR_REGISTRY = config / 'executors.json'
             hook.PUBLIC_READER_PLAN = config / 'public-reader-provision.json'
-            hook.PUBLIC_READER_SYSTEMD = Path('/run/systemd/system')
+            # Install disposable units through the same persistent directory as
+            # production, so enablement is checked without a runtime-unit override.
             # Only artifact promotion/DB-backed application selection are replaced
             # by the fixture. All unit writes, journals, roots, actual process
             # mounts, Unix peer credentials and rollback below are real.
@@ -170,7 +172,7 @@ def main():
             hook.run = fixture_run
             net = ('[Service]\nType=simple\nPrivateNetwork=yes\n'
                    'ExecStart=/usr/bin/sleep infinity\n')
-            Path('/run/systemd/system/lead-home-net.service').write_text(net)
+            Path('/etc/systemd/system/lead-home-net.service').write_text(net)
             consumer_root = root / 'consumer-root'
             consumer_root.mkdir(mode=0o755)
             base = ('[Unit]\nRequires=lead-home-net.service\nAfter=lead-home-net.service\n'
@@ -181,15 +183,15 @@ def main():
                     'BindReadOnlyPaths=/usr:/usr\nBindReadOnlyPaths=-/lib:/lib -/lib64:/lib64\n'
                     'ExecStart=/usr/bin/sleep infinity\n')
             for role in hook.PUBLIC_READER_CONSUMERS:
-                Path('/run/systemd/system', hook.unit(role)).write_text(base)
+                Path('/etc/systemd/system', hook.unit(role)).write_text(base)
             # Reproduce the actual worker's later reset and require the new
             # fixed append to survive it, while an original mount stays intact.
-            worker_dropin = Path('/run/systemd/system/lead-home-worker.service.d')
+            worker_dropin = Path('/etc/systemd/system/lead-home-worker.service.d')
             worker_dropin.mkdir()
             worker_reset = worker_dropin / 'zzzz-lead-executor.conf'
             worker_reset.write_text('[Service]\nBindReadOnlyPaths=\n'
                                     'BindReadOnlyPaths=/usr:/usr -/lib:/lib -/lib64:/lib64\n')
-            fence = Path('/run/systemd/system/lead-public-reader-drill-fence.service')
+            fence = Path('/etc/systemd/system/lead-public-reader-drill-fence.service')
             fence.write_text('[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/true\n')
             command('systemctl', 'daemon-reload')
             command('systemctl', 'start', 'lead-home-api.service', 'lead-home-worker.service')
@@ -341,8 +343,8 @@ print('private-network-direct-denied-unix-read-ok')
         subprocess.run(['systemctl', 'disable', '--now', hook.PUBLIC_READER_SOCKET], capture_output=True)
         subprocess.run(['systemctl', 'stop', *units], capture_output=True)
         for name in units:
-            Path('/run/systemd/system', name).unlink(missing_ok=True)
-            folder = Path('/run/systemd/system', name + '.d')
+            Path('/etc/systemd/system', name).unlink(missing_ok=True)
+            folder = Path('/etc/systemd/system', name + '.d')
             if folder.exists():
                 shutil.rmtree(folder)
         for path in protected:
