@@ -9,7 +9,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-MIRROR = "https://mirrors.edge.kernel.org/ubuntu"
+MIRROR = "https://archive.ubuntu.com/ubuntu"
 SUITES = ("noble", "noble-updates", "noble-security", "noble-backports")
 MIRRORS = Path("/etc/apt/apt-mirrors.txt")
 KEYRING = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"

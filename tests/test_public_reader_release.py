@@ -3,6 +3,8 @@
 import importlib.util
 import io
 import json
+import stat
+import subprocess
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -566,3 +568,153 @@ def test_direct_deploy_refuses_consumer_drift_before_application_switch(provisio
     assert activations == []
     if not during_backup:
         assert not any(args[:2] == ('systemctl', 'start') for args in p.commands)
+
+
+@pytest.fixture
+def masked_root(hook, tmp_path, monkeypatch):
+    proc = tmp_path / 'proc/123'
+    (proc / 'root/root').mkdir(parents=True)
+    source = tmp_path / 'inaccessible/dir'
+    source.mkdir(parents=True)
+    monkeypatch.setattr(hook, 'PUBLIC_READER_INACCESSIBLE', source, raising=False)
+    status = ('Uid:\t62001 62001 62001 62001\nGid:\t62001 62001 62001 62001\nGroups:\t62001\n'
+              'CapInh:\t0000000000000000\nCapPrm:\t0000000000000000\n'
+              'CapEff:\t0000000000000000\nCapBnd:\t0000000000000000\n'
+              'CapAmb:\t0000000000000000\nNoNewPrivs:\t1\n')
+    (proc / 'status').write_text(status)
+    (proc / 'mountinfo').write_text('20 10 0:10 /systemd/inaccessible/dir /root ro,nosuid - tmpfs tmpfs rw\n')
+    node = SimpleNamespace(st_mode=stat.S_IFDIR, st_uid=0, st_gid=0, st_dev=10, st_ino=100)
+    target = SimpleNamespace(**vars(node))
+    real_lstat = Path.lstat
+    def lstat(path):
+        if path == source:
+            return node
+        if path == proc / 'root/root':
+            return target
+        return real_lstat(path)
+    monkeypatch.setattr(Path, 'lstat', lstat)
+    monkeypatch.setattr(hook, 'executor_directory', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(hook, 'process', lambda _role: proc)
+    properties = {'ProtectHome': 'yes', 'InvocationID': 'a' * 32}
+    monkeypatch.setattr(hook, 'property_of', lambda _role, prop: properties[prop])
+    probes = []
+    monkeypatch.setattr(hook, 'public_reader_root_probe', lambda *args: probes.append(args), raising=False)
+    return SimpleNamespace(h=hook, proc=proc, node=node, target=target, probes=probes,
+                           properties=properties, plan={'client_uid': 995, 'client_gid': 983})
+
+
+def test_systemd_fixed_inaccessible_root_is_accepted(masked_root):
+    p = masked_root
+    assert hasattr(p.h, 'public_reader_masked_root'), 'fixed masked-root verification is missing'
+    p.h.public_reader_masked_root(p.proc, p.plan)
+    assert len(p.probes) == 1 and p.probes[0][:3] == (p.proc, 62001, 62001)
+
+
+@pytest.mark.parametrize('drift', ('ordinary-empty', 'other-inode', 'symlink', 'source-mode', 'target-mode',
+                                  'missing-mount', 'writable', 'nested', 'protection', 'capabilities'))
+def test_root_exception_rejects_ordinary_or_unproven_directory(masked_root, drift):
+    p = masked_root
+    assert hasattr(p.h, 'public_reader_masked_root'), 'fixed masked-root verification is missing'
+    if drift == 'ordinary-empty':
+        p.target.st_ino += 1
+        (p.proc / 'mountinfo').write_text('')
+    elif drift == 'other-inode':
+        p.target.st_ino += 1
+    elif drift == 'symlink':
+        p.target.st_mode = stat.S_IFLNK
+    elif drift == 'source-mode':
+        p.node.st_mode |= 0o755
+    elif drift == 'target-mode':
+        p.target.st_mode |= 0o700
+    elif drift == 'missing-mount':
+        (p.proc / 'mountinfo').write_text('')
+    elif drift == 'writable':
+        path = p.proc / 'mountinfo'
+        path.write_text(path.read_text().replace('ro,nosuid', 'rw,nosuid'))
+    elif drift == 'nested':
+        path = p.proc / 'mountinfo'
+        path.write_text(path.read_text() + '21 20 1:1 /secret /root/secret ro - ext4 device ro\n')
+    elif drift == 'protection':
+        p.properties['ProtectHome'] = 'read-only'
+    else:
+        path = p.proc / 'status'
+        path.write_text(path.read_text().replace('CapEff:\t0000000000000000', 'CapEff:\t0000000000000001'))
+    with pytest.raises(p.h.Refused):
+        p.h.public_reader_masked_root(p.proc, p.plan)
+    assert p.probes == []
+
+
+def test_root_proof_rejects_service_invocation_change(masked_root, monkeypatch):
+    p = masked_root
+    assert hasattr(p.h, 'public_reader_masked_root'), 'fixed masked-root verification is missing'
+    def probe(*args):
+        p.properties['InvocationID'] = 'b' * 32
+    monkeypatch.setattr(p.h, 'public_reader_root_probe', probe)
+    with pytest.raises(p.h.Refused, match='service changed'):
+        p.h.public_reader_masked_root(p.proc, p.plan)
+
+
+@pytest.mark.parametrize('path', ('srv', 'home', 'run/lead-home', 'run/credentials', 'etc/lead-home-release'))
+def test_other_private_paths_still_require_absence(masked_root, path):
+    p = masked_root
+    assert hasattr(p.h, 'public_reader_private_paths'), 'private path categories are missing'
+    (p.proc / 'root' / path).mkdir(parents=True)
+    with pytest.raises(p.h.Refused, match='private .* visible'):
+        p.h.public_reader_private_paths(p.proc, p.plan)
+
+
+def test_root_probe_has_empty_environment_and_fixed_no_output_contract(hook, monkeypatch):
+    assert hasattr(hook, 'public_reader_root_probe'), 'service-root EACCES probe is missing'
+    calls = []
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, b'root-inaccessible\n', b'')
+    monkeypatch.setattr(hook.subprocess, 'run', run)
+    hook.public_reader_root_probe(Path('/proc/123'), 62001, 62001, (10, 100))
+    args, options = calls[0]
+    assert args[:5] == ['/usr/bin/python3', '-I', '-S', '-B', '-c']
+    assert options['env'] == {} and options['timeout'] <= 10 and options['close_fds'] is True
+    assert options['capture_output'] is True
+    assert options.get('stdin') == subprocess.DEVNULL
+
+
+@pytest.mark.parametrize('returncode,stdout', ((1, b''), (0, b''), (0, b'wrong\n'), (0, b'root-inaccessible\nextra')))
+def test_root_probe_rejects_unknown_or_non_eacces_result(hook, monkeypatch, returncode, stdout):
+    assert hasattr(hook, 'public_reader_root_probe'), 'service-root EACCES probe is missing'
+    monkeypatch.setattr(hook.subprocess, 'run', lambda args, **kwargs:
+        subprocess.CompletedProcess(args, returncode, stdout, b'ignored private failure'))
+    with pytest.raises(hook.Refused, match='probe failed'):
+        hook.public_reader_root_probe(Path('/proc/123'), 62001, 62001, (10, 100))
+
+
+def test_root_identity_proof_ignores_unrelated_process_counters(masked_root, monkeypatch):
+    p = masked_root
+    def probe(*args):
+        path = p.proc / 'status'
+        path.write_text(path.read_text() + 'voluntary_ctxt_switches:\t100\n')
+    monkeypatch.setattr(p.h, 'public_reader_root_probe', probe)
+    p.h.public_reader_masked_root(p.proc, p.plan)
+
+
+@pytest.mark.parametrize(('role', 'expected'), [
+    ('api', 'lead-home-api.service'),
+    ('lead-public-reader.service', 'lead-public-reader.service'),
+    ('lead-public-reader.socket', 'lead-public-reader.socket'),
+])
+def test_status_readback_queries_the_actual_unit(hook, monkeypatch, role, expected):
+    calls = []
+    monkeypatch.setattr(hook, 'run', lambda *args: calls.append(args) or 'active')
+    assert hook.property_of(role, 'ActiveState') == 'active'
+    assert calls == [('systemctl', 'show', expected, '-p', 'ActiveState', '--value')]
+
+
+def test_systemd_optional_bind_source_is_a_modifier_not_a_relative_path(hook):
+    assert hook.public_reader_bindings('/usr:/usr:rbind -/lib:/lib:rbind -/lib64:/lib64:rbind') == {
+        ('/usr', '/usr'), ('/lib', '/lib'), ('/lib64', '/lib64')}
+
+
+@pytest.mark.parametrize('binding', ('--/lib:/lib:rbind', '-lib:/lib', '-/usr/../lib:/lib',
+                                     '/lib:-/lib', '/lib:/lib:unknown', '/lib:/lib:'))
+def test_optional_bind_modifier_never_bypasses_canonical_path_guard(hook, binding):
+    with pytest.raises(hook.Refused):
+        hook.public_reader_bindings(binding)

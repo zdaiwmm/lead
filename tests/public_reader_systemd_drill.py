@@ -4,6 +4,7 @@ Uses the exact service/template/fetch sources with a local synthetic public-IP
 HTTP fixture. No model, business database, account, pairing or auth file is used.
 """
 
+import ast
 import contextlib
 import http.server
 import importlib.util
@@ -23,10 +24,102 @@ def command(*args, timeout=30):
     return subprocess.check_output(args, text=True, timeout=timeout).strip()
 
 
+def diagnostic_failure(hook, error):
+    result = {'exception': type(error).__name__}
+    if isinstance(error, hook.Refused):
+        # Only literal guards in this exact trusted tool are printable. Never
+        # expose arbitrary exception text, command arguments, stdout or stderr.
+        guards = {'lead-public-reader.service process unavailable'}
+        try:
+            tree = ast.parse(Path(hook.__file__).read_bytes())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    index = {'require': 1, 'Refused': 0}.get(node.func.id)
+                    if index is not None and len(node.args) > index:
+                        value = node.args[index]
+                        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                            guards.add(value.value)
+        except (OSError, SyntaxError):
+            pass
+        result['guard'] = str(error) if str(error) in guards else 'unclassified_refusal'
+    elif isinstance(error, subprocess.CalledProcessError):
+        result['returncode'] = error.returncode
+    elif isinstance(error, OSError):
+        result['errno'] = error.errno
+    return result
+
+
+def diagnostic_readback(hook, sha, phase):
+    try:
+        hook.verify_public_reader(sha, consumers=False)
+    except Exception as error:
+        print(json.dumps({'diagnostic': 'direct_reader_readback', 'phase': phase,
+                          'status': 'failed', **diagnostic_failure(hook, error)}), file=sys.stderr)
+        raise
+    print(json.dumps({'diagnostic': 'direct_reader_readback', 'phase': phase,
+                      'status': 'passed'}), file=sys.stderr)
+
+
+def diagnostic_units(hook):
+    fields = ('MainPID', 'UnitFileState', 'ActiveState', 'SubState', 'Result', 'ExecMainCode', 'ExecMainStatus',
+              'User', 'Group', 'DynamicUser', 'RootDirectory', 'InvocationID')
+    units = []
+    for name in (hook.PUBLIC_READER_SERVICE, hook.PUBLIC_READER_SOCKET):
+        try:
+            result = subprocess.run(['systemctl', 'show', name,
+                *(argument for field in fields for argument in ('-p', field))],
+                capture_output=True, text=True, timeout=10, check=False)
+            properties = dict(line.split('=', 1) for line in result.stdout.splitlines()
+                              if '=' in line and line.split('=', 1)[0] in fields)
+            units.append({'unit': name, 'returncode': result.returncode, 'properties': properties})
+        except (OSError, subprocess.SubprocessError) as error:
+            units.append({'unit': name, **diagnostic_failure(hook, error)})
+    # Socket units legitimately omit service-only properties; keep their actual
+    # supported dictionary instead of inventing a MainPID or execution result.
+    print(json.dumps({'reader_units': units}), file=sys.stderr)
+
+
+def diagnostic_private_paths(hook):
+    try:
+        proc = hook.process(hook.PUBLIC_READER_SERVICE)
+        paths = []
+        for name in ('srv', 'home', 'root', 'run/lead-home', 'run/credentials', 'etc/lead-home-release'):
+            view = proc / 'root' / name
+            entry = {'path': '/' + name, 'exists': view.exists()}
+            if entry['exists']:
+                info = view.lstat()
+                entry.update(uid=info.st_uid, gid=info.st_gid, mode=oct(info.st_mode & 0o777))
+                if name == 'root':
+                    entry['fixed_inaccessible_inode'] = view.samefile('/run/systemd/inaccessible/dir')
+            paths.append(entry)
+        print(json.dumps({'private_path_metadata': paths,
+                          'ProtectHome': hook.property_of(hook.PUBLIC_READER_SERVICE, 'ProtectHome')}), file=sys.stderr)
+    except Exception as error:
+        print(json.dumps({'private_path_metadata': diagnostic_failure(hook, error)}), file=sys.stderr)
+
+
+@contextlib.contextmanager
+def diagnostic_scope(hook, sha):
+    try:
+        yield
+    except Exception as original:
+        print(json.dumps({'diagnostic': 'drill_failure', **diagnostic_failure(hook, original)}), file=sys.stderr)
+        diagnostic_units(hook)
+        diagnostic_private_paths(hook)
+        try:
+            diagnostic_readback(hook, sha, 'failure-before-cleanup')
+        except Exception:
+            # The diagnostic failure is recorded above. Preserve and rethrow the
+            # original failing operation; a later passing readback cannot fix it.
+            pass
+        raise
+
+
 def main():
     if (os.geteuid() or sys.platform != 'linux' or os.environ.get('LEAD_DISPOSABLE_RUNNER') != '1'
             or Path('/srv/lead-prod-vault').exists()):
         raise SystemExit('disposable Linux systemd runtime required')
+    print(json.dumps({'systemd_version': command('systemctl', '--version').splitlines()[0]}))
     repo = Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location('reader_release', repo / 'scripts/home_systemd_release.py')
     hook = importlib.util.module_from_spec(spec)
@@ -49,8 +142,9 @@ def main():
     protected = [Path('/var/lib/lead-public-reader'), hook.PUBLIC_READER_RUNTIME]
     assert all(not path.exists() and not path.is_symlink() for path in protected)
     for name in units:
-        assert not Path('/run/systemd/system', name).exists()
-        assert not Path('/run/systemd/system', name + '.d').exists()
+        for unit_root in (Path('/run/systemd/system'), hook.PUBLIC_READER_SYSTEMD):
+            assert not (unit_root / name).exists()
+            assert not (unit_root / (name + '.d')).exists()
     # This globally classified address belongs only to lo on this disposable
     # machine. The test never sends a packet to its actual Internet owner.
     address = '93.184.216.34'
@@ -61,7 +155,7 @@ def main():
     selected = {'sha': old}
     originals = {}
     try:
-        with tempfile.TemporaryDirectory(prefix='lead-public-reader-drill-', dir='/run') as temporary:
+        with tempfile.TemporaryDirectory(prefix='lead-public-reader-drill-', dir='/run') as temporary, diagnostic_scope(hook, sha):
             root = Path(temporary)
             root.chmod(0o755)
             hook.STORE = root / 'store'
@@ -81,7 +175,8 @@ def main():
             config.mkdir(mode=0o700)
             hook.EXECUTOR_REGISTRY = config / 'executors.json'
             hook.PUBLIC_READER_PLAN = config / 'public-reader-provision.json'
-            hook.PUBLIC_READER_SYSTEMD = Path('/run/systemd/system')
+            # Install disposable units through the same persistent directory as
+            # production, so enablement is checked without a runtime-unit override.
             # Only artifact promotion/DB-backed application selection are replaced
             # by the fixture. All unit writes, journals, roots, actual process
             # mounts, Unix peer credentials and rollback below are real.
@@ -97,7 +192,7 @@ def main():
             hook.run = fixture_run
             net = ('[Service]\nType=simple\nPrivateNetwork=yes\n'
                    'ExecStart=/usr/bin/sleep infinity\n')
-            Path('/run/systemd/system/lead-home-net.service').write_text(net)
+            Path('/etc/systemd/system/lead-home-net.service').write_text(net)
             consumer_root = root / 'consumer-root'
             consumer_root.mkdir(mode=0o755)
             base = ('[Unit]\nRequires=lead-home-net.service\nAfter=lead-home-net.service\n'
@@ -108,15 +203,15 @@ def main():
                     'BindReadOnlyPaths=/usr:/usr\nBindReadOnlyPaths=-/lib:/lib -/lib64:/lib64\n'
                     'ExecStart=/usr/bin/sleep infinity\n')
             for role in hook.PUBLIC_READER_CONSUMERS:
-                Path('/run/systemd/system', hook.unit(role)).write_text(base)
+                Path('/etc/systemd/system', hook.unit(role)).write_text(base)
             # Reproduce the actual worker's later reset and require the new
             # fixed append to survive it, while an original mount stays intact.
-            worker_dropin = Path('/run/systemd/system/lead-home-worker.service.d')
+            worker_dropin = Path('/etc/systemd/system/lead-home-worker.service.d')
             worker_dropin.mkdir()
             worker_reset = worker_dropin / 'zzzz-lead-executor.conf'
             worker_reset.write_text('[Service]\nBindReadOnlyPaths=\n'
                                     'BindReadOnlyPaths=/usr:/usr -/lib:/lib -/lib64:/lib64\n')
-            fence = Path('/run/systemd/system/lead-public-reader-drill-fence.service')
+            fence = Path('/etc/systemd/system/lead-public-reader-drill-fence.service')
             fence.write_text('[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/true\n')
             command('systemctl', 'daemon-reload')
             command('systemctl', 'start', 'lead-home-api.service', 'lead-home-worker.service')
@@ -146,6 +241,16 @@ def main():
                     mutations.append(args)
                 return actual_run(*args, **kwargs)
             hook.run = readback_run
+            diagnostic_readback(hook, sha, 'before-reconcile')
+            for role in hook.PUBLIC_READER_CONSUMERS:
+                try:
+                    hook.public_reader_assert_consumer(hook.public_reader_load(sha), role, activated=False)
+                except Exception as error:
+                    print(json.dumps({'diagnostic': 'consumer_preimage', 'role': role,
+                        'status': 'failed', **diagnostic_failure(hook, error)}), file=sys.stderr)
+                    raise
+                print(json.dumps({'diagnostic': 'consumer_preimage', 'role': role,
+                    'status': 'passed'}), file=sys.stderr)
             prepared = hook.provision_public_reader(sha, hook.PUBLIC_READER_PLAN)
             assert mutations == []
             assert hook.property_of(hook.PUBLIC_READER_SERVICE, 'InvocationID') == invocation
@@ -267,8 +372,8 @@ print('private-network-direct-denied-unix-read-ok')
         subprocess.run(['systemctl', 'disable', '--now', hook.PUBLIC_READER_SOCKET], capture_output=True)
         subprocess.run(['systemctl', 'stop', *units], capture_output=True)
         for name in units:
-            Path('/run/systemd/system', name).unlink(missing_ok=True)
-            folder = Path('/run/systemd/system', name + '.d')
+            Path('/etc/systemd/system', name).unlink(missing_ok=True)
+            folder = Path('/etc/systemd/system', name + '.d')
             if folder.exists():
                 shutil.rmtree(folder)
         for path in protected:
