@@ -125,21 +125,13 @@ def main():
     hook = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(hook)
     prefix = Path(os.environ['LEAD_PUBLIC_READER_PYTHON'])
-    hook.PUBLIC_READER_PYTHON = prefix
     hook.PUBLIC_READER_SITE = prefix / 'lib/python3.12/site-packages'
-    try:
-        hook.public_reader_python()
-    except hook.Refused:
-        print(json.dumps({'runtime_ancestors': [
-            {'path': str(path), 'uid': path.lstat().st_uid, 'mode': oct(path.lstat().st_mode & 0o777)}
-            for path in (prefix, prefix / 'bin', *prefix.parents)
-        ]}), file=sys.stderr)
-        raise
     units = ('lead-home-net.service', 'lead-home-api.service', 'lead-home-worker.service',
              hook.PUBLIC_READER_SERVICE, hook.PUBLIC_READER_SOCKET, 'lead-public-reader-drill-fence.service')
     for name in units:
         assert command('systemctl', 'show', name, '-p', 'LoadState', '--value') == 'not-found', name
-    protected = [Path('/var/lib/lead-public-reader'), hook.PUBLIC_READER_RUNTIME]
+    protected = [Path('/var/lib/lead-public-reader'), hook.PUBLIC_READER_RUNTIME,
+                 hook.PUBLIC_READER_PYTHON, hook.PUBLIC_READER_RETIRED]
     assert all(not path.exists() and not path.is_symlink() for path in protected)
     for name in units:
         for unit_root in (Path('/run/systemd/system'), hook.PUBLIC_READER_SYSTEMD):
@@ -175,6 +167,7 @@ def main():
             config.mkdir(mode=0o700)
             hook.EXECUTOR_REGISTRY = config / 'executors.json'
             hook.PUBLIC_READER_PLAN = config / 'public-reader-provision.json'
+            hook.PUBLIC_READER_RUNTIME_PLAN = config / 'public-reader-runtime-provision.json'
             # Install disposable units through the same persistent directory as
             # production, so enablement is checked without a runtime-unit override.
             # Only artifact promotion/DB-backed application selection are replaced
@@ -184,12 +177,33 @@ def main():
             hook.image = lambda revision: release if revision == sha else root / old
             hook.public_reader_sources = lambda revision: release
             hook.public_reader_blobs = lambda revision: {name: 'd' * 40 for name in hook.PUBLIC_READER_REUSE_FILES}
+            hook.sync_public_main = lambda *_args: sha
             original_run = hook.run
             def fixture_run(*args, **kwargs):
                 if args[0] == 'git' and args[-1] == sha + ':requirements.lock.txt':
                     return (repo / 'requirements.lock.txt').read_text()
                 return original_run(*args, **kwargs)
             hook.run = fixture_run
+            # Copy the actual public OS interpreter/stdlib through the formal
+            # operation. The injected venv supplies only the ten locked /site
+            # dependencies; it cannot bypass the runtime manifest or NX check.
+            runtime_plan = hook.public_reader_runtime_plan(sha)
+            hook.PUBLIC_READER_RUNTIME_PLAN.write_bytes(hook.executor_json(runtime_plan))
+            hook.PUBLIC_READER_RUNTIME_PLAN.chmod(0o600)
+            verify_runtime = hook.verify_public_reader_runtime
+            def lost_runtime_reply(*args, **kwargs):
+                raise OSError('synthetic acknowledgement loss after atomic installation')
+            hook.verify_public_reader_runtime = lost_runtime_reply
+            try:
+                hook.provision_public_reader_runtime(sha, hook.PUBLIC_READER_RUNTIME_PLAN)
+            except OSError:
+                pass
+            else:
+                raise AssertionError('runtime acknowledgement loss not injected')
+            hook.verify_public_reader_runtime = verify_runtime
+            runtime_inode = hook.PUBLIC_READER_PYTHON.stat().st_ino
+            assert hook.provision_public_reader_runtime(sha, hook.PUBLIC_READER_RUNTIME_PLAN)['runtime_revision'] == sha
+            assert hook.PUBLIC_READER_PYTHON.stat().st_ino == runtime_inode
             net = ('[Service]\nType=simple\nPrivateNetwork=yes\n'
                    'ExecStart=/usr/bin/sleep infinity\n')
             Path('/etc/systemd/system/lead-home-net.service').write_text(net)
@@ -263,6 +277,24 @@ def main():
             # A successful retry is readback, never another service start.
             assert hook.provision_public_reader(sha, hook.PUBLIC_READER_PLAN)['health']['revision'] == sha
             assert hook.public_reader_journal(sha).read_bytes() == first_journal
+            # First-migration prepared rollback preserves the untouched original
+            # consumer PIDs even when their /run can see the unused socket leaf.
+            retired_sha = sha
+            assert hook.rollback_prepared_public_reader(sha)['consumer_restarts'] == 0
+            assert all(hook.property_of(role, 'MainPID') == before['MainPID']
+                       for role, before in originals.items())
+            assert hook.retire_public_reader(sha)['state'] == 'retired'
+            sha = 'd' * 40
+            next_release = hook.STORE / sha
+            shutil.copytree(release, next_release)
+            release = next_release
+            (release / 'REVISION').write_text(sha + '\n')
+            hook.PUBLIC_READER_PLAN.write_bytes(hook.executor_json(hook.public_reader_plan(sha)))
+            hook.PUBLIC_READER_PLAN.chmod(0o600)
+            hook.provision_public_reader(sha, hook.PUBLIC_READER_PLAN)
+            new_root_inode = hook.PUBLIC_READER_ROOT.parent.stat().st_ino
+            assert hook.retire_public_reader(retired_sha)['archive_verified']
+            assert hook.PUBLIC_READER_ROOT.parent.stat().st_ino == new_root_inode
             command('ip', 'address', 'add', address + '/32', 'dev', 'lo')
             added_address = True
 
@@ -362,7 +394,8 @@ print('private-network-direct-denied-unix-read-ok')
                 'consumer_isolation_retained': True, 'local_public_source_read': True,
                 'private_canaries_hidden': True, 'socket_recreation': True,
                 'old_bindings_restored_before_reader_stop': True, 'unknown_start_readback_only': True,
-                'replay_refused': True}))
+                'prepared_rollback_without_consumer_restart': True, 'old_retirement_cannot_touch_new_instance': True,
+                'formal_nx_runtime_copy_and_unknown_readback': True, 'replay_refused': True}))
     finally:
         if server:
             server.shutdown()
