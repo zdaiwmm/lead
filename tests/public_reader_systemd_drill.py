@@ -242,6 +242,15 @@ def main():
                 return actual_run(*args, **kwargs)
             hook.run = readback_run
             diagnostic_readback(hook, sha, 'before-reconcile')
+            for role in hook.PUBLIC_READER_CONSUMERS:
+                try:
+                    hook.public_reader_assert_consumer(hook.public_reader_load(sha), role, activated=False)
+                except Exception as error:
+                    print(json.dumps({'diagnostic': 'consumer_preimage', 'role': role,
+                        'status': 'failed', **diagnostic_failure(hook, error)}), file=sys.stderr)
+                    raise
+                print(json.dumps({'diagnostic': 'consumer_preimage', 'role': role,
+                    'status': 'passed'}), file=sys.stderr)
             prepared = hook.provision_public_reader(sha, hook.PUBLIC_READER_PLAN)
             assert mutations == []
             assert hook.property_of(hook.PUBLIC_READER_SERVICE, 'InvocationID') == invocation
