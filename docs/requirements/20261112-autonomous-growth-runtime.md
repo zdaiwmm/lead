@@ -885,3 +885,6 @@ PR #53、#54 已合并。#54 修正真实节点的 Telegram 配置入口：从�
 17:06:50新SSH独立回读：实际App仍M8276，五项原服务active/running、自动重启计数0；原请求仍completed、399条唯一事件；按原冻结上下文中的精确旧根引用核对probes47/attempts3/stopped及相关计数未变，消除了旧观察器“两候选无法唯一对账”的本轮证据缺口。新经营决策的两次错误与固定原错误字符串精确相等，仍无新资料、后续或社媒动作。Facebook关闭、X未验证、Reddit/Telegram原状态及零target grant保留。
 
 私有证据根为 `/private/tmp/lead-chamber-operations-20261115`：`final-readback.json`、`owner-observation-3.json`、`cli-proof/verified.json`、`cli-proof/merge-verified.json`及对应固定脚本/逐例输出；标识与来源正文仍留服务器。修复未激活，不宣称持续运营或获客已恢复；本批PR精确head快速检查、获准后的精确main全量与同轮连接器产物、受控worker更新/重启和再次业务回读仍分别放行。
+
+
+**待批准交付：**本需求已建[PR88](https://github.com/zdaiwmm/lead/pull/88)，源分支保持独立；PR精确候选快速检查与本地证据共同供审核，不能替代合并后的精确main完整应用CI。实际已安装连接器仍为 `3fb46ece212d4da88b9609091af4199bca20eb53`，已只读核实其Runner没有本次审批配置；当前应用仍M8276。未合并、安装或重启，不把PR通过描述成线上修复。下一步需用户批准本批合并及空闲窗口内一次连接器worker更新/重启，再按同轮产物和独立回读接续真实经营。

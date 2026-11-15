@@ -1,6 +1,6 @@
 # lead 开发工作项和验收清单
 
-2026-11-15 Chamber 已实际推进到新的平台阻塞：[本次运营指令与修复](requirements/20261112-autonomous-growth-runtime.md#2026-11-15-chamber-新运营指令与原文读取审批阻塞)。一次真实owner_direction使新决策执行4次公开搜索和2次原文读取，两读均明确受“需要审批但策略never”阻断，尚无新增原文/accepted后续/业务成果。候选仅为固定Lead服务当前声明的三种读取工具设置精确审批，不扩大账号/发送权限；原399回执恢复及线上M8276保持。连接器激活需要新的精确交付与一次worker更新/重启授权，未沿用旧批次发布权限；先完成PR与定向验证，不重投旧模型或重复能力触发。
+2026-11-15 Chamber 已实际推进到新的平台阻塞：[本次运营指令与修复](requirements/20261112-autonomous-growth-runtime.md#2026-11-15-chamber-新运营指令与原文读取审批阻塞)。一次真实owner_direction使新决策执行4次公开搜索和2次原文读取，两读均明确受“需要审批但策略never”阻断，尚无新增原文/accepted后续/业务成果。[修复PR88](https://github.com/zdaiwmm/lead/pull/88)仅为固定Lead服务当前声明的三种读取工具设置精确审批，不扩大账号/发送权限；原399回执恢复及线上M8276保持。连接器激活需要新的精确交付与一次worker更新/重启授权，未沿用旧批次发布权限；先完成PR与定向验证，不重投旧模型或重复能力触发。
 
 2026-11-15 Chamber 原回传故障已解决，当前等待新需求证据：[实际交付与运行核验](requirements/20261112-autonomous-growth-runtime.md#2026-11-15-chamber-持续运营修复交付与运行核验)。App、Telegram/Reddit继续为 `8276c7cd4c300e1e7fc2a7bfc5cb7be7edc65d88`，原完整应用CI43675958745/2及正式请求7799608811交付有效。回传根因为Nginx body临时目录0700属主错误（30秒8次EACCES）；PR86登记定点恢复与root校验复发防护，精确main a9c1f9c/文档CI43694471734/1成功后恢复同一持久inode的运行属主。16:28原399条事件自然回传、服务端399条唯一事件、outbox0/未ACK0，原请求和thread/turn对账一致；原经营判断完成并给出完整waiting_for_change条件（evidence_added、owner）。不再queued卡住，但无新原文、accepted后续或业务成果。不重启、清状态、重投模型、读认证文件或扩大权限；本次文档收尾不重建或再发布App。
 
