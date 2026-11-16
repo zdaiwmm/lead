@@ -385,6 +385,27 @@ async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=
                     " both Command.experiment_id and TaskSpec.experiment_id must be null."
                     " This remains subject to original admission, account permissions, required references and source-specific stop conditions."
                     " Do not rename/reopen an exhausted experiment or change the goal, counters or stopped source to bypass its guard.")
+                from .tools import INPUTS
+                task_errors = []
+                for command in proposal.commands:
+                    if command.kind != "task.create" or command_group(command) not in {item["group"] for item in failed_creates}:
+                        continue
+                    schema = TaskSpec
+                    try:
+                        spec = schema.model_validate(command.payload)
+                        schema = INPUTS.get(spec.kind)
+                        if schema:
+                            schema.model_validate(spec.payload)
+                    except ValidationError as schema_error:
+                        task_errors.append({"group":command_group(command), "command_key":command.command_key,
+                            "schema":schema.__name__, "errors":proposal_errors(schema_error)})
+                if task_errors:
+                    repair["task_schema_errors"] = task_errors
+                    repair["instruction"] += (
+                        " Correct the listed task_schema_errors in this SAME repair. For community tasks keep"
+                        " account_id on Command and TaskSpec; the inner community payload cannot include"
+                        " connection_account_id, takeover_id, profile_id, target_urls or desired_operation."
+                        " Preserve the real account binding, permissions and required references.")
         except (ValidationError, ValueError) as error:
             repair = {"code":type(error).__name__, "errors":proposal_errors(error),
                 "instruction":"Correct the exact validation errors. Return valid JSON with the supplied context_key, explicit current goal_ref.revision and declared tool schemas."}
