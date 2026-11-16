@@ -1,9 +1,11 @@
 """New publication points bind to the immutable original Action and content."""
 from lead_app.db import j, one, tx
-from lead_app.growth.runtime import advance
-from lead_app.growth.tools import prepare_channel
+from lead_app.growth.contracts import WorkResult
+from lead_app.growth.runtime import advance, finish
+from lead_app.growth.tools import execute_channel, prepare_channel
+from lead_app.local_executor_tools import _content_artifacts
 from test_growth_channel_intention import PARENT_ONE, submit_variant
-from test_growth_unknown_receipts import facebook_work
+from test_growth_unknown_receipts import facebook_work, real_submit
 from test_pixel_events import pixel  # noqa: F401
 
 
@@ -32,7 +34,7 @@ def test_reply_point_uses_parent_and_preserves_previous_publication(request,monk
     monkeypatch.setattr('lead_app.analytics.public_origin',lambda:'https://lead.example')
     aid = request.getfixturevalue('pixel')[0]
     with facebook_work(aid,'https://site.example/') as (original,data,account):
-        advance(original)
+        claim = advance(original)['claim']
         publication = prepare_channel(aid,original['task_id'],data)
         with tx(aid) as c:
             original_link = one(c,'SELECT * FROM lead.tracking_links WHERE content_id=%s',(publication['content_id'],))
@@ -48,8 +50,10 @@ def test_reply_point_uses_parent_and_preserves_previous_publication(request,monk
             c.execute('UPDATE lead.account_targets SET verified_permissions=%s WHERE id=%s',
                 (j({'browser_methods':{'reply':reply}}),publication['target_id']))
             c.execute("UPDATE lead.authorization_grants SET allowed_actions='[\"publish\",\"reply\"]' WHERE target_id=%s AND revoked_at IS NULL",(publication['target_id'],))
+        # End the unsent fixture's write lease before preparing a second action.
+        finish(claim,WorkResult(outcome='failed',failure_code='scope_changed'))
         ref,data = submit_variant(aid,original,'reply',PARENT_ONE)
-        advance(ref)
+        assert advance(ref)['state']=='ready'
         action = prepare_channel(aid,ref['task_id'],data)
         with tx(aid) as c:
             link = one(c,'SELECT * FROM lead.tracking_links WHERE content_id=%s',(action['content_id'],))
@@ -57,3 +61,27 @@ def test_reply_point_uses_parent_and_preserves_previous_publication(request,monk
         assert link['placement']=='reply' and link['placement_ref']==PARENT_ONE
         assert link['intent_key']==action['operation_key']
         assert link['public_code']!=original_link['public_code']
+
+
+async def test_confirmed_channel_exposes_actual_tracked_body_to_original_reader(request,monkeypatch):
+    monkeypatch.setattr('lead_app.analytics.public_origin',lambda:'https://lead.example')
+    aid = request.getfixturevalue('pixel')[0]
+    with facebook_work(aid,'https://site.example/') as (ref,data,account):
+        await real_submit(aid,monkeypatch,ref,data,account)
+        with tx(aid) as c:
+            row = one(c,'SELECT * FROM lead.tasks WHERE id=%s',(ref['task_id'],))
+            action = one(c,'SELECT * FROM lead.actions WHERE task_id=%s',(ref['task_id'],))
+        async def original_receipt(path,body):
+            assert str(action['id'])==body['action_id']
+            return {'state':'confirmed','external_id':action['external_id']}
+        monkeypatch.setattr('lead_app.activities.browser_rpc',original_receipt)
+        result = await execute_channel(aid,row,data,{'ref':ref,'attempt_token':'readback-only'})
+        assert result.outcome=='completed' and len(result.artifacts)==1
+        with tx(aid) as c:
+            resolved,limited = _content_artifacts(c,aid,result.model_dump(mode='json'))
+        assert not limited and resolved[0]['available']
+        assert resolved[0]['hash']==action['intent']['content_hash']
+        assert resolved[0]['body']['body']==action['intent']['body']
+        point = result.output['distribution_point']
+        assert point['platform']=='facebook' and point['placement']=='post'
+        assert str(point['account_id'])==str(account['id'])

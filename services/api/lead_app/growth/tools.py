@@ -1005,8 +1005,13 @@ async def execute_channel(aid, row, data, claim):
             if not one(c,"SELECT lead.growth_receipt_valid(%s) ok",(action["id"],))["ok"]:
                 return WorkResult(outcome="failed",failure_code="invalid_evidence")
             promoted = False if actual["intent"].get("telegram_community") else one(c,"SELECT lead.growth_confirm_publication(%s) ok",(action["id"],))["ok"]
+            final = one(c,"SELECT id,revision,content_hash FROM lead.content_items WHERE id=%s",(actual["content_id"],))
+            point = one(c,"""SELECT id,account_id,platform,placement,placement_ref FROM lead.tracking_links
+                WHERE content_id=%s AND intent_key=%s""",(actual["content_id"],actual["operation_key"]))
             return WorkResult(outcome="completed",evidence_refs=[{"kind":"action","id":action["id"]}],
+                artifacts=[{"kind":"content","id":str(final["id"]),"revision":final["revision"],"hash":final["content_hash"]}],
                 output={"action_id":str(action["id"]),"receipt":observed,"publication_status":"confirmed",
+                        "distribution_point":point,
                         "business_progress":False,"knowledge_progress":promoted,
                         "first_format_verified":promoted})
     if observed.get("state") in ("unknown","confirmed"):
