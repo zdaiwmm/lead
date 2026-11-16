@@ -616,3 +616,61 @@ async def test_actual_dom_reply_receipt_requires_the_exact_parent():
             assert await community_runtime.own_reply_receipt(page,'Controlled reply','10',parent_mid='10') is None
         finally:
             await browser.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('member_state',['dispatching','unknown','pending_approval'])
+@pytest.mark.parametrize('wait_state',['planned','waiting_user'])
+async def test_real_experiment_close_preserves_and_reconciles_original_membership(community,monkeypatch,member_state,wait_state):
+    from lead_app.growth.contracts import (
+        Command,
+        DecisionProposal,
+        ExperimentSpec,
+        Wait,
+    )
+    from lead_app.growth.store import accept_commands, create_experiment
+    original,_=inspected(community,joined=False)
+    with tx(community.aid) as c:
+        experiment=create_experiment(c,community.aid,ExperimentSpec(question_type='distribution',question='Can the relevant public group be reached?',
+            hypothesis='A verified public membership can enable a contextual answer',learning_signal='An original membership receipt',
+            token_limit=1000,review_at=utcnow()+timedelta(hours=1)))
+        ref=submit_work(c,community.aid,TaskSpec(kind='account',purpose='community',account_id=community.account['id'],experiment_id=experiment['id'],
+            payload={'community_operation':'join','group_task_id':original['task_id'],'group_id':PEER},
+            required_refs=[{'task_id':original['task_id'],'reason':'Use the selected actual group'}],review_at=utcnow()+timedelta(hours=1)))
+        ordinary=submit_work(c,community.aid,TaskSpec(kind='account',purpose='community',account_id=community.account['id'],experiment_id=experiment['id'],
+            payload={'community_operation':'search','queries':['ordinary candidate']},review_at=utcnow()+timedelta(hours=1)))
+    claim=advance(ref)['claim']
+    member={'state':member_state,'operation_key':'original-membership-before-close','group_id':PEER,'canonical_url':URL,
+        'execution_ref':community.actor.execution_ref.model_dump(mode='json')}
+    with tx(community.aid) as c:
+        c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,community}',%s) WHERE id=%s",(j(member),ref['task_id']))
+    finish(claim,WorkResult(outcome='waiting',wait=Wait(reason='community_membership_pending',producer='telegram_membership',
+        recovery_action='owner' if wait_state=='waiting_user' else 'reconcile',check_at=utcnow()+timedelta(minutes=1),
+        episode_root=ref['task_id'],responsibility='platform')))
+    closed=accept_commands(community.aid,DecisionProposal(context_key='actual-close-command',rationale='Close the question while the original external receipt is pending.',
+        commands=[Command(command_key='close-membership-question',group_key='membership',kind='experiment.close',experiment_id=experiment['id'],
+            expected_revision=experiment['revision'],goal_ref={'revision':1},payload={'state':'inconclusive','reason':'The original external result remains unknown.'})]))
+    assert len(closed['accepted'])==1 and not closed['rejected']
+    with tx(community.aid) as c:
+        assert one(c,'SELECT state,revision FROM lead.growth_experiments WHERE id=%s',(experiment['id'],))=={'state':'closed','revision':2}
+        task=one(c,'SELECT state,result FROM lead.tasks WHERE id=%s',(ref['task_id'],))
+        assert task['state']==wait_state and task['result']['runtime']['community']==member
+        assert one(c,'SELECT state FROM lead.tasks WHERE id=%s',(ordinary['task_id'],))['state']=='canceled'
+    async def read(*args,**kwargs):
+        return {'target_id':PEER,'title':'Privacy fixture','kind':'discussion','description':'Privacy tools discussion. Be helpful and respectful.',
+            'joined':True,'can_reply':True,'history':[]}
+    async def forbidden_click(*args,**kwargs):
+        pytest.fail('Closing an experiment must not create another membership submission')
+    def forbidden_grant(*args,**kwargs):
+        pytest.fail('An original membership read must not derive a new grant')
+    monkeypatch.setattr(community_runtime,'observe_group',read)
+    monkeypatch.setattr(community_runtime,'membership_button',forbidden_click)
+    monkeypatch.setattr(account_connection,'derive_community_group',forbidden_grant)
+    resumed=advance(ref,now=utcnow()+timedelta(minutes=2))
+    assert resumed['state']=='ready'
+    receipt=await community_runtime.growth_community_step(community.actor,ref['task_id'],'join',resumed['claim'],execution_ref=community.actor.execution_ref)
+    assert receipt['state']=='confirmed' and receipt['operation_key']==member['operation_key']
+    finish(resumed['claim'],WorkResult(outcome='completed',output=receipt))
+    with tx(community.aid) as c:
+        assert one(c,'SELECT state FROM lead.tasks WHERE id=%s',(ref['task_id'],))['state']=='succeeded'
+        assert one(c,'SELECT count(*) n FROM lead.actions WHERE task_id=%s',(ref['task_id'],))['n']==0
