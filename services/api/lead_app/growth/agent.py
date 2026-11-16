@@ -9,7 +9,7 @@ from ..model import run_model
 from .contracts import DecisionProposal, ExperimentSpec, TaskSpec, utcnow
 from .store import accept_commands, command_group, digest, objective_revision
 
-PROMPT_VERSION = "growth-v2.11"
+PROMPT_VERSION = "growth-v2.12"
 MAX_CONTEXT_BYTES = 48000
 
 
@@ -360,6 +360,20 @@ async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=
             rejected = result["rejected"]
             pending_work = result.get('pending_work')
             if not rejected:
+                if (attempt == 0 and not proposal.commands and not accepted and pending_work is False
+                        and any({'search','inspect'} & set(account.get('community_operations', []))
+                            for account in context['accounts'])):
+                    repair = {'no_work_review':True,'previous_proposal':proposal.model_dump(mode='json'),'accepted':[],
+                        'instruction':'The initial empty proposal is a no-change judgment, not an admission rejection. No original work is pending. '
+                        'Review that judgment once against this same frozen context and its declared investigation options; declarations do not prove execution readiness. '
+                        'A prior atomic rollback does not prove its account task was independently rejected or executed. '
+                        'no_progress_path_exhausted rejects experiment.create, not every independent account operation. '
+                        'An authorized community search/inspect can be proposed without an experiment; leave both Command.experiment_id and TaskSpec.experiment_id null. '
+                        'Keep account_id on Command and TaskSpec; inner community input cannot include connection_account_id, takeover_id, profile_id, target_urls or desired_operation. '
+                        'Use current bindings, real predecessor references and original task/source evidence. Preserve actual resource stops, unknown external results, permissions and exhausted experiment guards. '
+                        'Do not invent evidence, rename an exhausted path, replay accepted work or request repeated owner authorization. '
+                        'Propose a relevant permitted alternative if one exists; otherwise retain commands=[] with the specific real condition, producer, responsibility and next action. No further review is scheduled.'}
+                    continue
                 if pending_work is False and proposal.continuation is None:
                     repair = {'continuation_only':True,'accepted':accepted,
                         'instruction':'Accepted changes are final. No executable work remains. Return commands=[] and a continuation with the exact missing condition, real producer, responsibility and next action. Do not replay accepted groups or create work just to avoid stopping.'}
