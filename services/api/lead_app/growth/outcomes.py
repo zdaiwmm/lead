@@ -62,41 +62,56 @@ def classify_receipts(rows, unit='user', *, start=None, end=None, definition_rev
         'repeat_units':repeats,'excluded':excluded,'unit':unit,'evidence_refs':evidence}
 
 
+_BOUND_LINKS = """WITH source_links AS (
+      SELECT l.tenant_id,l.agent_id,l.id,l.content_id,l.platform,l.placement,l.account_id,l.intent_key,l.placement_ref,l.created_at
+      FROM lead.tracking_links l
+      WHERE l.tenant_id=lead.ctx_tenant() AND l.agent_id=lead.ctx_agent() AND l.platform<>'lab' AND l.created_at<=%(asof)s
+    ), candidates AS (
+      SELECT l.id link_id,a.id action_id,a.task_id,a.state action_state,a.created_at action_created_at,a.confirmed_at,t.experiment_id,
+        (coalesce(a.intent->>'publication_purpose','business')='diagnostic' OR
+          t.input->>'bootstrap_verification'='true' AND coalesce(t.input->>'member_contribution','false')<>'true') IS TRUE diagnostic
+      FROM source_links l JOIN lead.tasks t ON t.tenant_id=l.tenant_id AND t.agent_id=l.agent_id
+        AND l.intent_key='growth:'||t.id::text AND t.type='growth.channel'
+      JOIN lead.actions a ON (a.tenant_id,a.agent_id,a.task_id)=(t.tenant_id,t.agent_id,t.id)
+        AND a.operation_key=l.intent_key AND a.content_id=l.content_id AND a.intent->>'platform'=l.platform
+      JOIN lead.account_targets target ON (target.tenant_id,target.agent_id,target.id)=(a.tenant_id,a.agent_id,a.target_id)
+        AND target.account_id=l.account_id
+      JOIN lead.social_accounts account ON (account.tenant_id,account.agent_id,account.id)=(l.tenant_id,l.agent_id,l.account_id)
+        AND account.platform=l.platform
+      WHERE a.created_at<=%(asof)s AND a.type IN ('publish','reply')
+        AND l.placement=CASE a.type WHEN 'reply' THEN 'reply' ELSE 'post' END
+        AND l.placement_ref IS NOT NULL
+        AND l.placement_ref=CASE a.type WHEN 'reply' THEN a.intent->>'parent_url' ELSE target.canonical_url END
+    ), bound_links AS (
+      SELECT l.*,a.task_id,a.action_state,a.action_created_at,a.confirmed_at,a.experiment_id,a.diagnostic,
+        a.action_id IS NOT NULL bound,
+        CASE WHEN n.matches=1 THEN 'bound' WHEN n.matches>1 THEN 'ambiguous'
+          WHEN l.intent_key IS NULL OR l.placement IS NULL OR l.account_id IS NULL OR l.placement_ref IS NULL
+            THEN 'legacy_unknown' ELSE 'unassigned' END attribution
+      FROM source_links l LEFT JOIN (SELECT link_id,count(*) matches FROM candidates GROUP BY link_id) n ON n.link_id=l.id
+      LEFT JOIN candidates a ON a.link_id=l.id AND n.matches=1
+    )"""
+
+
 def shortlink_signals(c, as_of, experiment_id=None, *, start=None, end=None):
     """Read processed redirect facts, independently of site/core-value coverage.
 
-    This is the reporting SOURCES redirect/exclusion rule, narrowed by immutable
-    links and causal confirmed Actions for an experiment. A request is not an
-    arrival or a person. No rollup has link/experiment dimensions to substitute.
+    This is the reporting SOURCES redirect/exclusion rule. Only the immutable
+    task/account/point identity binds an Action; shared content is insufficient.
+    A request is not an arrival or a person. Old/unbound links remain unassigned.
     """
     from ..db import one
 
     start = (start or as_of-timedelta(days=30)).astimezone(timezone.utc)
     end = (end or as_of).astimezone(timezone.utc)
     c.execute("SELECT set_config('app.analytics_scope','live',true)")
-    data = one(c, """WITH links AS (
-      SELECT l.* FROM lead.tracking_links l
-      WHERE l.tenant_id=lead.ctx_tenant() AND l.agent_id=lead.ctx_agent() AND l.platform<>'lab' AND l.created_at<=%(asof)s
-        AND (%(experiment)s::uuid IS NULL OR EXISTS(
-          SELECT FROM lead.actions a JOIN lead.tasks t ON
-            (t.tenant_id,t.agent_id,t.id)=(a.tenant_id,a.agent_id,a.task_id)
-          WHERE (a.tenant_id,a.agent_id,a.content_id)=(l.tenant_id,l.agent_id,l.content_id)
-            AND a.state='confirmed' AND a.confirmed_at<=%(end)s AND t.experiment_id=%(experiment)s))
+    data = one(c, _BOUND_LINKS + """, links AS (
+      SELECT * FROM bound_links WHERE %(experiment)s::uuid IS NULL OR bound AND experiment_id=%(experiment)s
     ), observed AS (
       SELECT v.id,v.tracking_link_id,v.anonymous_id,v.exclusion_reason,v.started_at,
-        EXISTS(SELECT FROM lead.actions a JOIN lead.tasks t ON
-          (t.tenant_id,t.agent_id,t.id)=(a.tenant_id,a.agent_id,a.task_id)
-          WHERE (a.tenant_id,a.agent_id,a.content_id)=(l.tenant_id,l.agent_id,l.content_id)
-            AND a.state='confirmed' AND a.confirmed_at<=v.started_at
-            AND coalesce(a.intent->>'publication_purpose','business')='business'
-            AND (coalesce(t.input->>'bootstrap_verification','false')<>'true' OR t.input->>'member_contribution'='true')
-            AND (%(experiment)s::uuid IS NULL OR t.experiment_id=%(experiment)s)) AS business,
-        EXISTS(SELECT FROM lead.actions a JOIN lead.tasks t ON
-          (t.tenant_id,t.agent_id,t.id)=(a.tenant_id,a.agent_id,a.task_id)
-          WHERE (a.tenant_id,a.agent_id,a.content_id)=(l.tenant_id,l.agent_id,l.content_id)
-            AND a.created_at<=%(asof)s AND (a.intent->>'publication_purpose'='diagnostic' OR
-              t.input->>'bootstrap_verification'='true' AND coalesce(t.input->>'member_contribution','false')<>'true')
-            AND (%(experiment)s::uuid IS NULL OR t.experiment_id=%(experiment)s)) AS diagnostic
+        (l.bound AND l.action_state='confirmed' AND l.action_created_at<=v.started_at
+          AND l.confirmed_at<=v.started_at AND NOT l.diagnostic) IS TRUE business,
+        (l.bound AND l.diagnostic AND l.action_created_at<=v.started_at) IS TRUE diagnostic
       FROM lead.visit_sessions v JOIN links l ON
         (l.tenant_id,l.agent_id,l.id)=(v.tenant_id,v.agent_id,v.tracking_link_id)
       WHERE v.tenant_id=lead.ctx_tenant() AND v.agent_id=lead.ctx_agent()
@@ -105,7 +120,7 @@ def shortlink_signals(c, as_of, experiment_id=None, *, start=None, end=None):
     ), facts AS (
       SELECT * FROM observed WHERE %(experiment)s::uuid IS NULL OR business OR diagnostic
     ), per_link AS (
-      SELECT l.id,l.platform,l.placement,l.placement_ref IS NOT NULL point_ref_present,
+      SELECT l.id,l.platform,l.placement,l.attribution,l.placement_ref IS NOT NULL point_ref_present,
         count(f.id) FILTER(WHERE f.exclusion_reason IS NULL AND NOT f.diagnostic)::bigint clicks,
         count(f.id) FILTER(WHERE f.exclusion_reason IS NULL AND f.business AND NOT f.diagnostic)::bigint business_clicks,
         count(f.id) FILTER(WHERE f.exclusion_reason IS NULL AND f.diagnostic)::bigint diagnostic_clicks,
@@ -114,7 +129,7 @@ def shortlink_signals(c, as_of, experiment_id=None, *, start=None, end=None):
         count(f.id) FILTER(WHERE f.exclusion_reason IS NOT NULL AND f.exclusion_reason NOT IN ('coverage_probe','known_bot'))::bigint other_excluded,
         count(f.id)::bigint observed_rows,max(f.started_at) last_observed_at
       FROM links l LEFT JOIN facts f ON f.tracking_link_id=l.id
-      GROUP BY l.id,l.platform,l.placement,l.placement_ref
+      GROUP BY l.id,l.platform,l.placement,l.placement_ref,l.attribution
     ), points AS (
       SELECT platform,coalesce(placement,'legacy_unknown') placement,count(*) links,
         sum(clicks)::bigint clicks,sum(business_clicks)::bigint business_clicks,
@@ -129,7 +144,8 @@ def shortlink_signals(c, as_of, experiment_id=None, *, start=None, end=None):
       WHERE e.tenant_id=lead.ctx_tenant() AND e.agent_id=lead.ctx_agent() AND e.scope_key='live'
         AND e.source_kind='redirect' AND e.received_at<=%(asof)s
         AND click.occurred_at BETWEEN %(start)s AND %(end)s
-    ) SELECT count(*)::bigint link_count,count(*) FILTER(WHERE placement IS NULL)::bigint legacy_unknown,
+    ) SELECT count(*)::bigint link_count,count(*) FILTER(WHERE attribution='legacy_unknown')::bigint legacy_unknown,
+      count(*) FILTER(WHERE attribution<>'bound')::bigint unassigned_links,
       coalesce(sum(clicks),0)::bigint clicks,coalesce(sum(business_clicks),0)::bigint business_clicks,
       coalesce(sum(diagnostic_clicks),0)::bigint diagnostic_clicks,
       coalesce(sum(coverage_probe),0)::bigint coverage_probe,coalesce(sum(known_bot),0)::bigint known_bot,
@@ -156,9 +172,60 @@ def shortlink_signals(c, as_of, experiment_id=None, *, start=None, end=None):
         'unknown_browser_device_clicks':data['unknown_browser_device_clicks'],'pipeline':pipeline,
         'last_observed_at':data['last_observed_at'].isoformat() if data['last_observed_at'] else None,
         'links':{'total':data['link_count'],'legacy_unknown':data['legacy_unknown'],
+            'unassigned':data['unassigned_links'],
             'items':data['link_items'][:20],'truncated':len(data['link_items'])>20},
         'points':{'total':data['point_count'],'items':data['point_items'][:20],'truncated':len(data['point_items'])>20},
         'interpretation':'Observed shortlink requests and browser devices; not reach, arrivals, people or activation.'}
+
+
+def signals_revision(result):
+    """Fingerprint observed funnel facts, excluding evaluation clocks/windows."""
+    facts={'shortlinks':{key:value for key,value in result['shortlinks'].items() if key!='window'},
+           'visits':{key:value for key,value in result['visits'].items() if key not in {'window','window_days','coverage'}},
+           'event_funnel':result['event_funnel'],'event_funnel_scope':result['event_funnel_scope']}
+    return hashlib.sha256(json.dumps(facts,sort_keys=True,default=str).encode()).hexdigest()
+
+
+def distribution_trigger(aid, ingest_id):
+    """A stable factual wake from one processed, business-bound live receipt.
+
+    Reading the original point never grants access, repairs it, or retries work.
+    Only proof metadata leaves SQL; no payload, browser state, URL, account
+    credential or user identity is returned.
+    """
+    from ..db import one, tx
+    from .contracts import utcnow
+
+    with tx(aid) as c:
+        agent=one(c,"""SELECT desired_state,onboarding_state#>>'{growth_runtime,decision,engine}' engine
+            FROM lead.agents WHERE id=%s""",(aid,))
+        if not agent or agent['desired_state']!='running' or agent['engine']!='growth':
+            return None
+        c.execute("SELECT set_config('app.analytics_scope','live',true)")
+        row=one(c,_BOUND_LINKS + """ SELECT e.id ingest_id,e.event_name,l.account_id,l.experiment_id,l.task_id
+          FROM lead.analytics_ingest_events e
+          JOIN lead.agents current_agent ON (current_agent.tenant_id,current_agent.id)=(e.tenant_id,e.agent_id)
+            AND current_agent.desired_state='running' AND current_agent.onboarding_state#>>'{growth_runtime,decision,engine}'='growth'
+          LEFT JOIN lead.visit_sessions v ON (v.tenant_id,v.agent_id,v.source_session_id)=(e.tenant_id,e.agent_id,e.event_id)
+            AND e.source_kind='redirect' AND v.source='redirect' AND v.trust_level='redirect_observed' AND v.exclusion_reason IS NULL
+          LEFT JOIN lead.pixel_receipts p ON (p.tenant_id,p.agent_id,p.connection_id,p.event_id)=(e.tenant_id,e.agent_id,e.connection_id,e.event_id)
+            AND p.scope_key='live' AND p.counted AND p.event_name='PageView'
+          JOIN bound_links l ON (l.tenant_id,l.agent_id,l.id)=(e.tenant_id,e.agent_id,
+            CASE WHEN e.source_kind='redirect' THEN v.tracking_link_id ELSE p.entry_link_id END)
+          WHERE e.tenant_id=lead.ctx_tenant() AND e.agent_id=lead.ctx_agent() AND e.id=%(ingest)s
+            AND e.scope_key='live' AND e.state='processed' AND e.received_at<=%(asof)s
+            AND ((e.source_kind='redirect' AND e.event_name='ShortLinkClick' AND v.id IS NOT NULL)
+              OR (e.source_kind IN ('browser','server') AND e.event_name='PageView' AND p.id IS NOT NULL))
+            AND l.bound AND NOT l.diagnostic AND l.action_state='confirmed'
+            AND CASE WHEN e.source_kind='redirect' THEN v.started_at ELSE p.occurred_at END<=%(asof)s
+            AND l.action_created_at<=CASE WHEN e.source_kind='redirect' THEN v.started_at ELSE p.occurred_at END
+            AND l.confirmed_at<=CASE WHEN e.source_kind='redirect' THEN v.started_at ELSE p.occurred_at END
+          LIMIT 1""",{'asof':utcnow(),'ingest':ingest_id})
+    if not row:
+        return None
+    return {'reason':'distribution_signal','event_name':row['event_name'],
+            **{key:str(row[key]) if row[key] is not None else None
+               for key in ('account_id','experiment_id','task_id','ingest_id')}}
 
 
 def operating_signals(c,as_of,connection_id=None,experiment_id=None, *, shortlink_start=None,shortlink_end=None):
@@ -180,34 +247,39 @@ def operating_signals(c,as_of,connection_id=None,experiment_id=None, *, shortlin
         GROUP BY b.unit""",(as_of,experiment_id,str(experiment_id) if experiment_id else None))
     provider_costs=[{**item,**{key:int(item[key]) for key in ('held_units','spent_units','unknown_calls')}} for item in provider_costs]
     shortlinks=shortlink_signals(c,as_of,experiment_id,start=shortlink_start,end=shortlink_end)
-    revision={key:value for key,value in shortlinks.items() if key!='window'}
     result={'shortlinks':shortlinks,
-        'signals_revision':hashlib.sha256(json.dumps(revision,sort_keys=True,default=str).encode()).hexdigest(),
         'exposure':{'value':None,'coverage':'platform_insights_not_connected'},
-        'visits':{'visitors':None,'page_views':None,'qualified_visits':None,'coverage':'missing','connection_id':None},
-        'event_funnel':[],'costs':{'model_tokens':int(costs['tokens']),'held_tokens':int(held['tokens']),
+        'visits':{'visitors':None,'page_views':None,'qualified_visits':None,
+                  'coverage':'unknown_attribution' if experiment_id else 'missing',
+                  'scope':'experiment' if experiment_id else 'project_context','connection_id':None},
+        'event_funnel':[],'event_funnel_scope':'experiment_unattributed' if experiment_id else 'project_context',
+        'costs':{'model_tokens':int(costs['tokens']),'held_tokens':int(held['tokens']),
             'unknown_billing_calls':held['unknown'],'advertising':None,'paid_cooperation':None,'research_providers':provider_costs}}
-    if not connection:
+    # These existing pixel projections are project context, not exact experiment
+    # attribution. Until that binding exists, do not emit a pseudo experiment funnel.
+    if not connection or experiment_id:
+        result['signals_revision']=signals_revision(result)
         return result
     c.execute("SELECT set_config('app.analytics_scope','live',true)")
     visits=one(c,"""SELECT count(*) page_views,count(DISTINCT coalesce(p.user_key,p.anonymous_id::text)) visitors,
-        count(DISTINCT p.visit_session_id) FILTER(WHERE v.qualified IS TRUE) qualified_visits
+        count(DISTINCT p.visit_session_id) FILTER(WHERE v.qualified IS TRUE) qualified_visits,
+        max(p.received_at) last_received_at,max(p.occurred_at) last_observed_at
         FROM lead.pixel_receipts p LEFT JOIN lead.visit_sessions v ON v.id=p.visit_session_id
-        LEFT JOIN lead.tracking_links l ON l.id=p.entry_link_id
         WHERE p.connection_id=%s AND p.scope_key='live' AND p.counted AND p.event_name='PageView'
-          AND p.occurred_at BETWEEN %s-interval '30 days' AND %s AND p.received_at<=%s
-          AND (%s::uuid IS NULL OR EXISTS(SELECT FROM lead.actions a JOIN lead.tasks t ON t.id=a.task_id
-              WHERE a.content_id=l.content_id AND a.state='confirmed' AND t.experiment_id=%s))""",
-        (connection['id'],as_of,as_of,as_of,experiment_id,experiment_id))
+          AND p.occurred_at BETWEEN %s-interval '30 days' AND %s AND p.received_at<=%s""",
+        (connection['id'],as_of,as_of,as_of))
     freshness=connection['last_received_at']
     coverage='testing' if connection['state']!='verified' else 'stale' if not freshness or freshness<as_of-timedelta(hours=24) else 'healthy'
-    result['visits']={**visits,'coverage':coverage,'connection_id':str(connection['id']),'window_days':30}
+    visits={key:value.isoformat() if isinstance(value,datetime) else value for key,value in visits.items()}
+    result['visits']={**visits,'coverage':coverage,'scope':'project_context','connection_state':connection['state'],
+                      'connection_id':str(connection['id']),'window_days':30}
     result['event_funnel']=all_rows(c,"""SELECT event_name,definition_revision,
         count(*) FILTER(WHERE trust_level='server_verified') server_events,
         count(*) FILTER(WHERE trust_level='client_observed') client_events,max(received_at) last_received_at
         FROM lead.pixel_receipts WHERE connection_id=%s AND scope_key='live' AND counted
         AND occurred_at BETWEEN %s-interval '30 days' AND %s AND received_at<=%s
         GROUP BY event_name,definition_revision ORDER BY event_name,definition_revision LIMIT 30""",(connection['id'],as_of,as_of,as_of))
+    result['signals_revision']=signals_revision(result)
     return result
 
 
