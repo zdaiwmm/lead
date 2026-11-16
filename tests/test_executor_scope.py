@@ -141,7 +141,8 @@ async def test_http_descendants_use_bound_profile_for_search_and_research(
                 ),
             )
 
-    async def search(actor, task_id, query):
+    async def search(actor, task_id, query, growth_claim=None):
+        assert growth_claim is None
         return {"profile": str(actor.profile["id"])}
 
     async def command(controller, operation, args, command_id):
