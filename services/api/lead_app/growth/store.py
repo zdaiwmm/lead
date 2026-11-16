@@ -362,6 +362,7 @@ def accept_commands(aid, proposal, decision_task_id=None,*,business_snapshot=Non
                                     (j({**command.payload,"verified_progress":progress}), row["id"]))
                                 c.execute("""UPDATE lead.tasks SET state='canceled',completed_at=now()
                                     WHERE experiment_id=%s AND state IN ('planned','queued','waiting_user')
+                                    AND NOT (type='growth.account' AND coalesce(result#>>'{runtime,community,state}','') IN ('dispatching','unknown','pending_approval'))
                                     AND NOT EXISTS(SELECT FROM lead.actions a WHERE a.task_id=lead.tasks.id
                                         AND a.state IN ('dispatching','unknown','confirmed'))""", (row["id"],))
                             else:
