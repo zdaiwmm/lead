@@ -12,7 +12,7 @@ from uuid import UUID
 import pytest
 from lead_app.browser_execution import origin
 from lead_app.native_method_errors import MethodFactError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -33,7 +33,7 @@ class Contract(BaseModel):
     ('services/api/lead_app/growth/tools.py','AccountInput','Contract'),
     ('services/api/lead_app/browser.py','DiscoverRequest','OpenRequest')])
 def test_operation_is_optional_and_only_the_existing_two_operations(path,name,parent):
-    model=definition(path,name,namespace={parent:Contract,'Field':Field,'Literal':Literal,'UUID':UUID})
+    model=definition(path,name,namespace={parent:Contract,'Field':Field,'Literal':Literal,'UUID':UUID,'model_validator':model_validator})
     assert model().desired_operation is None
     for value in ('publish','reply'):
         assert model(desired_operation=value).desired_operation==value
@@ -130,7 +130,7 @@ def test_evaluation_requests_exact_outcomes_for_both_discovery_stages():
 def proposed_task(payload):
     from datetime import datetime, timedelta, timezone
     model=definition('services/api/lead_app/growth/tools.py','AccountInput',
-        namespace={'Contract':Contract,'Field':Field,'Literal':Literal,'UUID':UUID})
+        namespace={'Contract':Contract,'Field':Field,'Literal':Literal,'UUID':UUID,'model_validator':model_validator})
     tree=ast.parse((ROOT/'services/api/lead_app/growth/store.py').read_text())
     branch=next(node for node in ast.walk(tree) if isinstance(node,ast.If)
         and isinstance(node.test,ast.Compare) and isinstance(node.test.comparators[0],ast.Constant)
