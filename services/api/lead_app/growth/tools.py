@@ -678,12 +678,24 @@ async def execute_tool(aid, row, claim):
                     output={"original_task_id":str(data.legacy_native_task_id),"receipt":observed,"knowledge_progress":True})
             return WorkResult(outcome="waiting",wait=Wait(reason="original_native_receipt_pending",producer="native_receipt_adapter",
                 check_at=utcnow()+timedelta(minutes=15),recovery_action="reconcile",episode_root=row["id"],scope_ref=str(data.legacy_native_task_id)))
-        summary = await asyncio.to_thread(summarize, aid, data.experiment_id or spec.experiment_id)
+        experiment_id = data.experiment_id or spec.experiment_id
+        summary = await asyncio.to_thread(summarize, aid, experiment_id)
+        shortlinks = summary.get("shortlinks") or {}
+        observed = type(shortlinks.get("business_clicks")) is int and shortlinks["business_clicks"] > 0
+        signals_revision = summary.get("signals_revision")
+        signals_seen = False
         with tx(aid) as c:
             previous = one(c,"""SELECT EXISTS(SELECT FROM lead.tasks WHERE type='growth.observe' AND id<>%s
                 AND state='succeeded' AND result#>>'{output,output,evidence_revision}'=%s) ok""",
                 (row["id"],summary.get("evidence_revision")))["ok"]
+            if observed and isinstance(signals_revision, str) and signals_revision:
+                signals_seen = one(c,"""SELECT EXISTS(SELECT FROM lead.tasks WHERE type='growth.observe' AND id<>%s
+                    AND state='succeeded' AND result#>>'{output,output,signals_revision}'=%s
+                    AND coalesce(input#>>'{spec,payload,experiment_id}',input#>>'{spec,experiment_id}')
+                        IS NOT DISTINCT FROM %s) ok""",
+                    (row["id"],signals_revision,str(experiment_id) if experiment_id else None))["ok"]
         summary["business_progress"] = bool(summary.get("new_units") and not previous)
+        summary["knowledge_progress"] = bool(observed and isinstance(signals_revision, str) and signals_revision and not signals_seen)
         return WorkResult(outcome="completed", output=summary)
     if spec.kind == "recover":
         from .runtime import probe_episode

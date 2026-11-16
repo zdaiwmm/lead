@@ -194,6 +194,16 @@ async def deliver_workspace(client, tenant, configured, key_was_configured):
                 elif e["event_type"] == "growth.account_connected":
                     from .account_connection import connected
                     await run_db(connected, aid, payload["account_id"])
+                elif e["event_type"] == "analytics.cleaned":
+                    if payload.get("scope_key") == "live" and agent["desired_state"] == "running":
+                        from .growth.outcomes import distribution_trigger
+                        trigger = await run_db(distribution_trigger, aid, payload["ingest_id"])
+                        if trigger is not None:
+                            # Stable ingest facts use the ordinary pending/consumed
+                            # digest and per-experiment coalescing; RPC retry is safe.
+                            await start_workflow(client, GrowthDecisionWorkflow.run, aid, id="growth-decision:"+aid,
+                                task_queue="lead", id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+                                start_signal="wake", start_signal_args=[trigger])
                 elif e["event_type"] == "growth.wake":
                     await start_workflow(client, GrowthDecisionWorkflow.run, aid, id="growth-decision:"+aid,
                         task_queue="lead", id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
