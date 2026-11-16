@@ -196,3 +196,39 @@ async def test_revocation_during_each_read_fences_the_result(sample, mode, name,
     with pytest.raises((ValueError, HTTPException)):
         await invoke(name, arguments)
     assert observed == [True]
+
+
+def capture_content_rows(monkeypatch):
+    from lead_app import db
+    original, rows = db.one, []
+    def observed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if isinstance(result, dict) and {'body', 'source_refs'} <= result.keys():
+            rows.append(json.dumps(result, ensure_ascii=False, default=str, separators=(',', ':')).encode())
+        return result
+    monkeypatch.setattr(db, 'one', observed)
+    return rows
+
+
+def test_oversized_source_refs_are_bounded_before_leaving_database(sample, monkeypatch):
+    with tx(sample['aid']) as c:
+        c.execute('UPDATE lead.content_items SET source_refs=%s WHERE id=%s',
+                  (j([{'kind': 'task', 'id': sample['task'], 'claim': 'R'*300000}]), sample['artifact']['id']))
+    rows = capture_content_rows(monkeypatch)
+    result = read(sample)
+    assert result['resolved_artifacts_limited'] is True
+    assert not any(item['available'] for item in result['resolved_artifacts'])
+    assert rows and max(map(len, rows)) <= 256000
+
+
+def test_unrelated_large_validation_never_enters_api_memory(sample, monkeypatch):
+    with tx(sample['aid']) as c:
+        c.execute('UPDATE lead.content_items SET validation_result=validation_result || %s WHERE id=%s',
+                  (j({'unrelated': 'UNRELATED_LARGE_VALIDATION'*16000}), sample['artifact']['id']))
+    rows = capture_content_rows(monkeypatch)
+    result = read(sample)
+    artifact = result['resolved_artifacts'][0]
+    assert artifact['available'] and artifact['body'] == sample['body']
+    assert artifact['validation'] == sample['validation']
+    assert rows and max(map(len, rows)) <= 256000
+    assert all(b'UNRELATED_LARGE_VALIDATION' not in row for row in rows)
