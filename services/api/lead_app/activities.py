@@ -194,7 +194,14 @@ async def _chat_job(args: dict):
                 "server_context": {
                     "growth":growth_status,
                     **{
-                    k: [t for t in detail[k] if t["type"] != "operating.decision"]
+                    # Retained task bodies and outputs are read by ID through
+                    # lead_task_read; never nest frozen decision contexts here.
+                    k: [
+                        {field: t[field] for field in (
+                            "id", "type", "state", "created_at", "scheduled_at", "completed_at"
+                        )}
+                        for t in detail[k] if t["type"] != "operating.decision"
+                    ]
                     if k == "tasks"
                     else detail[k]
                     for k in (

@@ -70,3 +70,9 @@
 `68c5063` 的完整 CI `43882040212/1` 在 1902 项通过后失败：原 `test_native_discovery_operation` 只抽取 `AccountInput` 类到隔离 namespace，没有提供新增 after 校验器的 `model_validator`。仅补该测试导入及两个 namespace，保留真实校验器、原操作枚举和拒绝断言。该文件 21 项通过（0.18 秒）；定向静态核对确认所需 globals 已齐，无其他该模型的隔离提取消费者遗漏。
 
 集中运行 118 个原生接口及 AST 消费者文件：1056 项通过、71 项按当前环境跳过，1 项未改动的 `test_native_frame_partition_dom` 在本机 fallback Chromium 取独立子帧 CDP session 时失败。实际本机为 Playwright 1.62.0 / macOS ARM64 Chromium 151.0.7922.34；该测试及锁定依赖相对原成功 `4ffcc0c` 无差异，CI 会显式使用固定 Linux runtime。保留原帧隔离断言，不能将本地整批记为通过，也不能以跳过或本机结果放行；修复后精确 main 的完整 Linux 应用 CI 必须覆盖此项。Context7 未返回对应 API 片段，已改查 [Playwright 官方 CDP API](https://playwright.dev/python/docs/api/class-browsercontext#browser-context-new-cdp-session)，不据此改变生产隔离方式。隔离服务已停止；该失败候选仅缓存来源与原始 ZIP，仍未挂载或部署。
+
+### 聊天任务上下文使用原任务引用
+
+`9c120c2` 真实聊天的 native input 为 1,289,767 字符，其中 30 个完整任务行占 1,180,220 字符，包含历史增长决策冻结上下文，触发执行器输入长度拒绝。窄修复只把聊天模型输入的 tasks 投影为 ID、类型、状态及创建/计划/完成时间；任务 ID 继续供原 `lead_task_read` 读取规格、产物及已保存正文。原 UI/API、完整任务账本、授权和未知请求均不变，不删除历史或重发原聊天，也不改变自主运营流程。
+
+新回归通过真实 `_chat_job` 覆盖增长和旧项目各 30 个总量超过 1 MiB 的任务，旧源码两项稳定失败；修复后确认原 input/result/冻结上下文不进入提示词，元数据完整、原 reader 可读完整规格与产物、任务账本无变化，已完成聊天重复处理不再调用模型，原 operating.decision 过滤保留。与既有聊天、知识来源、原生任务读取和聊天续接消费者共 **56 项通过（9.46 秒）**，Ruff/diff 检查通过。仅复用原隔离 PostgreSQL/Temporal，服务已停止；没有真实模型或生产操作。此本地证据不替代修复后精确 main 的完整应用 CI 与独立发布回读。
