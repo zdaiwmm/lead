@@ -59,6 +59,14 @@ async def verify(state,source):
         runtime=importlib.import_module('lead_channel_adapter.community_runtime')
         importlib.import_module('lead_channel_adapter.community_schedule')
         assert callable(receipts.reconcile) and callable(runtime.search_history)
+        # New growth operations use the current public core, never the retained
+        # legacy module whose guard is restricted to pre-migration receipts.
+        from lead_app.community_runtime import (
+            execute_growth_reply,
+            growth_community_step,
+        )
+        from lead_app.community_search import native_search
+        assert all(callable(function) for function in (growth_community_step, execute_growth_reply, native_search))
         assert not any(name in sys.modules for name in ('lead_channel_adapter.resident','lead_channel_adapter.community_selection','lead_channel_adapter.model'))
         assert len(called)==1
         verify_imports(binding,sys.modules)

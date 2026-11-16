@@ -16,6 +16,8 @@ PERMANENT = {"unsupported_operation", "scope_changed", "invalid_evidence", "inva
              "dependency_failed", "account_changed", "target_not_permitted", "question_limit", "experiment_closed",
              "experiment_window_ended","product_changed","content_product_changed","stale_submission_claim",
              "unsupported_content_claim","unsupported_research_finding"}
+PERMANENT.update({'community_rules_unresolved', 'community_join_rules_changed', 'community_owner_scope_missing',
+    'community_target_disabled', 'community_target_grant_revoked', 'community_group_dependency_required'})
 MODEL_ERRORS={"ModelHTTPError","ModelRateLimitError","APITimeoutError","ConnectError","ReadTimeout",
     "APIConnectionError","ModelQuotaExceededError","AuthenticationError","ModelUnavailable","UnexpectedModelBehavior"}
 
@@ -26,6 +28,10 @@ def _ref(value):
 
 def _runtime(row):
     return dict((row["result"] or {}).get("runtime") or {})
+
+
+def _membership_pending(row):
+    return row['type'] == 'growth.account' and _runtime(row).get('community', {}).get('state') in ('dispatching', 'unknown', 'pending_approval')
 
 
 def _save(c, row, state, runtime, output=None, when=None):
@@ -421,7 +427,7 @@ def advance(value, attempt_token=None, *, now=None):
             _save(c,row,"planned",{**runtime,"wait":wait},when=wait["check_at"])
             return {"state":"wait","wait":wait}
         original = one(c, "SELECT id,state FROM lead.actions WHERE task_id=%s ORDER BY created_at DESC LIMIT 1", (row["id"],))
-        reconcile = bool(original and original["state"] in ("dispatching", "unknown", "confirmed"))
+        reconcile = bool(original and original["state"] in ("dispatching", "unknown", "confirmed")) or _membership_pending(row)
         if spec.kind=="observe" and spec.payload.get("legacy_native_task_id"):
             native = one(c,"SELECT input,result FROM lead.tasks WHERE id=%s",(spec.payload["legacy_native_task_id"],))
             reconcile = bool(native and native["input"].get("migration",{}).get("owner")=="receipt_only")
@@ -597,6 +603,12 @@ def _finish(claim, value):
             completed = progress.get('completed_checks', 0) if progress.get('action_id') == reconcile_action else 0
             runtime['receipt_reconciliation'] = {'action_id': reconcile_action, 'completed_checks': completed + 1}
         valid_receipt = bool(action and action["state"]=="confirmed" and one(c,"SELECT lead.growth_receipt_valid(%s) ok",(action["id"],))["ok"])
+        member = runtime.get('community') or {}
+        join = row['type'] == 'growth.account' and row['input']['spec'].get('payload', {}).get('community_operation') == 'join'
+        if join and result.outcome == 'completed' and not (member.get('state') == 'confirmed'
+                and member.get('evidence_ref') and member.get('confirmed_at')
+                and member.get('operation_key') == result.output.get('operation_key')):
+            result = WorkResult(outcome='unknown' if _membership_pending(row) else 'failed', failure_code='invalid_evidence')
         if row["type"] == "growth.channel" and result.outcome == "completed" and not valid_receipt:
             result = WorkResult(outcome="unknown" if action and action["state"] in ("dispatching","unknown") else "failed",
                                 failure_code="invalid_evidence")
@@ -607,7 +619,7 @@ def _finish(claim, value):
                 or (saved.get("join_state")=="confirmed" and saved.get("join_confirmed_at"))
                 or (saved.get("reply_state")=="failed" and saved.get("reply_failed_at"))):
                 result = WorkResult(outcome="failed",failure_code="invalid_evidence")
-        if result.outcome == "failed" and action and action["state"] in ("dispatching", "unknown"):
+        if result.outcome == "failed" and ((action and action["state"] in ("dispatching", "unknown")) or _membership_pending(row)):
             result = WorkResult(outcome="unknown", failure_code="unknown_receipt")
         if result.outcome == "failed":
             if row["type"]=="growth.research":
@@ -637,7 +649,7 @@ def _finish(claim, value):
         elif result.outcome == "unknown":
             delay = _receipt_delay(runtime, action)
             wait = _wait(row, "unknown_receipt", utcnow(), action="reconcile", delay=delay,
-                         owner='platform' if action else 'product')
+                         owner='platform' if action or _membership_pending(row) else 'product')
             if action:
                 wait['scope_ref'] = str(action['id'])
             if delay == 3600:
@@ -709,7 +721,8 @@ async def execute(claim):
     except Exception as error:
         with tx(str(ref.agent_id)) as c:
             action = one(c, "SELECT id FROM lead.actions WHERE task_id=%s AND state IN ('dispatching','unknown')", (ref.task_id,))
-        if action:
+            current = one(c, 'SELECT type,result FROM lead.tasks WHERE id=%s', (ref.task_id,))
+        if action or current and _membership_pending(current):
             return WorkResult(outcome="unknown", failure_code="unknown_receipt").model_dump(mode="json")
         code = str(error) if isinstance(error, ValueError) and len(str(error)) < 120 else type(error).__name__
         return WorkResult(outcome="failed", failure_code=code).model_dump(mode="json")
@@ -745,7 +758,9 @@ def recover_due(aid, now=None, cursor=None):
                 conclusion=%s WHERE id=%s""",(j({"state":"inconclusive","reason":"window_ended" if expired else "working_budget_ended",
                     "verified_progress":progress,"costs":costs}),experiment["id"]))
             c.execute("""UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE experiment_id=%s
-                AND state IN ('planned','queued','waiting_user') AND NOT EXISTS(SELECT FROM lead.actions a
+                AND state IN ('planned','queued','waiting_user')
+                AND NOT (type='growth.account' AND coalesce(result#>>'{runtime,community,state}','') IN ('dispatching','unknown','pending_approval'))
+                AND NOT EXISTS(SELECT FROM lead.actions a
                     WHERE a.task_id=lead.tasks.id AND a.state IN ('dispatching','unknown','confirmed'))""",(experiment["id"],))
             c.execute("UPDATE lead.actions SET state='canceled' WHERE state='prepared' AND task_id IN(SELECT id FROM lead.tasks WHERE experiment_id=%s)",(experiment["id"],))
             emit(c,aid,"growth.wake",{"reason":"experiment_review_due","experiment_id":str(experiment["id"]),"revision":experiment["revision"]+1})
@@ -776,10 +791,11 @@ def recover_due(aid, now=None, cursor=None):
             runtime = _runtime(row)
             if row["state"] == "running":
                 action = one(c, "SELECT id FROM lead.actions WHERE task_id=%s AND state IN ('dispatching','unknown')", (row["id"],))
-                if not action:
+                membership = _membership_pending(row)
+                if not action and not membership:
                     runtime["failure_attempts"] = runtime.get("failure_attempts",0)+1
                     episode = _record_failure(c,row,runtime,"work_lease_expired")
-                state = "reconciling" if action else "failed" if episode["status"]=="blocked" else "planned"
+                state = "reconciling" if action or membership else "failed" if episode["status"]=="blocked" else "planned"
                 runtime.update(lease_until=None, attempt_token=None, wait=None)
                 _save(c, row, state, runtime)
             checked.append(str(row["id"]))
@@ -793,6 +809,8 @@ def recover_due(aid, now=None, cursor=None):
 
 def _resume_allowed(c, agent, row):
     spec = TaskSpec.model_validate(row["input"]["spec"])
+    if _membership_pending(row):
+        return 'reconcile_original_membership'
     if not enabled(agent) or agent["desired_state"] in ("paused", "archived"):
         return "project_paused"
     if spec.review_at <= utcnow():
