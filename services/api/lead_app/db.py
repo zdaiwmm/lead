@@ -135,8 +135,10 @@ def emit(conn, agent_id, kind, payload=None):
         if agent and growth_enabled(agent):
             if kind=="agent.updated":
                 return
+            from .growth.agent import PROMPT_VERSION
             kind = "growth.wake"
-            payload = {"reason":"configuration_changed","control_version":agent["control_version"],"config_revision":agent["config_revision"]}
+            payload = {"reason":"configuration_changed","control_version":agent["control_version"],
+                       "config_revision":agent["config_revision"],"prompt_version":PROMPT_VERSION}
     if kind in {"supervisor.wake", "agent.updated"}:
         from .cadence_events import wake_clocks
         wake_clocks(conn, agent_id)
