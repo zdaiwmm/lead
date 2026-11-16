@@ -9,7 +9,7 @@ from ..model import run_model
 from .contracts import DecisionProposal, ExperimentSpec, TaskSpec, utcnow
 from .store import accept_commands, command_group, digest, objective_revision
 
-PROMPT_VERSION = "growth-v2.10"
+PROMPT_VERSION = "growth-v2.11"
 MAX_CONTEXT_BYTES = 48000
 
 
@@ -368,6 +368,23 @@ async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=
                         **decision_outcome(proposal,accepted,rejected,pending_work)}
             repair = {"groups":[item["group"] for item in rejected],"errors":rejected,"accepted":accepted,
                       "instruction":"Each rejected group was rolled back atomically. Resend the complete corrected rejected group, including experiment.create if it creates a new experiment. Accepted receipts are authoritative and immutable; never recreate accepted groups or invent dependency IDs. If no valid repair is feasible, return commands=[] and continuation with the specific real condition and next action; do not repeat exhausted paths."}
+            failed_creates = []
+            for error in rejected:
+                if error.get("reason") == "no_progress_path_exhausted":
+                    failed = next((command for command in proposal.commands
+                        if command_group(command) == error["group"] and command.kind == "experiment.create"), None)
+                    if failed:
+                        failed_creates.append({"group":error["group"], "command_key":failed.command_key,
+                            "kind":"experiment.create"})
+            if failed_creates:
+                repair["experiment_create_failures"] = failed_creates
+                repair["instruction"] += (
+                    " For experiment_create_failures, the exhausted operation is experiment.create, not the account primitive."
+                    " You may omit experiment.create and resubmit a complete corrected proposal in the SAME rejected group"
+                    " containing an independent account task with purpose=community and community_operation=search/inspect;"
+                    " both Command.experiment_id and TaskSpec.experiment_id must be null."
+                    " This remains subject to original admission, account permissions, required references and source-specific stop conditions."
+                    " Do not rename/reopen an exhausted experiment or change the goal, counters or stopped source to bypass its guard.")
         except (ValidationError, ValueError) as error:
             repair = {"code":type(error).__name__, "errors":proposal_errors(error),
                 "instruction":"Correct the exact validation errors. Return valid JSON with the supplied context_key, explicit current goal_ref.revision and declared tool schemas."}
