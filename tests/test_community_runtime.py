@@ -428,6 +428,22 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
         found = await native_search(actor, str(search_task["id"]), QUERIES[0])
         assert found["groups"][0]["telegram_url"] == "https://t.me/readers_fixture"
         assert await actor.page.locator(".item-main.is-search-active").count() == 1
+        # Titles are user-authored text, not the result's public username.
+        # This is the actual title/subtitle shape that produced a wrong URL.
+        await actor.page.locator(".search-group-contacts").evaluate(
+            """root=>{root.innerHTML='<a data-peer-id="-777778"><span class="peer-title">Private Chat App @title_alias</span><span>@observed_public, 3 039 members</span></a>'
+            +'<a data-peer-id="-777779"><span class="peer-title">Title only @unverified_name</span><span>12 members</span></a>'
+            +'<a data-peer-id="-777780"><span class="peer-title">Ambiguous result</span><span>@first_name, contact @second_name</span></a>'
+            +'<a data-peer-id="777781"><span class="peer-title">A person</span><span>@person_name</span></a>';}"""
+        )
+        bound = await native_search(actor, str(search_task["id"]), QUERIES[0])
+        assert [(item["peer_id"], item["telegram_url"]) for item in bound["groups"]] == [
+            ("-777778", "https://t.me/observed_public")
+        ]
+        with tx(aid) as c:
+            retained = one(c, "SELECT output FROM lead.browser_steps WHERE id=%s", (bound["source"]["evidence_id"],))["output"]
+        assert retained["groups"][0]["subtitle"] == "@observed_public, 3 039 members"
+        assert retained["elements"] == [{"href": "https://t.me/observed_public", "name": "Private Chat App @title_alias"}]
         await actor.page.locator(".search-group-contacts").evaluate(
             'e=>e.innerHTML=\'<a data-peer-id="-888888"><span class="peer-title">Other group</span><span>@other_fixture, 2 members</span></a>\''
         )
