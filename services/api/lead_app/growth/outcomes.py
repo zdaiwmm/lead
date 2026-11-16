@@ -1,7 +1,8 @@
 """First core-value results from trusted receipts, never visit counts."""
 import hashlib
+import json
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 def frozen_goal(c, agent):
@@ -61,7 +62,106 @@ def classify_receipts(rows, unit='user', *, start=None, end=None, definition_rev
         'repeat_units':repeats,'excluded':excluded,'unit':unit,'evidence_refs':evidence}
 
 
-def operating_signals(c,as_of,connection_id=None,experiment_id=None):
+def shortlink_signals(c, as_of, experiment_id=None, *, start=None, end=None):
+    """Read processed redirect facts, independently of site/core-value coverage.
+
+    This is the reporting SOURCES redirect/exclusion rule, narrowed by immutable
+    links and causal confirmed Actions for an experiment. A request is not an
+    arrival or a person. No rollup has link/experiment dimensions to substitute.
+    """
+    from ..db import one
+
+    start = (start or as_of-timedelta(days=30)).astimezone(timezone.utc)
+    end = (end or as_of).astimezone(timezone.utc)
+    c.execute("SELECT set_config('app.analytics_scope','live',true)")
+    data = one(c, """WITH links AS (
+      SELECT l.* FROM lead.tracking_links l
+      WHERE l.tenant_id=lead.ctx_tenant() AND l.agent_id=lead.ctx_agent() AND l.platform<>'lab' AND l.created_at<=%(asof)s
+        AND (%(experiment)s::uuid IS NULL OR EXISTS(
+          SELECT FROM lead.actions a JOIN lead.tasks t ON
+            (t.tenant_id,t.agent_id,t.id)=(a.tenant_id,a.agent_id,a.task_id)
+          WHERE (a.tenant_id,a.agent_id,a.content_id)=(l.tenant_id,l.agent_id,l.content_id)
+            AND a.state='confirmed' AND a.confirmed_at<=%(end)s AND t.experiment_id=%(experiment)s))
+    ), observed AS (
+      SELECT v.id,v.tracking_link_id,v.anonymous_id,v.exclusion_reason,v.started_at,
+        EXISTS(SELECT FROM lead.actions a JOIN lead.tasks t ON
+          (t.tenant_id,t.agent_id,t.id)=(a.tenant_id,a.agent_id,a.task_id)
+          WHERE (a.tenant_id,a.agent_id,a.content_id)=(l.tenant_id,l.agent_id,l.content_id)
+            AND a.state='confirmed' AND a.confirmed_at<=v.started_at
+            AND coalesce(a.intent->>'publication_purpose','business')='business'
+            AND (coalesce(t.input->>'bootstrap_verification','false')<>'true' OR t.input->>'member_contribution'='true')
+            AND (%(experiment)s::uuid IS NULL OR t.experiment_id=%(experiment)s)) AS business,
+        EXISTS(SELECT FROM lead.actions a JOIN lead.tasks t ON
+          (t.tenant_id,t.agent_id,t.id)=(a.tenant_id,a.agent_id,a.task_id)
+          WHERE (a.tenant_id,a.agent_id,a.content_id)=(l.tenant_id,l.agent_id,l.content_id)
+            AND a.created_at<=%(asof)s AND (a.intent->>'publication_purpose'='diagnostic' OR
+              t.input->>'bootstrap_verification'='true' AND coalesce(t.input->>'member_contribution','false')<>'true')
+            AND (%(experiment)s::uuid IS NULL OR t.experiment_id=%(experiment)s)) AS diagnostic
+      FROM lead.visit_sessions v JOIN links l ON
+        (l.tenant_id,l.agent_id,l.id)=(v.tenant_id,v.agent_id,v.tracking_link_id)
+      WHERE v.tenant_id=lead.ctx_tenant() AND v.agent_id=lead.ctx_agent()
+        AND v.source='redirect' AND v.trust_level='redirect_observed'
+        AND v.started_at BETWEEN %(start)s AND %(end)s AND v.started_at<=%(asof)s
+    ), facts AS (
+      SELECT * FROM observed WHERE %(experiment)s::uuid IS NULL OR business OR diagnostic
+    ), per_link AS (
+      SELECT l.id,l.platform,l.placement,l.placement_ref IS NOT NULL point_ref_present,
+        count(f.id) FILTER(WHERE f.exclusion_reason IS NULL AND NOT f.diagnostic)::bigint clicks,
+        count(f.id) FILTER(WHERE f.exclusion_reason IS NULL AND f.business AND NOT f.diagnostic)::bigint business_clicks,
+        count(f.id) FILTER(WHERE f.exclusion_reason IS NULL AND f.diagnostic)::bigint diagnostic_clicks,
+        count(f.id) FILTER(WHERE f.exclusion_reason='coverage_probe')::bigint coverage_probe,
+        count(f.id) FILTER(WHERE f.exclusion_reason='known_bot')::bigint known_bot,
+        count(f.id) FILTER(WHERE f.exclusion_reason IS NOT NULL AND f.exclusion_reason NOT IN ('coverage_probe','known_bot'))::bigint other_excluded,
+        count(f.id)::bigint observed_rows,max(f.started_at) last_observed_at
+      FROM links l LEFT JOIN facts f ON f.tracking_link_id=l.id
+      GROUP BY l.id,l.platform,l.placement,l.placement_ref
+    ), points AS (
+      SELECT platform,coalesce(placement,'legacy_unknown') placement,count(*) links,
+        sum(clicks)::bigint clicks,sum(business_clicks)::bigint business_clicks,
+        sum(diagnostic_clicks)::bigint diagnostic_clicks FROM per_link GROUP BY platform,placement
+    ), pipeline AS (
+      SELECT count(*) FILTER(WHERE e.state='pending') pending,
+        count(*) FILTER(WHERE e.state='failed') failed,
+        count(*) FILTER(WHERE e.state='quarantined') quarantined
+      FROM lead.analytics_ingest_events e JOIN lead.analytics_clicks click ON
+        (click.tenant_id,click.agent_id,click.id::text)=(e.tenant_id,e.agent_id,e.event_id)
+      JOIN links l ON (l.tenant_id,l.agent_id,l.id)=(click.tenant_id,click.agent_id,click.tracking_link_id)
+      WHERE e.tenant_id=lead.ctx_tenant() AND e.agent_id=lead.ctx_agent() AND e.scope_key='live'
+        AND e.source_kind='redirect' AND e.received_at<=%(asof)s
+        AND click.occurred_at BETWEEN %(start)s AND %(end)s
+    ) SELECT count(*)::bigint link_count,count(*) FILTER(WHERE placement IS NULL)::bigint legacy_unknown,
+      coalesce(sum(clicks),0)::bigint clicks,coalesce(sum(business_clicks),0)::bigint business_clicks,
+      coalesce(sum(diagnostic_clicks),0)::bigint diagnostic_clicks,
+      coalesce(sum(coverage_probe),0)::bigint coverage_probe,coalesce(sum(known_bot),0)::bigint known_bot,
+      coalesce(sum(other_excluded),0)::bigint other_excluded,coalesce(sum(observed_rows),0)::bigint observed_rows,
+      max(last_observed_at) last_observed_at,
+      (SELECT count(DISTINCT anonymous_id) FROM facts WHERE exclusion_reason IS NULL AND NOT diagnostic) observed_browser_devices,
+      (SELECT count(*) FROM facts WHERE exclusion_reason IS NULL AND NOT diagnostic AND anonymous_id IS NULL) unknown_browser_device_clicks,
+      (SELECT to_jsonb(pipeline) FROM pipeline) pipeline,
+      (SELECT coalesce(jsonb_agg(to_jsonb(item)),'[]') FROM
+        (SELECT * FROM per_link ORDER BY clicks DESC,id LIMIT 21) item) link_items,
+      (SELECT count(*) FROM points) point_count,
+      (SELECT coalesce(jsonb_agg(to_jsonb(item)),'[]') FROM
+        (SELECT * FROM points ORDER BY clicks DESC,platform,placement LIMIT 21) item) point_items
+      FROM per_link""", {'asof':as_of,'start':start,'end':end,'experiment':experiment_id})
+    pipeline = {key:int(value) for key,value in data['pipeline'].items()}
+    coverage = ('pending' if pipeline['pending'] else 'degraded' if pipeline['failed'] or pipeline['quarantined']
+                else 'recorded' if data['observed_rows'] else 'unobserved' if data['link_count'] else 'missing')
+    return {'scope':'live','source':'processed_redirects','coverage':coverage,
+        'window':{'start':start.isoformat(),'end':end.isoformat(),'timezone':'UTC'},
+        'clicks':data['clicks'],'business_clicks':data['business_clicks'],
+        'unattributed_clicks':data['clicks']-data['business_clicks'],'diagnostic_clicks':data['diagnostic_clicks'],
+        'excluded':{'coverage_probe':data['coverage_probe'],'known_bot':data['known_bot'],'other':data['other_excluded']},
+        'observed_browser_devices':data['observed_browser_devices'],
+        'unknown_browser_device_clicks':data['unknown_browser_device_clicks'],'pipeline':pipeline,
+        'last_observed_at':data['last_observed_at'].isoformat() if data['last_observed_at'] else None,
+        'links':{'total':data['link_count'],'legacy_unknown':data['legacy_unknown'],
+            'items':data['link_items'][:20],'truncated':len(data['link_items'])>20},
+        'points':{'total':data['point_count'],'items':data['point_items'][:20],'truncated':len(data['point_items'])>20},
+        'interpretation':'Observed shortlink requests and browser devices; not reach, arrivals, people or activation.'}
+
+
+def operating_signals(c,as_of,connection_id=None,experiment_id=None, *, shortlink_start=None,shortlink_end=None):
     from ..db import all_rows, one
     connection=one(c,"SELECT id,state,last_received_at FROM lead.analytics_connections WHERE state<>'disconnected' AND (%s::uuid IS NULL OR id=%s) ORDER BY created_at DESC LIMIT 1",(connection_id,connection_id))
     costs=one(c,"""SELECT coalesce(sum(units),0) tokens FROM lead.usage_events
@@ -79,7 +179,11 @@ def operating_signals(c,as_of,connection_id=None,experiment_id=None):
         AND (%s::uuid IS NULL OR r.pricing_snapshot#>>'{research,experiment_id}'=%s)
         GROUP BY b.unit""",(as_of,experiment_id,str(experiment_id) if experiment_id else None))
     provider_costs=[{**item,**{key:int(item[key]) for key in ('held_units','spent_units','unknown_calls')}} for item in provider_costs]
-    result={'exposure':{'value':None,'coverage':'platform_insights_not_connected'},
+    shortlinks=shortlink_signals(c,as_of,experiment_id,start=shortlink_start,end=shortlink_end)
+    revision={key:value for key,value in shortlinks.items() if key!='window'}
+    result={'shortlinks':shortlinks,
+        'signals_revision':hashlib.sha256(json.dumps(revision,sort_keys=True,default=str).encode()).hexdigest(),
+        'exposure':{'value':None,'coverage':'platform_insights_not_connected'},
         'visits':{'visitors':None,'page_views':None,'qualified_visits':None,'coverage':'missing','connection_id':None},
         'event_funnel':[],'costs':{'model_tokens':int(costs['tokens']),'held_tokens':int(held['tokens']),
             'unknown_billing_calls':held['unknown'],'advertising':None,'paid_cooperation':None,'research_providers':provider_costs}}
@@ -116,7 +220,10 @@ def summarize(aid, experiment_id=None, as_of=None):
         exp = one(c,'SELECT * FROM lead.growth_experiments WHERE id=%s',(experiment_id,)) if experiment_id else None
         # Never retrofit a current definition to an older unmeasured experiment.
         goal = exp['specification'].get('activation_ref') if exp else frozen_goal(c,agent)
-        signals=operating_signals(c,as_of,(goal or {}).get('connection_id'),experiment_id)
+        shortlink_start=exp['created_at'] if exp else as_of-timedelta(days=30)
+        shortlink_end=min(as_of,datetime.fromisoformat(exp['specification']['review_at'])) if exp else as_of
+        signals=operating_signals(c,as_of,(goal or {}).get('connection_id'),experiment_id,
+                                 shortlink_start=shortlink_start,shortlink_end=shortlink_end)
         base = {**signals,'definition_ref':goal,'measurement':'missing','new_units':None,'channels':{},
             'unknown_newness':None,'unattributed':None,'as_of':as_of.isoformat(),'window_status':'unknown'}
         if not goal or not goal.get('event_name') or not goal.get('connection_id'):
