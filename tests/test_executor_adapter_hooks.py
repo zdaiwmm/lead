@@ -40,8 +40,14 @@ async def test_adapter_step_uses_requested_profile_and_shared_timing(monkeypatch
     def fake_tx(_):
         yield SimpleNamespace(execute=lambda sql, values: writes.append(values))
 
+    def task_row(connection, sql, values):
+        assert sql == "SELECT type,input FROM lead.tasks WHERE id=%s"
+        assert values == (task,)
+        return {"type": "community.engage", "input": {}}
+
     monkeypatch.setattr(browser.gateway, "get", get)
     monkeypatch.setattr(browser, "tx", fake_tx)
+    monkeypatch.setattr(browser, "one", task_row)
     result = await browser.execute_community_step(
         aid,
         browser.CommunityStepRequest(task_id=task, operation="receipt"),

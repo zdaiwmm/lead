@@ -42,3 +42,13 @@
 ### 合入后的取消入口漏项
 
 只读验收准备发现显式 `experiment.close` 与定时关窗使用不同取消 SQL：前一候选只保护了定时关窗，显式关闭仍可能取消无 Action 的待批准入群任务。该候选未部署，原完整 CI 已取消并标为不放行；取消不计成功。窄修复仅为显式取消 SQL 增加同一持久成员操作例外。真实 `accept_commands` 关闭命令的六项回归覆盖三种未决状态与 planned/waiting_user，并以原 SQL 稳定复现错误取消；普通未执行任务仍取消，实验仍正常关闭。其他未变化证据复用；仅修复后精确 main 的完整应用 CI 和同轮产物可以放行。
+
+### 实际授权状态与原策略控制接通
+
+2026-11-16 12:30 UTC 原维护通道恢复，只读核实 App 仍为 `4ffcc0c`，Node 健康、Telegram 原账号 connected/intent running，未决任务和动作均为零。实际策略 `allow_promotion=false`，原 accepted owner_strategy 卡也缺少 `relevant_promotion`；此前把存在旧卡理解为已覆盖完整推广授权不准确。最新用户授权尚未交给原经营 Agent，不重复旧事实，不要求用户再次授权。
+
+必要接通沿原 `set_strategy`：只在 owner 显式提交推广允许时续签缺项的 owner_strategy 卡，旧卡取消并保留原内容，新增卡记录同一账号与 binding、版本及 supersedes；默认值不授予推广。原 API 保留 Pydantic 字段显式性，未提交的原参与策略不重置。owner 明确选 `quota_mode=agent` 才把经营频率交给 Agent；其他额度模式不变。原策略更新仍暂停旧 cadence，growth 群桥使用现代项目/账号暂停、路由、租约、未知回查和费用边界，不要求重新激活旧 cadence 或补旧设备额度 attest，也不恢复旧经营循环。
+
+控制增量固定源码 `6051e6b` 的 10 项新增与 3 项原策略/额度回归通过；不改变旧目标排除、revoked grants、账号 intent 或历史预算。实际应用须关联真实已登录 owner 消息的 ID/摘要，由真实维护 service 调用原控制并记录审计，不能伪造 human principal 或通过 SQL 造授权。
+
+前一 main `c67bce9` 的完整 CI `43865255738/1` 已完成失败，非取消：后端 786 项通过后，原 adapter 单元夹具对新增 Task 分类 SELECT 返回空 cursor；生产分类与增长围栏无需修改。只补该夹具的真实旧任务分类，保留原 profile/共享计时断言。修正后该 adapter 文件 18 项通过（1.34 秒），原 profile/计时、未知不重提、恢复隔离和 HTTP 边界断言保留；Ruff 与 diff 检查通过。该失败候选未部署；修复后的精确 main 仍需完整应用 CI 和同轮产物，不用局部结果放行。

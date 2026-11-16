@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class ParticipationPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
     answer_mode: Literal["exact_faq", "grounded_faq", "semantic_faq"] = "exact_faq"
-    quota_mode: Literal["combined", "per_action"] = "combined"
+    quota_mode: Literal["combined", "per_action", "agent"] = "combined"
     combined_per_24h: int = Field(default=1, ge=0, le=20)
     joins_per_24h: int = Field(default=1, ge=0, le=20)
     replies_per_24h: int = Field(default=1, ge=0, le=40)
@@ -153,7 +153,7 @@ def quota_due(policy, operation, attempts, now=None, *, waived_defaults=frozense
     """Attempts are pre-filtered to the current account; failed submits also count."""
     policy = ParticipationPolicy.model_validate(policy)
     now = now or datetime.now(timezone.utc)
-    if operation not in {"join", "reply"}:
+    if operation not in {"join", "reply"} or policy.quota_mode == 'agent':
         return None
     limit = (
         policy.combined_per_24h
