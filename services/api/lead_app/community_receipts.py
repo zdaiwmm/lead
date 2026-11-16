@@ -110,7 +110,7 @@ async def reconcile(actor, task, account, peer, limit):
     finally:
         check["duration_ms"] = round((time.monotonic() - started) * 1000)
         with tx(actor.aid) as c:
-            runtime.guard(actor, c, task, reading_receipt=task["state"] == "reconciling")
+            runtime.guard(actor, c, task, operation="receipt", read_only=True, reading_receipt=task["state"] == "reconciling")
             if check["status"] == "failed":
                 from .community_health import failed
                 failed(c, actor.aid, task, {"error_code": "send_failed", "stage": "receipt", "scope": "target", "retryable": True, "write_may_have_happened": False})

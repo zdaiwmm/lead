@@ -624,12 +624,16 @@ def guard(actor, c, task, *, editing_confirmed=False, reading_receipt=False, rea
         if due:
             raise ValueError(due["reason"])
     candidate = task["input"].get("candidate", {})
+    required = {"observe": "read_recent_history", "receipt": "read_recent_history", "scan_pending": "read_recent_history",
+                "join": "join_public_group", "reply": "relevant_promotion" if reply.get("promote") else "contextual_reply"}.get(action)
+    owner_required = {"read_recent_history", required} if required and not editing_confirmed else {
+        "join_public_group", "read_recent_history", "contextual_reply", "relevant_promotion"}
+    if action == "reply":
+        owner_required.add("contextual_reply")
     if card and account and candidate.get("handoff_id"):
         from .community_handoff import valid_handoff
         reply = task["input"].get("reply") or {}
         action = operation or ("observe" if read_only else "reply" if reply else "join" if task["input"].get("join_approved") else "observe")
-        required = {"observe": "read_recent_history", "receipt": "read_recent_history", "scan_pending": "read_recent_history",
-                    "join": "join_public_group", "reply": "relevant_promotion" if reply.get("promote") else "contextual_reply"}.get(action)
         bounded = bool(required and required in card["payload"].get("allowed_actions", [])
             and str(card["id"]) == candidate.get("handoff_delegation_id")
             and valid_handoff(c, actor.aid, account, a["config_revision"], candidate))
@@ -644,9 +648,8 @@ def guard(actor, c, task, *, editing_confirmed=False, reading_receipt=False, rea
         or not card
         or card["payload"].get("external_account_id") != account["external_account_id"]
         or card["payload"].get("account_id") != str(account["id"])
-        or not (bounded or (card["payload"].get("source") == "owner_strategy" and {
-            "join_public_group", "read_recent_history", "contextual_reply", "relevant_promotion",
-        }.issubset(card["payload"].get("allowed_actions", []))))
+        or not (bounded or (card["payload"].get("source") == "owner_strategy"
+            and owner_required.issubset(card["payload"].get("allowed_actions", []))))
         or task["type"] != "community.engage"
         or (task["state"] != "running" and not (reading_receipt and task["state"] == "reconciling") and not (editing_confirmed and task["state"] == "succeeded" and (task["result"] or {}).get("reply_state") == "confirmed" and promoter_voice(a)))
     ):
@@ -1154,7 +1157,7 @@ async def leave_restricted(actor, task, account, observed, membership):
         return {"state": state, "reason": reason}
 
     with tx(actor.aid) as c:
-        _, config = guard(actor, c, task)
+        _, config = guard(actor, c, task, operation='leave_restricted')
         if (not config.allow_leave_restricted or not mid or not membership
             or not membership["result"].get("join_submitted") or membership["result"].get("join_state") != "confirmed"
             or one(c, "SELECT 1 FROM lead.account_targets WHERE account_id=%s AND external_target_id=%s",
@@ -1202,7 +1205,7 @@ async def leave_restricted(actor, task, account, observed, membership):
         return save("deferred", "当前群未显示明确的退出选项，延后复查",
                     exit_menu_labels=[label.strip()[:70] for label in labels[:30]])
     with tx(actor.aid) as c:
-        _, config = guard(actor, c, task)
+        _, config = guard(actor, c, task, operation='leave_restricted')
         if not config.allow_leave_restricted:
             raise ValueError("受限群退出策略已关闭")
         locked = one(c, "UPDATE lead.tasks SET result=result || %s WHERE id=%s AND coalesce(result->>'leave_state','') NOT IN ('dispatching','unconfirmed','confirmed') RETURNING id",
@@ -1238,7 +1241,7 @@ async def leave_restricted(actor, task, account, observed, membership):
             await page.keyboard.press("Escape")
             return save("deferred", "确认框已关闭，未确认退出", exit_popup=text[:400], exit_buttons=labels[:8])
         with tx(actor.aid) as c:
-            _, current_config = guard(actor, c, task)
+            _, current_config = guard(actor, c, task, operation='leave_restricted')
             if not current_config.allow_leave_restricted:
                 await page.keyboard.press("Escape")
                 return save("deferred", "退出选项已关闭")
@@ -1280,7 +1283,7 @@ async def update_own_bio(actor, task, account, config):
         before = await read(field)
         if before != desired:
             with tx(actor.aid) as c:
-                _, fresh = guard(actor, c, task)
+                _, fresh = guard(actor, c, task, operation='profile_bio')
                 if fresh.profile_bio != desired or (await telegram.inspect_account(page))["external_account_id"] != expected:
                     raise ValueError("账号或简介配置已改变")
             await field.fill(desired)
@@ -1571,7 +1574,7 @@ async def browser_step(actor, task_id, operation):
                 document.querySelectorAll('.chatlist [data-peer-id],.chatlist-container [data-peer-id]'),
                 e=>e.dataset.peerId).filter(s=>/^-[0-9]+$/.test(s)))].slice(0,500)""")
             with tx(actor.aid) as c:
-                guard(actor,c,task,read_only=True)
+                guard(actor,c,task,operation=operation,read_only=True)
                 # Sidebar presence is a hint, never proof of membership. Mark
                 # the hints without moving every pending group to the write queue.
                 c.execute("""UPDATE lead.tasks SET result=result || %s WHERE type='community.engage'
@@ -1621,7 +1624,7 @@ async def browser_step(actor, task_id, operation):
             if native_membership(observed):
                 observed["joined"] = True
         with tx(actor.aid) as c:
-            guard(actor, c, task, read_only=operation == "observe")
+            guard(actor, c, task, operation=operation, read_only=operation == "observe")
             c.execute(
                 "UPDATE lead.tasks SET result=coalesce(result,'{}') || %s WHERE id=%s",
                 (j({"target_id": observed["target_id"]}), task_id),
@@ -1775,7 +1778,7 @@ async def browser_step(actor, task_id, operation):
             ):
                 return {"state": "blocked", "reason": "尚不具备加入条件"}
             with tx(actor.aid) as c:
-                _, config = guard(actor, c, task)
+                _, config = guard(actor, c, task, operation=operation)
                 if not config.allow_join:
                     return {"state": "blocked", "reason": "当前委托未启用加群"}
                 c.execute(
@@ -1795,7 +1798,7 @@ async def browser_step(actor, task_id, operation):
                     ),
                 )
             with tx(actor.aid) as c:
-                guard(actor, c, task)
+                guard(actor, c, task, operation=operation)
                 await telegram.close_chat_search(actor.page)
                 await latest_position(actor.page, observed["target_id"])
                 await (await membership_button(actor.page, request)).click(
@@ -1892,7 +1895,7 @@ async def browser_step(actor, task_id, operation):
                     return {"state": "blocked", "reason": "无法确认回复指向原问题"}
             baseline = await telegram.baseline(actor.page)
             with tx(actor.aid) as c:
-                _, config = guard(actor, c, task)
+                _, config = guard(actor, c, task, operation=operation)
                 owner = require_agent(c, actor.aid)
                 question = (message.get("body") if not publication.get("standalone") else "")
                 if promoter_voice(owner) and not promoter_copy_ok(body, owner["name"], identity_question=publication.get("promote") or asked_role(question)):
@@ -1921,7 +1924,7 @@ async def browser_step(actor, task_id, operation):
                     ),
                 )
             with tx(actor.aid) as c:
-                _, latest_config = guard(actor, c, task)
+                _, latest_config = guard(actor, c, task, operation=operation)
                 if latest_config.review_replies_only or not latest_config.allow_reply or (
                     publication["promote"] and not latest_config.allow_promotion
                 ) or (publication.get("standalone") and not latest_config.allow_proactive_post):
