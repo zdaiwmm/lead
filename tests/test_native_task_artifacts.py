@@ -3,12 +3,14 @@ import json
 from datetime import timedelta
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from fastapi import HTTPException
 from lead_app import domain, executor_nodes_api, fetch
 from lead_app import executor_nodes as nodes
 from lead_app import local_executor as core
 from lead_app import local_executor_tools as tools
+from lead_app.config import database_kwargs
 from lead_app.db import j, one, tx
 from lead_app.growth.contracts import TaskSpec, utcnow
 from lead_app.growth.store import digest, submit_work
@@ -103,7 +105,9 @@ def test_unavailable_references_remain_normal_task_results(sample, field, value)
 
 
 def test_persisted_body_hash_drift_is_not_a_readable_artifact(sample):
-    with tx(sample['aid']) as c:
+    # Only corrupt this fixture's content through the isolated database owner;
+    # the runtime correctly has no UPDATE privilege on retained content.
+    with psycopg.connect(**database_kwargs(owner=True)) as c:
         c.execute("UPDATE lead.content_items SET body=jsonb_set(body,'{body}','\"tampered\"') WHERE id=%s",
                   (sample['artifact']['id'],))
     assert read(sample)['resolved_artifacts'][0]['available'] is False
@@ -211,7 +215,7 @@ def capture_content_rows(monkeypatch):
 
 
 def test_oversized_source_refs_are_bounded_before_leaving_database(sample, monkeypatch):
-    with tx(sample['aid']) as c:
+    with psycopg.connect(**database_kwargs(owner=True)) as c:
         c.execute('UPDATE lead.content_items SET source_refs=%s WHERE id=%s',
                   (j([{'kind': 'task', 'id': sample['task'], 'claim': 'R'*300000}]), sample['artifact']['id']))
     rows = capture_content_rows(monkeypatch)
@@ -222,7 +226,7 @@ def test_oversized_source_refs_are_bounded_before_leaving_database(sample, monke
 
 
 def test_unrelated_large_validation_never_enters_api_memory(sample, monkeypatch):
-    with tx(sample['aid']) as c:
+    with psycopg.connect(**database_kwargs(owner=True)) as c:
         c.execute('UPDATE lead.content_items SET validation_result=validation_result || %s WHERE id=%s',
                   (j({'unrelated': 'UNRELATED_LARGE_VALIDATION'*16000}), sample['artifact']['id']))
     rows = capture_content_rows(monkeypatch)
