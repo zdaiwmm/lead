@@ -453,17 +453,30 @@ def community_pending(row):
 
 def community_authority(c, aid, account, operation, *, required=True):
     """Current owner control and the original account-bound delegation, never model flags."""
+    from .community_growth import GrowthConfig
     intent = one(c, 'SELECT * FROM lead.growth_read_intent(%s)', (account['id'],))
     card = one(c, """SELECT * FROM lead.interaction_cards WHERE type='manage_community'
         AND payload->>'account_id'=%s
         AND payload->>'external_account_id'=%s AND payload->>'source'='owner_strategy'
         ORDER BY created_at DESC,id DESC LIMIT 1 FOR SHARE""", (str(account['id']), account['external_account_id']))
     actions = {'search': 'read_recent_history', 'inspect': 'read_recent_history',
-               'join': 'join_public_group', 'reply': 'contextual_reply'}
-    saved = require_agent(c, aid)['onboarding_state'].get('community_growth') or {}
+               'join': 'join_public_group', 'reply': 'contextual_reply', 'promote':'relevant_promotion'}
+    config = GrowthConfig.model_validate(require_agent(c, aid)['onboarding_state'].get('community_growth') or {})
+    blocked = None
+    if operation in ('join','reply','promote'):
+        if not config.enabled or config.mode != 'contextual_outreach':
+            blocked = 'community_outreach_disabled'
+        elif operation == 'join' and not config.allow_join:
+            blocked = 'community_join_disabled'
+        elif operation in ('reply','promote') and (not config.allow_reply or config.review_replies_only):
+            blocked = 'community_reply_disabled'
+        elif operation == 'promote' and not config.allow_promotion:
+            blocked = 'community_promotion_disabled'
+    if required and blocked:
+        raise ValueError(blocked)
     valid = bool(intent and intent['desired'] == 'running' and account['automation_enabled'] and card
         and card['state'] == 'accepted' and card['expires_at'] > utcnow()
-        and saved.get('enabled') is not False
+        and not blocked
         and card['payload'].get('account_id') == str(account['id'])
         and card['payload'].get('external_account_id') == account['external_account_id']
         and card['payload'].get('source') == 'owner_strategy'
@@ -480,8 +493,9 @@ def community_task_scope(c, aid, task, claim=None, *, operation=None, reconcile=
     from .growth.store import enabled
     spec = task['input']['spec']
     runtime = (task.get('result') or {}).get('runtime') or {}
-    agent = require_agent(c, aid)
-    one(c, 'SELECT id FROM lead.agents WHERE id=%s FOR SHARE', (aid,))
+    agent = one(c, 'SELECT * FROM lead.agents WHERE id=%s FOR SHARE', (aid,))
+    if not agent or agent['desired_state'] == 'archived':
+        raise LookupError('Agent 不存在')
     account = one(c, "SELECT * FROM lead.social_accounts WHERE id=%s FOR SHARE", (spec.get('account_id'),))
     if (not enabled(agent) or task['type'] not in ('growth.account', 'growth.channel')
         or task['state'] != 'running' or not runtime.get('attempt_token')

@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from . import account_profiles, executor_scope, reddit_login
 from .adapters.catalog import SPECS
+from .channel_contracts import ExecutionRef
 from .config import BROWSER_BUILD, BROWSER_SDK, STATE, env, proxy_for
 from .db import j, one, record, require_agent, tx, uid
 from .domain import PLATFORMS
@@ -1518,6 +1519,7 @@ class CommunityStepRequest(BaseModel):
     task_id: UUID
     operation: Literal["observe", "inspect", "join", "reply", "leave_restricted", "profile_bio", "correct_voice", "scan_pending", "receipt"]
     growth_claim: dict | None = None
+    execution_ref: ExecutionRef | None = None
 
 
 @app.post("/agents/{aid}/community/step")
@@ -1546,7 +1548,7 @@ async def execute_community_step(aid, body, *, profile_id=None, step=None, reloa
                 verified = verified_profile(c, actor.profile['id'])
             if not community_pending(current) and not verified and not (await check(actor))['verified']:
                 raise BrowserBusy('运营环境核验未通过，平台会自动复查')
-        return await growth_community_step(actor, str(body.task_id), body.operation, body.growth_claim)
+        return await growth_community_step(actor, str(body.task_id), body.operation, body.growth_claim, execution_ref=body.execution_ref)
 
     browser_step = step or browser_step
     reload_telegram = reload or reload_telegram

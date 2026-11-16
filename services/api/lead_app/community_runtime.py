@@ -86,6 +86,27 @@ def _growth_evidence(actor, data):
     return str(path)
 
 
+def growth_community_quota(c, aid, account, task_id, operation):
+    """Keep the existing owner cadence, including its proven default waivers."""
+    from .cadence_state import participation_attempts, participation_due
+    from .db import all_rows
+    agent = require_agent(c, aid)
+    if agent['onboarding_state'].get('execution_cadence', {}).get('mode') not in ('active','paused'):
+        return
+    attempts = participation_attempts(c, aid, {'id':task_id,'input':{'external_account_id':account['external_account_id']}}, operation, exclude_current=True)
+    for row in all_rows(c, """SELECT result#>>'{runtime,community,dispatched_at}' dispatched_at FROM lead.tasks
+        WHERE type='growth.account' AND input#>>'{spec,account_id}'=%s AND id<>%s
+        AND result#>>'{runtime,community,dispatched_at}' IS NOT NULL""", (str(account['id']),task_id)):
+        attempts.append(('join', datetime.fromisoformat(row['dispatched_at'])))
+    for row in all_rows(c, """SELECT p.started_at FROM lead.action_attempts p JOIN lead.actions a ON a.id=p.action_id
+        JOIN lead.account_targets t ON t.id=a.target_id WHERE t.account_id=%s AND a.task_id<>%s
+        AND a.intent ? 'telegram_community' AND p.started_at>now()-interval '24 hours'""", (account['id'],task_id)):
+        attempts.append(('reply', row['started_at']))
+    due = participation_due(c, aid, operation, attempts, account_id=account['id'])
+    if due:
+        raise ValueError(due['reason'])
+
+
 def _growth_group(observed, group):
     """Retain a small public-message selection, never the full bounded history."""
     from .community_participation import rule_permissions
@@ -113,7 +134,7 @@ def _growth_group(observed, group):
             'parent_url': group['canonical_url']+'/'+message['mid']} for message in messages]}
 
 
-async def growth_community_step(actor, task_id, operation, claim):
+async def growth_community_step(actor, task_id, operation, claim, *, execution_ref=None):
     """One selected group operation. This function never selects or creates work."""
     from .account_connection import (
         COMMUNITY_ADAPTER,
@@ -123,7 +144,11 @@ async def growth_community_step(actor, task_id, operation, claim):
         community_target_control,
         derive_community_group,
     )
-    from .execution_routes import resolve
+    from .channel_contracts import ExecutionRef
+    from .execution_routes import registered_reference
+    reference = ExecutionRef.model_validate(execution_ref) if execution_ref is not None else None
+    if operation == 'join' and (reference is None or str(reference.profile_id) != str(actor.profile['id']) or reference.registry_revision is None):
+        raise ValueError('community_execution_ref_required')
     async with actor.lock:
         actor.touch()
         with tx(actor.aid) as c:
@@ -132,6 +157,8 @@ async def growth_community_step(actor, task_id, operation, claim):
                 raise LookupError('community_task_missing')
             member = (task.get('result') or {}).get('runtime', {}).get('community') or {}
             pending = community_pending(task)
+            if pending and reference != ExecutionRef.model_validate(member['execution_ref']):
+                raise ValueError('community_original_route_changed')
             account, intent, card = growth_community_guard(actor, c, task, claim, operation=operation, reconcile=pending)
             payload = task['input']['spec']['payload']
             group = community_group(c, task, payload['group_task_id'], payload['group_id'])
@@ -169,7 +196,7 @@ async def growth_community_step(actor, task_id, operation, claim):
                         'account_id': str(account['id']), 'binding_version': account['binding_version'],
                         'external_account_id': account['external_account_id'], 'group_id': group['group_id'],
                         'canonical_url': group['canonical_url'], 'state': 'confirmed', 'membership_origin': 'existing',
-                        'confirmed_at': result['observed_at'], 'execution_ref': resolve(actor.aid, profile_id=actor.profile['id']).model_dump(mode='json'),
+                        'confirmed_at': result['observed_at'], 'execution_ref': reference.model_dump(mode='json'),
                         'evidence_ref': _growth_evidence(actor, {'group_id': group['group_id'], 'membership': 'joined'})}
                     _growth_member_save(c, task_id, member)
             return {'state': 'confirmed' if observed['joined'] else 'observed', 'group': result,
@@ -182,7 +209,7 @@ async def growth_community_step(actor, task_id, operation, claim):
         already_pending = pending_join_request(observed)
         if not already_pending and not request and observed.get('join_button_count') != 1:
             raise ValueError('community_join_control_unresolved')
-        route = resolve(actor.aid, profile_id=actor.profile['id']).model_dump(mode='json')
+        route = reference.model_dump(mode='json')
         with tx(actor.aid) as c:
             current = one(c, 'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE', (task_id,))
             growth_community_guard(actor, c, current, claim, operation='join')
@@ -215,6 +242,10 @@ async def growth_community_step(actor, task_id, operation, claim):
             blocked = community_target_control(c, account, group)
             if blocked:
                 raise ValueError(blocked)
+            growth_community_quota(c, actor.aid, account, task_id, 'join')
+            current_route = one(c, 'SELECT * FROM lead.growth_read_route(%s)', (actor.profile['id'],))
+            if not current_route or registered_reference(current_route) != reference:
+                raise ValueError('execution_route_changed')
             await (await membership_button(actor.page, request)).click(timeout=10000)
         controls = await membership_controls(actor.page)
         state = 'pending_approval' if pending_join_request(controls) or request_sent_dialog(controls.get('dialogs', []), observed.get('dialogs', [])) else 'confirmed' if native_membership(controls) else 'unknown'
@@ -239,6 +270,7 @@ def growth_reply_gate(c, actor, action, task, account, target, intent, grant):
     )
     frozen = action['intent'].get('telegram_community') or {}
     _, card = community_authority(c, actor.aid, account, 'reply')
+    growth_community_quota(c, actor.aid, account, task['id'], 'reply')
     community_group_allowed(intent, {'group_id': target['external_target_id'], 'canonical_url': target['canonical_url']})
     blocked = community_target_control(c, account, {'group_id': target['external_target_id'], 'canonical_url': target['canonical_url']})
     if blocked:
@@ -260,7 +292,22 @@ def growth_reply_gate(c, actor, action, task, account, target, intent, grant):
         AND intent->>'parent_url'=%s AND state IN ('dispatching','unknown','confirmed') LIMIT 1""",
         (target['id'], action['id'], frozen['parent_url'])):
         raise ValueError('community_message_already_answered')
-    if re.search(r'https?://|\bt\.me/', action['intent']['body'], re.I) and not link_requested(frozen['source_excerpt']):
+    if one(c, """SELECT a.id FROM lead.actions a JOIN lead.account_targets t ON t.id=a.target_id
+        WHERE t.account_id=%s AND a.id<>%s AND a.state IN ('dispatching','unknown','confirmed')
+        AND (a.intent->>'body'=%s OR (t.external_target_id=%s AND a.intent->>'parent_url'=%s)) LIMIT 1""",
+        (account['id'],action['id'],action['intent']['body'],target['external_target_id'],frozen['parent_url'])) or one(c, """SELECT id FROM lead.tasks
+        WHERE type='community.engage' AND input->>'external_account_id'=%s
+        AND result->>'reply_state' IN ('dispatching','unknown','confirmed')
+        AND (input#>>'{reply,content_hash}'=%s OR (result->>'target_id'=%s AND input#>>'{reply,reply_to_mid}'=%s)) LIMIT 1""",
+        (account['external_account_id'],digest(action['intent']['body']),target['external_target_id'],frozen['reply_to_mid'])):
+        raise ValueError('community_reply_already_sent')
+    business = one(c, "SELECT facts->>'name' brand,product_url FROM lead.business_profiles ORDER BY revision DESC LIMIT 1") or {}
+    brand = business.get('brand') or require_agent(c, actor.aid)['name']
+    promotion = bool(CHAT_LINK.search(action['intent']['body']) or action['intent'].get('link') or action['intent'].get('promote')
+        or brand and not asked_role(frozen['source_excerpt']) and re.search(r'(?<![a-z0-9])'+re.escape(brand)+r'(?![a-z0-9])', action['intent']['body'], re.I))
+    if promotion:
+        community_authority(c, actor.aid, account, 'promote')
+    if CHAT_LINK.search(action['intent']['body']) and not link_requested(frozen['source_excerpt']):
         source = one(c, 'SELECT result FROM lead.tasks WHERE id=%s', (frozen['context_task_id'],))
         group = ((source or {}).get('result') or {}).get('output', {}).get('output', {}).get('group') or {}
         clauses = [line.strip() for line in re.split(r'[。.!！\n]', group.get('rules', '')) if line.strip()]
@@ -323,6 +370,15 @@ async def execute_growth_reply(actor, action_id, claim):
                     action['expected_control_version'], account['external_account_id'], group['group_id'], j({'baseline_mid': baseline}), action_id))
             with tx(actor.aid) as c:
                 submission_gate(c, actor, action, claim)
+                if (await actor.page.evaluate(telegram.TARGET))['target_id'] != group['group_id'] or (await telegram.inspect_account(actor.page))['external_account_id'] != account['external_account_id']:
+                    raise ValueError('community_reply_scope_changed')
+                chat = await telegram.selected_chat(actor.page)
+                source = next((item for item in await read_history(actor.page, 1, frozen['reply_to_mid']) if not item['own']), None)
+                if not source or digest(source['body']) != frozen['source_hash'] or not await reply_preview_matches(chat, source):
+                    raise ValueError('community_reply_parent_changed')
+                editor = chat.locator('.input-message-input[contenteditable=true]').filter(visible=True)
+                if await editor.count() != 1 or ' '.join((await editor.inner_text()).split()) != ' '.join(body.split()):
+                    raise ValueError('community_reply_draft_changed')
                 await telegram.submit(actor.page)
         else:
             if not original or (original.get('observation') or {}).get('baseline_mid') is None:
