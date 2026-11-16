@@ -188,7 +188,7 @@ async def run_model(output, prompt, system, *, agent_id=None, purpose=None, call
             'inputSchema':{'type':'object','properties':{'id':{'type':'string'}},'required':['id'],'additionalProperties':False}}
             for name,description in (
                 ('lead_document_read','Read the complete current source document by its actual evidence ID, including all chunks and source metadata.'),
-                ('lead_task_read','Read the original task specification and complete business output by its actual task ID.')))
+                ('lead_task_read','Read the original task specification, output and exact referenced content artifacts, including full bodies, versions and hashes. Drafts and claim checks are not publication or independent verification.')))
     key = request_identity(output, prompt, purpose, call_key)
     if aid is None:
         from . import executor_studio

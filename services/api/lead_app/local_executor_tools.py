@@ -1,6 +1,7 @@
 """Authenticated Lead MCP handlers; original business services own all authority."""
 import asyncio
 import json
+import re
 import socket
 
 import httpx
@@ -22,6 +23,9 @@ async def call(device, request, name, arguments, *, revalidate=None):
             if context.get('workspace_request') or set(arguments) != {'id'}:
                 raise ValueError('executor_tool_scope_changed')
             result = await asyncio.to_thread(_business_read, request, name, arguments['id'])
+            if revalidate is not None:
+                with revalidate():
+                    pass
             return {'content':[{'type':'text','text':json.dumps(result,ensure_ascii=False,default=str)}],
                 'structuredContent':result}
         if set(arguments) != {'url'}:
@@ -176,7 +180,69 @@ def _business_read(request, name, reference):
         row = one(c, "SELECT id,type,state,input->'spec' specification,result->'output' output FROM lead.tasks WHERE id=%s", (identifier,))
         if not row:
             raise LookupError('task_unavailable')
-        return row
+        artifacts, limited = _content_artifacts(c, str(request['agent_id']), row.get('output'))
+        return {**row, 'resolved_artifacts': artifacts, 'resolved_artifacts_limited': limited}
+
+
+def _content_artifacts(c, aid, output):
+    """Resolve only immutable content references already retained by this task."""
+    from uuid import UUID
+
+    from .db import one
+    from .growth.store import digest
+
+    references = (output or {}).get('artifacts', []) if isinstance(output, dict) else []
+    if not isinstance(references, list):
+        return [], True
+    result, limited = [], len(references) > 16
+    for ref in references[:16]:
+        if not isinstance(ref, dict) or ref.get('kind') != 'content':
+            continue
+        item = {'kind': 'content', 'available': False}
+        try:
+            identifier = str(UUID(str(ref.get('id'))))
+        except ValueError:
+            result.append(item)
+            continue
+        revision, sha = ref.get('revision'), ref.get('hash')
+        if (type(revision) is not int or not 1 <= revision <= 2147483647
+                or not isinstance(sha, str) or not re.fullmatch('[a-f0-9]{64}', sha)):
+            result.append(item)
+            continue
+        item.update(id=identifier, revision=revision, hash=sha)
+        result.append(item)
+    budget = 256000 - len(json.dumps({'resolved_artifacts': result, 'resolved_artifacts_limited': False},
+                                   ensure_ascii=False, default=str).encode())
+    for index, item in enumerate(result):
+        if 'id' not in item:
+            continue
+        content = one(c, """SELECT CASE WHEN data_bytes<=256000 THEN body END body,
+                CASE WHEN data_bytes<=256000 THEN source_refs END source_refs,
+                CASE WHEN data_bytes<=256000 THEN validation END validation,data_bytes
+            FROM (SELECT *,coalesce(octet_length(body::text),4)+coalesce(octet_length(source_refs::text),4)
+                    +coalesce(octet_length(validation::text),4) data_bytes
+                FROM (SELECT body,source_refs,CASE WHEN jsonb_typeof(validation_result)='object' THEN
+                    (SELECT coalesce(jsonb_object_agg(field,validation_result->field),'{}'::jsonb)
+                     FROM unnest(ARRAY['publication_status','optional_media_missing','business_profile_id',
+                        'growth_task_id','claim_checks']) fields(field) WHERE validation_result ? field)
+                    END validation FROM lead.content_items
+                    WHERE tenant_id=lead.ctx_tenant() AND agent_id=%s AND id=%s AND revision=%s
+                        AND content_hash=%s) projected) bounded""",
+            (aid, item['id'], item['revision'], item['hash']))
+        if content and content['data_bytes'] > 256000:
+            limited = True
+        if (content and isinstance(content['body'], dict) and digest(content['body']) == item['hash']
+                and isinstance(content['source_refs'], list) and isinstance(content['validation'], dict)):
+            candidate = {**item, 'available': True, 'body': content['body'],
+                'source_refs': content['source_refs'],
+                'validation': content['validation']}
+            size = (len(json.dumps(candidate, ensure_ascii=False, default=str).encode())
+                    - len(json.dumps(item, ensure_ascii=False, default=str).encode()))
+            if size <= budget:
+                result[index], budget = candidate, budget - size
+            else:
+                limited = True
+    return result, limited
 
 
 def _record_public_read(request,context,observed):

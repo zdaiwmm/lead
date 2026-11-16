@@ -684,7 +684,7 @@ async def call_tool(bearer, epoch, request_id, name, arguments):
         # The adapter independently revalidates the original action/connection
         # at its actual barrier; do not keep a DB lock across browser/network IO.
         from .local_executor_tools import call
-        if (name == 'lead_public_read'
+        if (name in {'lead_public_read', 'lead_document_read', 'lead_task_read'}
                 and request['payload'].get('tool_context', {}).get('kind') == 'model'):
             @contextmanager
             def revalidate():

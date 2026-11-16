@@ -226,7 +226,7 @@ async def scope_tools(scope_ref: UUID, request: Request, body: ScopeTools):
         with tenant_scope(grant['tenant_id'], nodes.machine_identity(node['id'], grant['tenant_id'], grant['agent_id'])), service_scope():
             if grant['scope_kind'] == 'project':
                 from .local_executor_tools import call
-                if (body.name == 'lead_public_read'
+                if (body.name in {'lead_public_read', 'lead_document_read', 'lead_task_read'}
                         and current['payload'].get('tool_context', {}).get('kind') == 'model'):
                     @contextmanager
                     def revalidate():
