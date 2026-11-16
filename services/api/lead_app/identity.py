@@ -5,11 +5,132 @@ import base64
 import hashlib
 import ipaddress
 import json
+import os
 
 from . import reddit_login
 from .config import STATE, env
 from .db import j, one, require_agent, tx, uid
 from .scope import current_tenant
+
+
+def _community_read_scope(c, actor, account_id, reference):
+    """Current server authority for a self-session read, never target/send proof."""
+    from .account_connection import community_authority
+    from .admin_controls import enforce_channel
+    from .execution_routes import registered_reference
+    from .executor_scope import selected_profile
+    from .growth.store import enabled
+    from .scope import principal, trusted_execution
+
+    aid, profile_id = str(actor.aid), str(actor.profile['id'])
+    if (not trusted_execution() or principal() is not None
+            or str(one(c, 'SELECT lead.ctx_agent() id')['id']) != aid
+            or str(selected_profile(aid, profile_id)) != profile_id):
+        raise ValueError('community_read_service_scope_required')
+    agent = one(c, 'SELECT * FROM lead.agents WHERE id=%s FOR SHARE', (aid,))
+    if (not agent or not enabled(agent) or agent['desired_state'] != 'running'
+            or agent['onboarding_state'].get('home_release_maintenance')):
+        raise ValueError('community_read_project_paused')
+    policy = agent['onboarding_state'].get('community_growth') or {}
+    if not policy.get('enabled') or policy.get('mode') != 'contextual_outreach':
+        raise ValueError('community_read_disabled')
+    enforce_channel(c, aid, 'telegram', operation='community')
+    account = one(c, 'SELECT * FROM lead.social_accounts WHERE id=%s FOR SHARE', (account_id,))
+    if (not account or account['platform'] != 'telegram' or account['state'] != 'connected'
+            or not account['automation_enabled'] or str(account['profile_id']) != profile_id
+            or not isinstance(account['external_account_id'], str) or not account['external_account_id']):
+        raise ValueError('community_read_account_scope_changed')
+    intent, card = community_authority(c, aid, account, 'inspect')
+    profile = one(c, 'SELECT * FROM lead.browser_profiles WHERE id=%s FOR SHARE', (profile_id,))
+    route = one(c, 'SELECT * FROM lead.growth_read_route(%s)', (profile_id,))
+    if (not profile or not reference.registry_revision or str(reference.profile_id) != profile_id
+            or not route or registered_reference(route) != reference):
+        raise ValueError('community_read_execution_route_changed')
+    session = one(c, """SELECT b.id FROM lead.browser_sessions b JOIN lead.profile_leases l
+        ON l.profile_id=b.profile_id AND l.epoch=b.epoch WHERE b.id=%s AND b.profile_id=%s AND b.epoch=%s
+        AND b.state='ready' AND b.ended_at IS NULL AND l.state='held' AND l.expires_at>now()
+        FOR SHARE OF b,l""",
+        (actor.session, profile_id, actor.epoch))
+    if not session or one(c, """SELECT 1 FROM lead.takeover_sessions WHERE profile_id=%s
+        AND state IN ('requested','active','ending') AND expires_at>now()""", (profile_id,)) or one(c,
+        "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()"):
+        raise ValueError('community_read_session_unavailable')
+    return {'agent_id': aid, 'account_id': str(account['id']), 'binding_version': account['binding_version'],
+            'external_self_sha256': hashlib.sha256(account['external_account_id'].encode()).hexdigest(),
+            'profile_id': profile_id, 'session_id': str(actor.session), 'epoch': actor.epoch,
+            'execution_ref': reference.model_dump(mode='json'), 'control_version': agent['control_version'],
+            'config_revision': agent['config_revision'], 'authorization_version': agent['authorization_version'],
+            'intent_revision': intent['revision'], 'delegation_id': str(card['id']),
+            'engine_version': profile['engine_version'], 'config_hash': profile['config_hash'],
+            'network_identity_id': str(profile['network_identity_id'])}, account['external_account_id']
+
+
+async def community_read_check(actor, account_id, *, execution_ref):
+    """One real environment + current Telegram self read; no group navigation.
+
+    Recovery consumers reread this opaque identity-check row. It proves only
+    community investigation reads, not a source, membership or outbound action.
+    """
+    from datetime import datetime, timezone
+
+    from . import telegram
+    from .channel_contracts import ExecutionRef
+    from .db import audit
+
+    reference = ExecutionRef.model_validate(execution_ref)
+    started = datetime.now(timezone.utc)
+    with tx(actor.aid) as c:
+        before, expected = _community_read_scope(c, actor, account_id, reference)
+    measured = await check(actor)
+    if measured.get('verified') is not True:
+        raise ValueError('community_read_environment_unverified')
+    async with actor.lock:
+        with tx(actor.aid) as c:
+            current, current_self = _community_read_scope(c, actor, account_id, reference)
+            if current != before or current_self != expected:
+                raise ValueError('community_read_scope_changed')
+        await telegram.open_account(actor.page, expected)
+        observed = await telegram.inspect_account(actor.page)
+        if observed.get('platform') != 'telegram' or observed.get('external_account_id') != expected:
+            raise ValueError('community_read_observed_account_changed')
+        observed_at = datetime.now(timezone.utc)
+        with tx(actor.aid) as c:
+            current, current_self = _community_read_scope(c, actor, account_id, reference)
+            if current != before or current_self != expected:
+                raise ValueError('community_read_scope_changed')
+            device = one(c, """SELECT * FROM lead.identity_checks WHERE id=%s AND profile_id=%s
+                AND result='passed' AND checked_at>=%s AND valid_until>now()
+                AND engine_version=%s AND config_hash=%s AND network_identity_id=%s""",
+                (measured['id'], before['profile_id'], started, before['engine_version'],
+                 before['config_hash'], before['network_identity_id']))
+            if not device or not verified_profile(c, before['profile_id']):
+                raise ValueError('community_read_device_proof_changed')
+            proof_id = uid()
+            proof_ref = 'identity-check:' + proof_id
+            bound = {**before, 'version': 1, 'scope': 'community_read_v1',
+                     'source': 'server_verification',
+                     'observed_at': observed_at.isoformat(), 'operations': ['search', 'inspect'],
+                     'device_check_id': str(device['id'])}
+            checks = {**device['checks'], 'community_read': bound}
+            folder = STATE / 'evidence' / str(actor.aid)
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = folder / ('community-read-' + proof_id + '.json')
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, 'w') as out:
+                json.dump(checks, out, ensure_ascii=False, sort_keys=True)
+                out.flush()
+                os.fsync(out.fileno())
+            c.execute("""INSERT INTO lead.identity_checks(id,tenant_id,agent_id,profile_id,network_identity_id,
+                engine_version,config_hash,observed_ip,result,checks,evidence_ref,valid_until)
+                VALUES(%s,lead.ctx_tenant(),%s,%s,%s,%s,%s,%s,'passed',%s,%s,%s)""",
+                (proof_id, actor.aid, before['profile_id'], device['network_identity_id'],
+                 device['engine_version'], device['config_hash'], device['observed_ip'], j(checks), str(path), device['valid_until']))
+            audit(c, actor.aid, 'community.read_proof_observed', {'proof_ref': proof_ref,
+                'source': 'server_verification',
+                'scope': 'community_read_v1', 'account_id': before['account_id'], 'profile_id': before['profile_id'],
+                'execution_ref': bound['execution_ref'], 'observed_at': bound['observed_at'],
+                'operations': bound['operations']})
+    return {'verified': True, 'scope': 'community_read_v1', 'proof_ref': proof_ref}
 
 COLLECT = r"""(async()=>{
  const hash=arr=>Array.from(arr).reduce((h,n)=>Math.imul(h^n,16777619)>>>0,2166136261);

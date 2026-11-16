@@ -1465,14 +1465,25 @@ class TelegramTargetRequest(BaseModel):
     url: str = Field(max_length=2000)
 
 
+class AccountInspectRequest(OpenRequest):
+    community_read_proof: bool = False
+    execution_ref: ExecutionRef | None = None
+
+
 @app.post("/agents/{aid}/account/inspect")
-async def inspect_account(aid: UUID, body: OpenRequest):
+async def inspect_account(aid: UUID, body: AccountInspectRequest):
     from .adapters import get_adapter
 
+    proof_requested = getattr(body, 'community_read_proof', False)
+    if proof_requested and (body.platform != 'telegram' or not body.account_id or body.takeover or not body.execution_ref):
+        raise ValueError('community_read_exact_account_required')
     profile = account_profiles.for_platform(
         str(aid), body.platform, account_id=body.account_id
     )
     actor = await gateway.get(str(aid), profile["id"])
+    if proof_requested:
+        from .identity import community_read_check
+        return await community_read_check(actor, body.account_id, execution_ref=body.execution_ref)
     async with actor.lock:
         if body.takeover:
             require_takeover(str(aid), actor, body.takeover)
