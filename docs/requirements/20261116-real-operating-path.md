@@ -64,3 +64,9 @@
 ### 原搜索接口的测试替身对齐
 
 `e56d15c` 的完整 CI `43877952379/1` 在 854 项通过后发现 HTTP 范围测试仍以三参数替身模拟已增加可选 `growth_claim` 的 `native_search`。本次只给原替身补可选参数并断言旧请求仍为 `None`，账号 Profile 范围断言和生产接口不变。定向检索本轮变化接口的全部测试替身与调用方，集中运行 51 个增长与执行范围消费者文件，379 项全部通过（73.74 秒）；旧群消费者的未变化证据复用。该失败候选只同步来源、缓存原包，未挂载、发请求或部署；不能使用失败 CI 和缓存作为放行证明。
+
+### 隔离 AST 模型测试的依赖补齐
+
+`68c5063` 的完整 CI `43882040212/1` 在 1902 项通过后失败：原 `test_native_discovery_operation` 只抽取 `AccountInput` 类到隔离 namespace，没有提供新增 after 校验器的 `model_validator`。仅补该测试导入及两个 namespace，保留真实校验器、原操作枚举和拒绝断言。该文件 21 项通过（0.18 秒）；定向静态核对确认所需 globals 已齐，无其他该模型的隔离提取消费者遗漏。
+
+集中运行 118 个原生接口及 AST 消费者文件：1056 项通过、71 项按当前环境跳过，1 项未改动的 `test_native_frame_partition_dom` 在本机 fallback Chromium 取独立子帧 CDP session 时失败。实际本机为 Playwright 1.62.0 / macOS ARM64 Chromium 151.0.7922.34；该测试及锁定依赖相对原成功 `4ffcc0c` 无差异，CI 会显式使用固定 Linux runtime。保留原帧隔离断言，不能将本地整批记为通过，也不能以跳过或本机结果放行；修复后精确 main 的完整 Linux 应用 CI 必须覆盖此项。Context7 未返回对应 API 片段，已改查 [Playwright 官方 CDP API](https://playwright.dev/python/docs/api/class-browsercontext#browser-context-new-cdp-session)，不据此改变生产隔离方式。隔离服务已停止；该失败候选仅缓存来源与原始 ZIP，仍未挂载或部署。
