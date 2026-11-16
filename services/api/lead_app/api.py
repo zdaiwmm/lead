@@ -1017,7 +1017,7 @@ def community_strategy(aid: UUID):
 def community_strategy_update(aid: UUID, body: GrowthConfig):
     from .community_growth import set_strategy
 
-    return set_strategy(str(aid), body.model_dump())
+    return set_strategy(str(aid), body)
 
 
 class CommunityResearchRequest(BaseModel):

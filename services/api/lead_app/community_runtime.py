@@ -91,6 +91,10 @@ def growth_community_quota(c, aid, account, task_id, operation):
     from .cadence_state import participation_attempts, participation_due
     from .db import all_rows
     agent = require_agent(c, aid)
+    # This is the current owner's explicit operating choice, not a migration
+    # of the retired device cadence or an attestation of its old defaults.
+    if (agent['onboarding_state'].get('community_growth') or {}).get('participation_policy', {}).get('quota_mode') == 'agent':
+        return
     if agent['onboarding_state'].get('execution_cadence', {}).get('mode') not in ('active','paused'):
         return
     attempts = participation_attempts(c, aid, {'id':task_id,'input':{'external_account_id':account['external_account_id']}}, operation, exclude_current=True)

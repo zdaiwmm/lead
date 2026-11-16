@@ -172,11 +172,16 @@ def get_strategy(aid):
 
 
 def set_strategy(aid, config):
-    supplied_policy = config.get("participation_policy", {}) if isinstance(config, dict) else config.participation_policy
-    explicit_fields = sorted(supplied_policy if isinstance(supplied_policy, dict) else supplied_policy.model_fields_set)
     config = GrowthConfig.model_validate(config)
+    explicit_fields = sorted(config.participation_policy.model_fields_set)
+    promotion_requested = 'allow_promotion' in config.model_fields_set and config.allow_promotion
     with tx(aid) as c:
         agent = require_agent(c, aid, True)
+        # A partial policy choice must not reset existing owner limits or turn
+        # model defaults into owner-selected quota values.
+        policy = dict((agent['onboarding_state'].get('community_growth') or {}).get('participation_policy') or {})
+        policy.update(config.participation_policy.model_dump(include=set(explicit_fields)))
+        config = config.model_copy(update={'participation_policy':ParticipationPolicy.model_validate(policy)})
         patch = {"community_growth": config.model_dump()}
         cadence = agent["onboarding_state"].get("execution_cadence", {})
         if cadence.get("mode") == "active":
@@ -188,14 +193,23 @@ def set_strategy(aid, config):
         if config.enabled and config.mode == "contextual_outreach":
             for account in all_rows(
                 c,
-                "SELECT id,external_account_id FROM lead.social_accounts WHERE platform='telegram' AND state='connected' AND automation_enabled",
+                "SELECT id,external_account_id,binding_version FROM lead.social_accounts WHERE platform='telegram' AND state='connected' AND automation_enabled FOR SHARE",
             ):
                 existing = one(
                     c,
-                    "SELECT id FROM lead.interaction_cards WHERE type='manage_community' AND state='accepted' AND expires_at>now() AND payload->>'account_id'=%s AND payload->>'external_account_id'=%s",
+                    "SELECT * FROM lead.interaction_cards WHERE type='manage_community' AND state='accepted' AND expires_at>now() AND payload->>'account_id'=%s AND payload->>'external_account_id'=%s ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE",
                     (str(account["id"]), account["external_account_id"]),
                 )
-                if not existing:
+                refresh = bool(existing and promotion_requested and existing['payload'].get('source') == 'owner_strategy'
+                    and 'relevant_promotion' not in existing['payload'].get('allowed_actions', []))
+                if not existing or refresh:
+                    actions = list(existing['payload'].get('allowed_actions', [])) if refresh else [
+                        action for action, allowed in (('join_public_group',config.allow_join),('read_recent_history',True),
+                            ('contextual_reply',config.allow_reply)) if allowed]
+                    if promotion_requested and 'relevant_promotion' not in actions:
+                        actions.append('relevant_promotion')
+                    if refresh:
+                        c.execute("UPDATE lead.interaction_cards SET state='canceled' WHERE id=%s", (existing['id'],))
                     c.execute(
                         "INSERT INTO lead.interaction_cards(tenant_id,agent_id,type,state,payload,expires_at) VALUES(%s,%s,'manage_community','accepted',%s,now()+interval '1 year')",
                         (
@@ -208,12 +222,10 @@ def set_strategy(aid, config):
                                         "external_account_id"
                                     ],
                                     "source": "owner_strategy",
-                                    "allowed_actions": [
-                                        "join_public_group",
-                                        "read_recent_history",
-                                        "contextual_reply",
-                                        "relevant_promotion",
-                                    ],
+                                    "allowed_actions": actions,
+                                    "binding_version": account['binding_version'],
+                                    "delegation_version": int(existing['payload'].get('delegation_version',1))+1 if refresh else 1,
+                                    **({'supersedes':str(existing['id'])} if refresh else {}),
                                     "account_risk_accepted": True,
                                 }
                             ),
