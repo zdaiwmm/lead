@@ -107,6 +107,15 @@ def submit_work(c, aid, spec):
     validate_task(c, spec)
     intent = spec.model_dump(mode="json")
     material = {k: v for k, v in intent.items() if k != "review_at"}
+    if spec.kind == 'account' and spec.payload.get('community_operation') == 'join':
+        from ..account_connection import community_group
+        account = one(c, 'SELECT binding_version FROM lead.social_accounts WHERE id=%s', (spec.account_id,))
+        if spec.purpose != 'community' or not account:
+            raise ValueError('community_account_required')
+        group = community_group(c, {'input':{'spec':intent, 'binding_version':account['binding_version']}},
+            spec.payload.get('group_task_id'), spec.payload.get('group_id'))
+        material = {'kind':'telegram_membership', 'account_id':str(spec.account_id),
+            'binding_version':account['binding_version'], 'group_id':group['group_id']}
     if spec.kind=="research" and spec.payload.get("document_ids") and not spec.payload.get("urls") and not spec.payload.get("queries"):
         material = {"kind":"source_inspection","documents":sorted(spec.payload["document_ids"]),
             "goal_revision":objective_revision(require_agent(c,aid))}

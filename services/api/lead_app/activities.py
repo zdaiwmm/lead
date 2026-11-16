@@ -49,7 +49,14 @@ async def browser_rpc(path, data=None):
             from .growth.store import enabled
             if enabled(require_agent(c, matched[1])):
                 from .execution_routes import endpoint, request_route
-                base = endpoint(request_route(c, matched[1], path, data))
+                reference = request_route(c, matched[1], path, data)
+                base = endpoint(reference)
+                if path.endswith('/community/step') and (data or {}).get('task_id'):
+                    task = one(c, 'SELECT type,input FROM lead.tasks WHERE id=%s', (data['task_id'],))
+                    if task and task['type'] == 'growth.account' and task['input']['spec'].get('purpose') == 'community':
+                        # Freeze the actual selected RPC transport. Model/task
+                        # payloads cannot choose or override this reference.
+                        data = {**data, 'execution_ref': reference.model_dump(mode='json')}
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         while True:
             result = await client.post(base + path, json=data or {},

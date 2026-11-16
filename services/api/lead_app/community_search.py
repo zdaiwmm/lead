@@ -34,7 +34,10 @@ QUERIES = (
 )
 
 
-def guard(actor, c, task):
+def guard(actor, c, task, claim=None):
+    if task['type'] == 'growth.account':
+        from .community_runtime import growth_community_guard
+        return growth_community_guard(actor, c, task, claim, operation='search')[0]
     from .admin_controls import enforce_channel
     enforce_channel(c, actor.aid, "telegram", operation="community")
     a = require_agent(c, actor.aid, True)
@@ -78,7 +81,7 @@ def guard(actor, c, task):
     return account
 
 
-async def native_search(actor, task_id, query):
+async def native_search(actor, task_id, query, claim=None):
     from . import telegram
 
     if not isinstance(query, str) or len(query) > 60:
@@ -89,8 +92,9 @@ async def native_search(actor, task_id, query):
             task = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (task_id,))
             if not task:
                 raise LookupError("找群任务不存在")
-            account = guard(actor, c, task)
-            if query not in task["input"].get("native_queries", QUERIES):
+            account = guard(actor, c, task, claim)
+            queries = task['input']['spec']['payload'].get('queries', []) if task['type'] == 'growth.account' else task['input'].get('native_queries', QUERIES)
+            if query not in queries:
                 raise ValueError("找群查询不在已保存的 Agent 计划中")
         await telegram.open_account(actor.page, account["external_account_id"])
         if not getattr(actor, "community_search_error_listener", False):
@@ -230,13 +234,18 @@ async def native_search(actor, task_id, query):
         ):
             raise ValueError("原生搜索标签已关闭，未将聊天列表当成空搜索结果")
         with tx(actor.aid) as c:
-            guard(actor, c, task)
-        rid = begin_run(
-            actor.aid,
-            "原生全局群搜索：" + query,
-            task_id=str(task_id),
-            mode="community_native_discovery",
-        )
+            guard(actor, c, task, claim)
+            if task['type'] == 'growth.account':
+                # This is a real account-page observation, never an anonymous
+                # research Profile or a borrowed legacy discovery task.
+                rid = uid()
+                c.execute("""INSERT INTO lead.browser_runs(id,tenant_id,agent_id,task_id,goal,mode,control_version,config_revision,profile_id)
+                    SELECT %s,tenant_id,id,%s,%s,'community_native_discovery',control_version,config_revision,%s
+                    FROM lead.agents WHERE id=%s""", (rid, task_id, 'Telegram group search', actor.profile['id'], actor.aid))
+            else:
+                rid = None
+        if rid is None:
+            rid = begin_run(actor.aid, '原生全局群搜索：' + query, task_id=str(task_id), mode='community_native_discovery')
         step = uid()
         output = {
             "url": actor.page.url,
@@ -266,7 +275,8 @@ async def native_search(actor, task_id, query):
             )
         finish_run(actor.aid, rid)
         return {
-            "groups": rows,
+            "groups": [{'group_id': row['peer_id'], 'canonical_url': row['telegram_url'], 'title': row['name'],
+                        'subtitle': row['subtitle'], 'source_step_id': step} for row in rows] if task['type'] == 'growth.account' else rows,
             "diagnostic": output["diagnostic"],
             "source": {
                 "url": output["url"],

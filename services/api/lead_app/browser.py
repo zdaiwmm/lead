@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from . import account_profiles, executor_scope, reddit_login
 from .adapters.catalog import SPECS
+from .channel_contracts import ExecutionRef
 from .config import BROWSER_BUILD, BROWSER_SDK, STATE, env, proxy_for
 from .db import j, one, record, require_agent, tx, uid
 from .domain import PLATFORMS
@@ -1500,19 +1501,25 @@ async def inspect_account(aid: UUID, body: OpenRequest):
 class CommunitySearchRequest(BaseModel):
     task_id: UUID
     query: str = Field(max_length=60)
+    growth_claim: dict | None = None
 
 
 @app.post("/agents/{aid}/community/search")
 async def community_search(aid: UUID, body: CommunitySearchRequest):
     from .community_search import native_search
 
-    actor = await gateway.get(str(aid))
-    return await asyncio.wait_for(native_search(actor, str(body.task_id), body.query), timeout=100)
+    with tx(str(aid)) as c:
+        task = one(c, 'SELECT type,input FROM lead.tasks WHERE id=%s', (body.task_id,))
+    profile = task['input'].get('profile_id') if task and task['type'] == 'growth.account' else None
+    actor = await gateway.get(str(aid), profile)
+    return await asyncio.wait_for(native_search(actor, str(body.task_id), body.query, body.growth_claim), timeout=100)
 
 
 class CommunityStepRequest(BaseModel):
     task_id: UUID
-    operation: Literal["observe", "join", "reply", "leave_restricted", "profile_bio", "correct_voice", "scan_pending", "receipt"]
+    operation: Literal["observe", "inspect", "join", "reply", "leave_restricted", "profile_bio", "correct_voice", "scan_pending", "receipt"]
+    growth_claim: dict | None = None
+    execution_ref: ExecutionRef | None = None
 
 
 @app.post("/agents/{aid}/community/step")
@@ -1525,6 +1532,23 @@ async def execute_community_step(aid, body, *, profile_id=None, step=None, reloa
     from playwright.async_api import Error as BrowserError
 
     from .community_runtime import browser_step, reload_telegram
+
+    with tx(aid) as c:
+        task = one(c, 'SELECT type,input FROM lead.tasks WHERE id=%s', (body.task_id,))
+    if task and task['type'].startswith('growth.'):
+        from .community_runtime import growth_community_step
+        if task['type'] != 'growth.account' or body.operation not in ('inspect', 'join') or not task['input'].get('profile_id'):
+            raise ValueError('community_operation_changed')
+        actor = await gateway.get(aid, task['input']['profile_id'])
+        if body.operation == 'join' and env().get('LEAD_DEPLOYMENT_MODE') == 'production':
+            from .account_connection import community_pending
+            from .identity import check, verified_profile
+            with tx(aid) as c:
+                current = one(c, 'SELECT type,result FROM lead.tasks WHERE id=%s', (body.task_id,))
+                verified = verified_profile(c, actor.profile['id'])
+            if not community_pending(current) and not verified and not (await check(actor))['verified']:
+                raise BrowserBusy('运营环境核验未通过，平台会自动复查')
+        return await growth_community_step(actor, str(body.task_id), body.operation, body.growth_claim, execution_ref=body.execution_ref)
 
     browser_step = step or browser_step
     reload_telegram = reload or reload_telegram
@@ -1763,6 +1787,15 @@ async def _publish_action(aid: UUID, body: PublishRequest):
             raise HTTPException(404)
     profile_id=action['intent']['execution_ref']['profile_id'] if action['state'] in ('dispatching','unknown','confirmed') and action['intent'].get('execution_ref') else action['profile_id']
     actor = await gateway.get(aid,profile_id)
+    if action['intent'].get('telegram_community'):
+        from .community_runtime import execute_growth_reply
+        if env().get('LEAD_DEPLOYMENT_MODE') == 'production' and action['state'] == 'prepared':
+            from .identity import check, verified_profile
+            with tx(aid) as c:
+                verified = verified_profile(c, actor.profile['id'])
+            if not verified and not (await check(actor))['verified']:
+                raise BrowserBusy('运营环境核验未通过，平台会自动复查')
+        return await execute_growth_reply(actor, body.action_id, body.growth_claim)
     if actor.native_runtime and action['intent'].get('browser_method'):
         if env().get('LEAD_DEPLOYMENT_MODE')=='production' and action['state']=='prepared':
             from .identity import check, verified_profile

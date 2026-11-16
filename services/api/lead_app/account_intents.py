@@ -38,6 +38,7 @@ def set_intent(aid, account_id, desired, *, source, source_ref, expected_revisio
                 (SELECT id FROM lead.account_targets WHERE account_id=%s)""",(account_id,))
             c.execute("""UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE type LIKE 'growth.%%'
                 AND input#>>'{spec,account_id}'=%s AND state IN ('planned','queued','running','waiting_user')
+                AND NOT (type='growth.account' AND coalesce(result#>>'{runtime,community,state}','') IN ('dispatching','unknown','pending_approval'))
                 AND NOT EXISTS(SELECT FROM lead.actions a WHERE a.task_id=lead.tasks.id AND a.state IN ('dispatching','unknown','confirmed'))""",(str(account_id),))
         emit(c, aid, "growth.wake", {"reason": "account_intent_changed", "account_id": str(account_id),
             "revision":actual["revision"],"desired":actual["desired"]})

@@ -34,6 +34,373 @@ PENDING_REQUEST = re.compile(
     r"cancel (?:join )?request|request (?:sent|pending)|pending approval|已申请|已申請|撤销申请|撤銷申請|取消申请|取消申請|等待批准|等待审核|待審核",
     re.I,
 )
+
+
+def growth_community_guard(actor, c, task, claim, *, operation, reconcile=False):
+    """The growth claim is authoritative; old community guards are never adapted."""
+    from .account_connection import community_task_scope
+    from .admin_controls import enforce_channel
+    from .backups import write_backup_ready
+    from .config import env
+    if not isinstance(claim, dict):
+        raise ValueError('community_claim_required')
+    account, intent, card = community_task_scope(c, actor.aid, task, claim, operation=operation, reconcile=reconcile)
+    if str(account['profile_id']) != str(actor.profile['id']):
+        raise ValueError('community_profile_changed')
+    enforce_channel(c, actor.aid, 'telegram', operation='community')
+    if one(c, "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()"):
+        raise ValueError('community_profile_maintenance')
+    if one(c, """SELECT id FROM lead.takeover_sessions WHERE profile_id=%s
+        AND state IN ('requested','active','ending') AND expires_at>now()""", (actor.profile['id'],)):
+        raise ValueError('owner_controls_profile')
+    if not one(c, """SELECT profile_id FROM lead.profile_leases WHERE profile_id=%s AND epoch=%s
+        AND state='held' AND expires_at>now() FOR SHARE""", (actor.profile['id'], actor.epoch)):
+        raise ValueError('community_profile_lease_expired')
+    if not one(c, """SELECT id FROM lead.browser_sessions WHERE id=%s AND profile_id=%s AND epoch=%s
+        AND state='ready' AND ended_at IS NULL""", (actor.session, actor.profile['id'], actor.epoch)):
+        raise ValueError('community_browser_session_changed')
+    if not reconcile and operation == 'join' and env().get('LEAD_DEPLOYMENT_MODE') == 'production' and not write_backup_ready(c):
+        raise ValueError('write_recovery_point_expired')
+    if not reconcile and operation == 'join' and env().get('LEAD_DEPLOYMENT_MODE') == 'production':
+        from .identity import verified_profile
+        if not verified_profile(c, actor.profile['id']):
+            raise ValueError('identity_verification_missing')
+    return account, intent, card
+
+
+def _growth_member_save(c, task_id, member):
+    c.execute("""UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,community}',%s)
+        WHERE id=%s""", (j(member), task_id))
+
+
+def _growth_evidence(actor, data):
+    import json
+
+    from .config import STATE
+    folder = STATE/'evidence'/actor.aid
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = folder/(uid()+'.json')
+    with path.open('x') as out:
+        path.chmod(0o600)
+        json.dump(data, out, ensure_ascii=False, sort_keys=True)
+    return str(path)
+
+
+def growth_community_quota(c, aid, account, task_id, operation):
+    """Keep the existing owner cadence, including its proven default waivers."""
+    from .cadence_state import participation_attempts, participation_due
+    from .db import all_rows
+    agent = require_agent(c, aid)
+    if agent['onboarding_state'].get('execution_cadence', {}).get('mode') not in ('active','paused'):
+        return
+    attempts = participation_attempts(c, aid, {'id':task_id,'input':{'external_account_id':account['external_account_id']}}, operation, exclude_current=True)
+    for row in all_rows(c, """SELECT result#>>'{runtime,community,dispatched_at}' dispatched_at FROM lead.tasks
+        WHERE type='growth.account' AND input#>>'{spec,account_id}'=%s AND id<>%s
+        AND result#>>'{runtime,community,dispatched_at}' IS NOT NULL""", (str(account['id']),task_id)):
+        attempts.append(('join', datetime.fromisoformat(row['dispatched_at'])))
+    for row in all_rows(c, """SELECT p.started_at FROM lead.action_attempts p JOIN lead.actions a ON a.id=p.action_id
+        JOIN lead.account_targets t ON t.id=a.target_id WHERE t.account_id=%s AND a.task_id<>%s
+        AND a.intent ? 'telegram_community' AND p.started_at>now()-interval '24 hours'""", (account['id'],task_id)):
+        attempts.append(('reply', row['started_at']))
+    due = participation_due(c, aid, operation, attempts, account_id=account['id'])
+    if due:
+        raise ValueError(due['reason'])
+
+
+def _growth_group(observed, group):
+    """Retain a small public-message selection, never the full bounded history."""
+    from .community_participation import rule_permissions
+    from .community_rule_evidence import description_kind, rules_status
+    description = observed.get('description') or ''
+    substantive = description_kind(description, topic_matches=True) == 'substantive'
+    status = rules_status(description=description, pinned_complete=False, external_rules_unresolved=False) if substantive else 'unresolved'
+    gaps = []
+    if not substantive:
+        gaps.append('substantive_public_description')
+    elif status != 'complete':
+        external = rules_status(description=description, pinned_complete=True, external_rules_unresolved=False) != 'complete'
+        gaps.append('referenced_external_rules' if external else 'referenced_pinned_rules')
+    rules = rule_permissions(description, complete=status == 'complete')
+    messages = [message for message in observed.get('history', []) if not message.get('own') and str(message.get('mid', '')).isdigit()][-4:]
+    return {'group_id': observed['target_id'], 'canonical_url': group['canonical_url'],
+        'title': observed['title'], 'kind': observed['kind'], 'rules': description,
+        'rules_hash': digest(description), 'rules_status': status, 'rules_read_scope': 'public_description',
+        'unread_rule_sources': gaps, 'rules_next_action': 'select_another_group' if gaps else None,
+        'automation_forbidden': rules['automation_forbidden'],
+        'membership': 'joined' if observed['joined'] else 'pending_approval' if pending_join_request(observed) else 'not_joined',
+        'can_reply': observed['can_reply'], 'observed_at': datetime.now(timezone.utc).isoformat(),
+        'members': observed.get('members'),
+        'messages': [{'mid': message['mid'], 'excerpt': message['body'][:1200], 'hash': digest(message['body']),
+            'parent_url': group['canonical_url']+'/'+message['mid']} for message in messages]}
+
+
+async def growth_community_step(actor, task_id, operation, claim, *, execution_ref=None):
+    """One selected group operation. This function never selects or creates work."""
+    from .account_connection import (
+        COMMUNITY_ADAPTER,
+        community_group,
+        community_group_allowed,
+        community_pending,
+        community_target_control,
+        derive_community_group,
+    )
+    from .channel_contracts import ExecutionRef
+    from .execution_routes import registered_reference
+    reference = ExecutionRef.model_validate(execution_ref) if execution_ref is not None else None
+    if operation == 'join' and (reference is None or str(reference.profile_id) != str(actor.profile['id']) or reference.registry_revision is None):
+        raise ValueError('community_execution_ref_required')
+    async with actor.lock:
+        actor.touch()
+        with tx(actor.aid) as c:
+            task = one(c, 'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE', (task_id,))
+            if not task:
+                raise LookupError('community_task_missing')
+            member = (task.get('result') or {}).get('runtime', {}).get('community') or {}
+            pending = community_pending(task)
+            if pending and reference != ExecutionRef.model_validate(member['execution_ref']):
+                raise ValueError('community_original_route_changed')
+            account, intent, card = growth_community_guard(actor, c, task, claim, operation=operation, reconcile=pending)
+            payload = task['input']['spec']['payload']
+            group = community_group(c, task, payload['group_task_id'], payload['group_id'])
+            if not pending:
+                community_group_allowed(intent, group)
+            if member and (member.get('group_id') != group['group_id'] or member.get('canonical_url') != group['canonical_url']):
+                raise ValueError('community_operation_identity_changed')
+        observed = await observe_group(actor.page, group['canonical_url'], account['external_account_id'], 30, expected_peer=group['group_id'])
+        if observed['target_id'] != group['group_id'] or observed['kind'] != 'discussion':
+            raise ValueError('community_discussion_binding_required')
+        if pending:
+            state = 'pending_approval' if pending_join_request(observed) else 'confirmed' if observed['joined'] else 'unknown'
+            with tx(actor.aid) as c:
+                current = one(c, 'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE', (task_id,))
+                growth_community_guard(actor, c, current, claim, operation=operation, reconcile=True)
+                member.update(state=state, checked_at=datetime.now(timezone.utc).isoformat(),
+                    evidence_ref=_growth_evidence(actor, {'operation_key': member['operation_key'], 'group_id': group['group_id'], 'membership': state}))
+                if state == 'confirmed':
+                    member['confirmed_at'] = member['checked_at']
+                _growth_member_save(c, task_id, member)
+            # Confirmation after revocation is a receipt, not new permission.
+            return {'state': state, 'group': _growth_group(observed, group), 'operation_key': member['operation_key']}
+        result = _growth_group(observed, group)
+        if operation == 'join' and member.get('state') == 'confirmed':
+            if not observed['joined']:
+                raise ValueError('community_membership_lost')
+            return {'state':'confirmed', 'group':result, 'operation_key':member['operation_key']}
+        if operation == 'inspect' or observed['joined']:
+            with tx(actor.aid) as c:
+                current = one(c, 'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE', (task_id,))
+                growth_community_guard(actor, c, current, claim, operation=operation)
+                derived = derive_community_group(c, actor.aid, current, account, result)
+                if operation == 'join':
+                    member = {'version': COMMUNITY_ADAPTER, 'operation_key': 'telegram:join:'+str(account['id'])+':'+str(account['binding_version'])+':'+group['group_id'],
+                        'account_id': str(account['id']), 'binding_version': account['binding_version'],
+                        'external_account_id': account['external_account_id'], 'group_id': group['group_id'],
+                        'canonical_url': group['canonical_url'], 'state': 'confirmed', 'membership_origin': 'existing',
+                        'confirmed_at': result['observed_at'], 'execution_ref': reference.model_dump(mode='json'),
+                        'evidence_ref': _growth_evidence(actor, {'group_id': group['group_id'], 'membership': 'joined'})}
+                    _growth_member_save(c, task_id, member)
+            return {'state': 'confirmed' if observed['joined'] else 'observed', 'group': result,
+                **({'operation_key':member['operation_key']} if operation == 'join' else {}), **derived}
+        if result['rules_status'] != 'complete':
+            return {'state':'observed', 'group':result, 'write_blocked_reason':'community_rules_unresolved', 'knowledge_progress': True}
+        if operation != 'join' or group.get('rules_status') != 'complete' or group.get('automation_forbidden') or result['automation_forbidden'] or result['rules_hash'] != group.get('rules_hash'):
+            raise ValueError('community_join_rules_changed')
+        request = observed.get('apply_button_count') == 1
+        already_pending = pending_join_request(observed)
+        if not already_pending and not request and observed.get('join_button_count') != 1:
+            raise ValueError('community_join_control_unresolved')
+        route = reference.model_dump(mode='json')
+        with tx(actor.aid) as c:
+            current = one(c, 'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE', (task_id,))
+            growth_community_guard(actor, c, current, claim, operation='join')
+            blocked = community_target_control(c, account, group)
+            if blocked:
+                raise ValueError(blocked)
+            # Cross-version history is a fence, not permission to revive old work.
+            if one(c, """SELECT id FROM lead.tasks WHERE type='community.engage'
+                AND input->>'external_account_id'=%s AND result->>'target_id'=%s
+                AND (result->>'join_state' IN ('dispatching','unknown','pending_approval','request_unavailable')
+                     OR result->>'leave_state' IN ('dispatching','unconfirmed','confirmed')) LIMIT 1""", (account['external_account_id'], group['group_id'])):
+                raise ValueError('original_membership_requires_reconciliation')
+            member = {'version': COMMUNITY_ADAPTER, 'operation_key': 'telegram:join:'+str(account['id'])+':'+str(account['binding_version'])+':'+group['group_id'],
+                'account_id': str(account['id']), 'binding_version': account['binding_version'],
+                'external_account_id': account['external_account_id'], 'intent_revision': intent['revision'],
+                'delegation_id': str(card['id']),
+                'group_id': group['group_id'], 'canonical_url': group['canonical_url'],
+                'execution_ref': route, 'state': 'pending_approval' if already_pending else 'dispatching',
+                'dispatched_at': datetime.now(timezone.utc).isoformat()}
+            _growth_member_save(c, task_id, member)
+        if already_pending:
+            return {'state':'pending_approval', 'group':result, 'operation_key':member['operation_key']}
+        # Keep the live authority locks through the one external click, exactly
+        # as the original Action commit barrier does for a publication.
+        with tx(actor.aid) as c:
+            current = one(c, 'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE', (task_id,))
+            _, current_intent, current_card = growth_community_guard(actor, c, current, claim, operation='join')
+            if str(current_card['id']) != member['delegation_id'] or current_intent['revision'] != member['intent_revision']:
+                raise ValueError('community_join_authority_changed')
+            blocked = community_target_control(c, account, group)
+            if blocked:
+                raise ValueError(blocked)
+            growth_community_quota(c, actor.aid, account, task_id, 'join')
+            current_route = one(c, 'SELECT * FROM lead.growth_read_route(%s)', (actor.profile['id'],))
+            if not current_route or registered_reference(current_route) != reference:
+                raise ValueError('execution_route_changed')
+            await (await membership_button(actor.page, request)).click(timeout=10000)
+        controls = await membership_controls(actor.page)
+        state = 'pending_approval' if pending_join_request(controls) or request_sent_dialog(controls.get('dialogs', []), observed.get('dialogs', [])) else 'confirmed' if native_membership(controls) else 'unknown'
+        with tx(actor.aid) as c:
+            current = one(c, 'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE', (task_id,))
+            growth_community_guard(actor, c, current, claim, operation='join', reconcile=True)
+            member.update(state=state, checked_at=datetime.now(timezone.utc).isoformat(),
+                evidence_ref=_growth_evidence(actor, {'operation_key': member['operation_key'], 'group_id': group['group_id'], 'membership': state}))
+            if state == 'confirmed':
+                member['confirmed_at'] = member['checked_at']
+            _growth_member_save(c, task_id, member)
+        # A later inspect supplies current context and any reply grant.
+        return {'state': state, 'group': result, 'operation_key': member['operation_key']}
+
+
+def growth_reply_gate(c, actor, action, task, account, target, intent, grant):
+    from .account_connection import (
+        COMMUNITY_ADAPTER,
+        community_authority,
+        community_group_allowed,
+        community_target_control,
+    )
+    frozen = action['intent'].get('telegram_community') or {}
+    _, card = community_authority(c, actor.aid, account, 'reply')
+    growth_community_quota(c, actor.aid, account, task['id'], 'reply')
+    community_group_allowed(intent, {'group_id': target['external_target_id'], 'canonical_url': target['canonical_url']})
+    blocked = community_target_control(c, account, {'group_id': target['external_target_id'], 'canonical_url': target['canonical_url']})
+    if blocked:
+        raise ValueError(blocked)
+    if (frozen.get('version') != COMMUNITY_ADAPTER or action['type'] != 'reply'
+        or action['intent'].get('media') or action['intent'].get('format') != 'text'
+        or account['platform'] != 'telegram' or target['target_type'] != 'group'
+        or frozen.get('group_id') != target['external_target_id']
+        or frozen.get('canonical_url') != target['canonical_url']
+        or frozen.get('parent_url') != action['intent'].get('parent_url')
+        or frozen.get('delegation_id') != str(card['id'])
+        or grant['limits'].get('community_delegation_id') != str(card['id'])
+        or grant['limits'].get('intent_revision') != intent['revision']
+        or grant['limits'].get('adapter_version') != COMMUNITY_ADAPTER):
+        raise ValueError('community_reply_scope_changed')
+    if datetime.fromisoformat(frozen['observed_at']) < datetime.now(timezone.utc)-timedelta(hours=24):
+        raise ValueError('community_context_expired')
+    if one(c, """SELECT id FROM lead.actions WHERE target_id=%s AND id<>%s AND type='reply'
+        AND intent->>'parent_url'=%s AND state IN ('dispatching','unknown','confirmed') LIMIT 1""",
+        (target['id'], action['id'], frozen['parent_url'])):
+        raise ValueError('community_message_already_answered')
+    if one(c, """SELECT a.id FROM lead.actions a JOIN lead.account_targets t ON t.id=a.target_id
+        WHERE t.account_id=%s AND a.id<>%s AND a.state IN ('dispatching','unknown','confirmed')
+        AND (a.intent->>'body'=%s OR (t.external_target_id=%s AND a.intent->>'parent_url'=%s)) LIMIT 1""",
+        (account['id'],action['id'],action['intent']['body'],target['external_target_id'],frozen['parent_url'])) or one(c, """SELECT id FROM lead.tasks
+        WHERE type='community.engage' AND input->>'external_account_id'=%s
+        AND result->>'reply_state' IN ('dispatching','unknown','confirmed')
+        AND (input#>>'{reply,content_hash}'=%s OR (result->>'target_id'=%s AND input#>>'{reply,reply_to_mid}'=%s)) LIMIT 1""",
+        (account['external_account_id'],digest(action['intent']['body']),target['external_target_id'],frozen['reply_to_mid'])):
+        raise ValueError('community_reply_already_sent')
+    business = one(c, "SELECT facts->>'name' brand,product_url FROM lead.business_profiles ORDER BY revision DESC LIMIT 1") or {}
+    brand = business.get('brand') or require_agent(c, actor.aid)['name']
+    promotion = bool(CHAT_LINK.search(action['intent']['body']) or action['intent'].get('link') or action['intent'].get('promote')
+        or brand and not asked_role(frozen['source_excerpt']) and re.search(r'(?<![a-z0-9])'+re.escape(brand)+r'(?![a-z0-9])', action['intent']['body'], re.I))
+    if promotion:
+        community_authority(c, actor.aid, account, 'promote')
+    if CHAT_LINK.search(action['intent']['body']) and not link_requested(frozen['source_excerpt']):
+        source = one(c, 'SELECT result FROM lead.tasks WHERE id=%s', (frozen['context_task_id'],))
+        group = ((source or {}).get('result') or {}).get('output', {}).get('output', {}).get('group') or {}
+        clauses = [line.strip() for line in re.split(r'[。.!！\n]', group.get('rules', '')) if line.strip()]
+        if not any(ad_permission({'evidence_id':frozen['context_task_id'], 'rules_quote':group.get('rules', '')}, group.get('rules', ''), clause) for clause in clauses):
+            raise ValueError('community_link_not_requested')
+
+
+async def execute_growth_reply(actor, action_id, claim):
+    """An original content Action, with a real parent and independent DOM receipt."""
+    from . import telegram
+    from .growth.tools import submission_gate
+    async with actor.lock:
+        actor.touch()
+        with tx(actor.aid) as c:
+            action = one(c, 'SELECT * FROM lead.actions WHERE id=%s', (action_id,))
+            if not action:
+                raise LookupError('community_action_missing')
+            if action['state'] == 'confirmed':
+                return {'state':'confirmed', 'external_id':action['external_id']}
+            task = one(c, 'SELECT * FROM lead.tasks WHERE id=%s', (action['task_id'],))
+            reconcile = action['state'] in ('dispatching', 'unknown', 'confirmed')
+            account, _, _ = growth_community_guard(actor, c, task, claim, operation='reply', reconcile=reconcile)
+            original = one(c, 'SELECT * FROM lead.action_attempts WHERE action_id=%s ORDER BY attempt DESC LIMIT 1', (action_id,))
+            if not reconcile:
+                submission_gate(c, actor, action, claim)
+        frozen = action['intent']['telegram_community']
+        group = {'canonical_url': frozen['canonical_url'], 'group_id': frozen['group_id']}
+        observed = await observe_group(actor.page, group['canonical_url'], account['external_account_id'], 30, expected_peer=group['group_id'])
+        if observed['target_id'] != group['group_id']:
+            raise ValueError('community_reply_scope_changed')
+        body = action['intent']['body']
+        if not reconcile:
+            current = _growth_group(observed, group)
+            if not observed['joined'] or not observed['can_reply'] or current['rules_status'] != 'complete' or current['automation_forbidden'] or current['rules_hash'] != frozen['rules_hash']:
+                raise ValueError('community_reply_rules_changed')
+            if placement_allowed({}, observed.get('description')) is False:
+                raise ValueError('community_reply_rules_changed')
+            message = next((message for message in observed['history'] if message['mid'] == frozen['reply_to_mid'] and not message['own']), None)
+            if not message:
+                await focus_message(actor.page, group['group_id'], frozen['reply_to_mid'])
+                message = next((message for message in await read_history(actor.page, 1, frozen['reply_to_mid']) if not message['own']), None)
+            if not message or digest(message['body']) != frozen['source_hash']:
+                raise ValueError('community_original_message_changed')
+            bubble = (await telegram.selected_chat(actor.page)).locator('.bubble[data-mid="'+message['mid']+'"]').filter(visible=True)
+            if await bubble.count() != 1:
+                raise ValueError('community_original_message_changed')
+            await bubble.click(button='right', timeout=10000)
+            await actor.page.locator('.btn-menu-item').filter(has_text=re.compile(r'(?:Reply|回复|回覆)$', re.I)).filter(visible=True).click(timeout=10000)
+            if not await reply_preview_matches(await telegram.selected_chat(actor.page), message):
+                raise ValueError('community_reply_parent_changed')
+            baseline = await telegram.baseline(actor.page)
+            await telegram.fill(actor.page, body)
+            with tx(actor.aid) as c:
+                submission_gate(c, actor, action, claim)
+                c.execute("UPDATE lead.actions SET state='dispatching' WHERE id=%s AND state='prepared'", (action_id,))
+                original = one(c, """INSERT INTO lead.action_attempts(tenant_id,agent_id,action_id,browser_session_id,attempt,epoch,
+                    control_version,observed_account_id,observed_target_id,observation)
+                    SELECT lead.ctx_tenant(),%s,%s,%s,coalesce(max(attempt),0)+1,%s,%s,%s,%s,%s
+                    FROM lead.action_attempts WHERE action_id=%s RETURNING *""", (actor.aid, action_id, actor.session, actor.epoch,
+                    action['expected_control_version'], account['external_account_id'], group['group_id'], j({'baseline_mid': baseline}), action_id))
+            with tx(actor.aid) as c:
+                submission_gate(c, actor, action, claim)
+                if (await actor.page.evaluate(telegram.TARGET))['target_id'] != group['group_id'] or (await telegram.inspect_account(actor.page))['external_account_id'] != account['external_account_id']:
+                    raise ValueError('community_reply_scope_changed')
+                chat = await telegram.selected_chat(actor.page)
+                source = next((item for item in await read_history(actor.page, 1, frozen['reply_to_mid']) if not item['own']), None)
+                if not source or digest(source['body']) != frozen['source_hash'] or not await reply_preview_matches(chat, source):
+                    raise ValueError('community_reply_parent_changed')
+                editor = chat.locator('.input-message-input[contenteditable=true]').filter(visible=True)
+                if await editor.count() != 1 or ' '.join((await editor.inner_text()).split()) != ' '.join(body.split()):
+                    raise ValueError('community_reply_draft_changed')
+                await telegram.submit(actor.page)
+        else:
+            if not original or (original.get('observation') or {}).get('baseline_mid') is None:
+                raise ValueError('community_original_receipt_missing')
+            baseline = original['observation']['baseline_mid']
+        for _ in range(20):
+            receipt = await own_reply_receipt(actor.page, body, baseline, parent_mid=frozen['reply_to_mid'])
+            if receipt:
+                if (await actor.page.evaluate(telegram.TARGET))['target_id'] != group['group_id'] or (await telegram.inspect_account(actor.page))['external_account_id'] != account['external_account_id']:
+                    raise ValueError('community_reply_scope_changed')
+                evidence = _growth_evidence(actor, {'action_id': str(action_id), 'group_id': group['group_id'],
+                    'mid': receipt['mid'], 'body_hash': digest(body), 'parent_url': frozen['parent_url']})
+                external = group['group_id']+':'+receipt['mid']
+                with tx(actor.aid) as c:
+                    c.execute("UPDATE lead.actions SET state='confirmed',external_id=%s,evidence_ref=%s,confirmed_at=now() WHERE id=%s AND state IN ('dispatching','unknown')", (external, evidence, action_id))
+                    c.execute("UPDATE lead.action_attempts SET outcome='confirmed',evidence_ref=%s,ended_at=now() WHERE id=%s", (evidence, original['id']))
+                return {'state': 'confirmed', 'external_id': external}
+            await asyncio.sleep(.5)
+        with tx(actor.aid) as c:
+            c.execute("UPDATE lead.actions SET state='unknown' WHERE id=%s AND state='dispatching'", (action_id,))
+            c.execute("UPDATE lead.action_attempts SET outcome='unknown',ended_at=now() WHERE id=%s AND outcome IS NULL", (original['id'],))
+        return {'state': 'unknown'}
 MODEL_RETRY_ERRORS = ("ModelTimeoutError", "ModelConnectionError", "TimeoutError")
 
 
@@ -726,10 +1093,10 @@ async def _read_group(page, url, expected, limit, history_query, expected_peer):
     }
 
 
-async def own_reply_receipt(page, body, baseline):
+async def own_reply_receipt(page, body, baseline, *, parent_mid=None):
     return await page.evaluate(
-        r"""({body,baseline})=>{const norm=s=>s.replace(/\s+/g,' ').trim();const matches=e=>{const content=e.querySelector('.message,.message-text')?.cloneNode(true);if(!content)return false;content.querySelectorAll('.time,.time-inner,.reactions,.message-reactions').forEach(x=>x.remove());content.querySelectorAll('br').forEach(x=>x.replaceWith(' '));return norm(content.textContent||'')===norm(body)};const m=[...(document.querySelector('.chat.active[data-type=chat]')||document).querySelectorAll('.bubble.is-out[data-mid]')].filter(e=>e.getBoundingClientRect().width&&e.getBoundingClientRect().height&&/^\d+$/.test(e.dataset.mid)&&BigInt(e.dataset.mid)>BigInt(baseline)&&matches(e)&&!e.matches('.is-sending,.sending,.is-error,.error')&&!e.querySelector('.sending,.is-sending,.tgico-sending,.tgico-sendingerror'));return m.length===1?{mid:m[0].dataset.mid}:null}""",
-        {"body": body, "baseline": baseline},
+        r"""({body,baseline,parent_mid})=>{const norm=s=>s.replace(/\s+/g,' ').trim();const matches=e=>{const content=e.querySelector('.message,.message-text')?.cloneNode(true);if(!content)return false;content.querySelectorAll('.reply,.reply-wrapper,.time,.time-inner,.reactions,.message-reactions').forEach(x=>x.remove());content.querySelectorAll('br').forEach(x=>x.replaceWith(' '));return norm(content.textContent||'')===norm(body)};const parent=e=>e.dataset.replyToMid||e.querySelector('.reply[data-mid],.reply-wrapper[data-mid]')?.dataset.mid||null;const m=[...(document.querySelector('.chat.active[data-type=chat]')||document).querySelectorAll('.bubble.is-out[data-mid]')].filter(e=>e.getBoundingClientRect().width&&e.getBoundingClientRect().height&&/^\d+$/.test(e.dataset.mid)&&BigInt(e.dataset.mid)>BigInt(baseline)&&matches(e)&&(!parent_mid||parent(e)===parent_mid)&&!e.matches('.is-sending,.sending,.is-error,.error')&&!e.querySelector('.sending,.is-sending,.tgico-sending,.tgico-sendingerror'));return m.length===1?{mid:m[0].dataset.mid}:null}""",
+        {"body": body, "baseline": baseline, "parent_mid": parent_mid},
     )
 
 

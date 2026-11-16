@@ -143,7 +143,12 @@ def request_route(c, aid, path, data=None):
             JOIN lead.social_accounts s ON s.id=t.account_id WHERE a.id=%s""", (action,))
         profile = (row or {}).get("profile_id")
     elif task := data.get("task_id"):
-        row = one(c, "SELECT input FROM lead.tasks WHERE id=%s", (task,))
+        row = one(c, "SELECT input,result FROM lead.tasks WHERE id=%s", (task,))
+        member = (row or {}).get('result', {}).get('runtime', {}).get('community') or {}
+        if member.get('state') in ('dispatching', 'unknown', 'pending_approval'):
+            reference = ExecutionRef.model_validate(member['execution_ref'])
+            _registered_endpoint(reference, registry)
+            return reference
         profile = (row or {}).get("input", {}).get("profile_id")
     elif run := data.get("run_id") or (__import__("re").search(r"/research/([0-9a-fA-F-]{36})/",path) or [None,None])[1]:
         row = one(c, "SELECT profile_id FROM lead.browser_runs WHERE id=%s", (run,))

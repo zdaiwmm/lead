@@ -218,7 +218,9 @@ def _snapshot(aid, data):
             (data.connection_account_id, data.takeover_id))
 
 
-async def execute_account(aid, row, data):
+async def execute_account(aid, row, data, claim=None):
+    if getattr(data, 'community_operation', None):
+        return await execute_community_account(aid, row, data, claim)
     if row["input"]["spec"]["purpose"] == "discover":
         return await discover(aid, row)
     if not data.takeover_id or not data.connection_account_id or not data.profile_id:
@@ -438,3 +440,224 @@ def derive_browser_target(aid,account,observed,*,connection=None):
     if connection is None:
         _wake_browser_methods(aid,[result])
     return result
+
+
+COMMUNITY_ADAPTER = 'telegram-community-webk-v1'
+COMMUNITY_PENDING = {'dispatching', 'unknown', 'pending_approval'}
+
+
+def community_pending(row):
+    operation = (row.get('result') or {}).get('runtime', {}).get('community') or {}
+    return row.get('type') == 'growth.account' and operation.get('state') in COMMUNITY_PENDING
+
+
+def community_authority(c, aid, account, operation, *, required=True):
+    """Current owner control and the original account-bound delegation, never model flags."""
+    from .community_growth import GrowthConfig
+    intent = one(c, 'SELECT * FROM lead.growth_read_intent(%s)', (account['id'],))
+    card = one(c, """SELECT * FROM lead.interaction_cards WHERE type='manage_community'
+        AND payload->>'account_id'=%s
+        AND payload->>'external_account_id'=%s AND payload->>'source'='owner_strategy'
+        ORDER BY created_at DESC,id DESC LIMIT 1 FOR SHARE""", (str(account['id']), account['external_account_id']))
+    actions = {'search': 'read_recent_history', 'inspect': 'read_recent_history',
+               'join': 'join_public_group', 'reply': 'contextual_reply', 'promote':'relevant_promotion'}
+    config = GrowthConfig.model_validate(require_agent(c, aid)['onboarding_state'].get('community_growth') or {})
+    blocked = None
+    if operation in ('join','reply','promote'):
+        if not config.enabled or config.mode != 'contextual_outreach':
+            blocked = 'community_outreach_disabled'
+        elif operation == 'join' and not config.allow_join:
+            blocked = 'community_join_disabled'
+        elif operation in ('reply','promote') and (not config.allow_reply or config.review_replies_only):
+            blocked = 'community_reply_disabled'
+        elif operation == 'promote' and not config.allow_promotion:
+            blocked = 'community_promotion_disabled'
+    if required and blocked:
+        raise ValueError(blocked)
+    valid = bool(intent and intent['desired'] == 'running' and account['automation_enabled'] and card
+        and card['state'] == 'accepted' and card['expires_at'] > utcnow()
+        and not blocked
+        and card['payload'].get('account_id') == str(account['id'])
+        and card['payload'].get('external_account_id') == account['external_account_id']
+        and card['payload'].get('source') == 'owner_strategy'
+        and actions[operation] in card['payload'].get('allowed_actions', []))
+    if required and not valid:
+        raise ValueError('community_owner_scope_missing')
+    return intent, card if valid else None
+
+
+def community_task_scope(c, aid, task, claim=None, *, operation=None, reconcile=False):
+    """Validate the actual growth Task and Profile before any account-page access."""
+    from datetime import datetime
+
+    from .growth.store import enabled
+    spec = task['input']['spec']
+    runtime = (task.get('result') or {}).get('runtime') or {}
+    agent = one(c, 'SELECT * FROM lead.agents WHERE id=%s FOR SHARE', (aid,))
+    if not agent or agent['desired_state'] == 'archived':
+        raise LookupError('Agent 不存在')
+    account = one(c, "SELECT * FROM lead.social_accounts WHERE id=%s FOR SHARE", (spec.get('account_id'),))
+    if (not enabled(agent) or task['type'] not in ('growth.account', 'growth.channel')
+        or task['state'] != 'running' or not runtime.get('attempt_token')
+        or not runtime.get('lease_until') or datetime.fromisoformat(runtime['lease_until']) <= utcnow()
+        or runtime.get('control_version') != agent['control_version']
+        or not account or account['platform'] != 'telegram' or account['state'] != 'connected'
+        or account['binding_version'] != task['input'].get('binding_version')
+        or str(account['profile_id']) != task['input'].get('profile_id')):
+        raise ValueError('community_task_scope_changed')
+    if claim is not None:
+        ref = claim.get('ref') or {}
+        if (str(ref.get('agent_id')) != str(aid) or str(ref.get('task_id')) != str(task['id'])
+            or ref.get('task_generation') != task['input'].get('task_generation')
+            or claim.get('attempt_token') != runtime['attempt_token']):
+            raise ValueError('community_task_scope_changed')
+    op = operation or spec.get('payload', {}).get('community_operation')
+    if task['type'] == 'growth.account' and (spec.get('purpose') != 'community'
+        or op != spec.get('payload', {}).get('community_operation')):
+        raise ValueError('community_operation_changed')
+    intent, delegation = community_authority(c, aid, account, op, required=op in ('join', 'reply') and not reconcile)
+    if not reconcile and (agent['desired_state'] != 'running' or not intent or intent['desired'] != 'running'):
+        raise ValueError('community_account_paused')
+    return account, intent, delegation
+
+
+def community_group(c, task, source_id, peer):
+    """Only an exact completed predecessor can supply a public group binding."""
+    import re
+    from urllib.parse import urlsplit
+
+    from .growth.store import digest
+    if not isinstance(peer, str) or not re.fullmatch(r'-[1-9][0-9]{0,19}', peer):
+        raise ValueError('community_group_reference_invalid')
+    spec = task['input']['spec']
+    if str(source_id) not in {str(ref['task_id']) for ref in spec.get('required_refs', [])}:
+        raise ValueError('community_group_dependency_required')
+    source = one(c, 'SELECT * FROM lead.tasks WHERE id=%s', (source_id,))
+    if (not source or source['type'] != 'growth.account' or source['state'] != 'succeeded'
+        or source['input']['spec'].get('purpose') != 'community'
+        or source['input']['spec'].get('account_id') != spec.get('account_id')
+        or source['input'].get('binding_version') != task['input'].get('binding_version')):
+        raise ValueError('community_group_reference_invalid')
+    output = (source.get('result') or {}).get('output', {}).get('output') or {}
+    candidates = output.get('groups', []) if isinstance(output.get('groups'), list) else []
+    if isinstance(output.get('group'), dict):
+        candidates = [*candidates, output['group']]
+    matches = [group for group in candidates if group.get('group_id') == peer]
+    if len(matches) != 1:
+        raise ValueError('community_group_reference_invalid')
+    group = dict(matches[0])
+    parsed = urlsplit(group.get('canonical_url', ''))
+    if parsed.scheme != 'https' or parsed.netloc != 't.me' or not re.fullmatch(r'/[A-Za-z][A-Za-z0-9_]{3,31}', parsed.path) or parsed.query or parsed.fragment:
+        raise ValueError('community_public_group_required')
+    group['source_task_id'] = str(source['id'])
+    group['source_hash'] = digest(matches[0])
+    return group
+
+
+def community_group_allowed(intent, group):
+    scope = (intent or {}).get('scope') or {}
+    if group['group_id'] in scope.get('excluded_targets', []) or group['canonical_url'] in scope.get('excluded_targets', []):
+        raise ValueError('target_not_permitted')
+
+
+def community_target_control(c, account, group):
+    """An old peer's explicit stop applies across target types and adapters."""
+    targets = all_rows(c, """SELECT * FROM lead.account_targets WHERE account_id=%s
+        AND (external_target_id=%s OR canonical_url=%s) FOR UPDATE""",
+        (account['id'], group['group_id'], group['canonical_url']))
+    for target in targets:
+        if target['state'] != 'active':
+            return 'community_target_disabled'
+        grants = all_rows(c, 'SELECT revoked_at FROM lead.authorization_grants WHERE target_id=%s', (target['id'],))
+        if grants and all(grant['revoked_at'] is not None for grant in grants):
+            return 'community_target_grant_revoked'
+    return None
+
+
+def derive_community_group(c, aid, task, account, group):
+    """A current member observation can derive only the owner's scoped reply grant."""
+    intent, card = community_authority(c, aid, account, 'reply', required=False)
+    community_group_allowed(intent, group)
+    if not card or group['membership'] != 'joined' or not group['can_reply'] or group['rules_status'] != 'complete' or group['automation_forbidden']:
+        return {'write_scope_missing': card is None}
+    # Serialize derivation on the already-bound account, before inserting a
+    # target or superseding this bridge's own current grant.
+    one(c, 'SELECT id FROM lead.social_accounts WHERE id=%s FOR UPDATE', (account['id'],))
+    blocked = community_target_control(c, account, group)
+    if blocked:
+        return {'write_scope_missing': True, 'write_blocked_reason': blocked}
+    target = one(c, """SELECT * FROM lead.account_targets WHERE account_id=%s
+        AND target_type='group' AND external_target_id=%s FOR UPDATE""", (account['id'], group['group_id']))
+    grant = one(c, 'SELECT * FROM lead.authorization_grants WHERE target_id=%s AND revoked_at IS NULL FOR UPDATE', (target['id'],)) if target else None
+    if target and ((target['verified_permissions'].get('telegram_community') or {}).get('adapter_version') != COMMUNITY_ADAPTER
+        or grant and (grant['granted_by'] != 'account_intent' or grant['limits'].get('adapter_version') != COMMUNITY_ADAPTER)):
+        return {'write_scope_missing': True, 'write_blocked_reason': 'community_target_has_independent_control'}
+    permissions = {'access_mode': 'ordinary_member', 'actions': ['reply'],
+        'binding_version': account['binding_version'], 'telegram_community': {
+            'adapter_version': COMMUNITY_ADAPTER, 'rules_hash': group['rules_hash'],
+            'context_task_id': str(task['id']), 'observed_at': group['observed_at']}}
+    target = one(c, """INSERT INTO lead.account_targets(tenant_id,agent_id,account_id,target_type,external_target_id,
+        canonical_url,display_name,verified_permissions,state) VALUES(lead.ctx_tenant(),%s,%s,'group',%s,%s,%s,%s,'active')
+        ON CONFLICT(account_id,target_type,external_target_id) DO UPDATE SET verified_permissions=EXCLUDED.verified_permissions,
+        canonical_url=EXCLUDED.canonical_url,display_name=EXCLUDED.display_name RETURNING *""",
+        (aid, account['id'], group['group_id'], group['canonical_url'], group['title'], j(permissions)))
+    limits = {'formats': ['text'], 'intent_revision': intent['revision'], 'binding_version': account['binding_version'],
+        'account_id': str(account['id']), 'community_delegation_id': str(card['id']), 'adapter_version': COMMUNITY_ADAPTER}
+    if grant and (grant['allowed_actions'] != ['reply'] or grant['limits'] != limits):
+        c.execute('UPDATE lead.authorization_grants SET revoked_at=now() WHERE id=%s', (grant['id'],))
+        grant = None
+    if not grant:
+        grant = one(c, """INSERT INTO lead.authorization_grants(tenant_id,agent_id,target_id,version,allowed_actions,limits,granted_by)
+            SELECT lead.ctx_tenant(),%s,%s,coalesce(max(version),0)+1,%s,%s,'account_intent'
+            FROM lead.authorization_grants WHERE target_id=%s RETURNING *""", (aid, target['id'], j(['reply']), j(limits), target['id']))
+    return {'target_id': str(target['id']), 'grant_id': str(grant['id']), 'write_scope_missing': False}
+
+
+async def execute_community_account(aid, row, data, claim):
+    from .activities import browser_rpc
+    with tx(aid) as c:
+        current = one(c, 'SELECT * FROM lead.tasks WHERE id=%s', (row['id'],))
+        community_task_scope(c, aid, current, claim, reconcile=community_pending(current))
+    base = {'task_id': str(row['id']), 'growth_claim': claim}
+    if data.community_operation == 'search':
+        groups = []
+        for query in data.queries:
+            found = await browser_rpc(f'/agents/{aid}/community/search', {**base, 'query': query})
+            groups.extend(found['groups'])
+        unique = {group['group_id']: group for group in groups}
+        return WorkResult(outcome='completed', output={'groups': list(unique.values())[:12], 'knowledge_progress': bool(unique)})
+    observed = await browser_rpc(f'/agents/{aid}/community/step', {**base, 'operation': data.community_operation})
+    if observed.get('write_blocked_reason') and data.community_operation == 'join':
+        return WorkResult(outcome='failed', failure_code=observed['write_blocked_reason'], output=observed)
+    if data.community_operation == 'join' and observed.get('state') in COMMUNITY_PENDING:
+        return WorkResult(outcome='unknown' if observed['state'] != 'pending_approval' else 'waiting',
+            wait=Wait(reason='community_membership_pending', producer='telegram_membership', recovery_action='reconcile',
+                check_at=utcnow()+timedelta(minutes=15), episode_root=row['id'], responsibility='platform'),
+            output=observed)
+    return WorkResult(outcome='completed', output={**observed, 'knowledge_progress': True})
+
+
+def community_reply_context(c, aid, task, context_task_id, target_id, parent_url):
+    """Freeze one observed source message; the caller creates the ordinary Action."""
+    from .growth.store import digest
+    account, intent, card = community_task_scope(c, aid, task, operation='reply')
+    target = one(c, 'SELECT * FROM lead.account_targets WHERE id=%s AND account_id=%s', (target_id, account['id']))
+    if not target or target['target_type'] != 'group':
+        raise ValueError('community_group_reference_invalid')
+    group = community_group(c, task, context_task_id, target['external_target_id'])
+    community_group_allowed(intent, group)
+    from datetime import datetime
+    if datetime.fromisoformat(group['observed_at']) < utcnow()-timedelta(hours=24):
+        raise ValueError('community_context_expired')
+    if group.get('membership') != 'joined' or not group.get('can_reply') or group.get('rules_status') != 'complete':
+        raise ValueError('community_reply_not_ready')
+    messages = [message for message in group.get('messages', []) if message.get('parent_url') == parent_url and not message.get('own')]
+    if len(messages) != 1:
+        raise ValueError('community_original_message_required')
+    message = messages[0]
+    return {'version': COMMUNITY_ADAPTER, 'group_id': group['group_id'], 'canonical_url': group['canonical_url'],
+        'context_task_id': str(context_task_id), 'context_hash': group['source_hash'],
+        'rules_hash': group['rules_hash'], 'reply_to_mid': message['mid'], 'source_hash': message['hash'],
+        'source_excerpt': message['excerpt'], 'observed_at':group['observed_at'],
+        'parent_url': parent_url, 'delegation_id': str(card['id']), 'intent_revision': intent['revision'],
+        'message_hash': digest(message)}

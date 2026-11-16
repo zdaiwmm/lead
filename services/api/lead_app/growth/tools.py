@@ -88,6 +88,7 @@ class ChannelInput(Contract):
     publication_purpose: Literal["business", "diagnostic"] = "business"
     operation: Literal["publish", "reply"] = "publish"
     parent_url: str | None = Field(default=None, max_length=2000)
+    community_context_task_id: UUID | None = None
 
     @model_validator(mode="after")
     def exact_intent(self):
@@ -111,6 +112,25 @@ class AccountInput(Contract):
     connection_account_id: UUID | None = None
     target_urls: list[str] = Field(default_factory=list,max_length=10)
     desired_operation: Literal['publish','reply'] | None = None
+    community_operation: Literal['search','inspect','join'] | None = None
+    queries: list[str] = Field(default_factory=list,max_length=2)
+    group_task_id: UUID | None = None
+    group_id: str | None = Field(default=None,pattern=r'^-[1-9]\d{0,18}$')
+
+    @model_validator(mode="after")
+    def community_scope(self):
+        if not self.community_operation:
+            if self.queries or self.group_task_id or self.group_id:
+                raise ValueError("community_operation_required")
+            return self
+        if self.takeover_id or self.profile_id or self.connection_account_id or self.target_urls or self.desired_operation:
+            raise ValueError("community_operation_cannot_replace_account_connection")
+        if self.community_operation == "search":
+            if not self.queries or any(not q.strip() or len(q)>60 for q in self.queries) or self.group_task_id or self.group_id:
+                raise ValueError("community_search_requires_bounded_queries")
+        elif not self.group_task_id or not self.group_id or self.queries:
+            raise ValueError("community_operation_requires_observed_group")
+        return self
 
 
 class ObserveInput(Contract):
@@ -129,9 +149,9 @@ INPUTS = {"research": ResearchInput, "content": ContentInput, "channel": Channel
 
 def definitions():
     return [{"name": name, "input_schema": schema.model_json_schema(),
-             "side_effect_class": "external_submission" if name == "channel" else "local_artifact" if name == "content" else "read",
+             "side_effect_class": "external_submission" if name in ("channel","account") else "local_artifact" if name == "content" else "read",
              "timeout_seconds": 480 if name in ("content", "channel") else 180,
-             "retry_class": "reconcile_only" if name == "channel" else "bounded_episode"}
+             "retry_class": "reconcile_only" if name in ("channel","account") else "bounded_episode"}
             for name, schema in INPUTS.items()]
 
 
@@ -640,7 +660,7 @@ async def execute_tool(aid, row, claim):
         return await content(aid, row, spec)
     if spec.kind == "account":
         from ..account_connection import execute_account
-        return await execute_account(aid, row, AccountInput.model_validate(spec.payload))
+        return await execute_account(aid, row, AccountInput.model_validate(spec.payload),claim=claim)
     if spec.kind == "channel":
         return await execute_channel(aid, row, ChannelInput.model_validate(spec.payload), claim)
     if spec.kind == "observe":
@@ -658,12 +678,24 @@ async def execute_tool(aid, row, claim):
                     output={"original_task_id":str(data.legacy_native_task_id),"receipt":observed,"knowledge_progress":True})
             return WorkResult(outcome="waiting",wait=Wait(reason="original_native_receipt_pending",producer="native_receipt_adapter",
                 check_at=utcnow()+timedelta(minutes=15),recovery_action="reconcile",episode_root=row["id"],scope_ref=str(data.legacy_native_task_id)))
-        summary = await asyncio.to_thread(summarize, aid, data.experiment_id or spec.experiment_id)
+        experiment_id = data.experiment_id or spec.experiment_id
+        summary = await asyncio.to_thread(summarize, aid, experiment_id)
+        shortlinks = summary.get("shortlinks") or {}
+        observed = type(shortlinks.get("business_clicks")) is int and shortlinks["business_clicks"] > 0
+        signals_revision = summary.get("signals_revision")
+        signals_seen = False
         with tx(aid) as c:
             previous = one(c,"""SELECT EXISTS(SELECT FROM lead.tasks WHERE type='growth.observe' AND id<>%s
                 AND state='succeeded' AND result#>>'{output,output,evidence_revision}'=%s) ok""",
                 (row["id"],summary.get("evidence_revision")))["ok"]
+            if observed and isinstance(signals_revision, str) and signals_revision:
+                signals_seen = one(c,"""SELECT EXISTS(SELECT FROM lead.tasks WHERE type='growth.observe' AND id<>%s
+                    AND state='succeeded' AND result#>>'{output,output,signals_revision}'=%s
+                    AND coalesce(input#>>'{spec,payload,experiment_id}',input#>>'{spec,experiment_id}')
+                        IS NOT DISTINCT FROM %s) ok""",
+                    (row["id"],signals_revision,str(experiment_id) if experiment_id else None))["ok"]
         summary["business_progress"] = bool(summary.get("new_units") and not previous)
+        summary["knowledge_progress"] = bool(observed and isinstance(signals_revision, str) and signals_revision and not signals_seen)
         return WorkResult(outcome="completed", output=summary)
     if spec.kind == "recover":
         from .runtime import probe_episode
@@ -671,7 +703,7 @@ async def execute_tool(aid, row, claim):
     raise ValueError("unsupported_operation")
 
 
-def _bind_publication(c,aid,row,source,target):
+def _bind_publication(c,aid,row,source,target,*,operation="publish",parent_url=None):
     """Bind the accepted draft mechanically; no new copy or business choice."""
     from urllib.parse import urlsplit
 
@@ -699,8 +731,11 @@ def _bind_publication(c,aid,row,source,target):
             "source_content_id":str(source["id"]),"source_content_hash":source["content_hash"],
             "transformation":"entry_tracking_only","publication_status":"accepted"}),digest(body)))
     if destination:
-        c.execute("""INSERT INTO lead.tracking_links(tenant_id,agent_id,content_id,platform,public_code,destination_url,allowed_host)
-            VALUES(lead.ctx_tenant(),%s,%s,%s,%s,%s,%s)""",(aid,final["id"],target["platform"],body["marker"],destination,urlsplit(destination).hostname))
+        from ..distribution import register
+        register(c,aid,target["platform"],destination,intent="growth:"+str(row["id"]),
+            placement="reply" if operation=="reply" else "post",account=target["account_id"],
+            location=parent_url if operation=="reply" else target["canonical_url"],
+            content=final["id"],code=body["marker"])
     return final
 
 
@@ -739,17 +774,25 @@ def prepare_channel(aid, task_id, data):
         grant = one(c,"SELECT * FROM lead.authorization_grants WHERE target_id=%s AND revoked_at IS NULL ORDER BY version DESC LIMIT 1",(target["id"],))
         if not grant or data.operation not in grant["allowed_actions"]:
             raise ValueError("target_not_permitted")
+        community = None
+        if data.community_context_task_id:
+            if target["platform"]!="telegram" or target["target_type"]!="group" or data.operation!="reply" or data.format!="text" or content["body"].get("media"):
+                raise ValueError("community_reply_requires_text_context")
+            from ..account_connection import community_reply_context
+            community = community_reply_context(c,aid,row,data.community_context_task_id,target["id"],data.parent_url)
         from ..execution_routes import resolve
         route = resolve(aid,account_id=spec.account_id)
-        content = _bind_publication(c,aid,row,content,target)
+        content = _bind_publication(c,aid,row,content,target,operation=data.operation,parent_url=data.parent_url)
         platform = target["platform"]
         release = SPECS[platform].version if platform in SPECS else "local-v1"
         permissions = target["verified_permissions"] if isinstance(target["verified_permissions"],dict) else {}
         methods = permissions.get("browser_methods") or {}
         if not isinstance(methods,dict):
             raise ValueError("browser_method_scope_changed")
-        method = methods.get(data.operation) or permissions.get("browser_method")
-        if method:
+        method = None if community else methods.get(data.operation) or permissions.get("browser_method")
+        if community:
+            release = "telegram-community-webk-v1"
+        elif method:
             from ..browser_execution import validate_method
             method = validate_method(method, account_id=str(spec.account_id),
                                      binding_version=target["binding_version"],
@@ -758,7 +801,7 @@ def prepare_channel(aid, task_id, data):
         elif data.operation == "reply":
             raise ValueError("reply_browser_method_missing")
         cap = one(c,"SELECT * FROM lead.platform_capabilities WHERE platform=%s AND action_type=%s AND target_type=%s",(platform,data.operation,target["target_type"]))
-        verification = platform != "lab" and (not cap or cap["technical_state"] != "verified" or data.format not in target["verified_permissions"].get("publishing_verified_formats",[]))
+        verification = not community and platform != "lab" and (not cap or cap["technical_state"] != "verified" or data.format not in target["verified_permissions"].get("publishing_verified_formats",[]))
         body = content["body"]
         publication = {**body,"platform":platform,"format":data.format,"adapter_version":release,
                        "operation":data.operation,"parent_url":data.parent_url,
@@ -766,6 +809,8 @@ def prepare_channel(aid, task_id, data):
                        "intent_revision":intent["revision"],"goal_revision":row["input"]["goal_revision"],
                        "task_generation":row["input"]["task_generation"],"execution_ref":route.model_dump(mode="json"),
                        "publication_purpose":data.publication_purpose,"verification_required":verification}
+        if community:
+            publication["telegram_community"] = community
         if method:
             publication["browser_method"] = method
             from ..browser_actions import method_hash
@@ -852,8 +897,12 @@ def submission_gate(c, actor, action,claim=None,*,allow_method_repair=False):
     if not grant or operation not in grant["allowed_actions"] or (publication.get("media") and "upload_media" not in grant["allowed_actions"]):
         raise ValueError("target_not_permitted")
     platform, kind = account["platform"], publication.get("format","text")
+    community = publication.get("telegram_community")
     method = publication.get("browser_method")
-    if method:
+    if community:
+        from ..community_runtime import growth_reply_gate
+        growth_reply_gate(c,actor,action,task,account,target,intent,grant)
+    elif method:
         from ..browser_actions import (
             execution_method,
             prepare_method_repair,
@@ -900,7 +949,7 @@ def submission_gate(c, actor, action,claim=None,*,allow_method_repair=False):
         from ..admin_settings import validate_brand_content
         from ..reddit_member import ordinary_member
         validate_brand_content(c,actor.aid,"\n".join([publication.get("title", ""),publication.get("body", "")]))
-        if ordinary_member(target) and not method:
+        if ordinary_member(target) and not method and not community:
             from datetime import datetime
 
             from ..reddit_member import member_scope
@@ -918,11 +967,11 @@ def submission_gate(c, actor, action,claim=None,*,allow_method_repair=False):
                 raise ValueError("target_not_permitted")
         cap = one(c,"SELECT * FROM lead.platform_capabilities WHERE platform=%s AND action_type=%s AND target_type=%s",(platform,operation,target["target_type"]))
         pilot = one(c,"SELECT lead.owner_browser_pilot_allowed(%s,%s) ok",(target["id"],grant["id"]))["ok"]
-        if not method and (not cap or (cap["permission_state"] != "approved" and not (cap["permission_state"] == "pending" and pilot))):
+        if not method and not community and (not cap or (cap["permission_state"] != "approved" and not (cap["permission_state"] == "pending" and pilot))):
             raise ValueError("platform_access_missing")
-        if not method and (platform not in SPECS or publication["adapter_version"] != SPECS[platform].version or target["verified_permissions"].get("adapter_version") != SPECS[platform].version):
+        if not method and not community and (platform not in SPECS or publication["adapter_version"] != SPECS[platform].version or target["verified_permissions"].get("adapter_version") != SPECS[platform].version):
             raise ValueError("adapter_changed")
-        if not method and not publication.get("verification_required") and (cap["technical_state"] != "verified" or kind not in target["verified_permissions"].get("publishing_verified_formats",[])):
+        if not method and not community and not publication.get("verification_required") and (cap["technical_state"] != "verified" or kind not in target["verified_permissions"].get("publishing_verified_formats",[])):
             raise ValueError("verification_proof_missing")
         if env().get("LEAD_DEPLOYMENT_MODE")=="production" and not verified_profile(c,actor.profile["id"]):
             raise ValueError("identity_verification_missing")
@@ -955,9 +1004,14 @@ async def execute_channel(aid, row, data, claim):
         if actual["state"] == "confirmed" and actual["external_id"]:
             if not one(c,"SELECT lead.growth_receipt_valid(%s) ok",(action["id"],))["ok"]:
                 return WorkResult(outcome="failed",failure_code="invalid_evidence")
-            promoted = one(c,"SELECT lead.growth_confirm_publication(%s) ok",(action["id"],))["ok"]
+            promoted = False if actual["intent"].get("telegram_community") else one(c,"SELECT lead.growth_confirm_publication(%s) ok",(action["id"],))["ok"]
+            final = one(c,"SELECT id,revision,content_hash FROM lead.content_items WHERE id=%s",(actual["content_id"],))
+            point = one(c,"""SELECT id,account_id,platform,placement,placement_ref FROM lead.tracking_links
+                WHERE content_id=%s AND intent_key=%s""",(actual["content_id"],actual["operation_key"]))
             return WorkResult(outcome="completed",evidence_refs=[{"kind":"action","id":action["id"]}],
+                artifacts=[{"kind":"content","id":str(final["id"]),"revision":final["revision"],"hash":final["content_hash"]}],
                 output={"action_id":str(action["id"]),"receipt":observed,"publication_status":"confirmed",
+                        "distribution_point":point,
                         "business_progress":False,"knowledge_progress":promoted,
                         "first_format_verified":promoted})
     if observed.get("state") in ("unknown","confirmed"):
