@@ -937,7 +937,7 @@ def submission_gate(c, actor, action,claim=None,*,allow_method_repair=False):
         from ..admin_settings import validate_brand_content
         from ..reddit_member import ordinary_member
         validate_brand_content(c,actor.aid,"\n".join([publication.get("title", ""),publication.get("body", "")]))
-        if ordinary_member(target) and not method:
+        if ordinary_member(target) and not method and not community:
             from datetime import datetime
 
             from ..reddit_member import member_scope
