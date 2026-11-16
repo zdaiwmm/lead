@@ -6,6 +6,7 @@ import socket
 import httpx
 
 from .local_executor_browser import request_context
+from .public_reader import PublicReaderPolicyError
 
 
 async def call(device, request, name, arguments, *, revalidate=None):
@@ -46,7 +47,7 @@ async def call(device, request, name, arguments, *, revalidate=None):
                          and await asyncio.to_thread(_growth_public_read, revalidate))
         try:
             observed=await fetch_product(url,external_links=True)
-        except (OSError, httpx.RequestError, httpx.HTTPStatusError) as error:
+        except (PublicReaderPolicyError, OSError, httpx.RequestError, httpx.HTTPStatusError) as error:
             if isinstance(error, PermissionError):
                 raise
             await check_research_settings()
@@ -87,7 +88,12 @@ async def call(device, request, name, arguments, *, revalidate=None):
 
 
 def public_read_failure(url, error):
-    """Keep a source failure finite without hiding authority or policy errors."""
+    """Keep typed source errors finite; caller authority barriers still apply."""
+    if isinstance(error, PublicReaderPolicyError):
+        failure = {'code': 'source_policy_denied', 'category': 'policy', 'failure_scope': 'source',
+            'retryable': False, 'knowledge_progress': False, 'business_progress': False}
+        return {'isError': True, 'content': [{'type': 'text', 'text': json.dumps(failure)}],
+            'structuredContent': failure}
     codes = {'source_dns_unavailable', 'source_transport_unavailable', 'source_timeout',
         'reader_busy', 'reader_unavailable', 'reader_invalid_response'}
     reason = getattr(error, 'code', None)

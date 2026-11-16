@@ -220,11 +220,12 @@ async def call_public_tool(request, name, arguments, *, revalidate=None):
     check_actor()
     from .fetch import fetch_product
     from .local_executor_tools import public_read_failure
+    from .public_reader import PublicReaderPolicyError
     from .research import public_url
     url = public_url(arguments['url'])
     try:
         observed = await fetch_product(url, external_links=True)
-    except (OSError, httpx.RequestError, httpx.HTTPStatusError) as error:
+    except (PublicReaderPolicyError, OSError, httpx.RequestError, httpx.HTTPStatusError) as error:
         if isinstance(error, PermissionError):
             raise
         if revalidate is not None:

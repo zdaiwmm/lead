@@ -1,8 +1,15 @@
 """An isolated caller must use its configured reader without direct fallback."""
+import asyncio
+import io
+import json
 import socket
 import sys
+import tempfile
+import urllib.error
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -197,3 +204,169 @@ async def test_studio_revalidates_original_scope_after_network(monkeypatch, read
     monkeypatch.setattr(fetch, 'fetch_product', observed)
     with pytest.raises(ValueError, match='executor_scope_changed'):
         await studio.call_public_tool(request, 'lead_public_read', {'url': SOURCE['url']}, revalidate=changed)
+
+
+@pytest.mark.parametrize('studio_mode', [False, True])
+async def test_typed_reader_policy_is_a_finite_nonretryable_result(monkeypatch, studio_mode):
+    from lead_app import local_executor_tools, public_reader
+    async def denied(*args, **kwargs):
+        raise public_reader.PublicReaderPolicyError()
+    monkeypatch.setattr(fetch, 'fetch_product', denied)
+    if studio_mode:
+        studio, request = studio_request(monkeypatch)
+        result = await studio.call_public_tool(request, 'lead_public_read', {'url': SOURCE['url']})
+    else:
+        device, request = native_request(monkeypatch)
+        result = await local_executor_tools.call(device, request, 'lead_public_read', {'url': SOURCE['url']})
+    assert result['isError'] is True
+    assert result['structuredContent'] == {
+        'code': 'source_policy_denied', 'category': 'policy', 'failure_scope': 'source',
+        'retryable': False, 'knowledge_progress': False, 'business_progress': False}
+    assert SOURCE['url'] not in str(result)
+
+
+@pytest.mark.parametrize('studio_mode', [False, True])
+@pytest.mark.parametrize('revocation', ['scope', 'settings'])
+async def test_policy_result_cannot_hide_late_authority_revocation(monkeypatch, revocation, studio_mode):
+    from lead_app import admin_settings, local_executor_tools, public_reader
+    device, request = native_request(monkeypatch)
+    settings = {'tools': {'public_web': True}}
+    if studio_mode:
+        studio, request = studio_request(monkeypatch)
+        monkeypatch.setattr(admin_settings, 'effective', lambda *args: (settings, None))
+    monkeypatch.setattr(admin_settings, 'for_agent', lambda *args: (settings, None))
+    async def denied(*args, **kwargs):
+        if revocation == 'settings':
+            settings['tools']['public_web'] = False
+        raise public_reader.PublicReaderPolicyError()
+    @contextmanager
+    def revalidate():
+        if revocation == 'scope':
+            raise ValueError('executor_scope_changed')
+        yield
+    monkeypatch.setattr(fetch, 'fetch_product', denied)
+    expected = 'executor_scope_changed' if revocation == 'scope' else 'executor_public_research_disabled'
+    with pytest.raises(ValueError, match=expected):
+        if studio_mode:
+            await studio.call_public_tool(request, 'lead_public_read', {'url': SOURCE['url']}, revalidate=revalidate)
+        else:
+            await local_executor_tools.call(device, request, 'lead_public_read', {'url': SOURCE['url']}, revalidate=revalidate)
+
+
+@pytest.mark.parametrize('message', ['executor_public_research_disabled', 'executor_tool_scope_changed'])
+def test_native_authority_error_stays_forbidden_in_api(message):
+    from lead_app.executor_nodes_api import _error
+    assert _error(ValueError(message)).status_code == 403
+    assert _error(ValueError(message)).detail == 'executor_scope_forbidden'
+
+
+def through_broker(monkeypatch, response):
+    from test_codex_node_broker import broker
+    node_http = broker.NodeHTTP({'base_url': 'https://example.invalid', 'node_id': str(uuid4()),
+        'node_token': 'SYNTHETIC_NODE_CREDENTIAL_0123456789', 'node_epoch': 1,
+        'instance_id': str(uuid4()), 'credential_generation': 1})
+    def receive(request, timeout):
+        if response.status_code >= 400:
+            raise urllib.error.HTTPError(request.full_url, response.status_code, 'fixture', {}, io.BytesIO(response.content))
+        return io.BytesIO(response.content)
+    monkeypatch.setattr(node_http.opener, 'open', receive)
+    path = '/executor/v2/scopes/' + str(uuid4()) + '/tools'
+    return node_http(path, {})
+
+
+@pytest.fixture
+def native_api(monkeypatch):
+    from fastapi import FastAPI
+    from lead_app import executor_nodes_api as api
+    from lead_app import local_executor_identity
+    device, request = native_request(monkeypatch)
+    node = {'id': str(uuid4())}
+    grant = {'id': str(uuid4()), 'generation': 1, 'scope_kind': 'project',
+             'tenant_id': device['tenant_id'], 'agent_id': device['agent_id']}
+    @contextmanager
+    def authorized(*args, **kwargs):
+        yield object(), node, grant
+    monkeypatch.setattr(api.nodes, 'authorized_scope', authorized)
+    monkeypatch.setattr(local_executor_identity, 'service_device', lambda *args: device)
+    monkeypatch.setattr(api.executor, 'tool_request', lambda *args, **kwargs: request)
+    monkeypatch.setattr(api.executor, 'require_agent', lambda *args: None)
+    app = FastAPI()
+    app.include_router(api.router)
+    return app
+
+
+@pytest.mark.parametrize('reader_error,code,scope,extra', [
+    ({'code': 'source_policy_denied', 'category': 'policy'}, 'source_policy_denied', 'source',
+        {'category': 'policy', 'retryable': False}),
+    ({'code': 'source_dns_unavailable', 'category': 'transport'}, 'source_unavailable', 'source',
+        {'reason': 'source_dns_unavailable', 'source_ref': SOURCE['url']}),
+    ({'code': 'reader_busy', 'category': 'transport'}, 'source_unavailable', 'platform',
+        {'reason': 'reader_busy', 'source_ref': SOURCE['url']}),
+    ({'code': 'source_http_error', 'category': 'http', 'status': 403}, 'source_unavailable', 'source',
+        {'reason': 'source_http_error', 'source_ref': SOURCE['url'], 'http_status': 403}),
+    ({'code': 'PRIVATE_NODE_MARKER', 'category': 'policy'}, 'source_unavailable', 'platform',
+        {'reason': 'reader_invalid_response', 'source_ref': SOURCE['url']}),
+])
+async def test_synthetic_reader_to_native_api_preserves_finite_result(monkeypatch, native_api,
+        reader_error, code, scope, extra):
+    from lead_app import public_reader
+    async def serve(reader, writer):
+        await reader.readline()
+        writer.write(json.dumps({'v': 1, 'ok': False, 'error': reader_error}).encode() + b'\n')
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+    # Parent ownership is covered by the protocol suite. This fixture substitutes
+    # only the root-owned socket location; decoding and native/API handlers run.
+    with tempfile.TemporaryDirectory(prefix='lead-err-', dir='/tmp') as directory:
+        path = str(Path(directory).resolve() / 'r.sock')
+        monkeypatch.setattr(public_reader, 'PUBLIC_READER_SOCKET', path)
+        monkeypatch.setattr(public_reader, '_trusted_socket', lambda value: None)
+        monkeypatch.setenv('LEAD_PUBLIC_READER_SOCKET', path)
+        server = await asyncio.start_unix_server(serve, path=path)
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=native_api), base_url='http://fixture') as client:
+                response = await client.post('/executor/v2/scopes/' + str(uuid4()) + '/tools',
+                    headers={'Authorization': 'Bearer fixture-only'}, json={
+                        'node_epoch': 1, 'grant_generation': 1, 'epoch': 1,
+                        'request_id': str(uuid4()), 'name': 'lead_public_read',
+                        'arguments': {'url': SOURCE['url']}})
+        finally:
+            server.close()
+            await server.wait_closed()
+    assert response.status_code == 200
+    result = response.json()
+    assert result['isError'] is True
+    assert result['structuredContent'] == {'code': code, 'failure_scope': scope,
+        'knowledge_progress': False, 'business_progress': False, **extra}
+    assert json.loads(result['content'][0]['text']) == result['structuredContent']
+    assert 'PRIVATE_NODE_MARKER' not in response.text
+    assert through_broker(monkeypatch, response) == result
+
+
+@pytest.mark.parametrize('error,status,detail', [
+    (ValueError('PRIVATE_NODE_MARKER'), 422, 'executor_payload_invalid'),
+    (ValueError('source_policy_denied'), 422, 'executor_payload_invalid'),
+    (ValueError('executor_public_research_disabled'), 403, 'executor_scope_forbidden'),
+    (PermissionError('PRIVATE_NODE_MARKER'), 403, 'executor_scope_forbidden'),
+])
+async def test_native_api_does_not_turn_ordinary_or_permission_errors_into_source_results(
+        monkeypatch, native_api, error, status, detail):
+    async def failed(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(fetch, 'fetch_product', failed)
+    transport = httpx.ASGITransport(app=native_api, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url='http://fixture') as client:
+        response = await client.post('/executor/v2/scopes/' + str(uuid4()) + '/tools',
+            headers={'Authorization': 'Bearer fixture-only'}, json={
+                'node_epoch': 1, 'grant_generation': 1, 'epoch': 1,
+                'request_id': str(uuid4()), 'name': 'lead_public_read', 'arguments': {'url': SOURCE['url']}})
+    assert response.status_code == status
+    if detail:
+        assert response.json() == {'detail': detail}
+    assert 'PRIVATE_NODE_MARKER' not in response.text
+    from test_codex_node_broker import broker
+    with pytest.raises(broker.BrokerError) as rejected:
+        through_broker(monkeypatch, response)
+    assert rejected.value.code == detail
+    assert rejected.value.retryable is False
