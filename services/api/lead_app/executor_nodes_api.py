@@ -69,7 +69,8 @@ def _error(error):
     if code == 'executor_node_unavailable':
         return HTTPException(401, code)
     if code in {'executor_scope_forbidden', 'executor_studio_actor_unavailable', 'executor_request_unavailable',
-                'executor_tool_not_declared', 'executor_scope_changed', 'executor_permission_escalation_forbidden'}:
+                'executor_tool_not_declared', 'executor_scope_changed', 'executor_permission_escalation_forbidden',
+                'executor_public_research_disabled', 'executor_tool_scope_changed'}:
         return HTTPException(403, 'executor_scope_forbidden')
     if code == 'executor_not_ready':
         return HTTPException(503, code)
@@ -248,6 +249,8 @@ async def scope_tools(scope_ref: UUID, request: Request, body: ScopeTools):
             return await call_public_tool(current, body.name, body.arguments, revalidate=revalidate_studio)
     except (ValueError, LookupError) as error:
         raise _error(error) from None
+    except PermissionError:
+        raise HTTPException(403, 'executor_scope_forbidden') from None
     except psycopg.IntegrityError:
         raise HTTPException(409, 'executor_request_conflict') from None
     except psycopg.errors.InsufficientPrivilege:
