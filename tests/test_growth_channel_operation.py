@@ -48,20 +48,21 @@ def test_macro_operation_identity_is_immutable(growth_agent):
         assert one(c,"SELECT count(*) n FROM lead.actions WHERE task_id=%s",(ref["task_id"],))["n"] == 1
 
 
-def test_submission_gate_rechecks_intent_and_ignores_unrelated_config(growth_agent):
+@pytest.mark.parametrize('change', ['configuration', 'intent'])
+def test_submission_gate_rechecks_current_operating_input(growth_agent, change):
     ref,data,account = channel_work(growth_agent)
     claim=advance(ref)["claim"]
     action = prepare_channel(growth_agent,ref["task_id"],data)
     actor = SimpleNamespace(aid=growth_agent,profile={"id":account["profile_id"]},epoch=1)
     with tx(growth_agent) as c:
         c.execute("UPDATE lead.profile_leases SET epoch=1,state='held',expires_at=now()+interval '10 minutes' WHERE profile_id=%s",(account["profile_id"],))
-        c.execute("""INSERT INTO lead.agent_revisions(tenant_id,agent_id,revision,provider,model_ref,prompt_version,toolset_version,output_schema_version)
-            SELECT tenant_id,agent_id,revision+1,provider,model_ref,prompt_version,toolset_version,output_schema_version
-            FROM lead.agent_revisions ORDER BY revision DESC LIMIT 1""")
-        c.execute("UPDATE lead.agents SET config_revision=config_revision+1 WHERE id=%s",(growth_agent,))
         submission_gate(c,actor,action,claim)
-    set_intent(growth_agent,account["id"],"paused",source="owner_command",source_ref="owner:pause")
-    with pytest.raises(ValueError,match="scope_changed"):
+    if change == 'configuration':
+        with tx(growth_agent) as c:
+            domain.snapshot_preferences(c, growth_agent)
+    else:
+        set_intent(growth_agent,account["id"],"paused",source="owner_command",source_ref="owner:pause")
+    with pytest.raises(ValueError,match='configuration_changed' if change == 'configuration' else 'scope_changed'):
         with tx(growth_agent) as c:
             submission_gate(c,actor,action,claim)
 

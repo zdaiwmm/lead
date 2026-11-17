@@ -116,7 +116,7 @@ async def test_empty_native_decision_reviews_current_scope_without_bypassing_adm
     else:
         assert result['accepted'] == [] and tasks == []
         if mode == 'retain_stop':
-            assert result['status'] == 'waiting_for_change' and result['continuation'] == STOP
+            assert result['status'] == 'needs_follow_up' and result['continuation'] == {**STOP, 'source_ref': None}
         elif mode == 'stale_claim':
             assert result['discarded'] == 'stale_decision'
         else:
@@ -158,7 +158,7 @@ async def test_pending_or_accepted_work_does_not_get_a_no_work_review(community,
     assert len(result['accepted']) == int(new_command)
 
 
-async def test_no_declared_account_investigation_keeps_original_stop(growth_agent, monkeypatch):
+async def test_public_native_discovery_also_gets_one_bounded_review(growth_agent, monkeypatch):
     connected(growth_agent)
     calls = []
 
@@ -175,4 +175,5 @@ async def test_no_declared_account_investigation_keeps_original_stop(growth_agen
 
     monkeypatch.setattr(local_executor_client, 'await_request', complete)
     result = await agent.decide(growth_agent)
-    assert len(calls) == 1 and result['status'] == 'waiting_for_change'
+    assert len(calls) == 2 and result['status'] == 'needs_follow_up'
+    assert calls[1]['repair']['no_work_review']

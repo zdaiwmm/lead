@@ -100,6 +100,82 @@ def validate_task(c, spec):
             raise ValueError("dependency_failed")
 
 
+def continuation_sources(c, aid):
+    """Project only conditions with an existing runtime owner, never model timers."""
+    agent = require_agent(c, aid)
+    sources = []
+    rows = c.execute("""SELECT id,type,state,input,result,scheduled_at,
+        EXISTS(SELECT FROM lead.actions a WHERE a.task_id=lead.tasks.id
+            AND a.state IN ('dispatching','unknown','confirmed')) reconcile_action FROM lead.tasks
+        WHERE type LIKE 'growth.%%' AND type<>'growth.decision' AND
+          (state IN ('planned','queued','running','waiting_user','reconciling')
+           OR result#>>'{runtime,recovery,status}'='blocked') ORDER BY created_at,id""").fetchall()
+    for row in rows:
+        runtime = row['result'].get('runtime') or {}
+        episode = runtime.get('recovery') or {}
+        if row['state'] in ('failed', 'canceled', 'succeeded'):
+            if episode.get('status') != 'blocked' or not episode.get('condition_revision'):
+                continue
+            stopped = bool(episode.get('probes_stopped'))
+            sources.append({'ref': {'kind': 'resource', 'id': str(row['id']),
+                'version': episode['condition_revision']}, 'producer': 'resource_recovered',
+                'responsibility': 'resource', 'status': 'blocked' if stopped else 'waiting',
+                'check_at': None if stopped else episode.get('next_check_at'),
+                'reason': episode.get('error_code') or episode.get('reason') or 'resource_blocked'})
+            continue
+        spec = row['input']['spec']
+        ordinary = spec['kind'] in ('research', 'content', 'channel') or spec['kind'] == 'account' and spec['purpose'] != 'connect'
+        product_research = spec['kind'] == 'research' and spec['purpose'] == 'product' and not spec.get('experiment_id')
+        reconcile = row['reconcile_action'] or row['type'] == 'growth.account' and runtime.get('community', {}).get('state') in ('dispatching', 'unknown', 'pending_approval')
+        if (ordinary and not product_research and not reconcile and 'config_revision' in row['input']
+                and row['input']['config_revision'] != agent['config_revision']):
+            continue
+        if (spec['kind'] in ('research', 'content', 'channel') and not product_research and not reconcile
+                and row['input'].get('goal_revision') != objective_revision(agent)):
+            continue
+        wait = runtime.get('wait') or {}
+        at = wait.get('check_at') or row['scheduled_at']
+        sources.append({'ref': {'kind': 'task', 'id': str(row['id']),
+            'version': str(row['input']['task_generation'])},
+            'producer': 'account_changed' if wait.get('producer') == 'account_connection' else 'evidence_added',
+            'responsibility': wait.get('responsibility', 'product'), 'status': 'waiting',
+            'check_at': at.isoformat() if hasattr(at, 'isoformat') else at,
+            'reason': wait.get('reason') or 'work_pending'})
+    for row in c.execute("""SELECT id,revision,specification FROM lead.growth_experiments
+        WHERE state IN ('active','observing') AND objective_revision=%s ORDER BY created_at,id""",
+        (objective_revision(agent),)).fetchall():
+        sources.append({'ref': {'kind': 'experiment', 'id': str(row['id']), 'version': str(row['revision'])},
+            'producer': 'experiment_review_due', 'responsibility': 'product', 'status': 'waiting',
+            'check_at': row['specification']['review_at'], 'reason': 'original_experiment_review'})
+    return sources
+
+
+def check_continuation(continuation, sources):
+    if not continuation or not continuation.source_ref:
+        return {'valid': False, 'status': 'missing', 'reason': 'continuation_source_required'}
+    ref = continuation.source_ref.model_dump(mode='json')
+    source = next((source for source in sources if source['ref'] == ref), None)
+    if not source:
+        return {'valid': False, 'status': 'missing', 'reason': 'continuation_source_changed'}
+    if (source['producer'] != continuation.producer
+            or source['responsibility'] != continuation.responsibility):
+        return {'valid': False, 'status': 'missing', 'reason': 'continuation_source_mismatch'}
+    return {'valid': True, 'status': source['status'], 'source': source, 'reason': source['reason']}
+
+
+def discovery_scope(c, aid, spec):
+    agent = require_agent(c, aid)
+    account = one(c, 'SELECT binding_version FROM lead.social_accounts WHERE id=%s', (spec.account_id,))
+    document = one(c, """SELECT id FROM lead.knowledge_documents WHERE deleted_at IS NULL
+        ORDER BY created_at DESC,id DESC LIMIT 1""")
+    review = one(c, """SELECT id FROM lead.outbox_events WHERE event_type='growth.wake'
+        AND payload->>'reason'='experiment_review_due' ORDER BY occurred_at DESC,id DESC LIMIT 1""")
+    return {'account_id': str(spec.account_id), 'binding_version': account['binding_version'],
+        'goal_revision': objective_revision(agent), 'config_revision': agent['config_revision'],
+        'document_id': str(document['id']) if document else None,
+        'review_event_id': str(review['id']) if review else None}
+
+
 def submit_work(c, aid, spec):
     if str(one(c,"SELECT lead.ctx_agent() id")["id"]) != str(aid):
         raise ValueError("explicit_agent_scope_required")
@@ -107,6 +183,11 @@ def submit_work(c, aid, spec):
     validate_task(c, spec)
     intent = spec.model_dump(mode="json")
     material = {k: v for k, v in intent.items() if k != "review_at"}
+    search_scope = None
+    if spec.kind == 'account' and spec.payload.get('community_operation') == 'search':
+        search_scope = discovery_scope(c, aid, spec)
+        queries = sorted({' '.join(query.casefold().split()) for query in spec.payload['queries']})
+        material = {'kind': 'community_search', 'scope': search_scope, 'queries': queries}
     if spec.kind == 'account' and spec.payload.get('community_operation') in ('inspect', 'join'):
         from ..account_connection import validate_community_source
         account = one(c, 'SELECT binding_version FROM lead.social_accounts WHERE id=%s', (spec.account_id,))
@@ -146,10 +227,15 @@ def submit_work(c, aid, spec):
             previous = (legacy or {}).get('input',{}).get('spec',{}).get('payload',{})
             previous_operation = previous.get('operation','publish')
             previous_parent = previous.get('parent_url') if previous_operation == 'reply' else None
-            if legacy and (previous_operation,previous_parent) == (operation,parent):
+            if (legacy and (previous_operation,previous_parent) == (operation,parent)
+                    and legacy['input'].get('config_revision', agent['config_revision']) == agent['config_revision']):
                 return TaskRef(agent_id=UUID(str(aid)),task_id=legacy['id'],
                     task_generation=legacy['input'].get('task_generation',1)).model_dump(mode='json')
             material.update(operation=operation,parent_url=parent)
+    ordinary = spec.kind in ('research', 'content', 'channel') or spec.kind == 'account' and spec.purpose != 'connect'
+    product_research = spec.kind == 'research' and spec.purpose == 'product' and not spec.experiment_id
+    if ordinary and not product_research:
+        material['config_revision'] = require_agent(c, aid)['config_revision']
     workflow_id = "growth:" + str(aid) + ":" + digest(material)
     old = one(c, "SELECT id,input FROM lead.tasks WHERE workflow_id=%s", (workflow_id,))
     if old:
@@ -164,9 +250,11 @@ def submit_work(c, aid, spec):
         (current_tenant(), aid, "growth." + spec.kind, workflow_id,
          j({"schema_version": 1, "spec": intent, "task_generation": 1,
             "goal_revision": objective_revision(agent),
+            "config_revision": agent['config_revision'],
             "business_profile_id":str(business["id"]) if business else None,
             "binding_version": account["binding_version"] if account else None,
-            "profile_id": str(account["profile_id"]) if account else None}),
+            "profile_id": str(account["profile_id"]) if account else None,
+            **({'discovery_scope': search_scope} if search_scope else {})}),
          j({"runtime": {}, "output": {}}), spec.experiment_id))
     if not task:
         old = one(c, "SELECT id,input FROM lead.tasks WHERE workflow_id=%s", (workflow_id,))
@@ -268,7 +356,7 @@ def _check_command(c, agent, command):
             raise ValueError("account_paused")
 
 
-def accept_commands(aid, proposal, decision_task_id=None,*,business_snapshot=None,decision_claim=None):
+def accept_commands(aid, proposal, decision_task_id=None,*,business_snapshot=None,decision_claim=None,config_revision=None):
     proposal = DecisionProposal.model_validate(proposal)
     accepted, rejected = [], []
     groups = defaultdict(list)
@@ -277,6 +365,9 @@ def accept_commands(aid, proposal, decision_task_id=None,*,business_snapshot=Non
         groups[key].append(command)
     with tx(aid) as c:
         agent = require_agent(c, aid, True)
+        if config_revision is not None and agent['config_revision'] != config_revision:
+            return {'decision_task_id': decision_task_id, 'accepted': [], 'rejected': [],
+                    'discarded': 'configuration_changed'}
         if decision_task_id:
             from datetime import datetime
 
@@ -412,4 +503,7 @@ def accept_commands(aid, proposal, decision_task_id=None,*,business_snapshot=Non
             "continuation":proposal.continuation.model_dump(mode='json') if proposal.continuation else None})
         pending_work = one(c,"""SELECT EXISTS(SELECT FROM lead.tasks WHERE type LIKE 'growth.%%'
             AND type<>'growth.decision' AND state IN ('planned','queued','running','waiting_user','reconciling')) ok""")['ok']
-    return {"decision_task_id": decision_task_id, "accepted": accepted, "rejected": rejected,'pending_work':pending_work}
+        sources = continuation_sources(c, aid)
+        continuation_check = check_continuation(proposal.continuation, sources)
+    return {"decision_task_id": decision_task_id, "accepted": accepted, "rejected": rejected,
+            'pending_work': pending_work, 'continuation_sources': sources, 'continuation_check': continuation_check}

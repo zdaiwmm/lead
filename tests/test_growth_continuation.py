@@ -28,7 +28,8 @@ async def test_stop_decision_preserves_rationale_and_real_resume_condition(growt
                 'responsibility':'product'})
     monkeypatch.setattr(agent, 'run_model', provider)
     result = await agent.decide(growth_agent)
-    assert result['status'] == 'waiting_for_change'
+    assert result['status'] == 'needs_follow_up'
+    assert result['continuation_check']['reason'] == 'continuation_source_required'
     assert result['rationale'].startswith('Original source is blocked')
     assert result['continuation']['producer'] == 'evidence_added'
     assert 'check_at' not in result['continuation']
@@ -95,7 +96,7 @@ async def test_close_only_gets_one_continuation_repair_without_replaying_accepte
     monkeypatch.setattr(agent,'run_model',provider)
     result = await agent.decide(growth_agent)
     assert calls==['primary','repair'] and len(result['accepted'])==1
-    assert result['status']=='waiting_for_change' and result['continuation']
+    assert result['status']=='needs_follow_up' and result['continuation']
     with tx(growth_agent) as c:
         assert one(c,'SELECT revision,state FROM lead.growth_experiments WHERE id=%s',(exp['id'],))=={'revision':2,'state':'closed'}
         assert one(c,"SELECT count(*) n FROM lead.tasks WHERE type LIKE 'growth.%%'")['n']==0

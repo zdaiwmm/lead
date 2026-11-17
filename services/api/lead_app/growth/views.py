@@ -8,9 +8,9 @@ from pydantic import Field
 
 from ..db import all_rows, audit, emit, j, one, require_agent, tx
 from ..scope import actor_ref, current_tenant
-from .contracts import Contract, GoalRef, utcnow
+from .contracts import Continuation, Contract, GoalRef, utcnow
 from .outcomes import summarize
-from .store import digest, objective_revision
+from .store import check_continuation, continuation_sources, digest, objective_revision
 
 router = APIRouter()
 LABELS = {"research":"调查产品与真实需求","content":"制作有依据的内容","account":"核对账号与可运营位置",
@@ -39,6 +39,16 @@ def render_growth(aid):
         decision = one(c,"""SELECT completed_at,result#>'{output,output}' output FROM lead.tasks
             WHERE type='growth.decision' AND state IN ('succeeded','failed')
             ORDER BY completed_at DESC,id DESC LIMIT 1""")
+        output = (decision or {}).get('output') or {}
+        checked = output.get('continuation_check')
+        if checked is not None:
+            if (output.get('config_revision') != agent['config_revision']
+                    or output.get('goal_revision') != objective_revision(agent)):
+                checked = {'valid': False, 'status': 'missing', 'reason': 'continuation_context_changed'}
+            else:
+                saved = output.get('continuation')
+                checked = check_continuation(Continuation.model_validate(saved) if saved else None,
+                                             continuation_sources(c, aid))
     for item in work+recent:
         item["title"] = LABELS.get(item["type"].removeprefix("growth."),"推进工作")
         if item["type"] == "growth.recover":
@@ -66,8 +76,11 @@ def render_growth(aid):
         'producer':(output.get('continuation') or {}).get('producer'),
         'next_action':(output.get('continuation') or {}).get('next_action'),
         'responsibility':(output.get('continuation') or {}).get('responsibility','product'),
+        'check': checked,
         'rejected_reasons':list(dict.fromkeys(item.get('reason') for item in rejected if item.get('reason'))),
         'decided_at':(decision or {}).get('completed_at')}
+    if checked is not None and continuation['status'] in ('waiting_for_change', 'blocked'):
+        continuation['status'] = ('blocked' if checked['status'] == 'blocked' else 'waiting_for_change') if checked['valid'] else 'needs_follow_up'
     if continuation['status']=='unknown' and any(item['wait'].get('automatic_checks')=='stopped' for item in waits):
         continuation.update(status='blocked', condition='原来源或访问能力发生可验证的变化。',
             next_action='处理并核验原阻塞，再根据新证据判断可行路径；不重置旧恢复计数。')

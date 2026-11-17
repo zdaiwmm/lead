@@ -122,11 +122,18 @@ class Command(Contract):
     payload: dict[str, Any]
 
 
+class ContinuationSourceRef(Contract):
+    kind: Literal['task', 'experiment', 'resource']
+    id: UUID
+    version: str = Field(min_length=1, max_length=200)
+
+
 class Continuation(Contract):
     condition: str = Field(min_length=3, max_length=1000)
-    producer: Literal['evidence_added', 'account_changed', 'objective_changed', 'resource_recovered', 'owner_direction']
+    producer: Literal['evidence_added', 'account_changed', 'objective_changed', 'resource_recovered', 'owner_direction', 'experiment_review_due']
     next_action: str = Field(min_length=3, max_length=1000)
     responsibility: Literal['owner', 'product', 'platform', 'resource'] = 'product'
+    source_ref: ContinuationSourceRef | None = None
 
 
 class DecisionProposal(Contract):
