@@ -2027,9 +2027,36 @@ class IdentityCheckRequest(BaseModel):
 
 @app.post("/agents/{aid}/identity/check")
 async def check_identity(aid: UUID,body:IdentityCheckRequest | None = None):
-    from .identity import check
+    from .execution_routes import resolve
+    from .growth.runtime import consume_community_read_proof
+    from .growth.store import enabled
+    from .identity import check, community_read_check
 
-    return await check(await gateway.get(str(aid),body.profile_id if body else None))
+    aid = str(aid)
+    actor = await gateway.get(aid,body.profile_id if body else None)
+    account_id = None
+    with tx(aid) as c:
+        agent = require_agent(c, aid)
+        policy = agent['onboarding_state'].get('community_growth') or {}
+        if (enabled(agent) and agent['desired_state'] == 'running'
+                and policy.get('enabled') and policy.get('mode') == 'contextual_outreach'):
+            accounts = c.execute("""SELECT id FROM lead.social_accounts WHERE profile_id=%s
+                AND platform='telegram' AND state='connected' AND automation_enabled ORDER BY id LIMIT 2""",
+                (actor.profile['id'],)).fetchall()
+            if len(accounts) == 1 and one(c, """SELECT id FROM lead.tasks WHERE type='growth.account'
+                AND input#>>'{spec,purpose}'='community' AND input#>>'{spec,account_id}'=%s
+                AND input->>'profile_id'=%s AND input#>>'{spec,payload,community_operation}' IN ('search','inspect')
+                AND result#>>'{runtime,recovery,error_code}'='HTTPStatusError'
+                AND result#>>'{runtime,recovery,status}'='blocked' LIMIT 1""",
+                (str(accounts[0]['id']), str(actor.profile['id']))):
+                account_id = accounts[0]['id']
+    if account_id:
+        reference = resolve(aid, profile_id=actor.profile['id'])
+        proof = await community_read_check(actor, account_id, execution_ref=reference)
+        recovered = consume_community_read_proof(aid, proof['proof_ref'])
+        return {**proof, 'read_recovery': {key: recovered[key]
+            for key in ('state', 'scope', 'recovered_episodes', 'resumed_count')}}
+    return await check(actor)
 
 
 @app.post("/agents/{aid}/open")
