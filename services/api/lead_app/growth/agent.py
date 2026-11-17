@@ -15,7 +15,7 @@ from .store import (
     objective_revision,
 )
 
-PROMPT_VERSION = "growth-v2.15"
+PROMPT_VERSION = "growth-v2.16"
 MAX_CONTEXT_BYTES = 48000
 
 
@@ -70,6 +70,12 @@ run in an independent group without an experiment; use its observed evidence bef
 An exhausted experiment question does not stop independent account primitives. Preserve blocked-resource
 and original-source stop conditions; do not reopen the same exhausted path by renaming it.
 Tasks on independent accounts/resources should not depend on one another.
+blocked_resources.task_scope and failure_scope describe the original task and recorded attempt;
+a valid continuation reference does not establish a global lack of alternatives. Actual resource
+and dependency guards still apply. community_candidates contains source-bound observed metadata
+not yet inspected, not business fit, current reachability or permission to join or publish.
+Each candidate's source_ref is its exact predecessor TaskRef. An inspection uses its task_id
+in required_refs and group_task_id, with the observed group_id.
 Give the bottleneck, evidence, nearest alternative, action and falsification/stop condition.
 Learning and completion rules must answer the experiment's actual question. A reachable venue,
 generated artifact, accepted task or working command is an intermediate result, not evidence of
@@ -136,6 +142,85 @@ def proposal_errors(error):
     return [{'type':type(error).__name__,'msg':str(error)[:240]}]
 
 
+def observed_community_candidates(c, aid, desired_state):
+    from ..account_connection import (
+        community_authority,
+        community_group_allowed,
+        validate_community_source,
+    )
+    from ..admin_controls import enforce_channel
+
+    result = {'items': [], 'limited': False}
+    if desired_state != 'running':
+        return result
+    try:
+        enforce_channel(c, aid, 'telegram', operation='community')
+    except ValueError:
+        return result
+    rows = all_rows(c, """SELECT t.id,t.input->'task_generation' generation,
+        a.id account_id,a.profile_id,a.binding_version,g.value->>'group_id' group_id,
+        octet_length(t.result::text) source_bytes
+        FROM lead.tasks t JOIN lead.social_accounts a ON a.id::text=t.input#>>'{spec,account_id}'
+          AND (a.tenant_id,a.agent_id)=(t.tenant_id,t.agent_id)
+        JOIN lead.account_operating_intents i ON (i.tenant_id,i.agent_id,i.account_id)=(a.tenant_id,a.agent_id,a.id)
+        CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.result#>'{output,output,groups}')='array'
+          THEN t.result#>'{output,output,groups}' ELSE '[]'::jsonb END) WITH ORDINALITY g(value,position)
+        WHERE t.tenant_id=lead.ctx_tenant() AND t.agent_id=%s AND t.type='growth.account' AND t.state='succeeded'
+          AND t.input#>>'{spec,purpose}'='community' AND t.input#>>'{spec,payload,community_operation}'='search'
+          AND a.platform='telegram' AND a.state='connected' AND a.automation_enabled AND i.desired='running'
+          AND t.input->>'binding_version'=a.binding_version::text AND t.input->>'profile_id'=a.profile_id::text
+          AND NOT EXISTS(SELECT FROM lead.tasks h LEFT JOIN lead.tasks predecessor
+            ON predecessor.id::text=h.input#>>'{spec,payload,group_task_id}'
+              AND (predecessor.tenant_id,predecessor.agent_id)=(h.tenant_id,h.agent_id)
+            WHERE (h.tenant_id,h.agent_id)=(t.tenant_id,t.agent_id) AND h.type='growth.account'
+              AND h.input#>>'{spec,purpose}'='community' AND h.input#>>'{spec,payload,community_operation}'='inspect'
+              AND h.input#>>'{spec,account_id}'=a.id::text AND (
+                h.input#>>'{spec,payload,group_id}'=g.value->>'group_id'
+                OR lower(h.result#>>'{output,output,group,canonical_url}')=lower(g.value->>'canonical_url')
+                OR EXISTS(SELECT FROM jsonb_array_elements(CASE
+                  WHEN jsonb_typeof(predecessor.result#>'{output,output,groups}')='array'
+                  THEN predecessor.result#>'{output,output,groups}' ELSE '[]'::jsonb END) old(value)
+                  WHERE old.value->>'group_id'=h.input#>>'{spec,payload,group_id}'
+                    AND lower(old.value->>'canonical_url')=lower(g.value->>'canonical_url'))))
+        ORDER BY t.created_at DESC,t.id DESC,g.position LIMIT 65""", (aid,))
+    result['limited'] = len(rows) > 64
+    accounts, peers, urls = {}, set(), set()
+    for row in rows[:64]:
+        if row['source_bytes'] > 256000:
+            result['limited'] = True
+            continue
+        if row['account_id'] not in accounts:
+            account = one(c, 'SELECT * FROM lead.social_accounts WHERE id=%s', (row['account_id'],))
+            accounts[row['account_id']] = community_authority(c, aid, account, 'inspect', required=False)[0]
+        intent = accounts[row['account_id']]
+        if not intent or intent['desired'] != 'running' or type(row['generation']) is not int or row['generation'] < 1:
+            continue
+        spec = {'kind': 'account', 'purpose': 'community', 'account_id': str(row['account_id']),
+            'required_refs': [{'task_id': str(row['id'])}], 'payload': {'community_operation': 'inspect',
+                'group_task_id': str(row['id']), 'group_id': row['group_id']}}
+        try:
+            group = validate_community_source(c, spec, binding_version=row['binding_version'])
+            community_group_allowed(intent, group)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        peer = (str(row['account_id']), group['group_id'])
+        url = (str(row['account_id']), group['canonical_url'].casefold())
+        if peer in peers or url in urls:
+            continue
+        peers.add(peer)
+        urls.add(url)
+        if len(result['items']) == 24:
+            result['limited'] = True
+            break
+        result['items'].append({'source_ref': {'agent_id': str(aid), 'task_id': str(row['id']),
+                'task_generation': row['generation']}, 'account_id': str(row['account_id']),
+            'profile_id': str(row['profile_id']), 'binding_version': row['binding_version'],
+            'group_id': group['group_id'], 'canonical_url': group['canonical_url'],
+            'title': clip(str(group.get('title') or ''), 240), 'subtitle': clip(str(group.get('subtitle') or ''), 240),
+            'inspection_status': 'not_yet_inspected'})
+    return result
+
+
 def build_context(aid, trigger_refs=None):
     from uuid import UUID
     task_refs = []
@@ -146,7 +231,7 @@ def build_context(aid, trigger_refs=None):
             pass
     with tx(aid) as c:
         # Owner direction and Goal must describe the same revision as preferences.
-        agent = one(c, """SELECT config_revision,onboarding_state,
+        agent = one(c, """SELECT config_revision,onboarding_state,desired_state,
             (SELECT coalesce(jsonb_agg(entry),'[]'::jsonb) FROM (
                 SELECT id,body->>'text' text,source_refs,confirmation FROM lead.memory_entries
                 WHERE kind='preference' AND deleted_at IS NULL
@@ -158,11 +243,21 @@ def build_context(aid, trigger_refs=None):
         contract = agent["onboarding_state"].get("operating_contract", {})
         experiments = all_rows(c, """SELECT id,revision,state,specification,conclusion
             FROM lead.growth_experiments ORDER BY updated_at DESC LIMIT 12""")
-        blocked = all_rows(c, """SELECT id,type,result#>'{runtime,recovery}' recovery,
-            result#>'{runtime,failure_scope}' failure_scope FROM lead.tasks
-            WHERE result#>>'{runtime,recovery,status}'='blocked'
-            ORDER BY completed_at DESC,id DESC LIMIT 8""")
+        blocked = all_rows(c, """SELECT t.id,t.type,t.input->'task_generation' task_generation,
+            jsonb_build_object('kind',t.input#>'{spec,kind}','purpose',t.input#>'{spec,purpose}',
+              'account_id',coalesce(t.input#>>'{spec,account_id}',t.input->>'account_id'),
+              'profile_id',coalesce(t.input->>'profile_id',t.input#>>'{spec,payload,profile_id}',
+                CASE WHEN t.input->>'binding_version'=s.binding_version::text THEN s.profile_id::text END),
+              'operation',coalesce(t.input#>>'{spec,payload,community_operation}',t.input#>>'{spec,payload,operation}')) task_scope,
+            t.result#>'{runtime,recovery}' recovery,t.result#>'{runtime,failure_scope}' failure_scope
+            FROM lead.tasks t LEFT JOIN lead.social_accounts s
+              ON s.id::text=coalesce(t.input#>>'{spec,account_id}',t.input->>'account_id')
+                AND (s.tenant_id,s.agent_id)=(t.tenant_id,t.agent_id)
+            WHERE t.result#>>'{runtime,recovery,status}'='blocked'
+            ORDER BY t.completed_at DESC,t.id DESC LIMIT 8""")
         for item in blocked:
+            item['task_ref'] = {'agent_id': str(aid), 'task_id': str(item['id']),
+                                'task_generation': item.pop('task_generation')}
             item['recovery'] = {key:value for key,value in (item.get('recovery') or {}).items() if key in (
                 'status','reason','error_code','resource','probes','attempts','probes_stopped','paid_probes_stopped',
                 'next_check_at','condition_revision','failure_condition')}
@@ -183,6 +278,7 @@ def build_context(aid, trigger_refs=None):
                     if card:
                         allowed.append(operation)
                 account['community_operations'] = allowed
+        community_candidates = observed_community_candidates(c, aid, agent['desired_state'])
         targets = all_rows(c, """SELECT t.id,t.account_id,t.target_type,t.canonical_url,t.display_name,
             t.state,t.verified_permissions->'publishing_verified_formats' formats,
             t.verified_permissions#>>'{browser_method,version}' method_version,
@@ -239,6 +335,7 @@ def build_context(aid, trigger_refs=None):
         "continuation_sources": sources,
         "goal": goal, "product": business or {}, "experiments": experiments, "work": work,
         "blocked_resources": blocked,
+        "community_candidates": community_candidates,
         "accounts": accounts, "targets": targets, "capabilities": capabilities,
         "measurement": {"state": "configured" if events else "missing", "definitions": events},
         "outcomes": context_outcomes,
@@ -308,6 +405,9 @@ def build_context(aid, trigger_refs=None):
             context["experiments"].pop()
         elif context["targets"]:
             context["targets"].pop()
+        elif context['community_candidates']['items']:
+            context['community_candidates']['items'].pop()
+            context['community_candidates']['limited'] = True
         else:
             raise ValueError("growth_model_context_too_large")
         context["history_truncated"] = True
