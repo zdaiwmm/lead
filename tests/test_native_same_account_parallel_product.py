@@ -125,9 +125,10 @@ async def test_unknown_receipt_read_allows_same_account_independent_original_tas
 
         async def execute(item, number, kind='action'):
             ref, data, _, body = item
+            started = time.monotonic()
             admitted = advance(ref, now=utcnow()+timedelta(minutes=6))
             admissions.append({'task_id': str(ref['task_id']), 'kind': kind, 'state': admitted['state'],
-                'wait': admitted.get('wait')})
+                'started': started, 'admitted_at': time.monotonic(), 'wait': admitted.get('wait')})
             assert admitted['state'] == 'ready', admitted
             with tx(aid) as c:
                 task = one(c, 'SELECT * FROM lead.tasks WHERE id=%s', (ref['task_id'],))
@@ -187,9 +188,9 @@ async def test_unknown_receipt_read_allows_same_account_independent_original_tas
             assert len(board.oracle()['posts']) == 2
             assert sum(row['method'] == 'POST' and row['path'] == '/posts' for row in board.oracle()['requests']) == 2
             rows = [row for row in intervals if row['barrier_member']]
-            assert len(rows) == 2 and not any(row.get('barrier_aborted') for row in rows), rows
+            assert len(rows) == 2 and not any(row.get('barrier_aborted') for row in rows), json.dumps({'intervals': rows, 'admissions': admissions})
             overlap = min(row['ended'] for row in rows) - max(row['started'] for row in rows)
-            assert overlap >= .4, rows
+            assert overlap >= .4, json.dumps({'intervals': rows, 'admissions': admissions})
             pages = [row for row in workers if 'target_id' in row and row['task_id'] in by_task and row['task_id'] != str(second['id'])]
             assert len(pages) == 3 and len({row['target_id'] for row in pages}) == 3
             assert {row['profile_id'] for row in pages} == {str(actor.profile['id'])}
