@@ -9,7 +9,7 @@ from ..model import run_model
 from .contracts import DecisionProposal, ExperimentSpec, TaskSpec, utcnow
 from .store import accept_commands, command_group, digest, objective_revision
 
-PROMPT_VERSION = "growth-v2.12"
+PROMPT_VERSION = "growth-v2.13"
 MAX_CONTEXT_BYTES = 48000
 
 
@@ -332,6 +332,46 @@ def decision_outcome(proposal, accepted, rejected, pending_work=None):
     return {'status':status, 'rationale':proposal.rationale, 'continuation':continuation}
 
 
+def rejected_community_review(aid, proposal, rejected):
+    """Show masked source errors in the original repair; never submit work."""
+    groups = {item['group'] for item in rejected if item['reason'] in {
+        'dependency_failed', 'community_source_binding_invalid',
+        'community_group_reference_invalid', 'community_group_dependency_required',
+        'community_public_group_required'}}
+    commands = [command for command in proposal.commands
+        if command.kind == 'task.create' and command_group(command) in groups]
+    reviews = []
+    if not commands:
+        return reviews
+    from ..account_connection import validate_community_source
+    with tx(aid) as c:
+        for command in commands:
+            payload = dict(command.payload)
+            if command.account_id:
+                if payload.get('account_id') and str(payload['account_id']) != str(command.account_id):
+                    continue
+                payload['account_id'] = str(command.account_id)
+            try:
+                spec = TaskSpec.model_validate(payload)
+            except ValidationError:
+                continue
+            if (spec.kind != 'account' or spec.purpose != 'community'
+                    or spec.payload.get('community_operation') not in ('inspect', 'join')):
+                continue
+            dependencies = []
+            for ref in spec.required_refs:
+                row = one(c, 'SELECT state FROM lead.tasks WHERE id=%s', (ref.task_id,))
+                dependencies.append({'task_id':str(ref.task_id), 'state':row['state'] if row else 'missing'})
+            source_error = None
+            try:
+                validate_community_source(c, spec)
+            except ValueError as error:
+                source_error = str(error)
+            reviews.append({'group':command_group(command), 'command_key':command.command_key,
+                'required_tasks':dependencies, 'source_error':source_error})
+    return reviews
+
+
 async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=None):
     context = await asyncio.to_thread(decision_context,aid,decision_task_id,decision_claim,trigger_refs)
     accepted, rejected, repair = [], [], None
@@ -382,6 +422,23 @@ async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=
                         **decision_outcome(proposal,accepted,rejected,pending_work)}
             repair = {"groups":[item["group"] for item in rejected],"errors":rejected,"accepted":accepted,
                       "instruction":"Each rejected group was rolled back atomically. Resend the complete corrected rejected group, including experiment.create if it creates a new experiment. Accepted receipts are authoritative and immutable; never recreate accepted groups or invent dependency IDs. If no valid repair is feasible, return commands=[] and continuation with the specific real condition and next action; do not repeat exhausted paths."}
+            reviews = await asyncio.to_thread(rejected_community_review, aid, proposal, rejected)
+            if reviews:
+                repair['community_task_reviews'] = reviews
+                repair['server_now'] = utcnow().isoformat()
+                repair['instruction'] += (
+                    ' community_task_reviews separately checks the required tasks and original source binding;'
+                    ' fixing one error does not fix the others. Failed/canceled tasks may remain evidence but'
+                    ' cannot be required predecessors. A source binding error invalidates that historical'
+                    ' candidate; account-read recovery does not repair its recorded URL or identity.'
+                    ' Do not edit/retry that invalid source. In the SAME rejected group you may replace the'
+                    ' action with an independent community search if declared and permitted, without an'
+                    ' experiment: queries<=2, no group_id/group_task_id or failed required_refs, same real'
+                    ' account/binding/current goal. This is guidance, not readiness or permission; all original'
+                    ' admission, source/resource stops and unknown-result guards still apply.'
+                    ' server_now is current admission time; choose a finite future review_at for NEW work'
+                    ' within the existing budget, never extend an old task deadline.'
+                    ' Do not wait for evidence from a task that was rejected and never created.')
             failed_creates = []
             for error in rejected:
                 if error.get("reason") == "no_progress_path_exhausted":
