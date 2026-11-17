@@ -137,7 +137,9 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
         )
     html = """<!doctype html><style>[hidden]{display:none!important}.chatlist{width:100px;height:100px}[contenteditable]{min-height:50px}</style>
     <div class="chatlist">Chats</div><div class="chat-info"><span class="peer-title" data-peer-id="-777777">Readers</span>4 members</div>
-    <div id="column-right" inert><div class="profile-container active"><div class="sidebar-header"><button class="sidebar-close-button">Close</button></div><div class="row row-grid"><div class="row-title">t.me/readers_fixture</div></div></div></div>
+    <div id="column-right" inert><div class="profile-container active"><div class="sidebar-header"><button class="sidebar-close-button">Close</button></div>
+    <div class="row row-with-icon"><div class="row-title pre-wrap" id="about-body">Readers discuss EPUB translation and terminology. Be helpful and respectful.</div><div class="row-subtitle">Info</div><span class="row-icon">Info</span></div>
+    <div class="row row-grid"><div class="row-title">t.me/readers_fixture</div></div></div></div>
     <button id="join">Join Group</button><div class="input-message-input" contenteditable="true" data-placeholder="Message" hidden></div><button class="btn-send send">Send</button>
     <div class="bubble" data-mid="100"><div class="message">How to keep an EPUB glossary consistent?</div></div><button class="btn-menu-item" hidden>Reply</button><div class="reply-wrapper" hidden>How to keep an EPUB glossary consistent?</div><div id="posts"></div>
     <script>localStorage.setItem('account1',JSON.stringify({userId:'IDENTITY'}));
@@ -160,6 +162,30 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
             actor, str(task["id"]), "observe"
         )
         assert observed["kind"] == "discussion" and not observed["joined"]
+        about = await actor.page.locator('#about-body').text_content()
+        assert observed['description'] == about and observed['description_read_status'] == 'complete'
+
+        async def incomplete_about(case):
+            await actor.page.locator('#about-body').evaluate('(e, text) => e.textContent=text',
+                'Sharing relevant products is allowed. '*60+' No bots or promotional links.' if case == 'truncated' else about)
+            if case == 'ambiguous':
+                await actor.page.locator('.profile-container.active').evaluate('''e =>
+                    e.insertAdjacentHTML('beforeend', '<div class="row row-with-icon" id="extra-about"><div class="row-title pre-wrap">No bots or promotions.</div></div>')''')
+
+        async def restore_about():
+            await actor.page.locator('#about-body').evaluate('(e, text) => e.textContent=text', about)
+            await actor.page.locator('#extra-about').evaluate_all('(rows) => rows.forEach(e => e.remove())')
+
+        with tx(aid) as c:
+            c.execute("UPDATE lead.tasks SET input=input || %s WHERE id=%s", (j({'join_approved':True}), task['id']))
+        for case in ('truncated', 'ambiguous'):
+            await incomplete_about(case)
+            blocked = await community_runtime.browser_step(actor, str(task['id']), 'join')
+            assert blocked == {'state':'blocked', 'reason':'community_rules_unresolved', 'description_read_reason':case}
+            assert await actor.page.evaluate("localStorage.getItem('join_count')") is None
+            await restore_about()
+        with tx(aid) as c:
+            c.execute("UPDATE lead.tasks SET input=input-'join_approved' WHERE id=%s", (task['id'],))
         # Telegram may canonicalize the public username route to a peer ID.
         # An already bound visible peer must not be closed and opened again.
         await actor.page.evaluate("history.replaceState(null,'','#-777777')")
@@ -214,6 +240,12 @@ async def test_product_community_join_history_contextual_reply_and_lost_receipt(
                     task["id"],
                 ),
             )
+        for case in ('truncated', 'ambiguous'):
+            await incomplete_about(case)
+            blocked = await community_runtime.browser_step(actor, str(task['id']), 'reply')
+            assert blocked == {'state':'blocked', 'reason':'community_rules_unresolved', 'description_read_reason':case}
+            assert await actor.page.evaluate("localStorage.getItem('posts')") is None
+            await restore_about()
         submit = telegram.submit
 
         async def lose_ack(page, **kwargs):
