@@ -124,7 +124,7 @@ async def test_read_proof_does_not_resume_join_channel_or_original_unknown_actio
             c.execute("UPDATE lead.tasks SET state='failed',result=%s WHERE id=%s", (j(result), task_id))
         grant = one(c, 'SELECT id,target_id FROM lead.authorization_grants WHERE revoked_at IS NULL ORDER BY id LIMIT 1')
         one(c, """INSERT INTO lead.actions(tenant_id,agent_id,task_id,target_id,grant_id,operation_key,type,intent,
-            expected_control_version,expected_config_revision,state) VALUES(lead.ctx_tenant(),%s,%s,%s,%s,%s,'reply','{}',1,1,'unknown')
+            expected_control_version,expected_config_revision,state) VALUES(lead.ctx_tenant(),%s,%s,%s,%s,%s,'reply','{"growth_runtime":"1"}',1,1,'unknown')
             RETURNING id""", (observed.aid, unknown['task_id'], grant['target_id'], grant['id'], uid()))
         before = digest(c.execute('SELECT id,state,input,result FROM lead.tasks WHERE id=ANY(%s::uuid[]) ORDER BY id', (protected,)).fetchall())
         action = digest(c.execute('SELECT * FROM lead.actions').fetchall())
