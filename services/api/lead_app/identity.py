@@ -14,18 +14,30 @@ from .scope import current_tenant
 
 
 def _community_read_scope(c, actor, account_id, reference):
-    """Current server authority for a self-session read, never target/send proof."""
-    from .account_connection import community_authority
-    from .admin_controls import enforce_channel
-    from .execution_routes import registered_reference
+    """The actual producer must own this executor and its service context."""
     from .executor_scope import selected_profile
-    from .growth.store import enabled
     from .scope import principal, trusted_execution
 
     aid, profile_id = str(actor.aid), str(actor.profile['id'])
     if (not trusted_execution() or principal() is not None
-            or str(one(c, 'SELECT lead.ctx_agent() id')['id']) != aid
             or str(selected_profile(aid, profile_id)) != profile_id):
+        raise ValueError('community_read_service_scope_required')
+    return community_read_snapshot(c, aid, account_id, profile_id, actor.session, actor.epoch, reference)
+
+
+def community_read_snapshot(c, aid, account_id, profile_id, session_id, epoch, reference):
+    """One locked DB view shared by the real producer and opaque-proof consumer.
+
+    The consumer separately verifies its service context and persisted proof;
+    this function reads current scope, never manufactures an actor or evidence.
+    """
+    from .account_connection import community_authority
+    from .admin_controls import enforce_channel
+    from .execution_routes import registered_reference
+    from .growth.store import enabled
+
+    aid, profile_id = str(aid), str(profile_id)
+    if str(one(c, 'SELECT lead.ctx_agent() id')['id']) != aid:
         raise ValueError('community_read_service_scope_required')
     agent = one(c, 'SELECT * FROM lead.agents WHERE id=%s FOR SHARE', (aid,))
     if (not agent or not enabled(agent) or agent['desired_state'] != 'running'
@@ -50,14 +62,14 @@ def _community_read_scope(c, actor, account_id, reference):
         ON l.profile_id=b.profile_id AND l.epoch=b.epoch WHERE b.id=%s AND b.profile_id=%s AND b.epoch=%s
         AND b.state='ready' AND b.ended_at IS NULL AND l.state='held' AND l.expires_at>now()
         FOR SHARE OF b,l""",
-        (actor.session, profile_id, actor.epoch))
+        (session_id, profile_id, epoch))
     if not session or one(c, """SELECT 1 FROM lead.takeover_sessions WHERE profile_id=%s
         AND state IN ('requested','active','ending') AND expires_at>now()""", (profile_id,)) or one(c,
         "SELECT 1 FROM lead.profile_maintenance WHERE state='active' AND expires_at>now()"):
         raise ValueError('community_read_session_unavailable')
     return {'agent_id': aid, 'account_id': str(account['id']), 'binding_version': account['binding_version'],
             'external_self_sha256': hashlib.sha256(account['external_account_id'].encode()).hexdigest(),
-            'profile_id': profile_id, 'session_id': str(actor.session), 'epoch': actor.epoch,
+            'profile_id': profile_id, 'session_id': str(session_id), 'epoch': epoch,
             'execution_ref': reference.model_dump(mode='json'), 'control_version': agent['control_version'],
             'config_revision': agent['config_revision'], 'authorization_version': agent['authorization_version'],
             'intent_revision': intent['revision'], 'delegation_id': str(card['id']),
