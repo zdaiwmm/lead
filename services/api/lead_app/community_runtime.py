@@ -151,7 +151,7 @@ async def growth_community_step(actor, task_id, operation, claim, *, execution_r
     from .channel_contracts import ExecutionRef
     from .execution_routes import registered_reference
     reference = ExecutionRef.model_validate(execution_ref) if execution_ref is not None else None
-    if operation == 'join' and (reference is None or str(reference.profile_id) != str(actor.profile['id']) or reference.registry_revision is None):
+    if (operation == 'join' or reference is not None) and (reference is None or str(reference.profile_id) != str(actor.profile['id']) or reference.registry_revision is None):
         raise ValueError('community_execution_ref_required')
     async with actor.lock:
         actor.touch()
@@ -204,6 +204,8 @@ async def growth_community_step(actor, task_id, operation, claim, *, execution_r
                         'evidence_ref': _growth_evidence(actor, {'group_id': group['group_id'], 'membership': 'joined'})}
                     _growth_member_save(c, task_id, member)
             return {'state': 'confirmed' if observed['joined'] else 'observed', 'group': result,
+                **({'execution_ref': reference.model_dump(mode='json'), 'source_hash': group['source_hash']}
+                    if operation == 'inspect' and reference is not None else {}),
                 **({'operation_key':member['operation_key']} if operation == 'join' else {}), **derived}
         if result['rules_status'] != 'complete':
             return {'state':'observed', 'group':result, 'write_blocked_reason':'community_rules_unresolved', 'knowledge_progress': True}
