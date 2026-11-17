@@ -707,6 +707,7 @@ async def execute_community_account(aid, row, data, claim):
 
         from .channel_contracts import ExecutionRef
         from .community_rule_evidence import description_kind
+        from .community_runtime import telegram_message_id
         from .execution_routes import registered_reference
         from .growth.tools import _remember
 
@@ -726,12 +727,13 @@ async def execute_community_account(aid, row, data, claim):
         if description_kind(description, topic_matches=True) == 'substantive':
             pages.append((canonical, description, {'kind': 'public_description', 'source_hash': group['rules_hash']}))
         for message in group.get('messages', []):
-            mid = str(message.get('mid', ''))
-            if (not mid.isdigit() or message.get('parent_url', '').casefold() != canonical+'/'+mid):
+            mid = message.get('mid')
+            parent_url = canonical+'/'+telegram_message_id(mid)
+            if message.get('parent_url', '').casefold() != parent_url:
                 raise ValueError('community_source_binding_invalid')
             text = (message.get('excerpt') or '').strip()
             if text and not message.get('own'):
-                pages.append((canonical+'/'+mid, text, {'kind': 'message_excerpt', 'mid': mid,
+                pages.append((parent_url, text, {'kind': 'message_excerpt', 'mid': mid,
                     'source_hash': message['hash'], 'retained_characters': len(text)}))
         evidence, documents, added = [], [], False
         with tx(aid) as c:
@@ -770,6 +772,7 @@ async def execute_community_account(aid, row, data, claim):
 
 def community_reply_context(c, aid, task, context_task_id, target_id, parent_url):
     """Freeze one observed source message; the caller creates the ordinary Action."""
+    from .community_runtime import telegram_message_id
     from .growth.store import digest
     account, intent, card = community_task_scope(c, aid, task, operation='reply')
     target = one(c, 'SELECT * FROM lead.account_targets WHERE id=%s AND account_id=%s', (target_id, account['id']))
@@ -786,6 +789,8 @@ def community_reply_context(c, aid, task, context_task_id, target_id, parent_url
     if len(messages) != 1:
         raise ValueError('community_original_message_required')
     message = messages[0]
+    if parent_url != group['canonical_url']+'/'+telegram_message_id(message.get('mid')):
+        raise ValueError('community_source_binding_invalid')
     return {'version': COMMUNITY_ADAPTER, 'group_id': group['group_id'], 'canonical_url': group['canonical_url'],
         'context_task_id': str(context_task_id), 'context_hash': group['source_hash'],
         'rules_hash': group['rules_hash'], 'reply_to_mid': message['mid'], 'source_hash': message['hash'],
