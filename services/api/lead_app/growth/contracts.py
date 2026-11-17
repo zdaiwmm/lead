@@ -130,7 +130,7 @@ class ContinuationSourceRef(Contract):
 
 class Continuation(Contract):
     condition: str = Field(min_length=3, max_length=1000)
-    producer: Literal['evidence_added', 'account_changed', 'objective_changed', 'resource_recovered', 'owner_direction', 'experiment_review_due']
+    producer: Literal['evidence_added', 'account_changed', 'objective_changed', 'resource_recovered', 'owner_direction', 'experiment_review_due', 'work_settled']
     next_action: str = Field(min_length=3, max_length=1000)
     responsibility: Literal['owner', 'product', 'platform', 'resource'] = 'product'
     source_ref: ContinuationSourceRef | None = None

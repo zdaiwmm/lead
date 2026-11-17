@@ -4,7 +4,7 @@ import json
 
 from pydantic import ValidationError
 
-from ..db import all_rows, j, one, require_agent, tx
+from ..db import all_rows, j, one, tx
 from ..model import run_model
 from .contracts import DecisionProposal, ExperimentSpec, TaskSpec, utcnow
 from .store import (
@@ -84,7 +84,9 @@ when no executable follow-up is accepted, supply continuation with the specific 
 its real producer, responsible party and next_action after that condition changes. This is an
 event condition, not a timer or permission to resume a stopped task. Do not invent check times.
 Copy continuation.source_ref from continuation_sources[].ref and use that source's exact producer
-and responsibility. Task completion, original receipts and experiment_review_due are existing
+and responsibility. work_settled records completion of the exact awaited Task, including an
+unchanged result; settlement does not establish new evidence or business progress.
+Original receipts and experiment_review_due are existing
 producers; a stopped resource is a blocker, not a scheduled automatic recovery. A bare producer
 name does not create work. No source means the next step has not formed, not a healthy wait.
 Use declared native public discovery/read tools when available to obtain original evidence before
@@ -143,15 +145,15 @@ def build_context(aid, trigger_refs=None):
         except ValueError:
             pass
     with tx(aid) as c:
-        agent = require_agent(c, aid)
-        # One statement pairs the revision with its current preferences without
-        # locking a read-only context build or copying historical/deleted memory.
-        preferences = one(c, """SELECT config_revision,
+        # Owner direction and Goal must describe the same revision as preferences.
+        agent = one(c, """SELECT config_revision,onboarding_state,
             (SELECT coalesce(jsonb_agg(entry),'[]'::jsonb) FROM (
                 SELECT id,body->>'text' text,source_refs,confirmation FROM lead.memory_entries
                 WHERE kind='preference' AND deleted_at IS NULL
                 ORDER BY created_at DESC,id DESC LIMIT 100) entry) entries
-            FROM lead.agents WHERE id=%s""", (aid,))
+            FROM lead.agents WHERE id=%s AND desired_state<>'archived'""", (aid,))
+        if not agent:
+            raise LookupError("Agent 不存在")
         business = one(c, "SELECT id,revision,product_url,description,facts,source_refs FROM lead.business_profiles ORDER BY revision DESC LIMIT 1")
         contract = agent["onboarding_state"].get("operating_contract", {})
         experiments = all_rows(c, """SELECT id,revision,state,specification,conclusion
@@ -232,7 +234,7 @@ def build_context(aid, trigger_refs=None):
             "event_ref": context_outcomes["definition_ref"], "audience": contract.get("audience") or (business or {}).get("facts", {}).get("audience")}
     context = {
         "prompt_version": PROMPT_VERSION, "now": utcnow().isoformat(), "agent_id": str(aid),
-        "config_revision": preferences["config_revision"], "owner_preferences": preferences["entries"],
+        "config_revision": agent["config_revision"], "owner_preferences": agent["entries"],
         "owner_direction": agent['onboarding_state'].get('operating_direction'),
         "continuation_sources": sources,
         "goal": goal, "product": business or {}, "experiments": experiments, "work": work,

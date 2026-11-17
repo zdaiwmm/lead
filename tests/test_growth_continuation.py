@@ -151,7 +151,7 @@ def test_old_recovery_not_lost_behind_recent_work(growth_agent):
         c.execute("UPDATE lead.tasks SET created_at=now()-interval '3 days' WHERE id=%s",(ref['task_id'],))
     for index in range(25):
         with tx(growth_agent) as c:
-            other = submit_work(c,growth_agent,TaskSpec(kind='observe',purpose='history',dedupe_key=str(index),
+            other = submit_work(c,growth_agent,TaskSpec(kind='research',purpose='history',dedupe_key=str(index),
                 review_at=utcnow()+timedelta(hours=1)))
         with tx(growth_agent) as c:
             c.execute("UPDATE lead.tasks SET state='succeeded',completed_at=now() WHERE id=%s",(other['task_id'],))

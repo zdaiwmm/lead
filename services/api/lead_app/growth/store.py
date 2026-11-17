@@ -110,6 +110,10 @@ def continuation_sources(c, aid):
         WHERE type LIKE 'growth.%%' AND type<>'growth.decision' AND
           (state IN ('planned','queued','running','waiting_user','reconciling')
            OR result#>>'{runtime,recovery,status}'='blocked') ORDER BY created_at,id""").fetchall()
+    observed_searches = {row['scope'] for row in c.execute("""SELECT DISTINCT
+        result#>>'{runtime,discovery_observation,scope}' scope FROM lead.tasks
+        WHERE type='growth.account' AND state='succeeded'
+            AND result#>>'{runtime,discovery_observation,scope}' IS NOT NULL""").fetchall()}
     for row in rows:
         runtime = row['result'].get('runtime') or {}
         episode = runtime.get('recovery') or {}
@@ -124,6 +128,8 @@ def continuation_sources(c, aid):
                 'reason': episode.get('error_code') or episode.get('reason') or 'resource_blocked'})
             continue
         spec = row['input']['spec']
+        if row['input'].get('discovery_scope') and digest(row['input']['discovery_scope']) in observed_searches:
+            continue
         ordinary = spec['kind'] in ('research', 'content', 'channel') or spec['kind'] == 'account' and spec['purpose'] != 'connect'
         product_research = spec['kind'] == 'research' and spec['purpose'] == 'product' and not spec.get('experiment_id')
         reconcile = row['reconcile_action'] or row['type'] == 'growth.account' and runtime.get('community', {}).get('state') in ('dispatching', 'unknown', 'pending_approval')
@@ -137,7 +143,7 @@ def continuation_sources(c, aid):
         at = wait.get('check_at') or row['scheduled_at']
         sources.append({'ref': {'kind': 'task', 'id': str(row['id']),
             'version': str(row['input']['task_generation'])},
-            'producer': 'account_changed' if wait.get('producer') == 'account_connection' else 'evidence_added',
+            'producer': 'account_changed' if wait.get('producer') == 'account_connection' else 'work_settled',
             'responsibility': wait.get('responsibility', 'product'), 'status': 'waiting',
             'check_at': at.isoformat() if hasattr(at, 'isoformat') else at,
             'reason': wait.get('reason') or 'work_pending'})
@@ -188,6 +194,17 @@ def submit_work(c, aid, spec):
         search_scope = discovery_scope(c, aid, spec)
         queries = sorted({' '.join(query.casefold().split()) for query in spec.payload['queries']})
         material = {'kind': 'community_search', 'scope': search_scope, 'queries': queries}
+    if spec.kind == 'observe':
+        from .tools import ObserveInput
+        agent = require_agent(c, aid)
+        observation = one(c, """SELECT id FROM lead.outbox_events WHERE event_type='analytics.cleaned'
+            AND payload->>'scope_key'='live' ORDER BY occurred_at DESC,id DESC LIMIT 1""")
+        review = one(c, """SELECT id FROM lead.outbox_events WHERE event_type='growth.wake'
+            AND payload->>'reason'='experiment_review_due' ORDER BY occurred_at DESC,id DESC LIMIT 1""")
+        material = {'kind': 'observe', 'payload': ObserveInput.model_validate(spec.payload).model_dump(mode='json'),
+            'experiment_id': intent['experiment_id'], 'goal_revision': objective_revision(agent),
+            'config_revision': agent['config_revision'], 'observation_event_id': str(observation['id']) if observation else None,
+            'review_event_id': str(review['id']) if review else None}
     if spec.kind == 'account' and spec.payload.get('community_operation') in ('inspect', 'join'):
         from ..account_connection import validate_community_source
         account = one(c, 'SELECT binding_version FROM lead.social_accounts WHERE id=%s', (spec.account_id,))

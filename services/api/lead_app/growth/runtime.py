@@ -599,6 +599,33 @@ def _discovery_observation(c, row, runtime, result):
     return not previous
 
 
+def _settle_continuation(c, aid, completed):
+    decision = one(c, """SELECT result#>'{output,output}' output FROM lead.tasks
+        WHERE type='growth.decision' AND state IN ('succeeded','failed')
+        ORDER BY completed_at DESC,id DESC LIMIT 1""")
+    output = (decision or {}).get('output') or {}
+    checked = output.get('continuation_check') or {}
+    ref = (checked.get('source') or {}).get('ref') or {}
+    if (not checked.get('valid') or ref.get('kind') != 'task'
+            or (output.get('continuation') or {}).get('producer') != 'work_settled'
+            or completed['type'] != 'growth.decision' and str(completed['id']) != ref.get('id')):
+        return
+    agent = one(c, 'SELECT * FROM lead.agents WHERE id=%s', (aid,))
+    if (not agent or agent['desired_state'] == 'archived' or output.get('config_revision') != agent['config_revision']
+            or output.get('goal_revision') != objective_revision(agent)):
+        return
+    source = one(c, 'SELECT id,state,input,result FROM lead.tasks WHERE id=%s', (ref['id'],))
+    if (not source or source['state'] != 'succeeded' or str(source['input']['task_generation']) != ref.get('version')
+            or source['result'].get('output', {}).get('output', {}).get('discovery_observation_progress') is False):
+        return
+    fact = {'reason': 'work_settled', 'task_id': str(source['id']), 'task_generation': source['input']['task_generation'],
+            'config_revision': output['config_revision'], 'goal_revision': output['goal_revision']}
+    if not one(c, """SELECT id FROM lead.outbox_events WHERE event_type='growth.wake'
+        AND payload->>'reason'='work_settled' AND payload->>'task_id'=%s
+        AND payload->>'task_generation'=%s LIMIT 1""", (fact['task_id'], str(fact['task_generation']))):
+        emit(c, aid, 'growth.wake', fact)
+
+
 def _finish(claim, value):
     result = WorkResult.model_validate(value)
     ref = _ref(claim["ref"])
@@ -675,6 +702,8 @@ def _finish(claim, value):
                 or result.output.get("learning_progress") is True or result.output.get("business_progress") is True
                 or result.output.get("context_available") is True):
                 emit(c, str(ref.agent_id), "growth.wake", {"reason": "evidence_added", "task_id": str(row["id"])})
+            # Both finish orders share the existing project recovery lock.
+            _settle_continuation(c, str(ref.agent_id), row)
         elif result.outcome == "unknown":
             delay = _receipt_delay(runtime, action)
             wait = _wait(row, "unknown_receipt", utcnow(), action="reconcile", delay=delay,
@@ -1254,6 +1283,8 @@ def trigger_key(item):
     # A newer fact with the same key survives consumption of the old snapshot.
     if item.get("reason") in ("resource_blocked", "resource_recovered", "resource_probe_stopped"):
         return digest([item.get("reason"), item.get("resource"), item.get("condition_revision"), item.get("transition")])
+    if item.get('reason') == 'work_settled':
+        return digest([item['reason'], item.get('task_id'), item.get('task_generation')])
     task = item.get("task_id") if item.get("reason") in ("evidence_added","work_failed","dependency_failed","dependency_artifact_missing") else None
     return digest([item.get("reason"),item.get("account_id"),item.get("experiment_id"),item.get("event_name"),task])
 

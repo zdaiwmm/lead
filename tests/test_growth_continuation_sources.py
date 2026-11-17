@@ -239,7 +239,7 @@ async def test_read_projection_rechecks_terminal_source_without_dispatch(growth_
 
     async def model(schema, context, **kwargs):
         source = next(s for s in context['continuation_sources'] if s['ref']['id'] == original['task_id'])
-        return proposal(context, {**STOP, 'source_ref': source['ref']})
+        return proposal(context, {**STOP, 'producer': source['producer'], 'source_ref': source['ref']})
 
     monkeypatch.setattr(agent, 'run_model', model)
     result = await agent.decide(growth_agent, decision['task_id'], decision_claim=claim)
