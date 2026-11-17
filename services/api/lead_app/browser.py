@@ -1222,13 +1222,17 @@ async def auth(request, call_next):
         with service_scope():
             return await call_next(request)
     except (ValueError, LookupError) as e:
+        from .channel_contracts import COMMUNITY_INSPECTION_ERRORS
         from .native_method_errors import method_error_metadata
 
         message = str(e)
+        code = getattr(e, 'code', None)
+        if code is None and message in COMMUNITY_INSPECTION_ERRORS:
+            code = message
         if not any("\u4e00" <= ch <= "\u9fff" for ch in message):
             message = "浏览器状态不允许此操作"
         return JSONResponse(
-            {"detail": message[:250], "code": getattr(e, "code", None), **method_error_metadata(e)}, status_code=409
+            {"detail": message[:250], "code": code, **method_error_metadata(e)}, status_code=409
         )
 
 
