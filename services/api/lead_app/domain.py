@@ -608,8 +608,14 @@ def retry_messages(aid):
         require_agent(c, aid, True)
         for job in all_rows(
             c,
-            "UPDATE lead.chat_jobs SET status='pending',error_code=NULL WHERE status IN ('blocked','failed') RETURNING id,message_id",
+            "SELECT id,message_id,error_code,error_context FROM lead.chat_jobs WHERE status IN ('blocked','failed') FOR UPDATE",
         ):
+            context = job["error_context"] or {}
+            if job["error_code"] in ("CONFIGURATION_CHANGED", "CONTROL_CHANGED"):
+                context.pop("operating_direction_classification", None)
+                context["operating_direction_retry"] = context.get("operating_direction_retry", 0) + 1
+            c.execute("UPDATE lead.chat_jobs SET status='pending',error_code=NULL,error_context=%s WHERE id=%s",
+                      (j(context), job["id"]))
             c.execute(
                 "UPDATE lead.conversation_messages SET status='pending' WHERE id=%s",
                 (job["message_id"],),
@@ -956,7 +962,7 @@ def queue_lab_publish(aid, body, key):
         return task
 
 
-def snapshot_preferences(c, aid):
+def snapshot_preferences(c, aid, *, wake_reason="preferences_changed", wake_payload=None):
     a = require_agent(c, aid, True)
     rev = a["config_revision"] + 1
     prev = one(
@@ -994,7 +1000,7 @@ def snapshot_preferences(c, aid):
     )
     from .growth.store import enabled as growth_enabled
     if growth_enabled(one(c,"SELECT * FROM lead.agents WHERE id=%s",(aid,))):
-        emit(c,aid,"growth.wake",{"reason":"preferences_changed","revision":rev})
+        emit(c,aid,"growth.wake",{**(wake_payload or {}),"reason":wake_reason,"revision":rev})
     else:
         c.execute("UPDATE lead.tasks SET state='canceled',completed_at=now() WHERE state IN ('planned','queued')")
         emit(c, aid, "supervisor.wake")
