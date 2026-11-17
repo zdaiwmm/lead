@@ -155,7 +155,7 @@ jobs:
       - run: npm run typecheck
       - name: Verify executor HTTP forwarding through Next
         if: github.event_name == 'pull_request'
-        run: node --test ../../tests/executor_web_proxy.mjs
+        run: node --test ../../tests/executor_web_proxy.mjs ../../tests/growth_continuation_ui.mjs
       - name: Verify and package the local Codex connector
         working-directory: services/local-executor
         run: |
@@ -171,7 +171,7 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           LEAD_PROXY_PRODUCTION: '1'
-        run: node --test ../../tests/executor_web_proxy.mjs
+        run: node --test ../../tests/executor_web_proxy.mjs ../../tests/growth_continuation_ui.mjs
       - name: Reproduce home browser frames with synthetic images
         if: github.event_name != 'pull_request'
         run: |

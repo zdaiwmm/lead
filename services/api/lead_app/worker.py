@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import re
 import signal
 import time
 from contextlib import AsyncExitStack
@@ -72,9 +73,27 @@ async def autonomous_cycle(args: dict):
 
 
 def model_became_available():
+    from .home_release_probe import REVISION
+    try:
+        sha = REVISION.read_text().strip()
+    except OSError:
+        sha = None
+    if not sha or not re.fullmatch('[a-f0-9]{40}', sha):
+        sha = None
     with tx() as c:
         running = all_rows(
-            c, "SELECT id FROM lead.agents WHERE desired_state='running'"
+            c, """SELECT a.id FROM lead.agents a WHERE desired_state='running' OR (
+                desired_state='paused' AND onboarding_state#>>'{growth_runtime,decision,engine}'='growth'
+                AND onboarding_state#>>'{home_release_maintenance,sha}'=%s
+                AND onboarding_state#>'{home_release_maintenance,before}'=jsonb_build_object(
+                    'control',a.control_version,'config',a.config_revision,'authorization',a.authorization_version,
+                    'targets',(SELECT md5(string_agg(to_jsonb(t)::text,',' ORDER BY id)) FROM lead.account_targets t WHERE agent_id=a.id),
+                    'accounts',(SELECT md5(string_agg(jsonb_build_array(id,external_account_id,state,automation_enabled)::text,',' ORDER BY id))
+                                FROM lead.social_accounts WHERE agent_id=a.id),
+                    'grants',(SELECT md5(string_agg(to_jsonb(g)::text,',' ORDER BY id)) FROM lead.authorization_grants g WHERE agent_id=a.id),
+                    'delegations',(SELECT md5(string_agg(jsonb_build_array(id,state,expires_at,payload)::text,',' ORDER BY id))
+                                   FROM lead.interaction_cards WHERE agent_id=a.id AND type='manage_community')))
+                FOR NO KEY UPDATE OF a""", (sha,)
         )
         for agent in running:
             emit(c, str(agent["id"]), "supervisor.wake")

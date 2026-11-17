@@ -12,6 +12,7 @@ import styles from "./growth-status.module.css";
 
 type Row = Record<string, any>;
 const states: Row = { planned: "待执行", queued: "排队中", running: "执行中", reconciling: "核对原结果", waiting_user: "需要本人处理", succeeded: "已完成", failed: "未完成", canceled: "已结束" };
+const continuationSources: Row = { task: "原任务", experiment: "原观察窗口", resource: "原能力检查" };
 const reasons: Row = { resource_blocked: "等待受影响能力恢复；其他工作继续", recovery_exhausted: "此能力仍受阻", recovery_probe_limit: "本轮能力检查次数已用完", recovery_deadline: "本轮能力检查期限已结束", recovery_budget_exhausted: "已达到本次检查投入上限", dependency_pending: "等待必要资料", account_paused: "该账号已暂停", resource_wait: "等待此账号环境空闲", work_leased: "原任务仍在执行", unknown_receipt: "正在核对原操作，结果尚未确认", login_in_progress: "等待登录完成", signed_out: "尚未登录", challenge: "需要在原窗口完成验证", ambiguous: "需要确认当前账号身份", temporarily_unavailable: "平台正在恢复账号识别", daily_token_limit: "等待当前用量额度恢复", question_limit: "这条验证路径已达到投入上限", model_call_billing_unknown: "平台正在核对原调用费用" };
 
 function probeStatus(probe: Row | undefined) {
@@ -53,6 +54,15 @@ export default function GrowthStatus({ aid, agent, readOnly }: { aid: string; ag
   const [history, setHistory] = useState(false);
   const current = data?.current_learning?.find((item: Row) => ["active", "observing"].includes(item.state));
   const continuation = data?.continuation;
+  const check = continuation?.check;
+  const source = check?.source;
+  const verifiedWait = check?.valid === true && check.status === "waiting";
+  const blocked = check?.status === "blocked";
+  const sourceKind = source?.ref?.kind;
+  const continuationTitle = verifiedWait
+    ? sourceKind === "experiment" ? "等待原观察窗口复盘" : "等待原工作结果"
+    : blocked ? "当前下一步受阻" : check ? "下一步尚未形成" : "等待依据尚未核对";
+  const showContinuation = agent.desired_state !== "paused" && !data?.current_work?.length && continuation && ["blocked", "waiting_for_change", "needs_follow_up"].includes(continuation.status);
   const work: Row[] = [...(data?.current_work || []), ...(data?.waiting || [])];
   const shown = history ? [...work, ...(data?.recent_work || [])] : work.slice(0, 4);
   return <div className={styles.overview}>
@@ -62,12 +72,18 @@ export default function GrowthStatus({ aid, agent, readOnly }: { aid: string; ag
       {error && <p role="alert">{error} <button className="text-button" onClick={refresh}><RefreshCw size={14} />重新读取</button></p>}
       {data ? <>
         <p className={styles.objective}>{data.objective.description}</p>
-        {!current && !data.current_work?.length && continuation && ["blocked", "waiting_for_change", "needs_follow_up"].includes(continuation.status) && <div className={styles.learning}>
-          <span className="muted small">{continuation.status === "blocked" ? "当前下一步受阻" : continuation.status === "needs_follow_up" ? "下一步尚未形成" : "等待新的依据"}</span>
+        {showContinuation && <div className={styles.learning}>
+          <span className="muted small">{continuationTitle}</span>
           <p>{continuation.rationale || "原路径已停止，暂未形成可执行的新工作。"}</p>
-          {continuation.condition && <p>继续条件：{continuation.condition}</p>}
-          {continuation.next_action && <small>条件满足后：{continuation.next_action}</small>}
-          <small>{continuation.responsibility === "owner" ? "需要你补充相关条件。" : "由 Lead 处理并核对依据。"}</small>
+          {continuation.condition && <p>{verifiedWait || blocked ? "继续条件" : "原判断继续条件"}：{continuation.condition}</p>}
+          {continuation.next_action && <small>{verifiedWait || blocked ? "条件满足后" : "原判断建议"}：{continuation.next_action}</small>}
+          {verifiedWait && <>
+            <small>后续来源：{continuationSources[sourceKind] || "已记录的工作"}。</small>
+            {source?.check_at && <small>{sourceKind === "experiment" ? "复盘时间" : "下次检查"}：{new Date(source.check_at).toLocaleString("zh-CN")}</small>}
+            {source?.responsibility === "owner" && <small>需要你处理已记录的本人事项。</small>}
+          </>}
+          {blocked && <small>此项条件仍受阻，未安排自动复查。</small>}
+          {!verifiedWait && !blocked && <small>尚无已核对的后续来源。</small>}
         </div>}
         {current && <div className={styles.learning}><span className="muted small">当前验证</span><p>{current.question}</p><small>观察依据：{current.learning_signal}</small></div>}
         {shown.length ? <ul className={styles.rows}>{shown.map(item => <li key={item.id}>
@@ -76,7 +92,7 @@ export default function GrowthStatus({ aid, agent, readOnly }: { aid: string; ag
             <span>{item.platform && `${socialNames[item.platform] || item.platform} · `}{item.wait ? reasons[item.wait.reason] || (item.wait.responsibility === "owner" ? "需要本人处理账号事项" : "平台正在处理这项等待") : probeStatus(item.probe) || states[item.state] || "推进中"}</span>
             {item.wait?.automatic_checks === "stopped" && <small>{item.wait.resume_when}</small>}
           </div><small>{(item.wait?.check_at || item.probe?.next_check_at) ? `下次检查 ${new Date(item.wait?.check_at || item.probe.next_check_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : ""}</small>
-        </li>)}</ul> : <p className={styles.empty}>{agent.desired_state === "paused" ? "项目已暂停。原操作的结果核对仍会继续。" : "当前没有待执行的工作。新资料、账号变化或真实结果会触发下一步判断。"}</p>}
+        </li>)}</ul> : !showContinuation && <p className={styles.empty}>{agent.desired_state === "paused" ? "项目已暂停。原操作的结果核对仍会继续。" : "当前没有待执行的工作，下一步尚未形成。"}</p>}
         {!!data.owner_actions?.length && <p className={styles.owner}>有 {data.owner_actions.length} 项账号事项需要你处理，可从上方对应账号进入原窗口。</p>}
       </> : !error && <p className={styles.empty} role="status">正在读取工作与等待状态…</p>}
     </section>

@@ -1660,3 +1660,111 @@ def test_maintenance_window_does_not_release_unified_upgrade_hold(hook,monkeypat
         pass
     assert not any('restore' in call for call in calls)
     assert not any(call[:2]==('systemctl','start') for call in calls)
+
+
+@pytest.fixture
+def maintenance_site(executors, monkeypatch):
+    from types import SimpleNamespace
+
+    h = executors.hook
+    h.TOOLS.mkdir()
+    site = h.TOOLS / 'home_live_maintenance.py'
+    site.write_text('# trusted fixture')
+    state = {'held': False, 'intake': 'active', 'revision': executors.revision}
+    calls = []
+    monkeypatch.setattr(h, 'current', lambda: state['revision'])
+    monkeypatch.setattr(h, 'verify', lambda *args, **kwargs: None)
+
+    def run(*args, **kwargs):
+        calls.append(args)
+        if args[0] == site:
+            if args[1] == 'health':
+                return json.dumps({'active_profiles': 0})
+            if args[1] in ('hold', 'restore'):
+                state['held'] = args[1] == 'hold'
+            return 'idle'
+        if args[:2] == ('systemctl', 'show'):
+            return state['intake'] if args[2] == 'lead-home-ingress.socket' else 'inactive'
+        if args[:2] == ('systemctl', 'stop') and 'lead-home-ingress.socket' in args:
+            state['intake'] = 'inactive'
+        if args[:2] == ('systemctl', 'start') and 'lead-home-ingress.socket' in args:
+            state['intake'] = 'active'
+        return ''
+
+    monkeypatch.setattr(h, 'run', run)
+    return SimpleNamespace(h=h, executors=executors, site=site, state=state, calls=calls)
+
+
+def test_maintenance_window_keeps_rollback_mixed_fleet_held(maintenance_site):
+    m = maintenance_site
+    h, executors = m.h, m.executors
+    old, candidate = executors.revision, 'b' * 40
+    failure = None
+    try:
+        with h.maintenance_window(old, candidate):
+            # App and Reddit have returned to old; independent Telegram still
+            # has the candidate revision loaded in its immutable process view.
+            binding = executors.bindings['telegram']
+            view = executors.proc / '10/root' / binding['release'].lstrip('/')
+            (view / 'REVISION').write_text(candidate)
+            receipt = executors.proc / '10/root' / binding['receipt'].lstrip('/')
+            executors.proofs['telegram']['revision'] = candidate
+            executors.save(receipt, executors.proofs['telegram'])
+    except h.Refused as error:
+        failure = error
+
+    assert m.state['held'] and m.state['intake'] == 'inactive'
+    assert failure is not None and 'executor revision mismatch' in str(failure)
+
+
+def test_maintenance_window_verifies_actual_fleet_before_restore(maintenance_site, monkeypatch):
+    m = maintenance_site
+    old, candidate = 'b' * 40, m.executors.revision
+    m.state['revision'] = old
+    verify = m.h.verify_executors
+
+    def verified(revision):
+        assert m.state['held'] and m.state['intake'] == 'inactive'
+        result = verify(revision)
+        m.calls.append(('fleet-verified', revision))
+        return result
+
+    monkeypatch.setattr(m.h, 'verify_executors', verified)
+    with m.h.maintenance_window(old, candidate):
+        m.state['revision'] = candidate
+    assert not m.state['held'] and m.state['intake'] == 'active'
+    assert m.calls.index(('fleet-verified', candidate)) < m.calls.index((m.site, 'restore', candidate))
+
+
+def test_maintenance_window_preserves_unregistered_legacy_restore(maintenance_site, monkeypatch):
+    m = maintenance_site
+    m.executors.registry.unlink()
+    monkeypatch.setattr(m.h, 'verify_executors', lambda revision: pytest.fail('legacy site has no executor fleet'))
+    with m.h.maintenance_window(m.executors.revision, 'b' * 40):
+        pass
+    assert not m.state['held'] and m.state['intake'] == 'active'
+
+
+@pytest.mark.parametrize('kind', ['growth', 'unified-browser', 'shared-executor'])
+def test_maintenance_window_keeps_real_pending_cutover_held(maintenance_site, kind):
+    m = maintenance_site
+    candidate = 'b' * 40
+    stage = m.h.STORE / ('maintenance-' + candidate)
+    stage.mkdir(mode=0o700)
+    marker = stage / (kind + '-cutover.pending')
+    marker.write_text(candidate)
+    marker.chmod(0o600)
+    with m.h.maintenance_window(m.executors.revision, candidate):
+        pass
+    assert m.state['held'] and m.state['intake'] == 'inactive'
+    assert marker.read_text() == candidate
+
+
+def test_maintenance_window_keeps_broken_registry_held(maintenance_site):
+    m = maintenance_site
+    m.executors.registry.unlink()
+    m.executors.registry.symlink_to(m.executors.registry.with_suffix('.missing'))
+    with pytest.raises(m.h.Refused, match='regular'):
+        with m.h.maintenance_window(m.executors.revision, 'b' * 40):
+            pass
+    assert m.state['held'] and m.state['intake'] == 'inactive'

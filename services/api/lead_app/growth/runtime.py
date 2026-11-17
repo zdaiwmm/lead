@@ -450,6 +450,12 @@ def advance(value, attempt_token=None, *, now=None):
                     _save(c, row, "canceled", {**runtime, "reason": "experiment_closed"})
                     return {"state": "terminal", "reason": "experiment_closed"}
         product_research=spec.kind=="research" and spec.purpose=="product" and not spec.experiment_id
+        ordinary = spec.kind in ('research', 'content', 'channel') or spec.kind == 'account' and spec.purpose != 'connect'
+        if (ordinary and not product_research and not reconcile and 'config_revision' in row['input']
+                and row['input']['config_revision'] != agent['config_revision']):
+            _save(c, row, 'canceled', {**runtime, 'reason': 'configuration_changed'})
+            c.execute("UPDATE lead.actions SET state='canceled' WHERE task_id=%s AND state='prepared'", (row['id'],))
+            return {'state': 'terminal', 'reason': 'configuration_changed'}
         if spec.kind in ("research","content","channel") and not product_research and not reconcile and row["input"].get("goal_revision")!=objective_revision(agent):
             _save(c,row,"canceled",{**runtime,"reason":"objective_changed"})
             return {"state":"terminal","reason":"objective_changed"}
@@ -573,6 +579,53 @@ def finish(claim, value):
     return accepted
 
 
+def _discovery_observation(c, row, runtime, result):
+    scope = row['input'].get('discovery_scope')
+    groups = result.output.get('groups')
+    if (row['type'] != 'growth.account' or not scope or not isinstance(groups, list)
+            or row['input']['spec'].get('payload', {}).get('community_operation') != 'search'):
+        return True
+    observed = sorted([{key: group.get(key) for key in ('group_id', 'canonical_url', 'title', 'subtitle')}
+                       for group in groups], key=lambda group: str(group['group_id']))
+    identity, fingerprint = digest(scope), digest(observed)
+    previous = one(c, """SELECT EXISTS(SELECT FROM lead.tasks WHERE id<>%s
+        AND type='growth.account' AND state='succeeded'
+        AND result#>>'{runtime,discovery_observation,scope}'=%s
+        AND result#>>'{runtime,discovery_observation,fingerprint}'=%s) ok""",
+        (row['id'], identity, fingerprint))['ok']
+    runtime['discovery_observation'] = {'scope': identity, 'fingerprint': fingerprint}
+    result.output = {**result.output, 'discovery_observation_progress': not previous,
+                     'knowledge_progress': bool(result.output.get('knowledge_progress')) and not previous}
+    return not previous
+
+
+def _settle_continuation(c, aid, completed):
+    decision = one(c, """SELECT result#>'{output,output}' output FROM lead.tasks
+        WHERE type='growth.decision' AND state IN ('succeeded','failed')
+        ORDER BY completed_at DESC,id DESC LIMIT 1""")
+    output = (decision or {}).get('output') or {}
+    checked = output.get('continuation_check') or {}
+    ref = (checked.get('source') or {}).get('ref') or {}
+    if (not checked.get('valid') or ref.get('kind') != 'task'
+            or (output.get('continuation') or {}).get('producer') != 'work_settled'
+            or completed['type'] != 'growth.decision' and str(completed['id']) != ref.get('id')):
+        return
+    agent = one(c, 'SELECT * FROM lead.agents WHERE id=%s', (aid,))
+    if (not agent or agent['desired_state'] == 'archived' or output.get('config_revision') != agent['config_revision']
+            or output.get('goal_revision') != objective_revision(agent)):
+        return
+    source = one(c, 'SELECT id,state,input,result FROM lead.tasks WHERE id=%s', (ref['id'],))
+    if (not source or source['state'] != 'succeeded' or str(source['input']['task_generation']) != ref.get('version')
+            or source['result'].get('output', {}).get('output', {}).get('discovery_observation_progress') is False):
+        return
+    fact = {'reason': 'work_settled', 'task_id': str(source['id']), 'task_generation': source['input']['task_generation'],
+            'config_revision': output['config_revision'], 'goal_revision': output['goal_revision']}
+    if not one(c, """SELECT id FROM lead.outbox_events WHERE event_type='growth.wake'
+        AND payload->>'reason'='work_settled' AND payload->>'task_id'=%s
+        AND payload->>'task_generation'=%s LIMIT 1""", (fact['task_id'], str(fact['task_generation']))):
+        emit(c, aid, 'growth.wake', fact)
+
+
 def _finish(claim, value):
     result = WorkResult.model_validate(value)
     ref = _ref(claim["ref"])
@@ -636,6 +689,7 @@ def _finish(claim, value):
                     runtime["failure_attempts"] = max(3, runtime["failure_attempts"])
         if result.checkpoint is not None:
             runtime["checkpoint"] = result.checkpoint
+        discovery_progress = _discovery_observation(c, row, runtime, result) if result.outcome == 'completed' else False
         output = result.model_dump(mode="json")
         if result.outcome == "completed":
             _save(c, row, "succeeded", {**runtime, "wait": None}, output)
@@ -643,10 +697,13 @@ def _finish(claim, value):
                 c.execute("""UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery,status}','\"superseded\"')
                     WHERE type='growth.decision' AND state='failed' AND result#>>'{runtime,recovery,error_code}'='invalid_proposal'
                     AND result#>>'{runtime,recovery,status}'='blocked'""")
-            if (row["type"] in ("growth.account","growth.channel") or result.output.get("knowledge_progress") is True
+            if (row["type"] == "growth.channel" or row['type'] == 'growth.account' and discovery_progress
+                or result.output.get("knowledge_progress") is True
                 or result.output.get("learning_progress") is True or result.output.get("business_progress") is True
                 or result.output.get("context_available") is True):
                 emit(c, str(ref.agent_id), "growth.wake", {"reason": "evidence_added", "task_id": str(row["id"])})
+            # Both finish orders share the existing project recovery lock.
+            _settle_continuation(c, str(ref.agent_id), row)
         elif result.outcome == "unknown":
             delay = _receipt_delay(runtime, action)
             wait = _wait(row, "unknown_receipt", utcnow(), action="reconcile", delay=delay,
@@ -1226,6 +1283,8 @@ def trigger_key(item):
     # A newer fact with the same key survives consumption of the old snapshot.
     if item.get("reason") in ("resource_blocked", "resource_recovered", "resource_probe_stopped"):
         return digest([item.get("reason"), item.get("resource"), item.get("condition_revision"), item.get("transition")])
+    if item.get('reason') == 'work_settled':
+        return digest([item['reason'], item.get('task_id'), item.get('task_generation')])
     task = item.get("task_id") if item.get("reason") in ("evidence_added","work_failed","dependency_failed","dependency_artifact_missing") else None
     return digest([item.get("reason"),item.get("account_id"),item.get("experiment_id"),item.get("event_name"),task])
 

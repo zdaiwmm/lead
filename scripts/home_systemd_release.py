@@ -2282,6 +2282,8 @@ def maintenance_window(old, sha):
                 # During a refused/aborted drain a profile may legitimately still be open.
                 verify(revision, fenced=True, require_idle=False)
             if not cutover_pending(sha):
+                if os.path.lexists(EXECUTOR_REGISTRY):
+                    verify_executors(revision)
                 run(site, "restore", sha)
                 run("systemctl", "start", "lead-home-live.path", "lead-home-ingress.socket")
 

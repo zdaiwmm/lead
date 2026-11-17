@@ -17,7 +17,7 @@ from .budget import BudgetExceeded
 from .channels import store_target
 from .config import any_model_configured
 from .db import all_rows, append_message, emit, j, one, record, require_agent, tx
-from .domain import agent_detail, metrics, set_control, snapshot_preferences
+from .domain import agent_detail, metrics, snapshot_preferences
 from .local_executor_client import native_continuation
 from .model import ContentDecision, Decision, ModelUnavailable, run_model
 from .operating_playbooks import (
@@ -115,6 +115,8 @@ async def _chat_job(args: dict):
         job = one(c, "SELECT * FROM lead.chat_jobs WHERE id=%s", (job_id,))
         if not job or job["status"] == "complete":
             return
+        if job["status"] == "failed" and job["error_code"] in ("CONFIGURATION_CHANGED", "CONTROL_CHANGED"):
+            return {"error": job["error_code"]}
         message = one(
             c,
             "SELECT * FROM lead.conversation_messages WHERE id=%s",
@@ -187,6 +189,15 @@ async def _chat_job(args: dict):
         from .growth.store import enabled as growth_enabled
         from .growth.views import render_growth
         growth_status = await asyncio.to_thread(render_growth,aid) if growth_enabled(detail) else None
+        with tx(aid) as c:
+            job = one(c, "SELECT * FROM lead.chat_jobs WHERE id=%s FOR UPDATE", (job_id,))
+            classification = (job["error_context"] or {}).get("operating_direction_classification")
+            if classification is None:
+                retry = (job["error_context"] or {}).get("operating_direction_retry", 0)
+                classification = {"config_revision":detail["config_revision"],"control_version":detail["control_version"],
+                    "call_key":"owner-direction-retry:"+str(retry) if retry else "primary","reclassifications":0}
+                c.execute("UPDATE lead.chat_jobs SET error_context=coalesce(error_context,'{}'::jsonb) || %s WHERE id=%s",
+                          (j({"operating_direction_classification":classification}), job_id))
         decision = await run_model(
             Decision,
             {
@@ -222,6 +233,7 @@ async def _chat_job(args: dict):
             },
             agent_id=aid,
             tools=browser.tools(),
+            call_key=classification["call_key"],
         )
         runtime_success(aid, "chat")
         sources = await browser.finish()
@@ -241,27 +253,48 @@ async def _chat_job(args: dict):
         ):
             decision.product_url = None
         control_result = None
-        if decision.intent in ("pause", "resume", "start"):
-            try:
-                if not direct_control(message["content"]["text"], decision.intent):
-                    raise ValueError(
-                        "运行状态未改变。可以直接说“暂停运营”“恢复运营”或“启动运营”，也可以使用顶部按钮。"
-                    )
-                set_control(aid, decision.intent)
-                control_result = {
-                    "pause": "已暂停。",
-                    "resume": "已恢复自主运营。",
-                    "start": "已开始自主运营。",
-                }[decision.intent]
-            except ValueError as e:
-                control_result = str(e)
+        direction = decision.operating_direction
+        if not direction and decision.intent in ("resume", "start") and direct_control(message["content"]["text"], decision.intent):
+            direction = message["content"]["text"]
         with tx(aid) as c:
             job = one(
                 c, "SELECT * FROM lead.chat_jobs WHERE id=%s FOR UPDATE", (job_id,)
             )
             if job["status"] == "complete":
                 return
-            require_agent(c, aid, True)
+            current = require_agent(c, aid, True)
+            direction_revision_current = current["config_revision"] == classification["config_revision"]
+            is_control = decision.intent in ("pause", "resume", "start")
+            if growth_enabled(current) and (direction or is_control):
+                control_changed = current["control_version"] != classification["control_version"]
+                if control_changed or not direction_revision_current:
+                    if not control_changed and classification["reclassifications"] == 0:
+                        next_classification = {"config_revision":current["config_revision"],
+                            "control_version":current["control_version"],"reclassifications":1,
+                            "call_key":classification["call_key"]+":reclassify"}
+                        c.execute("UPDATE lead.chat_jobs SET status='pending',error_code=NULL,error_context=coalesce(error_context,'{}'::jsonb) || %s WHERE id=%s",
+                                  (j({"operating_direction_classification":next_classification}), job_id))
+                        c.execute("UPDATE lead.conversation_messages SET status='pending' WHERE id=%s", (message["id"],))
+                        emit(c, aid, "chat.enqueue", {"job_id":job_id})
+                        return {"reclassification_pending":True}
+                    code = "CONTROL_CHANGED" if control_changed else "CONFIGURATION_CHANGED"
+                    c.execute("UPDATE lead.chat_jobs SET status='failed',error_code=%s WHERE id=%s", (code, job_id))
+                    c.execute("UPDATE lead.conversation_messages SET status='failed' WHERE id=%s", (message["id"],))
+                    record(c, aid, "经营指令尚未转交", "运行控制已变化，原消息已保留，可按当前状态重试。" if control_changed
+                           else "经营配置持续变化，原消息已保留，可按当前状态重试。")
+                    return {"error":code}
+            if is_control:
+                try:
+                    if not direct_control(message["content"]["text"], decision.intent):
+                        raise ValueError(
+                            "运行状态未改变。可以直接说“暂停运营”“恢复运营”或“启动运营”，也可以使用顶部按钮。"
+                        )
+                    from .domain import control_in_tx
+
+                    control_in_tx(c, aid, decision.intent)
+                    control_result = {"pause":"已暂停。","resume":"已恢复自主运营。","start":"已开始自主运营。"}[decision.intent]
+                except ValueError as e:
+                    control_result = str(e)
             cards = []
             business_changed = False
             if decision.intent == "business" or any(
@@ -324,14 +357,14 @@ async def _chat_job(args: dict):
                     aid,
                     message,
                     decision.operating_update,
-                    detail["config_revision"],
+                    classification["config_revision"],
                 )
                 record(c, aid, "经营配置请求已处理", control_result)
             elif decision.preference or decision.preference_mode != "add":
                 from .commands import apply_preference
 
                 control_result = apply_preference(
-                    c, aid, message, decision, detail["config_revision"]
+                    c, aid, message, decision, classification["config_revision"]
                 )
                 record(c, aid, "运营偏好请求已处理", control_result)
             if decision.intent == "connect" or decision.stage == "connect":
@@ -389,6 +422,13 @@ async def _chat_job(args: dict):
             )
             if business_changed:
                 snapshot_preferences(c, aid)
+            if direction:
+                from .commands import apply_operating_direction
+
+                revision = require_agent(c, aid)["config_revision"] if direction_revision_current else classification["config_revision"]
+                direction_reply = apply_operating_direction(c, aid, message, direction, revision)
+                if direction_reply:
+                    control_result = (control_result + "\n" if control_result else "") + direction_reply
             response = append_message(
                 c, aid, "assistant", control_result or decision.reply, cards=cards
             )
@@ -424,7 +464,7 @@ async def _chat_job(args: dict):
         )
         with tx(aid) as c:
             c.execute(
-                "UPDATE lead.chat_jobs SET status=%s,error_code=%s,error_context=%s WHERE id=%s",
+                "UPDATE lead.chat_jobs SET status=%s,error_code=%s,error_context=coalesce(error_context,'{}'::jsonb) || %s WHERE id=%s",
                 (
                     "blocked" if code == "MODEL_NOT_CONFIGURED" else "failed",
                     code,

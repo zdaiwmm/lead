@@ -755,6 +755,8 @@ def prepare_channel(aid, task_id, data):
             raise ValueError("original_action_missing")
         if not row or row["state"] != "running" or not enabled(agent) or agent["desired_state"] != "running":
             raise ValueError("scope_changed")
+        if 'config_revision' in row['input'] and row['input']['config_revision'] != agent['config_revision']:
+            raise ValueError('configuration_changed')
         spec = TaskSpec.model_validate(row["input"]["spec"])
         target = one(c,"""SELECT t.*,s.platform,s.profile_id,s.binding_version,s.external_account_id
             FROM lead.account_targets t JOIN lead.social_accounts s ON s.id=t.account_id
@@ -840,6 +842,8 @@ def submission_gate(c, actor, action,claim=None,*,allow_method_repair=False):
     agent = one(c,"SELECT * FROM lead.agents WHERE id=%s FOR SHARE",(actor.aid,))
     if not agent or not enabled(agent) or agent["desired_state"] != "running" or agent["control_version"] != action["expected_control_version"]:
         raise ValueError("scope_changed")
+    if agent['config_revision'] != action['expected_config_revision']:
+        raise ValueError('configuration_changed')
     target = one(c,"SELECT * FROM lead.account_targets WHERE id=%s",(action["target_id"],))
     if not target or target["state"] != "active":
         raise ValueError("target_not_permitted")

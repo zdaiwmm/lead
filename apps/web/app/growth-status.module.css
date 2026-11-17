@@ -3,6 +3,7 @@
 .learning { margin-bottom: 24px; }
 .learning p { margin: 8px 0; }
 .learning small, .rows span, .rows > li > small { color: var(--text-muted); font-size: 12px; }
+.learning small { display: block; }
 .rows { list-style: none; margin: 0; padding: 0; }
 .rows li { display: flex; gap: 12px; align-items: center; min-height: 64px; padding: 12px 0; border-top: 1px solid var(--line); }
 .rows li > div { flex: 1; min-width: 0; }
