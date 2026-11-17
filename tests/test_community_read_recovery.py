@@ -18,10 +18,10 @@ from test_growth_telegram_community import community as community
 from test_growth_telegram_community import inspected, source, work
 
 
-def search_task(env):
+def search_task(env, query='relevant privacy tools'):
     with tx(env.aid) as c:
         return submit_work(c, env.aid, TaskSpec(kind='account', purpose='community', account_id=env.account['id'],
-            payload={'community_operation':'search', 'queries':['relevant privacy tools']}, dedupe_key=uid(),
+            payload={'community_operation':'search', 'queries':[query]}, dedupe_key=uid(),
             review_at=utcnow()+timedelta(hours=1)))
 
 
@@ -114,7 +114,8 @@ async def test_read_proof_does_not_resume_join_channel_or_original_unknown_actio
             account_id=observed.account['id'], target_id=target['id'], review_at=utcnow()+timedelta(hours=1),
             payload={'content_id': uid(), 'content_hash': 'f'*64}))
     ref, root, _ = failed_read(observed, 'search')
-    unknown = search_task(observed)
+    unknown = search_task(observed, 'independent private conversations')
+    assert unknown['task_id'] != ref['task_id']
     protected = [join['task_id'], channel['task_id'], unknown['task_id']]
     with tx(observed.aid) as c:
         for task_id in protected:
