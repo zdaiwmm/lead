@@ -97,7 +97,8 @@ async def test_unknown_receipt_read_allows_same_account_independent_original_tas
                     loop.call_soon_threadsafe(entered.set)
                 try:
                     if row['barrier_member']:
-                        phase['barrier'].wait(timeout=20)
+                        # The second request includes a fresh native SDK startup.
+                        phase['barrier'].wait(timeout=60)
                         time.sleep(.5)
                     return original(request)
                 except threading.BrokenBarrierError:
@@ -124,9 +125,10 @@ async def test_unknown_receipt_read_allows_same_account_independent_original_tas
 
         async def execute(item, number, kind='action'):
             ref, data, _, body = item
+            started = time.monotonic()
             admitted = advance(ref, now=utcnow()+timedelta(minutes=6))
             admissions.append({'task_id': str(ref['task_id']), 'kind': kind, 'state': admitted['state'],
-                'wait': admitted.get('wait')})
+                'started': started, 'admitted_at': time.monotonic(), 'wait': admitted.get('wait')})
             assert admitted['state'] == 'ready', admitted
             with tx(aid) as c:
                 task = one(c, 'SELECT * FROM lead.tasks WHERE id=%s', (ref['task_id'],))
@@ -169,7 +171,7 @@ async def test_unknown_receipt_read_allows_same_account_independent_original_tas
                 assert one(c, 'SELECT state FROM lead.actions WHERE id=%s', (initial[1]['id'],))['state'] == 'unknown'
                 assert submit_work(c, aid, first[2]) == first[0]
             assert advance(first[0])['wait']['reason'] == 'work_leased'
-            restored, continued = await asyncio.wait_for(asyncio.gather(reading, execute(other, 1)), 65)
+            restored, continued = await asyncio.wait_for(asyncio.gather(reading, execute(other, 1)), 120)
             phase['active'] = False
             for result, action, attempts, terminal, _ in (restored, continued):
                 assert result.outcome == 'completed' and action['state'] == 'confirmed' and terminal == 'succeeded'
@@ -186,9 +188,9 @@ async def test_unknown_receipt_read_allows_same_account_independent_original_tas
             assert len(board.oracle()['posts']) == 2
             assert sum(row['method'] == 'POST' and row['path'] == '/posts' for row in board.oracle()['requests']) == 2
             rows = [row for row in intervals if row['barrier_member']]
-            assert len(rows) == 2 and not any(row.get('barrier_aborted') for row in rows), rows
+            assert len(rows) == 2 and not any(row.get('barrier_aborted') for row in rows), json.dumps({'intervals': rows, 'admissions': admissions})
             overlap = min(row['ended'] for row in rows) - max(row['started'] for row in rows)
-            assert overlap >= .4, rows
+            assert overlap >= .4, json.dumps({'intervals': rows, 'admissions': admissions})
             pages = [row for row in workers if 'target_id' in row and row['task_id'] in by_task and row['task_id'] != str(second['id'])]
             assert len(pages) == 3 and len({row['target_id'] for row in pages}) == 3
             assert {row['profile_id'] for row in pages} == {str(actor.profile['id'])}
