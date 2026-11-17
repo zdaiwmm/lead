@@ -133,10 +133,14 @@ def _growth_group(observed, group):
     from .community_participation import rule_permissions
     from .community_rule_evidence import description_kind, rules_status
     description = observed.get('description') or ''
+    read_status = observed.get('description_read_status', 'complete')
+    read_reason = observed.get('description_read_reason')
     substantive = description_kind(description, topic_matches=True) == 'substantive'
-    status = rules_status(description=description, pinned_complete=False, external_rules_unresolved=False) if substantive else 'unresolved'
+    status = rules_status(description=description, pinned_complete=False, external_rules_unresolved=False) if substantive and read_status == 'complete' else 'unresolved'
     gaps = []
-    if not substantive:
+    if read_status != 'complete':
+        gaps.append('public_description_' + (read_reason or 'unresolved'))
+    elif not substantive:
         gaps.append('substantive_public_description')
     elif status != 'complete':
         external = rules_status(description=description, pinned_complete=True, external_rules_unresolved=False) != 'complete'
@@ -155,6 +159,7 @@ def _growth_group(observed, group):
     return {'group_id': observed['target_id'], 'canonical_url': group['canonical_url'],
         'title': observed['title'], 'kind': observed['kind'], 'rules': description,
         'rules_hash': digest(description), 'rules_status': status, 'rules_read_scope': 'public_description',
+        'description_read_status': read_status, 'description_read_reason': read_reason,
         'unread_rule_sources': gaps, 'rules_next_action': 'select_another_group' if gaps else None,
         'automation_forbidden': rules['automation_forbidden'],
         'membership': 'joined' if observed['joined'] else 'pending_approval' if pending_join_request(observed) else 'not_joined',
@@ -965,6 +970,29 @@ async def search_history(page, query, peer, limit):
     return found[:limit], "native_group_search" if found else "no_matches"
 
 
+async def _read_description(profile, *, timeout=15000):
+    from playwright.async_api import TimeoutError as BrowserTimeout
+
+    # About has no row-grid: that class is reserved for right-side controls.
+    body = profile.locator('.row.row-with-icon > .row-title.pre-wrap').filter(visible=True)
+    try:
+        await body.first.wait_for(state='visible', timeout=timeout)
+        count = await body.count()
+        if count != 1:
+            return '', 'ambiguous' if count else 'not_observed'
+        text = (await body.first.inner_text(timeout=timeout)).strip()
+    except BrowserTimeout:
+        return '', 'not_observed'
+    count = await body.count()
+    if count != 1:
+        return '', 'ambiguous' if count else 'not_observed'
+    if not text:
+        return '', 'empty'
+    if len(text) > 1800:
+        return '', 'truncated'
+    return text, None
+
+
 async def observe_group(
     page, url, expected, limit, history_query=None, expected_peer=None
 ):
@@ -1071,6 +1099,8 @@ async def _read_group(page, url, expected, limit, history_query, expected_peer):
                 f"公开群路由未能绑定已核验目标：expected={expected_peer}, observed={actual.get('target_id')}"
             ) from error
     profile = await telegram.open_selected_profile(page, "t.me/" + target[1:])
+    if await profile.count() != 1:
+        raise ValueError('community_source_binding_invalid')
     link = (
         profile.locator(".row.row-grid .row-title")
         .filter(has_text=re.compile(
@@ -1088,12 +1118,16 @@ async def _read_group(page, url, expected, limit, history_query, expected_peer):
         raise ValueError(f"目标群资料未能核对公开地址 {target}，资料栏可核对的地址为 {handles[:3]}") from error
     identity = await telegram.inspect_account(page)
     state = await page.evaluate(telegram.TARGET)
-    if identity["external_account_id"] != expected or not re.fullmatch(
-        r"-\d+", state.get("target_id") or ""
-    ):
+    if (identity["external_account_id"] != expected or not re.fullmatch(r"-\d+", state.get("target_id") or "")
+            or expected_peer and state['target_id'] != expected_peer):
         raise ValueError("社群身份尚不能确认")
-    # Only description rows; no participant lists or profiles are visited.
-    description = await profile.locator(".row.row-grid").all_inner_texts()
+    description, description_reason = await _read_description(profile)
+    after = await telegram.inspect_account(page)
+    current_target = await page.evaluate(telegram.TARGET)
+    if (after['external_account_id'] != expected or current_target['target_id'] != state['target_id']
+            or expected_peer and current_target['target_id'] != expected_peer
+            or await profile.count() != 1 or await link.count() != 1):
+        raise ValueError('community_source_binding_invalid')
     close = profile.locator(".sidebar-header .sidebar-close-button").filter(
         visible=True
     )
@@ -1117,7 +1151,9 @@ async def _read_group(page, url, expected, limit, history_query, expected_peer):
         "target_id": state["target_id"],
         "title": state["title"],
         "kind": "broadcast" if state["channel_hint"] else "discussion",
-        "description": "\n".join(description)[:1800],
+        "description": description,
+        "description_read_status": 'unresolved' if description_reason else 'complete',
+        "description_read_reason": description_reason,
         "joined": native_membership(membership),
         "can_reply": state["can_write"],
         **membership,
@@ -1799,6 +1835,9 @@ async def browser_step(actor, task_id, operation):
                 }
             if saved.get("join_state") in ("dispatching", "unknown"):
                 return {"state": "unknown", "reason": "正在核对加入结果，未重复申请"}
+            if observed.get('description_read_status') == 'unresolved':
+                return {'state':'blocked', 'reason':'community_rules_unresolved',
+                    'description_read_reason':observed['description_read_reason']}
             request = observed.get("apply_button_count", 0) == 1
             if not task["input"].get("join_approved") or (
                 not request and observed["join_button_count"] != 1
@@ -1840,6 +1879,9 @@ async def browser_step(actor, task_id, operation):
         body = publication["body"]
         if saved.get("reply_state") == "confirmed":
             return {"state": "confirmed", "external_id": saved["reply_external_id"]}
+        if observed.get('description_read_status') == 'unresolved':
+            return {'state':'blocked', 'reason':'community_rules_unresolved',
+                'description_read_reason':observed['description_read_reason']}
         if saved.get("reply_state") not in ("dispatching", "unknown"):
             from .outbound_links import reply_link_problem
 
