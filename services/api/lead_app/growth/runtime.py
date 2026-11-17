@@ -954,6 +954,8 @@ def _consume_community_read(c, aid, agent, root, episode, proof_ref):
     if (not trusted_execution() or principal() is not None or not _community_http_episode(root)
         or episode.get('status') != 'blocked' or not episode.get('last_failure_at')):
         return None
+    if _membership_pending(root) or one(c, 'SELECT id FROM lead.actions WHERE task_id=%s', (root['id'],)):
+        return None
     proof = community_read_proof(c, aid, proof_ref, after=datetime.fromisoformat(episode['last_failure_at']))
     spec = TaskSpec.model_validate(root['input']['spec'])
     resource, condition = _resource_condition(c, agent, root, spec)
