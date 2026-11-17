@@ -96,3 +96,22 @@ async def test_existing_domain_auth_and_http_boundaries_remain(kind, status, mon
         response = await client.post('/agents/00000000-0000-0000-0000-000000000002/community/step', json=body, headers=headers)
     assert response.status_code == status
     assert 'browser_failure' not in response.text
+
+
+@pytest.mark.parametrize('authenticated', [True, False])
+async def test_failure_before_business_middleware_is_diagnosed_without_bypassing_auth(authenticated, monkeypatch, capsys):
+    async def failed(*args, **kwargs):
+        raise RuntimeError('NEVER_EXPORT upstream-private-token')
+
+    monkeypatch.setattr(browser.TelemetryMiddleware, '__call__', failed)
+    headers = {'Authorization': 'Bearer ' + internal_token()} if authenticated else {}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=browser.app, raise_app_exceptions=False), base_url='http://fixture') as client:
+        response = await client.get('/health', headers=headers)
+    if authenticated:
+        assert response.status_code == 500
+        assert response.json()['browser_failure'] == {'category': 'runtime_error', 'module': 'unknown', 'line': None}
+        assert 'TG_RESULT' in capsys.readouterr().out
+    else:
+        assert response.status_code == 403 and 'browser_failure' not in response.text
+        assert 'TG_RESULT' not in capsys.readouterr().out
+    assert 'NEVER_EXPORT' not in response.text

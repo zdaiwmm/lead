@@ -1201,6 +1201,19 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(Exception)
+async def unexpected_browser_failure(request, error):
+    from .channel_contracts import browser_failure_metadata
+    from .config import ROOT
+
+    if request.headers.get('authorization') != 'Bearer ' + internal_token():
+        return Response(status_code=403)
+    diagnostic = browser_failure_metadata(error, ROOT)
+    # The Telegram unit deliberately retains only this content-free prefix.
+    print('TG_RESULT ' + json.dumps({'event': 'browser_failure', 'metadata': diagnostic}), flush=True)
+    return JSONResponse({'detail': '浏览器操作未完成，已保留诊断信息', 'browser_failure': diagnostic}, status_code=500)
+
+
 @app.middleware("http")
 async def auth(request, call_next):
     if request.headers.get("authorization") != "Bearer " + internal_token():
@@ -1217,14 +1230,6 @@ async def auth(request, call_next):
         return JSONResponse(
             {"detail": message[:250], "code": getattr(e, "code", None), **method_error_metadata(e)}, status_code=409
         )
-    except Exception as error:
-        from .channel_contracts import browser_failure_metadata
-        from .config import ROOT
-
-        diagnostic = browser_failure_metadata(error, ROOT)
-        # The Telegram unit deliberately retains only this content-free prefix.
-        print('TG_RESULT ' + json.dumps({'event': 'browser_failure', 'metadata': diagnostic}), flush=True)
-        return JSONResponse({'detail': '浏览器操作未完成，已保留诊断信息', 'browser_failure': diagnostic}, status_code=500)
 
 
 class OpenRequest(BaseModel):

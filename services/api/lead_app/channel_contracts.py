@@ -11,7 +11,7 @@ BROWSER_FAILURE_CATEGORIES = frozenset(('browser_timeout', 'browser_error', 'tim
     'type_error', 'attribute_error', 'runtime_error', 'unexpected_error'))
 BROWSER_FAILURE_MODULES = frozenset(('browser', 'community_runtime', 'telegram', 'identity',
     'account_connection', 'network_namespace', 'forward_proxy', 'community_search', 'db',
-    'resources', 'account_profiles', 'managed_network', 'browser_runtime'))
+    'resources', 'account_profiles', 'managed_network', 'browser_runtime', 'telemetry'))
 
 
 def browser_failure_metadata(error, root):
