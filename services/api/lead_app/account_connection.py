@@ -686,8 +686,11 @@ async def execute_community_account(aid, row, data, claim):
     from .activities import browser_rpc
     with tx(aid) as c:
         current = one(c, 'SELECT * FROM lead.tasks WHERE id=%s', (row['id'],))
-        community_task_scope(c, aid, current, claim, reconcile=community_pending(current))
-        validate_community_source(c, current['input']['spec'], binding_version=current['input'].get('binding_version'))
+        _, intent, card = community_task_scope(c, aid, current, claim, reconcile=community_pending(current))
+        source = validate_community_source(c, current['input']['spec'], binding_version=current['input'].get('binding_version'))
+        if data.community_operation == 'inspect':
+            versions = one(c, 'SELECT control_version,config_revision FROM lead.agents WHERE id=%s', (aid,))
+            authority = (intent['revision'], str(card['id']) if card else None)
     base = {'task_id': str(row['id']), 'growth_claim': claim}
     if data.community_operation == 'search':
         groups = []
@@ -696,7 +699,65 @@ async def execute_community_account(aid, row, data, claim):
             groups.extend(found['groups'])
         unique = {group['group_id']: group for group in groups}
         return WorkResult(outcome='completed', output={'groups': list(unique.values())[:12], 'knowledge_progress': bool(unique)})
+    started = utcnow()
     observed = await browser_rpc(f'/agents/{aid}/community/step', {**base, 'operation': data.community_operation})
+    received = utcnow()
+    if data.community_operation == 'inspect':
+        from datetime import datetime
+
+        from .channel_contracts import ExecutionRef
+        from .community_rule_evidence import description_kind
+        from .execution_routes import registered_reference
+        from .growth.tools import _remember
+
+        group = observed['group']
+        observed_at = datetime.fromisoformat(group['observed_at'])
+        if not observed.get('execution_ref'):
+            raise ValueError('community_source_binding_invalid')
+        reference = ExecutionRef.model_validate(observed.get('execution_ref'))
+        if (not observed_at.tzinfo or not started <= observed_at <= received
+            or reference.registry_revision is None or group['group_id'] != source['group_id']
+            or group['canonical_url'].casefold() != source['canonical_url'].casefold()
+            or observed.get('source_hash') != source['source_hash']):
+            raise ValueError('community_source_binding_invalid')
+        pages = []
+        canonical = group['canonical_url'].casefold()
+        description = group.get('rules') or ''
+        if description_kind(description, topic_matches=True) == 'substantive':
+            pages.append((canonical, description, {'kind': 'public_description', 'source_hash': group['rules_hash']}))
+        for message in group.get('messages', []):
+            mid = str(message.get('mid', ''))
+            if (not mid.isdigit() or message.get('parent_url', '').casefold() != canonical+'/'+mid):
+                raise ValueError('community_source_binding_invalid')
+            text = (message.get('excerpt') or '').strip()
+            if text and not message.get('own'):
+                pages.append((canonical+'/'+mid, text, {'kind': 'message_excerpt', 'mid': mid,
+                    'source_hash': message['hash'], 'retained_characters': len(text)}))
+        evidence, documents, added = [], [], False
+        with tx(aid) as c:
+            current = one(c, 'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE', (row['id'],))
+            account, intent, card = community_task_scope(c, aid, current, claim)
+            current_source = validate_community_source(c, current['input']['spec'], binding_version=current['input'].get('binding_version'))
+            current_versions = one(c, 'SELECT control_version,config_revision FROM lead.agents WHERE id=%s', (aid,))
+            route = one(c, 'SELECT * FROM lead.growth_read_route(%s)', (account['profile_id'],))
+            if (current_source['source_hash'] != source['source_hash'] or current_versions != versions
+                or (intent['revision'], str(card['id']) if card else None) != authority
+                or not route or registered_reference(route) != reference):
+                raise ValueError('scope_changed')
+            for url, text, provenance in pages:
+                ref, fresh = _remember(aid, {'url': url, 'title': group['title'], 'text': text},
+                    source_type='account_read', connection=c)
+                if ref:
+                    # Freshness describes this observation, not delayed ingestion.
+                    # Repeated source text keeps the original document's time.
+                    if fresh:
+                        c.execute('UPDATE lead.knowledge_documents SET created_at=%s WHERE id=%s', (observed_at, ref.id))
+                    evidence.append(ref)
+                    documents.append({**provenance, 'source_ref': url, 'evidence_ref': ref.model_dump(mode='json')})
+                    added = added or fresh
+        return WorkResult(outcome='completed', evidence_refs=evidence, output={**observed,
+            'documents': documents, 'inspection_task_id': str(row['id']), 'source_task_id': source['source_task_id'],
+            'source_step_id': source.get('source_step_id'), 'knowledge_progress': added})
     if observed.get('write_blocked_reason') and data.community_operation == 'join':
         return WorkResult(outcome='failed', failure_code=observed['write_blocked_reason'], output=observed)
     if data.community_operation == 'join' and observed.get('state') in COMMUNITY_PENDING:
