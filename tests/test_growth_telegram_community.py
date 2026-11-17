@@ -299,13 +299,15 @@ async def test_rpc_injects_its_selected_route_and_unknown_keeps_that_route(commu
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('lost_ack',[False,True])
-async def test_group_reply_uses_original_content_action_and_verified_attempt(community,monkeypatch,lost_ack):
+@pytest.mark.parametrize('offset',[0,1 << 32])
+async def test_group_reply_uses_original_content_action_and_verified_attempt(community,monkeypatch,lost_ack,offset):
     from lead_app import telegram
     from lead_app.growth.store import digest
     from lead_app.growth.tools import ChannelInput, prepare_channel
+    raw_mid, raw_receipt = str(offset+10), str(offset+11)
     question='How can I keep a chat private?'
     observation={'target_id':PEER,'title':'Privacy fixture','kind':'discussion','description':'Privacy tools discussion. Be helpful and respectful.',
-        'joined':True,'can_reply':True,'history':[{'mid':'10','body':question,'own':False}],
+        'joined':True,'can_reply':True,'history':[{'mid':raw_mid,'body':question,'own':False}],
         'dialogs':[],'join_button_count':0,'apply_button_count':0,'controls':[],'editor_metadata':[{'editable':True}]}
     async def read(*args,**kwargs):
         return observation
@@ -313,6 +315,8 @@ async def test_group_reply_uses_original_content_action_and_verified_attempt(com
     context=work(community,'inspect',source(community))
     inspect_claim=advance(context)['claim']
     observed=await community_runtime.growth_community_step(community.actor,context['task_id'],'inspect',inspect_claim)
+    assert observed['group']['messages'][0]['mid']==raw_mid
+    assert observed['group']['messages'][0]['parent_url']==URL+'/10'
     finish(inspect_claim,WorkResult(outcome='completed',output=observed))
     body={'body':'Check the documented privacy settings before sharing sensitive information.','title':'','format':'text','media':[]}
     with tx(community.aid) as c:
@@ -325,6 +329,7 @@ async def test_group_reply_uses_original_content_action_and_verified_attempt(com
             required_refs=[{'task_id':context['task_id'],'reason':'Reply to this exact observed question'}],review_at=utcnow()+timedelta(hours=1)))
     claim=advance(ref)['claim']
     action=prepare_channel(community.aid,ref['task_id'],data)
+    assert action['intent']['telegram_community']['reply_to_mid']==raw_mid
     with tx(community.aid) as c:
         publish_capability=one(c,"SELECT technical_state,evidence_ref FROM lead.platform_capabilities WHERE platform='telegram' AND action_type='publish' AND target_type='channel'")
     state={'sent':0}
@@ -339,7 +344,7 @@ async def test_group_reply_uses_original_content_action_and_verified_attempt(com
     community.actor.page=Page()
     async def chat(*args): return Node()
     async def identity(*args): return {'external_account_id':'fixture-self'}
-    async def baseline(*args): return '10'
+    async def baseline(*args): return raw_mid
     async def preview(*args): return True
     async def fill(*args): return None
     async def send(*args):
@@ -347,8 +352,8 @@ async def test_group_reply_uses_original_content_action_and_verified_attempt(com
         if lost_ack:
             raise OSError('Controlled loss after the external send')
     async def receipt(*args,**kwargs):
-        assert kwargs['parent_mid']=='10'
-        return {'mid':'11'} if state['sent'] else None
+        assert kwargs['parent_mid']==raw_mid
+        return {'mid':raw_receipt} if state['sent'] else None
     for name,function in (('selected_chat',chat),('inspect_account',identity),('baseline',baseline),('fill',fill),('submit',send)):
         monkeypatch.setattr(telegram,name,function)
     monkeypatch.setattr(community_runtime,'reply_preview_matches',preview)
@@ -365,7 +370,7 @@ async def test_group_reply_uses_original_content_action_and_verified_attempt(com
         claim=advance(ref,now=utcnow()+timedelta(minutes=6))['claim']
     first=await community_runtime.execute_growth_reply(community.actor,action['id'],claim)
     second=await community_runtime.execute_growth_reply(community.actor,action['id'],claim)
-    assert first['external_id']==second['external_id']==PEER+':11' and state['sent']==1
+    assert first['external_id']==second['external_id']==PEER+':'+raw_receipt and state['sent']==1
     finish(claim,WorkResult(outcome='completed',evidence_refs=[{'kind':'action','id':action['id']}]))
     with tx(community.aid) as c:
         assert one(c,'SELECT lead.growth_receipt_valid(%s) ok',(action['id'],))['ok']
@@ -373,6 +378,46 @@ async def test_group_reply_uses_original_content_action_and_verified_attempt(com
         assert one(c,'SELECT count(*) n FROM lead.action_attempts WHERE action_id=%s',(action['id'],))['n']==1
         assert one(c,'SELECT count(*) n FROM lead.authorization_grants WHERE target_id=%s',(observed['target_id'],))['n']==1
         assert one(c,"SELECT technical_state,evidence_ref FROM lead.platform_capabilities WHERE platform='telegram' AND action_type='publish' AND target_type='channel'")==publish_capability
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalid',['old_raw_url','tampered_url','temporary_mid','ephemeral_mid'])
+async def test_new_action_rejects_old_or_inconsistent_message_links_without_rewriting_context(community,monkeypatch,invalid):
+    from lead_app.growth.store import digest
+    from lead_app.growth.tools import ChannelInput, prepare_channel
+    raw_mid=str((1 << 32)+10)
+    async def read(*args,**kwargs):
+        return {'target_id':PEER,'title':'Privacy fixture','kind':'discussion',
+            'description':'Privacy tools discussion. Be helpful and respectful.',
+            'joined':True,'can_reply':True,'history':[{'mid':raw_mid,'body':'Original question','own':False}],
+            'dialogs':[],'join_button_count':0,'apply_button_count':0,'controls':[]}
+    monkeypatch.setattr(community_runtime,'observe_group',read)
+    context=work(community,'inspect',source(community))
+    inspect_claim=advance(context)['claim']
+    observed=await community_runtime.growth_community_step(community.actor,context['task_id'],'inspect',inspect_claim)
+    message=observed['group']['messages'][0]
+    if invalid in ('old_raw_url','tampered_url'):
+        message['parent_url']=URL+'/'+(raw_mid if invalid=='old_raw_url' else '11')
+    else:
+        message['mid']=raw_mid+'.0001' if invalid=='temporary_mid' else str((2 << 32)+10)
+    # Persist a historical/bad adapter response, never repair it during a new write.
+    finish(inspect_claim,WorkResult(outcome='completed',output=observed))
+    body={'body':'A factual answer.','format':'text','media':[]}
+    with tx(community.aid) as c:
+        before=one(c,'SELECT state,result FROM lead.tasks WHERE id=%s',(context['task_id'],))
+        content=one(c,"""INSERT INTO lead.content_items(tenant_id,agent_id,revision,body,source_refs,validation_result,content_hash)
+            VALUES(lead.ctx_tenant(),%s,1,%s,'[]','{}',%s) RETURNING *""",(community.aid,j(body),digest(body)))
+        data=ChannelInput(content_id=content['id'],content_hash=content['content_hash'],operation='reply',
+            parent_url=message['parent_url'],community_context_task_id=context['task_id'])
+        ref=submit_work(c,community.aid,TaskSpec(kind='channel',purpose='contextual_reply',account_id=community.account['id'],
+            target_id=observed['target_id'],payload=data.model_dump(mode='json'),
+            required_refs=[{'task_id':context['task_id'],'reason':'Use the exact original source'}],review_at=utcnow()+timedelta(hours=1)))
+    advance(ref)
+    with pytest.raises(ValueError,match='^community_source_binding_invalid$'):
+        prepare_channel(community.aid,ref['task_id'],data)
+    with tx(community.aid) as c:
+        assert one(c,'SELECT state,result FROM lead.tasks WHERE id=%s',(context['task_id'],))==before
+        assert one(c,'SELECT count(*) n FROM lead.actions WHERE task_id=%s',(ref['task_id'],))['n']==0
 
 
 @pytest.mark.asyncio
@@ -600,21 +645,24 @@ def test_description_rules_do_not_claim_unread_pin_or_external_evidence(descript
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.environ.get('LEAD_BROWSER_TESTS')!='1',reason='Explicit local browser fixtures only')
-async def test_actual_dom_reply_receipt_requires_the_exact_parent():
+@pytest.mark.parametrize('offset',[0,1 << 32])
+async def test_actual_dom_reply_receipt_requires_the_exact_parent(offset):
     from playwright.async_api import async_playwright
+    before,parent,receipt,wrong=(str(offset+value) for value in (9,10,11,99))
     async with async_playwright() as manager:
         browser=await manager.chromium.launch(headless=True,executable_path=manager.chromium.executable_path)
         try:
             page=await browser.new_page()
-            await page.set_content('''<div class="chat active" data-type="chat">
-                <div class="bubble is-out" data-mid="9" data-reply-to-mid="10"><div class="message">Controlled reply</div></div>
-                <div class="bubble is-out" data-mid="11" data-reply-to-mid="99"><div class="message">Controlled reply</div></div>
+            await page.set_content(f'''<div class="chat active" data-type="chat">
+                <div class="bubble is-out" data-mid="{before}" data-reply-to-mid="{parent}"><div class="message">Controlled reply</div></div>
+                <div class="bubble is-out" data-mid="{receipt}" data-reply-to-mid="{wrong}"><div class="message">Controlled reply</div></div>
                 </div>''')
-            assert await community_runtime.own_reply_receipt(page,'Controlled reply','10',parent_mid='10') is None
-            await page.locator('[data-mid="11"]').evaluate("node=>node.dataset.replyToMid='10'")
-            assert await community_runtime.own_reply_receipt(page,'Controlled reply','10',parent_mid='10')=={'mid':'11'}
-            await page.locator('[data-mid="11"]').evaluate("node=>node.removeAttribute('data-reply-to-mid')")
-            assert await community_runtime.own_reply_receipt(page,'Controlled reply','10',parent_mid='10') is None
+            assert await community_runtime.own_reply_receipt(page,'Controlled reply',parent,parent_mid=parent) is None
+            await page.locator(f'[data-mid="{receipt}"]').evaluate('(node,parent)=>node.dataset.replyToMid=parent',parent)
+            assert await community_runtime.own_reply_receipt(page,'Controlled reply',parent,parent_mid=parent)=={'mid':receipt}
+            assert (await community_runtime.read_history(page,1,receipt))[0]['mid']==receipt
+            await page.locator(f'[data-mid="{receipt}"]').evaluate("node=>node.removeAttribute('data-reply-to-mid')")
+            assert await community_runtime.own_reply_receipt(page,'Controlled reply',parent,parent_mid=parent) is None
         finally:
             await browser.close()
 

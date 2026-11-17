@@ -111,6 +111,23 @@ def growth_community_quota(c, aid, account, task_id, operation):
         raise ValueError(due['reason'])
 
 
+def telegram_message_id(mid):
+    """Decode a confirmed Web K DOM mid, without promoting temporary IDs.
+
+    Web K adds 2**32 to channel IDs; Telegram's server message ID is a
+    positive signed int32. Temporary IDs have fractions and ephemeral IDs
+    start at 2 * 2**32. Neither may become a public message link.
+    """
+    if not isinstance(mid, str) or not re.fullmatch(r'[1-9][0-9]{0,9}', mid):
+        raise ValueError('community_source_binding_invalid')
+    value, offset, maximum = int(mid), 1 << 32, (1 << 31)-1
+    if offset < value <= offset+maximum:
+        value -= offset
+    elif not 0 < value <= maximum:
+        raise ValueError('community_source_binding_invalid')
+    return str(value)
+
+
 def _growth_group(observed, group):
     """Retain a small public-message selection, never the full bounded history."""
     from .community_participation import rule_permissions
@@ -125,7 +142,16 @@ def _growth_group(observed, group):
         external = rules_status(description=description, pinned_complete=True, external_rules_unresolved=False) != 'complete'
         gaps.append('referenced_external_rules' if external else 'referenced_pinned_rules')
     rules = rule_permissions(description, complete=status == 'complete')
-    messages = [message for message in observed.get('history', []) if not message.get('own') and str(message.get('mid', '')).isdigit()][-4:]
+    messages = []
+    for message in observed.get('history', []):
+        if message.get('own'):
+            continue
+        try:
+            server_mid = telegram_message_id(message.get('mid'))
+        except ValueError:
+            continue
+        messages.append({'mid': message['mid'], 'excerpt': message['body'][:1200], 'hash': digest(message['body']),
+            'parent_url': group['canonical_url']+'/'+server_mid})
     return {'group_id': observed['target_id'], 'canonical_url': group['canonical_url'],
         'title': observed['title'], 'kind': observed['kind'], 'rules': description,
         'rules_hash': digest(description), 'rules_status': status, 'rules_read_scope': 'public_description',
@@ -134,8 +160,7 @@ def _growth_group(observed, group):
         'membership': 'joined' if observed['joined'] else 'pending_approval' if pending_join_request(observed) else 'not_joined',
         'can_reply': observed['can_reply'], 'observed_at': datetime.now(timezone.utc).isoformat(),
         'members': observed.get('members'),
-        'messages': [{'mid': message['mid'], 'excerpt': message['body'][:1200], 'hash': digest(message['body']),
-            'parent_url': group['canonical_url']+'/'+message['mid']} for message in messages]}
+        'messages': messages[-4:]}
 
 
 async def growth_community_step(actor, task_id, operation, claim, *, execution_ref=None):

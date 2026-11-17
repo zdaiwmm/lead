@@ -30,7 +30,7 @@ MESSAGE = 'How can I keep a chat private? ' + 'original message text ' * 80
 def native_observation(*, description=DESCRIPTION, messages=True):
     return {'target_id': PEER, 'title': 'Privacy fixture', 'kind': 'discussion',
         'description': description, 'joined': False, 'can_reply': False,
-        'history': [{'mid': '10', 'body': MESSAGE, 'own': False}] if messages else [],
+        'history': [{'mid': str((1 << 32)+10), 'body': MESSAGE, 'own': False}] if messages else [],
         'dialogs': [], 'join_button_count': 1, 'apply_button_count': 0, 'controls': [], 'members': 20}
 
 
@@ -190,7 +190,8 @@ async def test_observation_before_closed_review_cannot_become_fresh_by_late_inge
     assert admission['rejected'][0]['reason'] == 'no_progress_path_exhausted'
 
 
-@pytest.mark.parametrize('change', ['pause', 'revoke', 'route', 'source', 'config', 'lease', 'old', 'future', 'missing_actual_ref'])
+@pytest.mark.parametrize('change', ['pause', 'revoke', 'route', 'source', 'config', 'lease', 'old', 'future', 'missing_actual_ref',
+    'raw_message_url', 'tampered_message_url', 'temporary_message_mid', 'ephemeral_message_mid'])
 async def test_await_drift_or_noncurrent_observation_cannot_save_any_document(community, monkeypatch, change):
     original = source(community)
 
@@ -203,6 +204,14 @@ async def test_await_drift_or_noncurrent_observation_cannot_save_any_document(co
             response['group']['observed_at'] = (utcnow()+timedelta(days=1 if change == 'future' else -1)).isoformat()
         elif change == 'missing_actual_ref':
             response.pop('execution_ref')
+        elif change in ('raw_message_url', 'tampered_message_url', 'temporary_message_mid', 'ephemeral_message_mid'):
+            message = response['group']['messages'][0]
+            if change == 'raw_message_url':
+                message['parent_url'] = URL+'/'+message['mid']
+            elif change == 'tampered_message_url':
+                message['parent_url'] = URL+'/11'
+            else:
+                message['mid'] = message['mid']+'.0001' if change == 'temporary_message_mid' else str((2 << 32)+10)
         else:
             with tx(community.aid) as c:
                 if change == 'revoke':
@@ -231,11 +240,13 @@ async def test_await_drift_or_noncurrent_observation_cannot_save_any_document(co
     monkeypatch.setattr(activities, 'browser_rpc', rpc)
     ref, claim, result = await inspect(community, original)
     assert result['outcome'] == 'failed'
-    if change in ('route', 'source', 'missing_actual_ref'):
+    permanent = change in ('route', 'source', 'missing_actual_ref', 'raw_message_url', 'tampered_message_url',
+        'temporary_message_mid', 'ephemeral_message_mid')
+    if permanent:
         runtime.finish(claim, result)
     with tx(community.aid) as c:
         assert one(c, 'SELECT count(*) n FROM lead.knowledge_documents')['n'] == 0
-        if change in ('route', 'source', 'missing_actual_ref'):
+        if permanent:
             saved = one(c, 'SELECT state,result FROM lead.tasks WHERE id=%s', (ref['task_id'],))
             assert saved['state'] == 'failed' and not saved['result']['runtime'].get('recovery')
             assert saved['result']['runtime']['attempts'] == 1
