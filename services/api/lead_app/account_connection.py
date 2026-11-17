@@ -549,12 +549,18 @@ def community_group(c, task, source_id, peer):
     parsed = urlsplit(group.get('canonical_url', ''))
     if parsed.scheme != 'https' or parsed.netloc != 't.me' or not re.fullmatch(r'/[A-Za-z][A-Za-z0-9_]{3,31}', parsed.path) or parsed.query or parsed.fragment:
         raise ValueError('community_public_group_required')
+    broadcast = group.get('kind') == 'broadcast'
     if source['input']['spec'].get('payload', {}).get('community_operation') == 'search':
+        from .community_discovery import broadcast_metadata
         from .community_search import public_group_url
         subtitle = group.get('subtitle')
         observed_url = public_group_url(subtitle) if isinstance(subtitle, str) else None
         if not observed_url or observed_url.casefold() != group['canonical_url'].casefold():
             raise ValueError('community_source_binding_invalid')
+        handle = '@' + observed_url.rsplit('/', 1)[1]
+        broadcast = broadcast or broadcast_metadata({'subtitle': subtitle.strip()[len(handle):]})
+    if broadcast:
+        raise ValueError('community_discussion_binding_required')
     group['source_task_id'] = str(source['id'])
     group['source_hash'] = digest(matches[0])
     return group

@@ -12,6 +12,10 @@ BROWSER_FAILURE_CATEGORIES = frozenset(('browser_timeout', 'browser_error', 'tim
 BROWSER_FAILURE_MODULES = frozenset(('browser', 'community_runtime', 'telegram', 'identity',
     'account_connection', 'network_namespace', 'forward_proxy', 'community_search', 'db',
     'resources', 'account_profiles', 'managed_network', 'browser_runtime', 'telemetry'))
+COMMUNITY_INSPECTION_ERRORS = frozenset(('community_discussion_binding_required',
+    'community_source_binding_invalid', 'community_operation_identity_changed',
+    'community_group_reference_invalid', 'community_public_group_required',
+    'community_group_dependency_required'))
 
 
 def browser_failure_metadata(error, root):

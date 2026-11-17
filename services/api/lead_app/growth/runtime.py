@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from temporalio import activity
 
+from ..channel_contracts import COMMUNITY_INSPECTION_ERRORS
 from ..db import all_rows, emit, j, one, require_agent, tx
 from ..scope import scoped_activity
 from .contracts import TaskRef, TaskSpec, Wait, WorkResult, utcnow
@@ -19,6 +20,7 @@ PERMANENT = {"unsupported_operation", "scope_changed", "invalid_evidence", "inva
 PERMANENT.update({'community_rules_unresolved', 'community_join_rules_changed', 'community_owner_scope_missing',
     'community_target_disabled', 'community_target_grant_revoked', 'community_group_dependency_required',
     'community_source_binding_invalid'})
+PERMANENT.update(COMMUNITY_INSPECTION_ERRORS)
 MODEL_ERRORS={"ModelHTTPError","ModelRateLimitError","APITimeoutError","ConnectError","ReadTimeout",
     "APIConnectionError","ModelQuotaExceededError","AuthenticationError","ModelUnavailable","UnexpectedModelBehavior"}
 
@@ -790,6 +792,14 @@ async def execute(claim):
         if (row['type'] == 'growth.account' and spec.get('purpose') == 'community'
             and operation in ('search', 'inspect', 'join') and isinstance(error, httpx.HTTPStatusError)):
             diagnostic['http_diagnostic'] = {'status_code': error.response.status_code, 'operation': operation}
+            if operation == 'inspect' and error.response.status_code == 409 and len(error.response.content) <= 4096:
+                try:
+                    feedback = error.response.json()
+                except ValueError:
+                    feedback = None
+                failure = feedback.get('code') if isinstance(feedback, dict) else None
+                if isinstance(failure, str) and failure in COMMUNITY_INSPECTION_ERRORS:
+                    code = failure
             if error.response.status_code == 500 and len(error.response.content) <= 4096:
                 from ..channel_contracts import read_browser_failure
                 try:
