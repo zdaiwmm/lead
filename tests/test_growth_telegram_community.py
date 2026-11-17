@@ -58,7 +58,8 @@ def work(env, operation, source=None):
 def source(env, group=None):
     ref=work(env,'search')
     claim=advance(ref)['claim']
-    finish(claim,WorkResult(outcome='completed',output={'groups':[group or {'group_id':PEER,'canonical_url':URL,'title':'Privacy fixture'}]}))
+    finish(claim,WorkResult(outcome='completed',output={'groups':[group or {'group_id':PEER,'canonical_url':URL,'title':'Privacy fixture',
+        'subtitle':'@privacy_fixture, 20 members'}]}))
     return ref
 
 
