@@ -104,3 +104,12 @@ test("paused status preserves original-result reconciliation", () => {
   const text = render(null, {}, { desired_state: "paused" });
   assert.match(text, /项目已暂停。原操作的结果核对仍会继续/);
 });
+
+test("pause hides a prior business wait while preserving unknown-result work", () => {
+  const text = render({ ...proposal, check: { valid: true, status: "waiting", source: {
+    ref: { kind: "experiment", id: "private-id" }, check_at: "2026-11-18T03:30:00+00:00",
+  } } }, { waiting: [{ id: "original-action", title: "核对原消息", state: "reconciling",
+    wait: { reason: "unknown_receipt", check_at: "2026-11-18T03:30:00+00:00" } }] }, { desired_state: "paused" });
+  assert.match(text, /核对原消息|正在核对原操作，结果尚未确认/);
+  assert.doesNotMatch(text, /等待原观察窗口复盘|private-id/);
+});
