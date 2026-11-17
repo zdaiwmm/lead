@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from lead_app import worker
-from lead_app.db import one, tx, uid
+from lead_app.db import emit, one, tx, uid
 from lead_app.growth import outcomes, tools
 from lead_app.growth.contracts import ExperimentSpec, TaskSpec, utcnow
 from lead_app.growth.runtime import advance, consume_triggers, ensure_decision, finish
@@ -149,6 +149,9 @@ async def observe(aid, monkeypatch, summary, *, experiment=None, payload_experim
 
     monkeypatch.setattr(outcomes, "summarize", summarize)
     with tx(aid) as c:
+        # Each supplied observation follows a new upstream notification. Its
+        # unchanged signal revision must still fail to mint progress.
+        emit(c, aid, "analytics.cleaned", {"scope_key": "live", "ingest_id": uid()})
         ref = submit_work(c, aid, TaskSpec(kind="observe", purpose="distribution", experiment_id=experiment,
             payload={"experiment_id": str(payload_experiment)} if payload_experiment else {},
             dedupe_key=uid(), review_at=utcnow() + timedelta(hours=1)))
