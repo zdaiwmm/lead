@@ -17,7 +17,8 @@ PERMANENT = {"unsupported_operation", "scope_changed", "invalid_evidence", "inva
              "experiment_window_ended","product_changed","content_product_changed","stale_submission_claim",
              "unsupported_content_claim","unsupported_research_finding"}
 PERMANENT.update({'community_rules_unresolved', 'community_join_rules_changed', 'community_owner_scope_missing',
-    'community_target_disabled', 'community_target_grant_revoked', 'community_group_dependency_required'})
+    'community_target_disabled', 'community_target_grant_revoked', 'community_group_dependency_required',
+    'community_source_binding_invalid'})
 MODEL_ERRORS={"ModelHTTPError","ModelRateLimitError","APITimeoutError","ConnectError","ReadTimeout",
     "APIConnectionError","ModelQuotaExceededError","AuthenticationError","ModelUnavailable","UnexpectedModelBehavior"}
 
@@ -725,7 +726,14 @@ async def execute(claim):
         if action or current and _membership_pending(current):
             return WorkResult(outcome="unknown", failure_code="unknown_receipt").model_dump(mode="json")
         code = str(error) if isinstance(error, ValueError) and len(str(error)) < 120 else type(error).__name__
-        return WorkResult(outcome="failed", failure_code=code).model_dump(mode="json")
+        import httpx
+        spec = row['input'].get('spec') or {}
+        operation = spec.get('payload', {}).get('community_operation')
+        diagnostic = {}
+        if (row['type'] == 'growth.account' and spec.get('purpose') == 'community'
+            and operation in ('search', 'inspect', 'join') and isinstance(error, httpx.HTTPStatusError)):
+            diagnostic['http_diagnostic'] = {'status_code': error.response.status_code, 'operation': operation}
+        return WorkResult(outcome="failed", failure_code=code, output=diagnostic).model_dump(mode="json")
 
 
 def recover_due(aid, now=None, cursor=None):
@@ -807,7 +815,17 @@ def recover_due(aid, now=None, cursor=None):
             "next_run": (now + timedelta(seconds=60)).isoformat()}
 
 
-def _resume_allowed(c, agent, row):
+def _community_investigation(row):
+    spec = row['input']['spec']
+    return (row['type'] == 'growth.account' and spec.get('purpose') == 'community'
+            and spec.get('payload', {}).get('community_operation') in ('search', 'inspect'))
+
+
+def _community_http_episode(row):
+    return _community_investigation(row) and (_runtime(row).get('recovery') or {}).get('error_code') == 'HTTPStatusError'
+
+
+def _resume_allowed(c, agent, row, *, proof_ref=None):
     spec = TaskSpec.model_validate(row["input"]["spec"])
     if _membership_pending(row):
         return 'reconcile_original_membership'
@@ -835,6 +853,30 @@ def _resume_allowed(c, agent, row):
             return "account_changed"
         if account["state"] != "connected" or account["desired"] != "running":
             return "account_paused"
+    if spec.kind == 'account' and spec.purpose == 'community':
+        from ..account_connection import validate_community_source
+        try:
+            validate_community_source(c, spec, binding_version=row['input'].get('binding_version'))
+        except ValueError as error:
+            return str(error)
+    scoped_read_proof = isinstance(proof_ref, str) and proof_ref.startswith('identity-check:')
+    if scoped_read_proof or _community_http_episode(row):
+        from ..account_connection import community_read_proof
+        if not _community_investigation(row) or one(c, 'SELECT id FROM lead.actions WHERE task_id=%s', (row['id'],)):
+            return 'community_read_proof_scope'
+        if not scoped_read_proof:
+            return 'community_read_proof_required'
+        try:
+            failure = (_runtime(row).get('recovery') or {}).get('last_failure_at')
+            if _community_http_episode(row) and not failure:
+                return 'community_read_proof_invalid'
+            proof = community_read_proof(c, str(agent['id']), proof_ref,
+                after=datetime.fromisoformat(failure) if failure else None)
+        except ValueError:
+            return 'community_read_proof_invalid'
+        if (str(spec.account_id) != proof['account_id'] or row['input'].get('profile_id') != proof['profile_id']
+            or row['input'].get('binding_version') != proof['binding_version']):
+            return 'community_read_proof_scope'
     if spec.target_id:
         target = one(c, """SELECT t.external_target_id FROM lead.account_targets t
             JOIN lead.authorization_grants g ON g.target_id=t.id AND g.revoked_at IS NULL
@@ -855,7 +897,7 @@ def _resume_proven(c, aid, agent, row, episode, proof_ref):
     runtime = _runtime(row)
     consumed = list(runtime.get("recovery_proofs") or [])
     proof_key = digest([episode["resource"], episode["condition_revision"], proof_ref])
-    if proof_key in consumed or _resume_allowed(c, agent, row):
+    if proof_key in consumed or _resume_allowed(c, agent, row, proof_ref=proof_ref):
         return None
     dependencies = list(runtime.get("blocked_resources") or [])
     def matches(dep):
@@ -898,9 +940,78 @@ def resume_task(aid, task_id, *, proof_ref=None):
         episode = runtime.get("recovery") or {}
         if not (proof_ref and episode.get("proof_ref") == proof_ref and episode.get("status") == "recovered"):
             raise ValueError("recovery_condition_unchanged")
-        if _resume_allowed(c, agent, row) == "reconcile_original_action":
+        if _resume_allowed(c, agent, row, proof_ref=proof_ref) == "reconcile_original_action":
             raise ValueError("reconcile_original_action")
         return _resume_proven(c, aid, agent, row, episode, proof_ref)
+
+
+def _consume_community_read(c, aid, agent, root, episode, proof_ref):
+    """Consume only read readiness; source and outbound stops remain independent."""
+    from ..account_connection import community_read_proof
+    from ..db import audit
+    from ..scope import principal, trusted_execution
+
+    if (not trusted_execution() or principal() is not None or not _community_http_episode(root)
+        or episode.get('status') != 'blocked' or not episode.get('last_failure_at')):
+        return None
+    proof = community_read_proof(c, aid, proof_ref, after=datetime.fromisoformat(episode['last_failure_at']))
+    spec = TaskSpec.model_validate(root['input']['spec'])
+    resource, condition = _resource_condition(c, agent, root, spec)
+    if (str(spec.account_id) != proof['account_id'] or root['input'].get('profile_id') != proof['profile_id']
+        or root['input'].get('binding_version') != proof['binding_version'] or resource != episode['resource']):
+        return None
+    episode.update(status='recovered', proof_ref=proof_ref, proof_scope='community_read_v1',
+        proof_operations=proof['operations'], observed_condition=condition, probe_lease_until=None)
+    c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery}',%s) WHERE id=%s", (j(episode), root['id']))
+    rows = all_rows(c, """SELECT * FROM lead.tasks WHERE type LIKE 'growth.%%'
+        AND state IN ('failed','planned','queued','waiting_user')
+        AND ((result#>>'{runtime,resource_key}'=%s AND result#>>'{runtime,condition_revision}'=%s)
+          OR result#>'{runtime,blocked_resources}' @> %s) ORDER BY id FOR UPDATE""",
+        (episode['resource'], episode['condition_revision'],
+         j([{'resource':episode['resource'], 'condition_revision':episode['condition_revision']}])))
+    resumed = [ref for row in rows if (ref := _resume_proven(c, aid, agent, row, episode, proof_ref))]
+    payload = {'reason':'resource_recovered', 'resource':episode['resource'],
+        'condition_revision':episode['condition_revision'], 'transition':episode['fingerprint'],
+        'proof_ref':proof_ref, 'scope':'community_read_v1', 'operations':proof['operations'], 'resumed_count':len(resumed)}
+    emit(c, aid, 'growth.wake', payload)
+    audit(c, aid, 'community.read_proof_consumed', payload)
+    return resumed
+
+
+def consume_community_read_proof(aid, proof_ref):
+    """A new real observation may outlive old work windows; it never extends them."""
+    from ..account_connection import community_read_proof
+    from ..scope import principal, trusted_execution
+
+    if not trusted_execution() or principal() is not None:
+        raise ValueError('community_read_service_scope_required')
+    with tx(aid) as c:
+        _recovery_lock(c, aid)
+        agent = require_agent(c, aid, True)
+        all_rows(c, 'SELECT id FROM lead.social_accounts ORDER BY id FOR SHARE')
+        all_rows(c, 'SELECT id FROM lead.authorization_grants ORDER BY id FOR SHARE')
+        proof = community_read_proof(c, aid, proof_ref)
+        roots = all_rows(c, """SELECT * FROM lead.tasks WHERE type='growth.account'
+            AND input#>>'{spec,purpose}'='community' AND input#>>'{spec,account_id}'=%s
+            AND input->>'profile_id'=%s AND input#>>'{spec,payload,community_operation}' IN ('search','inspect')
+            AND result#>>'{runtime,recovery,error_code}'='HTTPStatusError'
+            AND result#>>'{runtime,recovery,status}'='blocked' ORDER BY id FOR UPDATE""",
+            (proof['account_id'], proof['profile_id']))
+        resumed, count = [], 0
+        for root in roots:
+            root = one(c, 'SELECT * FROM lead.tasks WHERE id=%s FOR UPDATE', (root['id'],))
+            episode = dict(_runtime(root).get('recovery') or {})
+            try:
+                accepted = _consume_community_read(c, aid, agent, root, episode, proof_ref)
+            except ValueError as error:
+                if str(error) != 'community_read_proof_invalid':
+                    raise
+                continue
+            if accepted is not None:
+                count += 1
+                resumed.extend(accepted)
+    return {'state':'recovered' if count else 'no_matching_episode', 'scope':'community_read_v1',
+        'proof_ref':proof_ref, 'recovered_episodes':count, 'resumed_refs':resumed, 'resumed_count':len(resumed)}
 
 
 def _consume_recovery(aid, root_id, expected, proof, observed_condition, lease_token):
@@ -919,6 +1030,13 @@ def _consume_recovery(aid, root_id, expected, proof, observed_condition, lease_t
                 or episode.get("probe_token") != lease_token or current != observed_condition
                 or episode.get("attempts") != expected.get("attempts")):
             return None
+        if _community_http_episode(root) or isinstance(proof, str) and proof.startswith('identity-check:'):
+            try:
+                return _consume_community_read(c, aid, agent, root, episode, proof)
+            except ValueError as error:
+                if str(error) != 'community_read_proof_invalid':
+                    raise
+                return None
         episode.update(status="recovered", proof_ref=proof, observed_condition=observed_condition, probe_lease_until=None)
         c.execute("UPDATE lead.tasks SET result=jsonb_set(result,'{runtime,recovery}',%s) WHERE id=%s", (j(episode), root_id))
         rows = all_rows(c, """SELECT * FROM lead.tasks WHERE type LIKE 'growth.%%'
@@ -1002,6 +1120,15 @@ async def probe_episode(aid, work, data):
                         if document and (not urls or document["source_ref"] in urls):
                             proof = "document:"+str(evidence.id)
                             break
+        elif _community_http_episode(root):
+            from ..account_connection import rpc
+            from ..execution_routes import resolve
+            reference = await asyncio.to_thread(resolve, aid, profile_id=root['input']['profile_id'])
+            observation = await rpc(aid, root['input']['profile_id'], 'account/inspect', {
+                'platform':'telegram', 'account_id':str(spec.account_id), 'community_read_proof':True,
+                'execution_ref':reference.model_dump(mode='json')})
+            if observation.get('verified') is True and observation.get('scope') == 'community_read_v1':
+                proof = observation.get('proof_ref')
         elif episode.get("error_code") in ("ModelHTTPError","ModelRateLimitError","APITimeoutError","ConnectError","ReadTimeout","APIConnectionError") and spec.kind in ("decision","content","research"):
             from ..budget import growth_cost_context
             from ..model import run_model

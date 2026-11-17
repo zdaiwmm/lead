@@ -549,9 +549,78 @@ def community_group(c, task, source_id, peer):
     parsed = urlsplit(group.get('canonical_url', ''))
     if parsed.scheme != 'https' or parsed.netloc != 't.me' or not re.fullmatch(r'/[A-Za-z][A-Za-z0-9_]{3,31}', parsed.path) or parsed.query or parsed.fragment:
         raise ValueError('community_public_group_required')
+    if source['input']['spec'].get('payload', {}).get('community_operation') == 'search':
+        from .community_search import public_group_url
+        subtitle = group.get('subtitle')
+        observed_url = public_group_url(subtitle) if isinstance(subtitle, str) else None
+        if not observed_url or observed_url.casefold() != group['canonical_url'].casefold():
+            raise ValueError('community_source_binding_invalid')
     group['source_task_id'] = str(source['id'])
     group['source_hash'] = digest(matches[0])
     return group
+
+
+def validate_community_source(c, spec, *, binding_version=None):
+    """Check a read's immutable predecessor before admission or browser access."""
+    intent = spec.model_dump(mode='json') if isinstance(spec, TaskSpec) else spec
+    payload = intent.get('payload', {})
+    if intent.get('kind') != 'account' or intent.get('purpose') != 'community' or payload.get('community_operation') not in ('inspect', 'join'):
+        return None
+    if binding_version is None:
+        account = one(c, 'SELECT binding_version FROM lead.social_accounts WHERE id=%s', (intent.get('account_id'),))
+        binding_version = (account or {}).get('binding_version')
+    return community_group(c, {'input': {'spec': intent, 'binding_version': binding_version}},
+        payload.get('group_task_id'), payload.get('group_id'))
+
+
+def community_read_proof(c, aid, proof_ref, *, after=None):
+    """Resolve a fresh server observation; caller JSON or identity alone is insufficient."""
+    from datetime import datetime
+    from uuid import UUID
+
+    from .channel_contracts import ExecutionRef
+    from .identity import community_read_snapshot, verified_profile
+
+    try:
+        if not isinstance(proof_ref, str) or not proof_ref.startswith('identity-check:'):
+            raise ValueError()
+        identifier = str(UUID(proof_ref.split(':', 1)[1]))
+        proof = one(c, 'SELECT * FROM lead.identity_checks WHERE id=%s FOR SHARE', (identifier,))
+        if not proof or str(proof['agent_id']) != str(aid) or proof['result'] != 'passed' or not proof['valid_until'] or proof['valid_until'] <= utcnow():
+            raise ValueError()
+        bound = proof['checks'].get('community_read')
+        if (not isinstance(bound, dict) or type(bound.get('version')) is not int or bound['version'] != 1
+            or bound.get('scope') != 'community_read_v1' or bound.get('source') != 'server_verification'
+            or bound.get('operations') != ['search', 'inspect'] or bound.get('agent_id') != str(aid)
+            or any(type(bound.get(key)) is not int or bound[key] < 1 for key in
+                ('binding_version', 'epoch', 'control_version', 'config_revision', 'authorization_version', 'intent_revision'))):
+            raise ValueError()
+        observed = datetime.fromisoformat(bound['observed_at'])
+        if (not observed.tzinfo or observed > utcnow() or proof['checked_at'] < observed
+            or after and observed <= after):
+            raise ValueError()
+        reference = ExecutionRef.model_validate(bound['execution_ref'])
+        from .executor_scope import selected_profile
+        if str(selected_profile(str(aid), bound['profile_id'])) != bound['profile_id']:
+            raise ValueError()
+        current, _ = community_read_snapshot(c, str(aid), bound['account_id'], bound['profile_id'],
+            bound['session_id'], bound['epoch'], reference)
+        if any(bound.get(key) != value for key, value in current.items()):
+            raise ValueError()
+        device = one(c, 'SELECT * FROM lead.identity_checks WHERE id=%s FOR SHARE', (str(UUID(bound['device_check_id'])),))
+        if (not device or device['id'] == proof['id'] or device['result'] != 'passed'
+            or not device['valid_until'] or device['valid_until'] < proof['valid_until']
+            or device['checked_at'] > observed or after and device['checked_at'] <= after
+            or any(proof[key] != device[key] for key in
+                ('agent_id', 'profile_id', 'network_identity_id', 'engine_version', 'config_hash', 'observed_ip'))
+            or str(proof['profile_id']) != bound['profile_id']
+            or str(proof['network_identity_id']) != bound['network_identity_id']
+            or proof['engine_version'] != bound['engine_version'] or proof['config_hash'] != bound['config_hash']
+            or not verified_profile(c, proof['profile_id'])):
+            raise ValueError()
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        raise ValueError('community_read_proof_invalid') from error
+    return bound
 
 
 def community_group_allowed(intent, group):
@@ -618,6 +687,7 @@ async def execute_community_account(aid, row, data, claim):
     with tx(aid) as c:
         current = one(c, 'SELECT * FROM lead.tasks WHERE id=%s', (row['id'],))
         community_task_scope(c, aid, current, claim, reconcile=community_pending(current))
+        validate_community_source(c, current['input']['spec'], binding_version=current['input'].get('binding_version'))
     base = {'task_id': str(row['id']), 'growth_claim': claim}
     if data.community_operation == 'search':
         groups = []
