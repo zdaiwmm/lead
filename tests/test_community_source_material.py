@@ -1,6 +1,6 @@
 """Live native group text supplies existing document/experiment admission, not permission."""
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from lead_app import activities, community_runtime, local_executor_client
@@ -107,7 +107,7 @@ async def test_live_inspect_unlocks_real_admission_and_original_native_content_i
         docs = c.execute('SELECT id,source_ref,source_type,sha256,trust_state,created_at FROM lead.knowledge_documents ORDER BY source_ref').fetchall()
         assert [d['source_ref'] for d in docs] == [URL, URL+'/10']
         assert all(d['source_type'] == 'account_read' and d['trust_state'] == 'untrusted_source' for d in docs)
-        assert all(d['created_at'].isoformat() == result['output']['group']['observed_at'] for d in docs)
+        assert all(d['created_at'] == datetime.fromisoformat(result['output']['group']['observed_at']) for d in docs)
         before = digest(docs)
     document = _business_read({'agent_id': community.aid}, 'lead_document_read', docs[1]['id'])
     assert document['chunks'][0]['body'] == MESSAGE[:1200].strip()
@@ -229,10 +229,16 @@ async def test_await_drift_or_noncurrent_observation_cannot_save_any_document(co
 
     monkeypatch.setattr(community_runtime, 'observe_group', read)
     monkeypatch.setattr(activities, 'browser_rpc', rpc)
-    _, _, result = await inspect(community, original)
+    ref, claim, result = await inspect(community, original)
     assert result['outcome'] == 'failed'
+    if change in ('route', 'source', 'missing_actual_ref'):
+        runtime.finish(claim, result)
     with tx(community.aid) as c:
         assert one(c, 'SELECT count(*) n FROM lead.knowledge_documents')['n'] == 0
+        if change in ('route', 'source', 'missing_actual_ref'):
+            saved = one(c, 'SELECT state,result FROM lead.tasks WHERE id=%s', (ref['task_id'],))
+            assert saved['state'] == 'failed' and not saved['result']['runtime'].get('recovery')
+            assert saved['result']['runtime']['attempts'] == 1
 
 
 async def test_inspect_without_execution_ref_keeps_original_direct_caller_compatibility(community, monkeypatch):

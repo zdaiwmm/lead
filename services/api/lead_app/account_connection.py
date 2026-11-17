@@ -712,6 +712,8 @@ async def execute_community_account(aid, row, data, claim):
 
         group = observed['group']
         observed_at = datetime.fromisoformat(group['observed_at'])
+        if not observed.get('execution_ref'):
+            raise ValueError('community_source_binding_invalid')
         reference = ExecutionRef.model_validate(observed.get('execution_ref'))
         if (not observed_at.tzinfo or not started <= observed_at <= received
             or reference.registry_revision is None or group['group_id'] != source['group_id']
@@ -741,7 +743,7 @@ async def execute_community_account(aid, row, data, claim):
             if (current_source['source_hash'] != source['source_hash'] or current_versions != versions
                 or (intent['revision'], str(card['id']) if card else None) != authority
                 or not route or registered_reference(route) != reference):
-                raise ValueError('community_task_scope_changed')
+                raise ValueError('scope_changed')
             for url, text, provenance in pages:
                 ref, fresh = _remember(aid, {'url': url, 'title': group['title'], 'text': text},
                     source_type='account_read', connection=c)
