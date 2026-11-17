@@ -790,6 +790,14 @@ async def execute(claim):
         if (row['type'] == 'growth.account' and spec.get('purpose') == 'community'
             and operation in ('search', 'inspect', 'join') and isinstance(error, httpx.HTTPStatusError)):
             diagnostic['http_diagnostic'] = {'status_code': error.response.status_code, 'operation': operation}
+            if error.response.status_code == 500 and len(error.response.content) <= 4096:
+                from ..channel_contracts import read_browser_failure
+                try:
+                    failure = read_browser_failure(error.response.json())
+                except ValueError:
+                    failure = None
+                if failure is not None:
+                    diagnostic['http_diagnostic']['browser_failure'] = failure
         return WorkResult(outcome="failed", failure_code=code, output=diagnostic).model_dump(mode="json")
 
 

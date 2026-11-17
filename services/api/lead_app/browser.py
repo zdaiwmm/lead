@@ -1217,6 +1217,14 @@ async def auth(request, call_next):
         return JSONResponse(
             {"detail": message[:250], "code": getattr(e, "code", None), **method_error_metadata(e)}, status_code=409
         )
+    except Exception as error:
+        from .channel_contracts import browser_failure_metadata
+        from .config import ROOT
+
+        diagnostic = browser_failure_metadata(error, ROOT)
+        # The Telegram unit deliberately retains only this content-free prefix.
+        print('TG_RESULT ' + json.dumps({'event': 'browser_failure', 'metadata': diagnostic}), flush=True)
+        return JSONResponse({'detail': '浏览器操作未完成，已保留诊断信息', 'browser_failure': diagnostic}, status_code=500)
 
 
 class OpenRequest(BaseModel):
