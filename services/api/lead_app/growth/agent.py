@@ -15,7 +15,7 @@ from .store import (
     objective_revision,
 )
 
-PROMPT_VERSION = "growth-v2.14"
+PROMPT_VERSION = "growth-v2.15"
 MAX_CONTEXT_BYTES = 48000
 
 
@@ -399,6 +399,7 @@ def rejected_community_review(aid, proposal, rejected):
 async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=None):
     context = await asyncio.to_thread(decision_context,aid,decision_task_id,decision_claim,trigger_refs)
     accepted, rejected, repair = [], [], None
+    accepted_command_keys = set()
     last_valid = None
     pending_work = None
     continuation_check = None
@@ -412,6 +413,10 @@ async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=
                 raise ValueError("invalid_proposal_context")
             if repair and repair.get('continuation_only') and proposal.commands:
                 raise ValueError('accepted_work_is_immutable_return_continuation_only')
+            if repair and repair.get('no_work_review') and any(
+                    command_group(command) in {item['group'] for item in accepted}
+                    or command.command_key in accepted_command_keys for command in proposal.commands):
+                raise ValueError('accepted_work_is_immutable_do_not_replay_commands_or_groups')
             if repair and repair.get("groups") and any(command_group(cmd)
                     not in repair["groups"] for cmd in proposal.commands):
                 raise ValueError("repair_must_only_change_rejected_groups")
@@ -421,19 +426,25 @@ async def decide(aid, decision_task_id=None, trigger_refs=None,*,decision_claim=
                 business_snapshot={"id":str(context["product"].get("id")) if context["product"] else None},
                 decision_claim=decision_claim, config_revision=context.get('config_revision', -1))
             if result.get("discarded"):
-                return {**result,"prompt_version":PROMPT_VERSION}
+                return {**result,"accepted":accepted+result.get('accepted', []),"prompt_version":PROMPT_VERSION}
             accepted.extend(result["accepted"])
+            accepted_groups = {item['group'] for item in result['accepted']}
+            accepted_command_keys.update(command.command_key for command in proposal.commands
+                if command_group(command) in accepted_groups)
             rejected = result["rejected"]
             pending_work = result.get('pending_work')
             continuation_check = result.get('continuation_check')
             if not rejected:
-                if (attempt == 0 and not proposal.commands and not accepted and pending_work is False
+                if (attempt == 0 and pending_work is False
                         and (not (continuation_check or {}).get('valid') or continuation_check.get('status') == 'blocked')
                         and (context.get('discovery', {}).get('native_public_read')
                              or any({'search','inspect'} & set(account.get('community_operations', []))
                                     for account in context['accounts']))):
-                    repair = {'no_work_review':True,'previous_proposal':proposal.model_dump(mode='json'),'accepted':[],
-                        'instruction':'The initial empty proposal is a no-change judgment, not an admission rejection. No original work is pending. '
+                    repair = {'no_work_review':True,'previous_proposal':proposal.model_dump(mode='json'),'accepted':list(accepted),
+                        'continuation_sources':result.get('continuation_sources', []),
+                        'instruction':'No executable work remains after this proposal; an accepted receipt is not pending work. '
+                        'Accepted changes and receipts are final. Never replay their command keys or groups. '
+                        'An empty proposal is a no-change judgment, not an admission rejection. '
                         'Review that judgment once against this same frozen context and its declared investigation options; declarations do not prove execution readiness. '
                         'Declared native public search/read can obtain a canonical Document before experiment admission. '
                         'A prior atomic rollback does not prove its account task was independently rejected or executed. '

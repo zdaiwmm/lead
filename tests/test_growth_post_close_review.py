@@ -3,7 +3,7 @@ from datetime import timedelta
 
 import pytest
 from lead_app import activities, domain
-from lead_app.db import j, one, tx
+from lead_app.db import one, tx
 from lead_app.growth import agent, runtime
 from lead_app.growth.contracts import (
     Command,
@@ -198,3 +198,28 @@ async def test_bounded_review_cannot_replay_an_accepted_group_or_command(communi
     assert len(result['accepted']) == 1 and result['repair_exhausted']
     with tx(aid) as c:
         assert one(c, "SELECT count(*) n FROM lead.tasks WHERE type='growth.account'")['n'] == 1
+
+
+async def test_accepted_close_with_a_real_future_review_does_not_add_a_proposal(community, monkeypatch):  # noqa: F811
+    aid = community.aid
+    first, decision, claim, _, _, _, _, _ = await setup_case(community, monkeypatch, 'close')
+    with tx(aid) as c:
+        future = create_experiment(c, aid, ExperimentSpec(question_type='audience',
+            question='Does the original placement expose a different audience?',
+            hypothesis='The existing observation window may produce a relevant response.',
+            learning_signal='The original observed response or an inconclusive review.', token_limit=1000,
+            review_at=utcnow()+timedelta(hours=1)))
+    calls = []
+
+    async def model(schema, context, **kwargs):
+        calls.append(context)
+        source = next(source for source in context['continuation_sources'] if source['ref']['id'] == str(future['id']))
+        return DecisionProposal(context_key=context['context_key'], rationale='The independent original review is a real producer.',
+            commands=[first], continuation={'condition': 'The current original experiment reaches its review.',
+                'producer': source['producer'], 'responsibility': source['responsibility'], 'source_ref': source['ref'],
+                'next_action': 'Evaluate the actual original observation window.'})
+
+    monkeypatch.setattr(agent, 'run_model', model)
+    result = await agent.decide(aid, decision['task_id'], decision_claim=claim)
+    assert len(calls) == 1 and len(result['accepted']) == 1
+    assert result['status'] == 'waiting_for_change' and result['continuation_check']['valid']
