@@ -150,10 +150,13 @@ async def test_original_source_recovery_through_real_outbox_temporal_and_current
                     experiment_id=experiment, payload=TaskSpec(kind='research', purpose=name, experiment_id=experiment,
                         payload={'urls': [url], 'question': 'What comparison need is documented?'},
                         review_at=utcnow()+ (timedelta(seconds=10) if expire_second and name == 'waiting-two' else timedelta(hours=4))).model_dump(mode='json')))
-        continuation = None if commands else {
-            'condition': 'New original-source evidence about supplier comparisons is retained.',
-            'producer': 'evidence_added', 'responsibility': 'product',
-            'next_action': 'Evaluate that new evidence before choosing another bounded source action.'}
+        continuation = None
+        if not commands:
+            source = next(item for item in context['continuation_sources'] if item['ref']['kind'] == 'experiment')
+            continuation = {
+                'condition': 'The original comparison experiment reaches its recorded review window.',
+                'source_ref': source['ref'], 'producer': source['producer'], 'responsibility': source['responsibility'],
+                'next_action': 'Review the retained original-source evidence before choosing another bounded source action.'}
         return schema(context_key=context['context_key'], rationale='Use a feasible independent source while the original resource remains blocked.',
             commands=commands, continuation=continuation)
 
