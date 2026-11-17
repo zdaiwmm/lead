@@ -97,7 +97,8 @@ async def test_unknown_receipt_read_allows_same_account_independent_original_tas
                     loop.call_soon_threadsafe(entered.set)
                 try:
                     if row['barrier_member']:
-                        phase['barrier'].wait(timeout=20)
+                        # The second request includes a fresh native SDK startup.
+                        phase['barrier'].wait(timeout=60)
                         time.sleep(.5)
                     return original(request)
                 except threading.BrokenBarrierError:
@@ -169,7 +170,7 @@ async def test_unknown_receipt_read_allows_same_account_independent_original_tas
                 assert one(c, 'SELECT state FROM lead.actions WHERE id=%s', (initial[1]['id'],))['state'] == 'unknown'
                 assert submit_work(c, aid, first[2]) == first[0]
             assert advance(first[0])['wait']['reason'] == 'work_leased'
-            restored, continued = await asyncio.wait_for(asyncio.gather(reading, execute(other, 1)), 65)
+            restored, continued = await asyncio.wait_for(asyncio.gather(reading, execute(other, 1)), 120)
             phase['active'] = False
             for result, action, attempts, terminal, _ in (restored, continued):
                 assert result.outcome == 'completed' and action['state'] == 'confirmed' and terminal == 'succeeded'
