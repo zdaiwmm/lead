@@ -95,7 +95,7 @@ def test_retained_body_and_validation_are_complete_scoped_data(sample):
     assert 'MUST_NOT_ESCAPE' not in json.dumps(result, default=str)
 
 
-@pytest.mark.parametrize('field,value', [('id', str(uuid4())), ('id', 'bad-id'), ('id', {'injected': True}), ('revision', 2),
+@pytest.mark.parametrize('field,value', [pytest.param('id', str(uuid4()), id='missing-content-id'), ('id', 'bad-id'), ('id', {'injected': True}), ('revision', 2),
     ('revision', True), ('revision', '1'), ('hash', 'f'*64), ('hash', {'malicious': True})])
 def test_unavailable_references_remain_normal_task_results(sample, field, value):
     replace_refs(sample, [{**sample['artifact'], field: value}])

@@ -24,7 +24,7 @@ SHA = "a" * 40
 def test_ci_database_wait_ignores_temporary_unix_server(tmp_path, final_ready_after):
     """Run the actual workflow shell against init-time Unix and final TCP states."""
     workflow = yaml.safe_load((Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text())
-    command = next(step['run'] for step in workflow['jobs']['backend']['steps']
+    command = next(step['run'] for step in workflow['jobs']['backend-tests']['steps']
                    if step.get('name') == 'Start isolated CI database')
     tools = tmp_path / 'bin'
     tools.mkdir()
@@ -264,7 +264,7 @@ def test_workflow_contract_connects_scope_gate_tests_and_builds():
     jobs = workflow["jobs"]
     assert workflow["on"]["push"]["branches"] == ["main"]
     assert "pull_request" in workflow["on"] and "workflow_dispatch" in workflow["on"]
-    assert "github.event_name != 'pull_request'" in jobs["backend"]["if"]
+    assert "github.event_name != 'pull_request'" in jobs["backend-tests"]["if"]
     assert "github.event_name != 'pull_request'" in jobs["delivery"]["if"]
     assert jobs["verified"]["if"] == "always()"
     assert set(jobs["verified"]["needs"]) == {"scope", "checks", "backend", "frontend", "namespace", "delivery"}
@@ -281,7 +281,7 @@ def test_workflow_contract_connects_scope_gate_tests_and_builds():
     assert any("tests/home_mount_drill.py" in s.get("run", "") for s in steps)
     assert any("tests/tool_install_drill.py" in s.get("run", "") for s in steps)
     assert any("LEAD_BROWSER_TESTS=1" in s.get("run", "") and "pytest" in s.get("run", "")
-               for s in jobs["backend"]["steps"])
+               for s in jobs["backend-tests"]["steps"])
     assert scope.TOOL_FILES == importlib.import_module("home_systemd_release").OPERATOR_ONLY_FILES
 
 
@@ -318,8 +318,8 @@ def test_namespace_gate_runs_real_executor_systemd_dropin_drill():
 def test_sdk_is_built_once_and_same_attempt_artifact_reaches_tests_and_image():
     root = Path(__file__).resolve().parents[1]
     jobs = yaml.load((root / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)['jobs']
-    assert jobs['backend']['needs'] == ['scope', 'frontend']
-    frontend, backend = jobs['frontend']['steps'], jobs['backend']['steps']
+    assert jobs['backend-tests']['needs'] == ['scope', 'frontend']
+    frontend, backend = jobs['frontend']['steps'], jobs['backend-tests']['steps']
     builds = [s for s in frontend if 'build_browser_runtime.py' in s.get('run','') and '--with-system-deps' in s['run']]
     assert len(builds) == 1
     assert builds[0]['if'] == "github.event_name != 'pull_request'"
@@ -347,3 +347,100 @@ def test_sdk_is_built_once_and_same_attempt_artifact_reaches_tests_and_image():
     for step in frontend+backend:
         if 'run' in step:
             subprocess.run(['bash', '-n'], input=step['run'], text=True, check=True)
+
+
+def test_backend_matrix_keeps_isolation_complete_coverage_and_public_proof_job():
+    root = Path(__file__).resolve().parents[1]
+    jobs = yaml.load((root / '.github/workflows/ci.yml').read_text(), Loader=yaml.BaseLoader)['jobs']
+    runners, aggregate = jobs['backend-tests'], jobs['backend']
+    assert runners['runs-on'] == 'ubuntu-24.04'
+    assert runners['strategy'] == {'fail-fast': 'false', 'matrix': {'shard': ['0', '1', '2', '3']}}
+    assert 'continue-on-error' not in runners
+    assert runners['env']['LEAD_DB_NAME'] == 'lead_ci'
+    assert runners['env']['LEAD_CI_SHARD'] == '${{ matrix.shard }}'
+    steps = runners['steps']
+    early = next(s for s in steps if s.get('name') == 'Early browser and operating recovery regressions')
+    full = next(s for s in steps if s.get('name') == 'Database, media and authorization tests')
+    assert early['if'] == 'matrix.shard == 0'
+    assert '--ci-stage early' in early['run'] and '--ci-shard 0' in early['run']
+    assert '--ci-shard "$LEAD_CI_SHARD"' in full['run']
+    command = shlex.split(full['run'])
+    invocation = next(i for i, part in enumerate(command) if part.endswith('/pytest'))
+    assert command[invocation + 1:] == [
+        '-p', 'scripts.ci_pytest', '--ci-shard', '$LEAD_CI_SHARD',
+        '--ci-report', '.state/ci-proof/suite-$LEAD_CI_SHARD.json',
+        '-q', '--maxfail=1', '--tb=short', '--durations=15', '--junitxml=.state/ci-tests.xml',
+    ]
+    assert aggregate['needs'] == ['scope', 'backend-tests']
+    assert aggregate['if'].startswith('always() &&')
+    assert "github.event_name != 'pull_request'" in aggregate['if']
+    assert "needs.scope.outputs.kind == 'application'" in aggregate['if']
+    assert 'name' not in aggregate and 'strategy' not in aggregate
+    proof = next(s for s in steps if s.get('name') == 'Retain sanitized backend coverage and item timings')
+    assert proof['if'] == 'always()' and proof['with']['if-no-files-found'] == 'error'
+    assert proof['with']['include-hidden-files'] == 'true'
+    assert proof['with']['path'] == '.state/ci-proof/*.json'
+    assert proof['with']['name'] == 'lead-backend-proof-${{ github.sha }}-${{ github.run_attempt }}-${{ matrix.shard }}'
+    timing = next(s for s in steps if s.get('name') == 'Retain backend preparation and cleanup timings')
+    assert timing['with']['path'] == '.state/ci-timing.jsonl'
+    assert timing['with']['include-hidden-files'] == 'true'
+    download = next(s for s in aggregate['steps'] if s.get('name') == 'Download same-attempt backend coverage')
+    assert download['with']['pattern'] == 'lead-backend-proof-${{ github.sha }}-${{ github.run_attempt }}-*'
+    assert 'run-id' not in download['with'] and 'merge-multiple' not in download['with']
+    verifier = aggregate['steps'][-1]
+    assert 'scripts/ci_backend_proof.py' in verifier['run']
+    for step in aggregate['steps']:
+        assert 'if' not in step and 'continue-on-error' not in step
+        if 'run' in step:
+            subprocess.run(['bash', '-n'], input=step['run'], text=True, check=True)
+
+
+@pytest.mark.parametrize('result', ['success', 'failure', 'cancelled', 'skipped', ''])
+def test_backend_aggregate_requires_every_matrix_runner(result):
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / '.github/workflows/ci.yml').read_text())
+    guard = next(s for s in workflow['jobs']['backend']['steps']
+                 if s.get('name') == 'Require every backend runner to succeed')
+    assert guard['env']['SHARDS_RESULT'] == '${{ needs.backend-tests.result }}'
+    observed = subprocess.run(['bash', '-e', '-c', guard['run']], env={**os.environ, 'SHARDS_RESULT': result})
+    assert (observed.returncode == 0) is (result == 'success')
+
+
+@pytest.mark.parametrize('mutation', ['matrix-only', 'duplicate', 'failure', 'skipped', 'cancelled'])
+def test_application_marker_cannot_bypass_missing_or_unsuccessful_backend_aggregate(mutation):
+    get, jobs = proof_api(kind='application')
+    backend = next(j for j in jobs if j['name'] == 'backend')
+    if mutation == 'matrix-only':
+        jobs.remove(backend)
+        jobs.extend({'name': f'backend-tests ({i})', 'conclusion': 'success', 'steps': []} for i in range(4))
+    elif mutation == 'duplicate':
+        jobs.append(dict(backend))
+    else:
+        backend['conclusion'] = mutation
+    with pytest.raises(ValueError):
+        release.verified_run(SHA, get=get)
+
+
+@pytest.mark.parametrize('exitstatus', [0, 7])
+def test_cleanup_timing_preserves_failure_and_omits_environment_or_logs(tmp_path, exitstatus):
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / '.github/workflows/ci.yml').read_text())
+    cleanup = next(s for s in workflow['jobs']['backend-tests']['steps']
+                   if s.get('name') == 'Clean up the isolated backend environment')
+    timing = tmp_path / '.github/scripts/ci_timing.py'
+    timing.parent.mkdir(parents=True)
+    timing.write_bytes((root / '.github/scripts/ci_timing.py').read_bytes())
+    docker = tmp_path / 'docker'
+    docker.write_text(f'#!/bin/sh\necho secret-command-output\nexit {exitstatus}\n')
+    docker.chmod(0o755)
+    observed = subprocess.run(['bash', '-e', '-c', cleanup['run']], cwd=tmp_path,
+        env={**os.environ, 'PATH': str(tmp_path) + os.pathsep + os.environ['PATH'],
+             'GITHUB_SHA': SHA, 'GITHUB_RUN_ID': '7', 'GITHUB_RUN_ATTEMPT': '2',
+             'LEAD_CI_SHARD': '3', 'PRIVATE_TOKEN': 'secret-environment'}, capture_output=True, text=True)
+    assert observed.returncode == exitstatus, observed.stderr
+    text = (tmp_path / '.state/ci-timing.jsonl').read_text()
+    record = json.loads(text)
+    assert record['exitstatus'] == exitstatus and record['phase'] == 'cleanup'
+    assert record['run_attempt'] == '2' and record['shard'] == 3
+    assert 0 <= record['seconds'] < 10
+    assert 'secret-' not in text
