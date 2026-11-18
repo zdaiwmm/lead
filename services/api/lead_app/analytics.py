@@ -4,19 +4,19 @@ Client-observed engagement is never represented as server-verified revenue.
 
 import re
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid5
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from .config import env
+from .config import CONFIG, env
 from .db import all_rows, audit, emit, j, one, record, require_agent, uid
 from .db import pooled_tx as tx
 from .fetch import resolve_public
 from .pixel_events import BrowserEvent
-from .promotion import CODE_PATTERN, configuration
+from .promotion import CODE_PATTERN, configuration, tracking_url
 from .scope import current_tenant
 from .security import analytics_key, valid_analytics_key
 
@@ -39,6 +39,31 @@ def public_origin():
     ):
         raise ValueError("采集入口需要独立的公网 HTTPS 来源")
     return value
+
+
+def _configured_shortlink_base() -> SplitResult | None:
+    from .outbound_links import external_url_problem
+
+    value = env().get("LEAD_SHORTLINK_BASE_URL", CONFIG.get("shortlink_base_url"))
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError("短链入口须为公网 HTTPS 地址，最多包含一段路径")
+    parsed = urlsplit(value)
+    if (
+        external_url_problem(value, https=True)
+        or parsed.username is not None
+        or parsed.port == 0
+        or re.search(r"[\s\x00-\x1f\x7f\\?#]", value)
+        or not re.fullmatch(r"(?:/[a-z0-9][a-z0-9_-]*)?/?", parsed.path)
+    ):
+        raise ValueError("短链入口须为公网 HTTPS 地址，最多包含一段路径")
+    return parsed._replace(path=parsed.path.rstrip("/"))
+
+
+def shortlink_base_url() -> str:
+    configured = _configured_shortlink_base()
+    return configured.geturl() if configured else public_origin()
 
 
 class AnalyticsSetup(BaseModel):
@@ -197,7 +222,7 @@ def settings(aid: UUID):
     return {
         "connection": conn,
         "links": [
-            {**x, "url": public_origin() + "/r/" + x["public_code"]} for x in links
+            {**x, "url": tracking_url(x["public_code"])} for x in links
         ],
         "public_url": public_origin(),
         "server": server,
@@ -327,13 +352,14 @@ def create_link(aid: UUID, body: TrackingSetup):
         row = register(c, aid, body.platform, body.destination_url, intent="manual:" + str(body.intent_id or uid()),
                        placement=body.placement, account=body.account_id, location=body.placement_ref, campaign=body.campaign,
                        code=None if compact else secrets.token_urlsafe(12))
-    return {**row, "url": public_origin() + "/r/" + row["public_code"]}
+        return {**row, "url": tracking_url(row["public_code"])}
 
 
 @router.get("/r/{code}")
 def redirect(code: str, request: Request):
     if not re.fullmatch(CODE_PATTERN, code):
         raise HTTPException(404)
+    shortlink_base = _configured_shortlink_base()
     with tx() as c:
         link = one(
             c,
@@ -381,8 +407,10 @@ def redirect(code: str, request: Request):
 
     if admitted:
         response.set_cookie(
-            "lead_click_browser", browser, max_age=86400, path="/r/",
-            secure=request.url.scheme == "https", httponly=True, samesite="lax",
+            "lead_click_browser", browser, max_age=86400,
+            path=(shortlink_base.path if shortlink_base else "") + "/r/",
+            secure=shortlink_base is not None or request.url.scheme == "https",
+            httponly=True, samesite="lax",
         )
     return response
 

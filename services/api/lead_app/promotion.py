@@ -166,8 +166,8 @@ def promotion_body(body, destination, marker, product_url=None, *, require_track
 
 
 def tracking_url(marker):
-    from .analytics import public_origin
+    from .analytics import shortlink_base_url
 
     if not re.fullmatch(CODE_PATTERN, marker):
         raise ValueError("推广链接编号无效")
-    return public_origin() + "/r/" + marker
+    return shortlink_base_url() + "/r/" + marker

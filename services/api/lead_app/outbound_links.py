@@ -30,14 +30,14 @@ def external_url_problem(value, *, https=False):
 
 def configured_problem():
     from . import promotion
-    from .analytics import public_origin
+    from .analytics import shortlink_base_url
 
     # Older installations publish a direct business URL. Detect the delivered
     # shortlink implementation without replacing or duplicating its collector.
     if not callable(getattr(promotion, "tracking_url", None)):
         return None
     try:
-        invalid = external_url_problem(public_origin(), https=True)
+        invalid = external_url_problem(shortlink_base_url(), https=True)
     except ValueError:
         invalid = True
     return "public_shortlink_required" if invalid else None

@@ -129,8 +129,8 @@ def acquisition(c, agent, business, now):
     Public configuration alone is not a successful collector health check. Until
     that subsystem exposes verified health, absent observations remain unknown.
     """
-    from .analytics import public_origin
     from .growth_experiments import chamber_campaign
+    from .outbound_links import configured_problem
     from .pixel_events import configuration as pixel_configuration
 
     clicks_only = chamber_campaign(agent)
@@ -214,15 +214,13 @@ def acquisition(c, agent, business, now):
         WHERE trust_level='redirect_observed' AND tracking_link_id IS NOT NULL AND started_at>=%s""",
         (now - timedelta(days=30),),
     )
-    origin = public_origin()
-    public = urlsplit(origin).hostname not in {"localhost", "127.0.0.1", "::1"}
     # Existing storage has no collector health/coverage contract. Do not infer a
     # measured zero merely from a configured URL or from installed site pixels.
     click_state = (
         "observed"
         if clicks["requests"]
         else "awaiting_health_contract"
-        if public
+        if not configured_problem()
         else "not_public"
     )
     return {

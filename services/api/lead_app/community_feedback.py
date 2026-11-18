@@ -14,14 +14,10 @@ def probe_cookie(aid):
 
 
 async def sample_redirect(aid):
-    from .analytics import public_origin
-    from .outbound_links import external_url_problem
+    from .outbound_links import configured_problem
+    from .promotion import tracking_url
 
-    try:
-        origin = public_origin()
-    except ValueError:
-        return
-    if external_url_problem(origin, https=True):
+    if configured_problem():
         return
     slot = int(datetime.now(timezone.utc).timestamp() // 600)
     with tx(aid) as c:
@@ -36,6 +32,7 @@ async def sample_redirect(aid):
         )
         if not link:
             return
+        url = tracking_url(link["public_code"])
         sample = one(
             c,
             """INSERT INTO lead.tasks(tenant_id,agent_id,type,state,workflow_id,input,scheduled_at)
@@ -51,7 +48,7 @@ async def sample_redirect(aid):
             timeout=4, trust_env=False, follow_redirects=False
         ) as client:
             response = await client.get(
-                f"{origin}/r/{link['public_code']}",
+                url,
                 headers={"User-Agent": "LeadCoverageBot/1"},
                 cookies={"lead_click_browser": probe_cookie(aid)},
             )
