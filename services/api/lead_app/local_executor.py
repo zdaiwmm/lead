@@ -317,7 +317,18 @@ def request_by_key(aid, request_key):
         return one(c, "SELECT * FROM lead.local_executor_requests WHERE request_key=%s", (request_key,))
 
 
-def submit(aid, request_key, payload, *, session_key, task_id=None, resume=False):
+def instruction_session_key(session_key, instructions):
+    return "instructions-v1:" + _digest(_encoded([session_key, instructions]))
+
+
+def request_session_matches(request, session_key, *, instruction_session=False):
+    if request["session_key"] == session_key:
+        return not instruction_session or not request["scope"].get("instruction_session")
+    return bool(instruction_session and request["scope"].get("instruction_session") == session_key
+        and request["session_key"] == instruction_session_key(session_key, request["payload"]["instructions"]))
+
+
+def submit(aid, request_key, payload, *, session_key, task_id=None, resume=False, instruction_session=False):
     from . import executor_nodes
 
     aid = str(aid or "")
@@ -325,23 +336,36 @@ def submit(aid, request_key, payload, *, session_key, task_id=None, resume=False
         raise ValueError("executor_not_configured")
     if not request_key or len(request_key) > 500 or not session_key or len(session_key) > 500:
         raise ValueError("executor_request_key_invalid")
-    body = {**payload, "session_key": session_key, "model": MODEL, "effort": EFFORT}
-    fingerprint = _digest(_encoded({"payload": body, "task_id": task_id}))
     with tx(aid) as c:
         agent = require_agent(c, aid, True)
         previous = one(c, "SELECT * FROM lead.local_executor_requests WHERE request_key=%s", (request_key,))
+        logical_session = session_key
+        if instruction_session:
+            if not isinstance(payload.get("instructions"), str):
+                raise ValueError("executor_request_key_invalid")
+            session_key = instruction_session_key(logical_session, payload["instructions"])
+        body = {**payload, "session_key": session_key, "model": MODEL, "effort": EFFORT}
+        fingerprint = _digest(_encoded({"payload": body, "task_id": task_id}))
         if previous:
             if previous["request_hash"] != fingerprint:
-                if (not resume or previous["session_key"] != session_key
+                if (not resume or not request_session_matches(previous, logical_session, instruction_session=instruction_session)
                         or str(previous.get("task_id") or "") != str(task_id or "")
-                        or previous["payload"].get("output_schema") != body.get("output_schema")):
+                        or previous["payload"].get("output_schema") != body.get("output_schema")
+                        or instruction_session and previous["payload"].get("result_schema", previous["payload"].get("output_schema"))
+                            != body.get("result_schema", body.get("output_schema"))):
                     raise ValueError("executor_request_conflict")
             return previous
+        if instruction_session and one(c, """SELECT id FROM lead.local_executor_requests
+                WHERE (session_key=%s OR scope->>'instruction_session'=%s)
+                AND state NOT IN ('completed','failed','interrupted','canceled') LIMIT 1""",
+                (logical_session, logical_session)):
+            raise ValueError("executor_session_unresolved")
         project = one(c, "SELECT * FROM lead.local_executor_projects WHERE agent_id=%s", (aid,))
         # A session is pinned to its first device. Re-pairing never migrates an
         # existing conversation or an uncertain send to a different runtime.
-        session = one(c, """SELECT device_id,scope FROM lead.local_executor_requests WHERE session_key=%s
-            ORDER BY created_at,id LIMIT 1""", (session_key,))
+        session = one(c, """SELECT device_id,scope FROM lead.local_executor_requests
+            WHERE session_key=%s OR (%s AND scope->>'instruction_session'=%s)
+            ORDER BY created_at,id LIMIT 1""", (logical_session, instruction_session, logical_session))
         task_binding = one(c, "SELECT device_id,scope FROM lead.local_executor_requests WHERE task_id=%s ORDER BY created_at,id LIMIT 1", (task_id,)) if task_id else None
         old = session or task_binding
         if old:
@@ -376,6 +400,8 @@ def submit(aid, request_key, payload, *, session_key, task_id=None, resume=False
                 if device_id and executor_nodes.is_managed_device(c, device_id):
                     raise ValueError('executor_device_managed')
         scope = {"control_version": agent["control_version"], 'execution_route': route}
+        if instruction_session:
+            scope["instruction_session"] = logical_session
         if task_id:
             task = one(c, "SELECT * FROM lead.tasks WHERE id=%s", (task_id,))
             if not task:
