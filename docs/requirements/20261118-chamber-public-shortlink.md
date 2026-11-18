@@ -13,7 +13,7 @@
 
 1. 按[家庭服务器发布](../HOME_RELEASE.md)验收精确主线提交和同轮镜像。从镜像的 `infra/chamber-shortlink` 取件，核对源码和产物字节。
 2. 核对实际生产入口的 UID、GID、命名空间、配置 inode 和 `deploy.lock`。将 `tmpfiles.conf` 的 `@RELAY_USER@` 替换为已有 SSH 账户，以 root 持久安装，然后仅用该文件创建专用 `/run/lead-chamber-shortlink`。目录由 SSH 账户所有，组为入口用户组，权限为 `2750`。
-3. 在 Mac 启动环回采集器，沿用本机 Chamber 的环境，显式设定短链基址。运行 `relay.py SSH_CONFIG HOST COLLECTOR_PORT`。SSH 配置使用既有主机公钥校验和登录身份。隧道持锁发布监听套接字。断开时移除本次套接字。入口连接失败时返回上游错误。
+3. 在 Mac 启动环回采集器，沿用本机 Chamber 的环境，显式设定短链基址。运行 `relay.py SSH_CONFIG HOST COLLECTOR_PORT`。SSH 配置使用既有主机公钥校验和登录身份。隧道持锁发布监听套接字，断开或持续 30 秒收不到心跳时释放。入口连接失败时返回上游错误。
 4. 持生产维护锁保存旧配置。将 `location.conf` 加入 `shui.click` TLS 服务块。用入口实际身份及命名空间验证配置，然后平滑重载。校验失败时恢复旧配置。在另一个连接读回配置摘要及公网响应。
 5. 创建一条专用诊断短链，通过正常采集器接收并处理一次覆盖探针。核对 HTTP 状态、跳转主机、作用于 `/chamber/r/` 的 Secure Cookie、点击入库及覆盖探针排除原因。公共路由验收通过后，再启用 Chamber 正常推广短链配置。
 

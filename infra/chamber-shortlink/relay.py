@@ -4,6 +4,7 @@ import fcntl
 import os
 import re
 import secrets
+import select
 import shlex
 import stat
 import subprocess
@@ -11,6 +12,7 @@ import sys
 from pathlib import Path
 
 DIRECTORY = Path("/run/lead-chamber-shortlink")
+HEARTBEAT_INTERVAL = 10
 
 
 def attach(directory, name):
@@ -37,7 +39,9 @@ def attach(directory, name):
             temporary_link.symlink_to(name)
             try:
                 temporary_link.replace(link)
-                sys.stdin.buffer.read(1)
+                fd = sys.stdin.fileno()
+                while select.select([fd], [], [], 3 * HEARTBEAT_INTERVAL)[0] and os.read(fd, 1):
+                    pass
             finally:
                 temporary_link.unlink(missing_ok=True)
                 if link.is_symlink() and os.readlink(link) == name:
@@ -50,7 +54,7 @@ def connect(ssh_config, host, local_port):
     name = secrets.token_hex(12) + ".sock"
     source = Path(__file__).read_text()
     command = shlex.join(["/usr/bin/python3", "-IB", "-c", source, "attach", name])
-    return subprocess.call(
+    with subprocess.Popen(
         [
             "/usr/bin/ssh", "-F", ssh_config, "-T", "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=yes", "-o", "ExitOnForwardFailure=yes",
@@ -58,8 +62,18 @@ def connect(ssh_config, host, local_port):
             "-o", "ServerAliveCountMax=3", "-R", f"{DIRECTORY / name}:127.0.0.1:{local_port}",
             host, command,
         ],
-        stdin=subprocess.PIPE,
-    )
+        stdin=subprocess.PIPE, bufsize=0,
+    ) as ssh:
+        while ssh.poll() is None:
+            try:
+                ssh.stdin.write(b"\n")
+            except BrokenPipeError:
+                break
+            try:
+                return ssh.wait(timeout=HEARTBEAT_INTERVAL)
+            except subprocess.TimeoutExpired:
+                pass
+        return ssh.wait()
 
 
 if __name__ == "__main__":
