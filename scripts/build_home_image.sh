@@ -16,6 +16,7 @@ runtime_paths=(
   infra/alembic.ini
   infra/compose.yaml
   infra/migrations
+  infra/chamber-shortlink
 )
 git diff --quiet "$sha" -- services apps/web infra/home-browser-frames infra/local-executor "${runtime_paths[@]}"
 test -s apps/web/.next/BUILD_ID

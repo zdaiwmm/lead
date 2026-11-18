@@ -1,5 +1,6 @@
 """Real persistence and attribution for compact promotion links and channel rows."""
 
+from http.cookies import SimpleCookie
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
@@ -8,13 +9,15 @@ import pytest
 from fastapi.testclient import TestClient
 from lead_app import analytics, domain
 from lead_app.api import app
-from lead_app.config import database_kwargs
+from lead_app.collector_service import app as collector
+from lead_app.config import CONFIG, database_kwargs
 from lead_app.db import j, one, tx, uid
 from lead_app.promotion import (
     PLATFORM_CODES,
     attributed_url,
     new_marker,
     promotion_body,
+    tracking_url,
 )
 from lead_app.scope import current_tenant
 from lead_app.security import token
@@ -112,6 +115,62 @@ def test_compact_source_parameter_preserves_queries_and_hash():
             marker,
         )
         assert body.count(link) == 1 and "/old" not in body and "/other" not in body
+
+
+def test_prefixed_shortlink_uses_its_public_url_and_cookie(agent, monkeypatch, process_pending_clicks):
+    monkeypatch.delenv("LEAD_SHORTLINK_BASE_URL", raising=False)
+    monkeypatch.setitem(CONFIG, "shortlink_base_url", "https://shortlinks.example/chamber")
+    monkeypatch.setenv("LEAD_COLLECTOR_URL", "https://pixel.example")
+    client = owner_client()
+    destination = "https://site.example/start?offer=1#pricing"
+    created = client.post(
+        f"/api/agents/{agent}/tracking-links", headers=OWNER,
+        json={"destination_url": destination, "platform": "x"},
+    )
+    assert created.status_code == 200
+    link = created.json()
+    url = "https://shortlinks.example/chamber/r/" + link["public_code"]
+    assert link["url"] == url
+    settings = client.get(f"/api/agents/{agent}/analytics").json()
+    assert settings["links"][0]["url"] == url
+    assert settings["public_url"] == "https://pixel.example"
+    _, published = promotion_body("Try it", destination, link["public_code"], require_tracking=True)
+    assert published == url
+
+    # The ingress removes the public prefix and proxies to the HTTP collector.
+    redirected = TestClient(collector).get("/r/" + link["public_code"], follow_redirects=False)
+    assert redirected.status_code == 302
+    assert redirected.headers["X-Lead-Measurement"] == "accepted"
+    target = urlsplit(redirected.headers["Location"])
+    assert (target.netloc, target.path, target.fragment) == ("site.example", "/start", "pricing")
+    assert dict(parse_qsl(target.query))["offer"] == "1"
+    cookie = SimpleCookie(redirected.headers["Set-Cookie"])["lead_click_browser"]
+    assert cookie["path"] == "/chamber/r/" and cookie["secure"]
+    process_pending_clicks(agent)
+    channels = {row["platform"]: row for row in analytics.trend(UUID(agent))["channels"]}
+    assert channels["x"]["clicks"] == 1
+
+
+def test_shortlink_environment_overrides_persisted_prefix(monkeypatch):
+    monkeypatch.setitem(CONFIG, "shortlink_base_url", "https://configured.example/chamber")
+    monkeypatch.setenv("LEAD_SHORTLINK_BASE_URL", "https://override.example/promo/")
+    assert tracking_url("x_ABCDEFGHIJK") == "https://override.example/promo/r/x_ABCDEFGHIJK"
+
+
+@pytest.mark.parametrize("value", [
+    "http://shortlinks.example/chamber",
+    "https://localhost/chamber",
+    "https://@shortlinks.example/chamber",
+    "https://shortlinks.example:wrong/chamber",
+    "https://shortlinks.example/chamber/r",
+    "https://shortlinks.example/../chamber",
+    "https://shortlinks.example/chamber?x=1",
+    "https://shortlinks.example/chamber#anchor",
+])
+def test_unusable_shortlink_base_blocks_required_promotion(monkeypatch, value):
+    monkeypatch.setenv("LEAD_SHORTLINK_BASE_URL", value)
+    with pytest.raises(ValueError, match="public_shortlink_required"):
+        promotion_body("Try it", "https://site.example", "x_ABCDEFGHIJK", require_tracking=True)
 
 
 def test_promotion_configuration_versions_and_fences_old_queue(agent):
