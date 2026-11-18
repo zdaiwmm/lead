@@ -1,4 +1,5 @@
 import copy
+import importlib.util
 import json
 import os
 import subprocess
@@ -7,9 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts import ci_backend_proof as proof
-
-ROOT = Path(__file__).resolve().parents[1]
+CI_SCRIPTS = Path(__file__).resolve().parents[1] / ".github/scripts"
+proof_spec = importlib.util.spec_from_file_location("ci_backend_proof", CI_SCRIPTS / "ci_backend_proof.py")
+proof = importlib.util.module_from_spec(proof_spec)
+proof_spec.loader.exec_module(proof)
 IDENTITY = {"sha": "a" * 40, "run_id": "123", "run_attempt": "2"}
 SECRET = "private-body-and-parameter-93852"
 
@@ -17,10 +19,10 @@ SECRET = "private-body-and-parameter-93852"
 def run_pytest(folder, shard, *, stage="suite", extra=()):
     output = folder / "reports" / f"{stage}-{shard}.json"
     command = [sys.executable, "-m", "pytest", "--noconftest", "-c", "/dev/null",
-               "--rootdir", str(folder), "-p", "scripts.ci_pytest", "-q",
+               "--rootdir", str(folder), "-p", "ci_pytest", "-q",
                "--ci-shard", str(shard), "--ci-stage", stage, "--ci-report", str(output)]
     paths = proof.EARLY_NODEIDS[:2] + ("tests/test_research_recovery_integration.py",) if stage == "early" else ("tests",)
-    env = {**os.environ, "PYTHONPATH": str(ROOT), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    env = {**os.environ, "PYTHONPATH": str(CI_SCRIPTS), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
            "GITHUB_SHA": IDENTITY["sha"], "GITHUB_RUN_ID": IDENTITY["run_id"],
            "GITHUB_RUN_ATTEMPT": IDENTITY["run_attempt"]}
     result = subprocess.run([*command, *extra, *paths], cwd=folder, env=env,
@@ -202,7 +204,7 @@ def test_cli_reads_exact_report_set_and_rejects_stale_extra_file(project, report
         (folder / f"report-{index}.json").write_text(json.dumps(report))
     env = {**os.environ, "GITHUB_SHA": IDENTITY["sha"], "GITHUB_RUN_ID": IDENTITY["run_id"],
            "GITHUB_RUN_ATTEMPT": IDENTITY["run_attempt"]}
-    command = [sys.executable, str(ROOT / "scripts/ci_backend_proof.py"), str(project / "reports")]
+    command = [sys.executable, str(CI_SCRIPTS / "ci_backend_proof.py"), str(project / "reports")]
     valid = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
     assert valid.returncode == 0, valid.stderr
     assert json.loads(valid.stdout)["tests"] == 12

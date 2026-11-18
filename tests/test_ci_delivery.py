@@ -367,7 +367,7 @@ def test_backend_matrix_keeps_isolation_complete_coverage_and_public_proof_job()
     command = shlex.split(full['run'])
     invocation = next(i for i, part in enumerate(command) if part.endswith('/pytest'))
     assert command[invocation + 1:] == [
-        '-p', 'scripts.ci_pytest', '--ci-shard', '$LEAD_CI_SHARD',
+        '-o', 'pythonpath=services/api . .github/scripts', '-p', 'ci_pytest', '--ci-shard', '$LEAD_CI_SHARD',
         '--ci-report', '.state/ci-proof/suite-$LEAD_CI_SHARD.json',
         '-q', '--maxfail=1', '--tb=short', '--durations=15', '--junitxml=.state/ci-tests.xml',
     ]
@@ -388,7 +388,7 @@ def test_backend_matrix_keeps_isolation_complete_coverage_and_public_proof_job()
     assert download['with']['pattern'] == 'lead-backend-proof-${{ github.sha }}-${{ github.run_attempt }}-*'
     assert 'run-id' not in download['with'] and 'merge-multiple' not in download['with']
     verifier = aggregate['steps'][-1]
-    assert 'scripts/ci_backend_proof.py' in verifier['run']
+    assert '.github/scripts/ci_backend_proof.py' in verifier['run']
     for step in aggregate['steps']:
         assert 'if' not in step and 'continue-on-error' not in step
         if 'run' in step:

@@ -5,8 +5,7 @@ import time
 from pathlib import Path
 
 import pytest
-
-from scripts.ci_backend_proof import SHARD_COUNT, node_hash, owner
+from ci_backend_proof import SHARD_COUNT, node_hash, owner
 
 
 def pytest_addoption(parser):
