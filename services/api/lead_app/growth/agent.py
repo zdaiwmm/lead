@@ -15,7 +15,7 @@ from .store import (
     objective_revision,
 )
 
-PROMPT_VERSION = "growth-v2.17"
+PROMPT_VERSION = "growth-v2.18"
 MAX_CONTEXT_BYTES = 48000
 
 

@@ -758,6 +758,7 @@ async def execute(claim):
             from ..local_executor_client import execution_context, uses_native
             native = uses_native(str(ref.agent_id), task_id=str(ref.task_id))
             context_token = execution_context.set({"key": "task:" + str(ref.task_id) + ":" + str(ref.task_generation),
+                "growth_decision_session": claim.get("kind") == "decision",
                 "task_id": str(ref.task_id), "session_key": "decision:" + str(ref.agent_id) + ":" + str(row["input"].get("goal_revision", 1))
                 if claim.get("kind") == "decision" else "task:" + str(ref.task_id)})
             try:
@@ -1268,7 +1269,7 @@ def ensure_decision(aid, triggers=None):
         if agent["desired_state"]=="paused":
             return None
         old = one(c, """SELECT id,input FROM lead.tasks WHERE type='growth.decision'
-            AND state IN ('planned','queued','running','waiting_user') ORDER BY created_at LIMIT 1""")
+            AND state IN ('planned','queued','running','waiting_user','reconciling') ORDER BY created_at LIMIT 1""")
         if old:
             return {"agent_id":str(aid),"task_id":str(old["id"]),"task_generation":old["input"]["task_generation"]}
         if not pending:

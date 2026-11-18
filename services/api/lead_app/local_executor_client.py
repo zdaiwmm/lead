@@ -161,6 +161,7 @@ async def run_model(output, prompt, system, *, agent_id=None, purpose=None, call
     task_id = context.get("task_id")
     session = context.get("session_key") or ("chat:" + str(aid) if output.__name__ == "Decision" else
         "task:" + str(task_id) if task_id else "model:" + str(aid or 'studio') + ":" + output.__name__)
+    instruction_session = agent_id is not None and context.get("growth_decision_session") is True
     # Public research is supplied by Codex's native web search. Python closures
     # are never serialized or executed on the user's computer.
     public_web = not isinstance(prompt, dict) or prompt.get("managed_tools", {}).get("public_web", True)
@@ -197,7 +198,10 @@ async def run_model(output, prompt, system, *, agent_id=None, purpose=None, call
         lookup = getattr(local_executor, "request_by_key", lambda *args: None)
         request = await asyncio.to_thread(lookup, aid, key)
     if request:
-        if ((aid is not None and request["session_key"] != session) or str(request.get("task_id") or "") != str(task_id or "")
+        session_matches = (local_executor.request_session_matches(request, session, instruction_session=True)
+            if instruction_session else request["session_key"] == session)
+        if ((aid is not None and not session_matches)
+                or str(request.get("task_id") or "") != str(task_id or "")
                 or request["payload"].get("result_schema", request["payload"].get("output_schema")) != result_schema):
             raise ExecutorUnavailable("local_executor_request_contract_changed")
     else:
@@ -206,7 +210,8 @@ async def run_model(output, prompt, system, *, agent_id=None, purpose=None, call
                                              operation_key=context.get('key') or key)
         else:
             request = await asyncio.to_thread(local_executor.submit, aid, key, payload,
-                session_key=session, task_id=task_id, resume=True)
+                session_key=session, task_id=task_id, resume=True,
+                **({"instruction_session": True} if instruction_session else {}))
     if hasattr(tools, "resume"):
         tools.resume(request.get("payload", {}).get("tool_context") or {})
     result = await await_request(aid, str(request["id"]))
