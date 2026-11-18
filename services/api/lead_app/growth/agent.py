@@ -15,7 +15,7 @@ from .store import (
     objective_revision,
 )
 
-PROMPT_VERSION = "growth-v2.16"
+PROMPT_VERSION = "growth-v2.17"
 MAX_CONTEXT_BYTES = 48000
 
 
@@ -76,6 +76,15 @@ and dependency guards still apply. community_candidates contains source-bound ob
 not yet inspected, not business fit, current reachability or permission to join or publish.
 Each candidate's source_ref is its exact predecessor TaskRef. An inspection uses its task_id
 in required_refs and group_task_id, with the observed group_id.
+work[].community_inspection_scope identifies the failed inspection's exact account, profile, peer
+and predecessor source. Its recorded recovery and source-binding check are facts, not permission
+to retry it. A shared product, brand or group name does not identify the same peer or URL.
+Keep a source-specific stop on its actual source; do not expand it to another source by name.
+Likewise an experiment's audience, question and stop_rule bound that experiment, not all channels.
+Missing current demand or rules is uncertainty that an authorized bounded inspection can investigate,
+not proof that reading is forbidden. It never supplies permission to join, promote or send.
+Preserve same-peer/URL stops, blocked resources, owner exclusions, exhausted experiments and unknown
+external results. Choose another product-fit source or channel only within its actual access guards.
 Give the bottleneck, evidence, nearest alternative, action and falsification/stop condition.
 Learning and completion rules must answer the experiment's actual question. A reachable venue,
 generated artifact, accepted task or working command is an intermediate result, not evidence of
@@ -262,8 +271,38 @@ def build_context(aid, trigger_refs=None):
                 'status','reason','error_code','resource','probes','attempts','probes_stopped','paid_probes_stopped',
                 'next_check_at','condition_revision','failure_condition')}
         work = all_rows(c, """SELECT id,type,state,experiment_id,input->'spec' spec,result->'output' output,
-            result->'runtime'->'wait' wait FROM lead.tasks WHERE type LIKE 'growth.%%'
+            result->'runtime'->'wait' wait,
+            jsonb_build_object('task_generation',input->'task_generation','profile_id',input->>'profile_id',
+              'binding_version',input->'binding_version','recorded_recovery',jsonb_build_object(
+                'status',result#>'{runtime,recovery,status}','proof_scope',result#>'{runtime,recovery,proof_scope}',
+                'attempts',result#>'{runtime,recovery,attempts}','probes',result#>'{runtime,recovery,probes}',
+                'probes_stopped',result#>'{runtime,recovery,probes_stopped}')) inspection_scope
+            FROM lead.tasks WHERE type LIKE 'growth.%%'
             AND type<>'growth.decision' ORDER BY (id=ANY(%s::uuid[])) DESC,created_at DESC LIMIT 24""",(task_refs,))
+        from ..account_connection import validate_community_source
+        from ..channel_contracts import COMMUNITY_INSPECTION_ERRORS
+        for item in work:
+            scope = item.pop('inspection_scope')
+            spec = item.get('spec') or {}
+            payload = spec.get('payload') or {}
+            if (item['type'] != 'growth.account' or item['state'] != 'failed'
+                    or spec.get('purpose') != 'community' or payload.get('community_operation') != 'inspect'):
+                continue
+            scope.update(task_ref={'agent_id':str(aid), 'task_id':str(item['id']),
+                'task_generation':scope.pop('task_generation')}, account_id=spec.get('account_id'),
+                group_id=payload.get('group_id'), source_task_id=payload.get('group_task_id'),
+                source_binding={'state':'unknown'})
+            if (type(scope['binding_version']) is int and scope['binding_version'] > 0
+                    and all(isinstance(scope[key], str) and scope[key]
+                            for key in ('account_id', 'group_id', 'source_task_id'))):
+                try:
+                    source = validate_community_source(c, spec, binding_version=scope['binding_version'])
+                    scope['source_binding'] = {'state':'valid', 'canonical_url':source['canonical_url']}
+                except (ValueError, TypeError, KeyError, AttributeError) as error:
+                    if isinstance(error, ValueError) and str(error) in COMMUNITY_INSPECTION_ERRORS:
+                        scope['source_binding'] = {'state':'unsupported' if str(error) == 'community_discussion_binding_required'
+                            else 'invalid', 'reason':str(error)}
+            item['community_inspection_scope'] = scope
         doc_refs = [ref["id"] for item in work if item["id"] in task_refs for ref in (item.get("output") or {}).get("evidence_refs",[]) if ref.get("kind")=="document"]
         accounts = all_rows(c, """SELECT s.id,s.platform,s.binding_version,s.state,i.desired,
             i.revision intent_revision FROM lead.social_accounts s LEFT JOIN lead.account_operating_intents i
@@ -378,8 +417,8 @@ def build_context(aid, trigger_refs=None):
             context["product"]["facts"] = {"excerpt":clip(facts,4000),"truncated":True}
     for experiment in context["experiments"]:
         spec = experiment["specification"]
-        experiment["specification"] = {key:spec[key] for key in ("question_type","question","hypothesis","learning_signal","review_at","token_limit") if key in spec}
-        for key in ("question","hypothesis","learning_signal"):
+        experiment["specification"] = {key:spec[key] for key in ("question_type","question","audience","hypothesis","learning_signal","stop_rule","review_at","token_limit") if key in spec}
+        for key in ("question","audience","hypothesis","learning_signal","stop_rule"):
             if key in experiment["specification"]:
                 experiment["specification"][key] = clip(experiment["specification"][key],600)
         if experiment.get("conclusion"):
