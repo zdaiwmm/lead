@@ -13,16 +13,21 @@ from camoufox.pkgman import AvailableVersion, CamoufoxFetcher, RepoConfig, Versi
 BUILD = "156.0.1-beta.36"
 DIGEST = "72637885ee67c93466ad377831c647192f8f08fb5c6fd9279de1320b49dd2b53"
 URL = f"https://github.com/daijro/camoufox/releases/download/v{BUILD}/camoufox-{BUILD}-lin.x86_64.zip"
+MIRROR_URL = (
+    "https://downloads.sourceforge.net/project/camofox-browser.mirror/"
+    f"camoufox-backup-404310733/camoufox-{BUILD}-lin.x86_64.zip"
+)
 
 
-def download(file, url, repo, asset_id, digest):
+def download(file, url, repo, asset_id, digest, *, fallback_urls=()):
     api = f"https://api.github.com/repos/{repo}/releases/assets/{asset_id}?ci={time.time_ns()}"
-    for location in (url, api):
+    for location in (url, api, *fallback_urls):
         file.seek(0)
         file.truncate()
+        download_timeout = "600" if location in fallback_urls else "180"
         result = subprocess.run(["curl", "--fail", "--location", "--silent", "--show-error",
                                  "--retry", "2", "--retry-all-errors", "--connect-timeout", "10",
-                                 "--max-time", "180", "--header", "Accept: application/octet-stream",
+                                 "--max-time", download_timeout, "--header", "Accept: application/octet-stream",
                                  "--output", file.name, location], check=False)
         file.seek(0)
         if result.returncode == 0 and hashlib.file_digest(file, "sha256").hexdigest() == digest:
@@ -34,7 +39,7 @@ def download(file, url, repo, asset_id, digest):
 class LinuxReleaseFetcher(CamoufoxFetcher):
     @staticmethod
     def download_file(file, url):
-        return download(file, url, "daijro/camoufox", 614468056, DIGEST)
+        return download(file, url, "daijro/camoufox", 614468056, DIGEST, fallback_urls=(MIRROR_URL,))
 
 
 def install_model():
