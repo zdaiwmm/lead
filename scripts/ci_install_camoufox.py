@@ -1,10 +1,13 @@
 """Install the pinned browser and fingerprint model in a fresh Linux x86_64 CI environment."""
 
 import hashlib
+import shutil
 import subprocess
 import tempfile
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from camoufox import fpgen_model
 from camoufox.multiversion import find_installed_version, install_versioned
@@ -17,17 +20,18 @@ MIRROR_URL = (
     "https://downloads.sourceforge.net/project/camofox-browser.mirror/"
     f"camoufox-backup-404310733/camoufox-{BUILD}-lin.x86_64.zip"
 )
+MIRROR_BYTES = 1294875941
+MIRROR_STREAMS = 16
 
 
-def download(file, url, repo, asset_id, digest, *, fallback_urls=()):
+def download(file, url, repo, asset_id, digest):
     api = f"https://api.github.com/repos/{repo}/releases/assets/{asset_id}?ci={time.time_ns()}"
-    for location in (url, api, *fallback_urls):
+    for location in (url, api):
         file.seek(0)
         file.truncate()
-        download_timeout = "600" if location in fallback_urls else "180"
         result = subprocess.run(["curl", "--fail", "--location", "--silent", "--show-error",
                                  "--retry", "2", "--retry-all-errors", "--connect-timeout", "10",
-                                 "--max-time", download_timeout, "--header", "Accept: application/octet-stream",
+                                 "--max-time", "180", "--header", "Accept: application/octet-stream",
                                  "--output", file.name, location], check=False)
         file.seek(0)
         if result.returncode == 0 and hashlib.file_digest(file, "sha256").hexdigest() == digest:
@@ -36,10 +40,47 @@ def download(file, url, repo, asset_id, digest, *, fallback_urls=()):
     raise RuntimeError("Verified release asset unavailable")
 
 
+def download_browser_mirror(file):
+    part_size = (MIRROR_BYTES + MIRROR_STREAMS - 1) // MIRROR_STREAMS
+    offsets = range(0, MIRROR_BYTES, part_size)
+    with tempfile.TemporaryDirectory(prefix="lead-ci-browser-mirror-") as directory:
+        def fetch_part(start):
+            end = min(start + part_size, MIRROR_BYTES) - 1
+            length = end - start + 1
+            path = Path(directory, str(start))
+            result = subprocess.run(
+                ["curl", "--fail", "--location", "--silent", "--show-error",
+                 "--proto", "=https", "--proto-redir", "=https", "--retry", "1",
+                 "--retry-all-errors", "--connect-timeout", "10", "--max-time", "900",
+                 "--range", f"{start}-{end}", "--max-filesize", str(length),
+                 "--output", str(path), "--write-out", "%{http_code}", MIRROR_URL],
+                check=True, stdout=subprocess.PIPE, text=True,
+            )
+            if result.stdout != "206" or path.stat().st_size != length:
+                raise RuntimeError("Pinned browser mirror did not return the requested range")
+            return path
+
+        file.seek(0)
+        file.truncate()
+        with ThreadPoolExecutor(max_workers=MIRROR_STREAMS) as pool:
+            for path in pool.map(fetch_part, offsets):
+                with path.open("rb") as part:
+                    shutil.copyfileobj(part, file)
+                path.unlink()
+        file.seek(0)
+        if hashlib.file_digest(file, "sha256").hexdigest() != DIGEST:
+            raise RuntimeError("Pinned browser mirror digest mismatch")
+    file.seek(0)
+    return file
+
+
 class LinuxReleaseFetcher(CamoufoxFetcher):
     @staticmethod
     def download_file(file, url):
-        return download(file, url, "daijro/camoufox", 614468056, DIGEST, fallback_urls=(MIRROR_URL,))
+        try:
+            return download(file, url, "daijro/camoufox", 614468056, DIGEST)
+        except RuntimeError:
+            return download_browser_mirror(file)
 
 
 def install_model():
