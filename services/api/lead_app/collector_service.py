@@ -1,4 +1,4 @@
-"""Standalone public analytics API. Only the existing visitor routes are installed."""
+"""Standalone analytics API for public collection and the Chamber bridge."""
 
 import asyncio
 import re
@@ -6,7 +6,7 @@ import re
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from . import analytics, analytics_ingest, conversions, pixel_events
+from . import analytics, analytics_ingest, chamber_analytics, conversions, pixel_events
 from .identity_store import public_tenant
 from .promotion import CODE_PATTERN
 from .scope import tenant_scope
@@ -14,6 +14,7 @@ from .upload_limit import UploadLimit
 
 app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None, redirect_slashes=False)
 app.add_middleware(UploadLimit)
+app.include_router(chamber_analytics.router)
 for router in (
     analytics.router,
     analytics_ingest.router,
