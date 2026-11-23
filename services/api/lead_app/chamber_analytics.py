@@ -473,6 +473,8 @@ def _ranged_response(data, *, device_bounds):
 
 
 def _parse_record_links(values, now):
+    if not 0 < len(values) <= MAX_RECORD_LINKS:
+        raise HTTPException(422, "推广记录查询范围无效")
     links = []
     try:
         for value in values:
@@ -518,7 +520,7 @@ def production_daily_report(
     day: date,
     connection: Annotated[str, Depends(_report_connection)],
     period: Annotated[PromotionRange | None, Query(alias="range")] = None,
-    link: Annotated[list[str] | None, Query(max_length=MAX_RECORD_LINKS)] = None,
+    link: Annotated[list[str] | None, Query()] = None,
     device_bounds: Annotated[Literal["true"] | None, Query()] = None,
 ):
     from .analytics_reporting import read_daily_promotion

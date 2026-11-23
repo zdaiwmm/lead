@@ -613,7 +613,10 @@ def test_link_report_restricts_window_registration_and_scope(production):
             [valid, ("device_bounds", "true")],
             [valid] * 41,
         ):
-            assert client.get(path, params=[*params, *links], headers=auth(read_key)).status_code == 422
+            invalid = client.get(path, params=[*params, *links], headers=auth(read_key))
+            assert invalid.status_code == 422
+            assert registered["public_code"] not in invalid.text
+            assert published_at.isoformat() not in invalid.text
         valid_and_unmapped = [
             *params, valid, link_param(1, ordinary), link_param(2, wrong_origin), link_param(3, foreign)
         ]
