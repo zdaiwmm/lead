@@ -340,35 +340,65 @@ def setup(aid: UUID, body: AnalyticsSetup):
 def create_link(aid: UUID, body: TrackingSetup):
     resolve_public(body.destination_url)
     aid = str(aid)
-    import secrets
 
     from .atomic_dispatch import channel_pilot
-    from .distribution import register
+    from .chamber_analytics import ChamberAnalyticsUnavailable
+    from .distribution import register, registration_marker
     from .promotion import PLATFORM_CODES
 
-    with tx(aid) as c:
-        require_agent(c, aid)
-        compact = channel_pilot(aid) and body.platform in PLATFORM_CODES
-        row = register(c, aid, body.platform, body.destination_url, intent="manual:" + str(body.intent_id or uid()),
-                       placement=body.placement, account=body.account_id, location=body.placement_ref, campaign=body.campaign,
-                       code=None if compact else secrets.token_urlsafe(12))
-        return {**row, "url": tracking_url(row["public_code"])}
+    try:
+        with tx(aid) as c:
+            require_agent(c, aid)
+            compact = channel_pilot(aid) and body.platform in PLATFORM_CODES
+            intent = "manual:" + str(body.intent_id or uid())
+            marker = registration_marker(aid, body.platform, intent, body.placement, compact=compact)
+            row = register(c, aid, body.platform, body.destination_url, intent=intent,
+                           placement=body.placement, account=body.account_id,
+                           location=body.placement_ref, campaign=body.campaign, code=marker)
+            return {**row, "url": tracking_url(row["public_code"])}
+    except ChamberAnalyticsUnavailable:
+        raise HTTPException(503, "推广短链暂时无法登记到生产采集端") from None
 
 
 @router.get("/r/{code}")
 def redirect(code: str, request: Request):
+    return redirect_link(code, request)
+
+
+def redirect_link(
+    code: str,
+    request: Request,
+    *,
+    expected_agent: str | None = None,
+    expected_intent: str | None = None,
+    expected_origin: str | None = None,
+    cookie_path: str | None = None,
+):
     if not re.fullmatch(CODE_PATTERN, code):
         raise HTTPException(404)
-    shortlink_base = _configured_shortlink_base()
+    shortlink_base = _configured_shortlink_base() if cookie_path is None else None
     with tx() as c:
         link = one(
             c,
             "SELECT * FROM lead.tracking_links WHERE public_code=%s AND state='active'",
             (code,),
         )
-    if not link:
+    if (
+        not link
+        or (expected_intent is None and link["intent_key"] == "chamber:" + code)
+        or (expected_agent is not None and str(link["agent_id"]) != expected_agent)
+        or (expected_intent is not None and link["intent_key"] != expected_intent)
+    ):
         raise HTTPException(404)
     dest = urlsplit(link["destination_url"])
+    if expected_origin is not None:
+        origin = urlsplit(expected_origin)
+        if (dest.scheme, dest.hostname, dest.port or 443) != (
+            origin.scheme,
+            origin.hostname,
+            origin.port or 443,
+        ):
+            raise HTTPException(404)
     if dest.hostname != link["allowed_host"] or dest.scheme not in ("http", "https"):
         raise HTTPException(409)
     session = uid()
@@ -408,8 +438,8 @@ def redirect(code: str, request: Request):
     if admitted:
         response.set_cookie(
             "lead_click_browser", browser, max_age=86400,
-            path=(shortlink_base.path if shortlink_base else "") + "/r/",
-            secure=shortlink_base is not None or request.url.scheme == "https",
+            path=cookie_path or (shortlink_base.path if shortlink_base else "") + "/r/",
+            secure=cookie_path is not None or shortlink_base is not None or request.url.scheme == "https",
             httponly=True, samesite="lax",
         )
     return response

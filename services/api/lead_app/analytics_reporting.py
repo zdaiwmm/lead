@@ -191,6 +191,11 @@ def _replace_geography(c, params):
       SELECT DISTINCT lead.ctx_tenant(),lead.ctx_agent(),%(scope)s,'day',%(day)s,%(start)s,
         channel,device_kind,device_key
       FROM geographic_facts WHERE device_key IS NOT NULL
+      UNION ALL
+      SELECT lead.ctx_tenant(),lead.ctx_agent(),%(scope)s,'day',%(day)s,%(start)s,
+        channel,'click_device_snapshot',
+        CASE WHEN bool_or(device_key IS NULL) THEN 'incomplete' ELSE 'complete' END
+      FROM geographic_facts WHERE clicks>0 GROUP BY channel
     ) INSERT INTO lead.analytics_geo_rollups(tenant_id,agent_id,scope_key,day,channel,event_name,country,clicks,pv,server_conversions)
       SELECT lead.ctx_tenant(),lead.ctx_agent(),%(scope)s,%(day)s,channel,event_name,country,sum(clicks),sum(pv),sum(conversions)
       FROM geographic_facts GROUP BY channel,event_name,country""",
@@ -521,6 +526,111 @@ def summary(
         return read_report(
             c, str(aid), start_date, end_date, scope_key, grain, channel, event_name, traffic
         )
+
+
+def read_daily_promotion(c, aid, day):
+    """Read the four daily counts from one Agent-scoped materialized snapshot."""
+    bounds(day, day)
+    require_scope(c, aid, "live")
+    rows = all_rows(
+        c,
+        """WITH totals AS (
+          SELECT channel,coalesce(sum(clicks),0)::bigint AS clicks,
+            coalesce(sum(pv),0)::bigint AS pv,coalesce(bool_or(unknown_pv>0),false) AS unknown_pv
+          FROM lead.analytics_rollups WHERE grain='day' AND day=%(day)s AND channel<>'lab'
+          GROUP BY GROUPING SETS ((channel),())
+        ), devices AS (
+          SELECT channel,
+            count(DISTINCT identity_key) FILTER(WHERE starts_with(kind,'click_device:')) AS click_devices,
+            count(DISTINCT identity_key) FILTER(WHERE starts_with(kind,'site_device:') AND identity_key<>'unknown') AS site_devices,
+            bool_or(kind='click_device_snapshot' AND identity_key='complete') AS click_snapshot,
+            bool_or(starts_with(kind,'site_device:') AND identity_key='unknown') AS unknown_site_devices
+          FROM lead.analytics_audience WHERE grain='day' AND day=%(day)s AND channel<>'lab'
+            AND (kind='click_device_snapshot' OR starts_with(kind,'click_device:') OR starts_with(kind,'site_device:'))
+          GROUP BY GROUPING SETS ((channel),())
+        ), per_channel AS (
+          SELECT totals.*,coalesce(click_devices,0) AS click_devices,
+            coalesce(site_devices,0) AS site_devices,coalesce(unknown_site_devices,false) AS unknown_site_devices,
+            (clicks=coalesce(click_devices,0) OR coalesce(click_snapshot,false)) AS known_click_devices
+          FROM totals LEFT JOIN devices ON totals.channel IS NOT DISTINCT FROM devices.channel
+        ), availability AS (
+          SELECT EXISTS(SELECT 1 FROM lead.analytics_connections WHERE provider='lead_site' AND state='verified'
+              AND coalesce(last_pageview_at,last_received_at) IS NOT NULL)
+            OR EXISTS(SELECT 1 FROM lead.analytics_rollups
+              WHERE grain='day' AND day=%(day)s AND channel<>'lab' AND (pv>0 OR sessions>0)) AS site,
+            EXISTS(SELECT 1 FROM lead.tracking_links WHERE agent_id=lead.ctx_agent() AND state='active' AND platform<>'lab') AS shortlinks,
+            (SELECT version FROM lead.analytics_report_days WHERE day=%(day)s) AS snapshot,
+            (SELECT state FROM lead.analytics_report_dirty WHERE day=%(day)s) AS rebuild_state,
+            EXISTS(SELECT 1 FROM lead.analytics_ingest_events WHERE state='failed'
+              AND received_at>=%(start)s AND received_at<%(end)s) AS ingest_failed,
+            EXISTS(SELECT 1 FROM lead.analytics_ingest_events WHERE state='pending'
+              AND received_at>=%(start)s AND received_at<%(end)s) AS ingest_pending
+        )
+        SELECT per_channel.*,availability.*,
+          coalesce((SELECT bool_and(known_click_devices) FROM per_channel WHERE channel IS NOT NULL),true) AS all_click_devices
+        FROM per_channel CROSS JOIN availability ORDER BY channel NULLS FIRST""",
+        {
+            "day": day,
+            "start": datetime.combine(day, time.min, TZ),
+            "end": datetime.combine(day + timedelta(days=1), time.min, TZ),
+        },
+    )
+    total, *channels = rows
+    site = total["site"]
+    if total["rebuild_state"] == "failed" or total["ingest_failed"]:
+        status = "unavailable"
+    elif total["rebuild_state"] or total["ingest_pending"] or total["snapshot"] not in (None, VERSION):
+        status = "pending"
+    elif total["snapshot"] or site or total["shortlinks"]:
+        status = "ready"
+    else:
+        status = "unavailable"
+
+    def metrics(row, known_click_devices):
+        ready = status == "ready"
+        site_ready = ready and site and not row["unknown_pv"]
+        site_devices_known = not row["unknown_site_devices"] and (row["site_devices"] or row["pv"] == 0)
+        return {
+            "clicks": row["clicks"] if ready else None,
+            "click_devices": row["click_devices"] if ready and known_click_devices else None,
+            "pv": row["pv"] if site_ready else None,
+            "site_devices": row["site_devices"] if site_ready and site_devices_known else None,
+        }
+
+    return {
+        "day": day.isoformat(),
+        "status": status,
+        "coverage": {"site": site},
+        "totals": metrics(total, total["all_click_devices"]),
+        "channels": [
+            {"channel": row["channel"], **metrics(row, row["known_click_devices"])}
+            for row in channels
+            if row["clicks"] or row["pv"] or row["unknown_pv"]
+        ],
+    }
+
+
+@router.get("/api/agents/{aid}/analytics/daily-promotion")
+def daily_promotion(aid: UUID, day: date):
+    from .chamber_analytics import (
+        ChamberAnalyticsUnavailable,
+        fetch_daily_report,
+        production_bridge_enabled,
+    )
+
+    bounds(day, day)
+    agent = str(aid)
+    try:
+        with scoped_tx(current_tenant(), agent, "live") as c:
+            require_scope(c, agent, "live")
+            if not production_bridge_enabled(agent):
+                return {**read_daily_promotion(c, agent, day), "agent_id": agent, "source": "local"}
+        report = fetch_daily_report(agent, day)
+        if report is None:
+            raise ChamberAnalyticsUnavailable()
+        return {**report, "agent_id": agent, "source": "production"}
+    except ChamberAnalyticsUnavailable:
+        raise HTTPException(503, "暂时无法读取生产统计") from None
 
 
 class Rebuild(BaseModel):
