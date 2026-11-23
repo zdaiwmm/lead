@@ -11,7 +11,7 @@ from pathlib import Path
 
 INSTALLABLE = {
     "home_systemd_release.py", "request_home_release.py", "poll_home_release.py",
-    "prepare_home_image.py", "home_release_operator.py",
+    "prepare_home_image.py", "home_release_operator.py", "home_live_maintenance.py",
 }
 
 

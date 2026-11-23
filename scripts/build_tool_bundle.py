@@ -9,7 +9,7 @@ import sys
 import tarfile
 from pathlib import Path
 
-from ci_scope import TOOL_FILES
+from ci_scope import BUNDLED_TOOL_FILES
 
 
 def build(root, sha, output):
@@ -17,9 +17,9 @@ def build(root, sha, output):
         return subprocess.check_output(["git", "-C", str(root), *args])
     if not re.fullmatch("[a-f0-9]{40}", sha) or git("rev-parse", "HEAD").decode().strip() != sha:
         raise ValueError("Exact checked-out commit required")
-    subprocess.run(["git", "-C", str(root), "diff", "--quiet", sha, "--", *sorted(TOOL_FILES)], check=True)
+    subprocess.run(["git", "-C", str(root), "diff", "--quiet", sha, "--", *sorted(BUNDLED_TOOL_FILES)], check=True)
     contents, entries = {}, []
-    for name in sorted(TOOL_FILES):
+    for name in sorted(BUNDLED_TOOL_FILES):
         mode = git("ls-tree", sha, "--", name).decode().split()[0]
         if mode not in {"100644", "100755"}:
             raise ValueError("Regular Git source required")

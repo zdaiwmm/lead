@@ -12,7 +12,7 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-from ci_scope import TOOL_FILES
+from ci_scope import APPLICATION_TOOL_FILES, BUNDLED_TOOL_FILES, TOOL_FILES
 from request_home_release import REPO, api, verified_run
 from tool_install import INSTALLABLE, atomic_write, trusted
 
@@ -23,7 +23,8 @@ def unpack(raw, sha):
     with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
         members = archive.getmembers()
         names = [m.name for m in members]
-        if len(set(names)) != len(names) or set(names) != TOOL_FILES | {"manifest.json"}:
+        allowed = (TOOL_FILES | {"manifest.json"}, BUNDLED_TOOL_FILES | {"manifest.json"})
+        if len(set(names)) != len(names) or set(names) not in allowed:
             raise ValueError("Unexpected tool bundle contents")
         if any(not m.isfile() or m.size > 1024 * 1024 or m.mode & 0o7022 for m in members):
             raise ValueError("Unsafe tool bundle member")
@@ -41,8 +42,20 @@ def unpack(raw, sha):
     return files
 
 
-def fetch(sha, *, get=api, download=None):
-    ci = verified_run(sha, get=get, kind="tools")
+def fetch(sha, *, tool, get=api, download=None):
+    if tool not in INSTALLABLE:
+        raise ValueError("Tool outside installation scope")
+    path = "scripts/" + tool
+
+    def verify():
+        run = verified_run(sha, get=get, kind="tools")
+        if path in APPLICATION_TOOL_FILES:
+            app = verified_run(sha, get=get, kind="application")
+            if (app["id"], app["run_attempt"]) != (run["id"], run["run_attempt"]):
+                raise ValueError("Application verification and tool bundle must use the same CI attempt")
+        return run
+
+    ci = verify()
     name = f"lead-tools-{sha}-{ci['run_attempt']}"
     listing = get(f"actions/runs/{ci['id']}/artifacts?name={name}&per_page=2")
     artifacts = listing["artifacts"]
@@ -65,7 +78,9 @@ def fetch(sha, *, get=api, download=None):
         if len(members) != 1 or members[0].filename != "lead-tools.tar" or members[0].file_size > 8 * 1024 * 1024:
             raise ValueError("Unexpected tool transport archive")
         files = unpack(archive.read(members[0]), sha)
-    latest = verified_run(sha, get=get, kind="tools")
+    if path not in files:
+        raise ValueError("Requested tool is missing from the tested bundle")
+    latest = verify()
     if (latest["id"], latest["run_attempt"]) != (ci["id"], ci["run_attempt"]):
         raise ValueError("Tool CI changed while fetching")
     # Do not return a now-expired/replaced artifact after a transfer.
@@ -139,7 +154,7 @@ def main():
     parser.add_argument("--install", action="store_true", help="Execute the already authorized scoped installation")
     parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
-    files, receipt = fetch(args.sha)
+    files, receipt = fetch(args.sha, tool=args.tool)
     receipt.update(tool=args.tool, sha256=hashlib.sha256(files["scripts/" + args.tool]).hexdigest())
     if args.install:
         if not args.ssh_config or not args.host or not args.receipt:
