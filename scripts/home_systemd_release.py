@@ -898,11 +898,8 @@ def reviewed_executor_image_files(mirror, sha, extra):
     name = 'scripts/build_home_image.sh'
     if name not in extra:
         return set()
-    # The second builder adds the reviewed Chamber files to the archive.
-    require(run('git', '--git-dir', mirror, 'rev-parse', f'{sha}:{name}') in {
-        '7079b3b48ec7d727800c5959ba6f321dfb24c07c',
-        'f60d7260051594732adf4fd0c099a0ec100257f2',
-    }, 'executor image builder requires compatibility review')
+    require(run('git', '--git-dir', mirror, 'rev-parse', f'{sha}:{name}') ==
+            '7079b3b48ec7d727800c5959ba6f321dfb24c07c', 'executor image builder requires compatibility review')
     return {name}
 
 
@@ -917,11 +914,17 @@ CHAMBER_REVIEWED_FILES = {
     'scripts/chamber_analytics_links.py': 'b1650ce515e3cec6bcf891f0b4ea4b14216c94d4',
     'scripts/ci_install_camoufox.py': 'c3066208cb2498522a8092bbd1d683f5e3783398',
 }
+CHAMBER_BUILDER = 'scripts/build_home_image.sh'
+CHAMBER_BUILDER_BLOB = 'f60d7260051594732adf4fd0c099a0ec100257f2'
 
 
 def reviewed_chamber_release_files(mirror, sha, extra):
     paths = extra.intersection(CHAMBER_REVIEWED_FILES)
-    for name in sorted(paths):
+    chamber_builder = CHAMBER_BUILDER in extra and run(
+        'git', '--git-dir', mirror, 'rev-parse', f'{sha}:{CHAMBER_BUILDER}'
+    ) == CHAMBER_BUILDER_BLOB
+    checked = paths | CHAMBER_IMAGE_FILES.keys() if chamber_builder else paths
+    for name in sorted(checked):
         expected = CHAMBER_REVIEWED_FILES[name]
         require(run('git', '--git-dir', mirror, 'rev-parse', f'{sha}:{name}') == expected,
                 'Chamber release files require compatibility review')
@@ -930,7 +933,7 @@ def reviewed_chamber_release_files(mirror, sha, extra):
             require(source.is_file() and source.resolve(strict=True) == source
                     and run('git', 'hash-object', '--no-filters', source) == expected,
                     'Chamber image file differs from reviewed source')
-    return paths
+    return paths | {CHAMBER_BUILDER} if chamber_builder else paths
 
 
 # This is a separate, anonymous transport. It never owns a business identity,
@@ -3107,6 +3110,44 @@ def reviewed_runtime_files(mirror, sha, extra):
     return paths
 
 
+def verify_release_compatibility(mirror, old, sha):
+    # Reject schema, dependency, service configuration and runtime changes without a separate plan.
+    changes = run("git", "--git-dir", mirror, "diff", "--no-renames", "--name-only", "-z", old, sha)
+    allowed = ("services/api/lead_app/", "apps/web/app/", "apps/web/public/", "docs/", "tests/", ".github/")
+    # This public adapter is application source in the same verified services image.
+    # Adding it never installs node configuration or widens the script/infra exceptions.
+    allowed_files = {"README.md", "AGENTS.md", "services/channel_adapters/reddit/entry.py",
+                     "services/channel_adapters/telegram/entry.py","services/channel_adapters/systemd/executor.conf.in"}
+    extra = {name for name in changes.split("\0") if name and not name.startswith(allowed)
+             and name not in allowed_files}
+    extra -= OPERATOR_ONLY_FILES
+    extra -= LOCAL_VERIFICATION_FILES
+    extra -= reviewed_chamber_release_files(mirror, sha, extra)
+    extra -= reviewed_public_reader_files(mirror, sha, extra)
+    extra -= reviewed_maintenance_files(mirror, sha, extra)
+    extra -= reviewed_channel_schema(mirror, sha, extra)
+    extra -= reviewed_shared_executor_proxy(mirror, sha, extra)
+    extra -= reviewed_shared_executor(mirror, sha, extra)
+    extra -= reviewed_unified_browser(mirror, sha, extra)
+    extra -= reviewed_fault_isolation(mirror, sha, extra)
+    extra -= reviewed_growth_runtime(mirror,sha,extra)
+    extra -= reviewed_reddit_site(mirror, sha, extra)
+    extra -= reviewed_runtime_files(mirror, sha, extra)
+    extra -= reviewed_executor_image_files(mirror, sha, extra)
+    if extra:
+        # The frame subsystem was already installed from this reviewed commit.
+        # Only accept its EXACT reviewed blobs, and attest the installed components.
+        reviewed = "c8013909ab22a0ea3da15b5bfae7c70443fdca6a"
+        frame_files = {"infra/home-browser-frames/" + name for name in
+                       ("frame-live.cjs", FRAME_SERVICE, "location.conf", "upstream.conf")}
+        compatible = frame_files | {"scripts/build_home_image.sh", "scripts/home_systemd_release.py",
+                                    "scripts/request_home_release.py"}
+        require(extra <= compatible and (STORE / sha / "home-browser-frames").is_dir(),
+                "release requires separate compatibility review")
+        run("git", "--git-dir", mirror, "diff", "--exit-code", reviewed, sha, "--", *sorted(extra))
+        verify_frames(image(sha), running_web=image(old) / "web")
+
+
 def deploy(sha):
     require(os.geteuid() == 0, "trusted node dispatcher required")
     safe_layout()
@@ -3126,41 +3167,7 @@ def deploy(sha):
         mirror = STORE / "lead.git"
         sync_public_main(mirror, sha)
         run("git", "--git-dir", mirror, "merge-base", "--is-ancestor", old, sha)
-        # Reject schema, dependency, service configuration and runtime changes without a separate plan.
-        changes = run("git", "--git-dir", mirror, "diff", "--no-renames", "--name-only", "-z", old, sha)
-        allowed = ("services/api/lead_app/", "apps/web/app/", "apps/web/public/", "docs/", "tests/", ".github/")
-        # This public adapter is application source in the same verified services image.
-        # Adding it never installs node configuration or widens the script/infra exceptions.
-        allowed_files = {"README.md", "AGENTS.md", "services/channel_adapters/reddit/entry.py",
-                         "services/channel_adapters/telegram/entry.py","services/channel_adapters/systemd/executor.conf.in"}
-        extra = {name for name in changes.split("\0") if name and not name.startswith(allowed)
-                 and name not in allowed_files}
-        extra -= OPERATOR_ONLY_FILES
-        extra -= LOCAL_VERIFICATION_FILES
-        extra -= reviewed_public_reader_files(mirror, sha, extra)
-        extra -= reviewed_maintenance_files(mirror, sha, extra)
-        extra -= reviewed_channel_schema(mirror, sha, extra)
-        extra -= reviewed_shared_executor_proxy(mirror, sha, extra)
-        extra -= reviewed_shared_executor(mirror, sha, extra)
-        extra -= reviewed_unified_browser(mirror, sha, extra)
-        extra -= reviewed_fault_isolation(mirror, sha, extra)
-        extra -= reviewed_growth_runtime(mirror,sha,extra)
-        extra -= reviewed_reddit_site(mirror, sha, extra)
-        extra -= reviewed_runtime_files(mirror, sha, extra)
-        extra -= reviewed_executor_image_files(mirror, sha, extra)
-        extra -= reviewed_chamber_release_files(mirror, sha, extra)
-        if extra:
-            # The frame subsystem was already installed from this reviewed commit.
-            # Only accept its EXACT reviewed blobs, and attest the installed components.
-            reviewed = "c8013909ab22a0ea3da15b5bfae7c70443fdca6a"
-            frame_files = {"infra/home-browser-frames/" + name for name in
-                           ("frame-live.cjs", FRAME_SERVICE, "location.conf", "upstream.conf")}
-            compatible = frame_files | {"scripts/build_home_image.sh", "scripts/home_systemd_release.py",
-                                        "scripts/request_home_release.py"}
-            require(extra <= compatible and (STORE / sha / "home-browser-frames").is_dir(),
-                    "release requires separate compatibility review")
-            run("git", "--git-dir", mirror, "diff", "--exit-code", reviewed, sha, "--", *sorted(extra))
-            verify_frames(image(sha), running_web=image(old) / "web")
+        verify_release_compatibility(mirror, old, sha)
         if (STORE / sha / PUBLIC_READER_SOURCE_FILES[0]).is_file():
             public_reader_before_switch(sha, old)
         # The node's maintenance fence outlives this process. It must remain held across recovery.

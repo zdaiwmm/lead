@@ -1138,17 +1138,55 @@ def test_incomplete_provision_resumes_readback_without_replaying(provisioning, m
     assert not any(a[0] == 'systemctl' for a in p.commands)
 
 
-@pytest.mark.parametrize('blob', [
-    '7079b3b48ec7d727800c5959ba6f321dfb24c07c',
-    'f60d7260051594732adf4fd0c099a0ec100257f2',
-])
-def test_reviewed_executor_image_builder_is_exact(hook, monkeypatch, blob):
+def test_reviewed_executor_image_builder_is_exact(hook, monkeypatch):
     name = 'scripts/build_home_image.sh'
-    monkeypatch.setattr(hook, 'run', lambda *a: blob)
+    monkeypatch.setattr(hook, 'run', lambda *a: '7079b3b48ec7d727800c5959ba6f321dfb24c07c')
     assert hook.reviewed_executor_image_files('/mirror', 'a' * 40, {name, 'scripts/arbitrary.py'}) == {name}
     monkeypatch.setattr(hook, 'run', lambda *a: 'other')
     with pytest.raises(hook.Refused, match='image builder'):
         hook.reviewed_executor_image_files('/mirror', 'a' * 40, {name})
+
+
+@pytest.mark.parametrize('change, refusal', [
+    (None, None),
+    ('builder', 'unified-browser files require compatibility review'),
+    ('image', 'Chamber image file differs from reviewed source'),
+    ('migration', 'release requires separate compatibility review'),
+])
+def test_chamber_image_full_release_compatibility(hook, monkeypatch, change, refusal):
+    old, sha = 'a' * 40, 'b' * 40
+    builder = 'scripts/build_home_image.sh'
+    source = Path(__file__).resolve().parents[1]
+    files = set(hook.CHAMBER_REVIEWED_FILES) | {builder, 'services/api/lead_app/chamber_analytics.py'}
+    for name in hook.CHAMBER_IMAGE_FILES:
+        mounted = hook.STORE / sha / name
+        mounted.parent.mkdir(parents=True, exist_ok=True)
+        mounted.write_bytes((source / name).read_bytes())
+    if change == 'image':
+        (hook.STORE / sha / 'infra/chamber-shortlink/production-location.conf').write_text('unexpected bytes')
+    if change == 'migration':
+        files.add('infra/migrations/unreviewed.py')
+
+    def command(*args):
+        if 'diff' in args:
+            assert args[-2:] == (old, sha)
+            return '\0'.join(sorted(files)) + '\0'
+        if 'rev-parse' in args:
+            relative = args[-1].partition(':')[2]
+            if change == 'builder' and relative == builder:
+                return 'a' * 40
+            path = source / relative
+        else:
+            assert args[:3] == ('git', 'hash-object', '--no-filters')
+            path = args[-1]
+        return subprocess.check_output(['git', 'hash-object', '--no-filters', path], text=True).strip()
+
+    monkeypatch.setattr(hook, 'run', command)
+    if refusal:
+        with pytest.raises(hook.Refused, match=refusal):
+            hook.verify_release_compatibility('/mirror', old, sha)
+    else:
+        hook.verify_release_compatibility('/mirror', old, sha)
 
 
 @pytest.mark.parametrize('drift', [None, 'source', 'image', 'missing', 'symlink', 'parent symlink'])
