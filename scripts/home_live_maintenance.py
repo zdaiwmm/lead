@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from uuid import UUID
 
 SITE = Path("/srv/lead-prod-vault/lead-onboard-87d151a")
 MONITOR = ("b48825dd-69b9-438c-b73c-407cdf215cb8", "urn:lead:local-release-health", "node-health-reader")
@@ -117,10 +118,33 @@ def request_discovery_drain(sha):
                    OR t.state='planned' AND t.input#>>'{{discovery_handoff,sha}}'='{sha}'))""")
 
 
-def maintenance(action, sha):
+def maintenance(action, sha, agent_id=None):
     # The same transaction journals the original authorization fingerprint and changes only
     # scheduling intent. No domain pause/resume action (which cancels tasks/redelegates) runs.
-    if action == "hold":
+    if not re.fullmatch("[a-f0-9]{40}", sha) or action not in ("hold", "hold-paused", "restore"):
+        raise ValueError("expected a maintenance operation and exact revision")
+    if agent_id is not None and action != "hold-paused":
+        raise ValueError("agent UUID is only accepted for an already paused executor")
+    if action == "hold-paused":
+        if not agent_id or str(UUID(agent_id)) != agent_id:
+            raise ValueError("expected the paused executor's agent UUID")
+        check_target = f"""IF NOT EXISTS(SELECT FROM lead.agents a WHERE a.id='{agent_id}'::uuid
+          AND a.desired_state='paused' AND (NOT a.onboarding_state ? '{KEY}' OR
+              (a.onboarding_state#>>'{{{KEY},sha}}'='{sha}' AND
+               a.onboarding_state#>>'{{{KEY},previous_desired_state}}'='paused' AND
+               a.onboarding_state#>'{{{KEY},before}}'={FINGERPRINT})))
+        THEN RAISE EXCEPTION 'paused executor agent changed'; END IF;"""
+        mark = f"""UPDATE lead.agents a SET onboarding_state=onboarding_state ||
+            jsonb_build_object('{KEY}',jsonb_build_object(
+                'sha','{sha}','before',{FINGERPRINT},'previous_desired_state','paused'))
+            WHERE id='{agent_id}'::uuid AND NOT onboarding_state ? '{KEY}';"""
+    elif action == "hold":
+        check_target = ""
+        mark = f"""UPDATE lead.agents a SET desired_state='paused',onboarding_state=onboarding_state ||
+            jsonb_build_object('{KEY}',jsonb_build_object('sha','{sha}','before',{FINGERPRINT}))
+            WHERE desired_state='running' AND NOT onboarding_state ? '{KEY}';"""
+
+    if action in ("hold", "hold-paused"):
         query = f"""DO $$ BEGIN
         IF EXISTS(SELECT FROM lead.agents WHERE onboarding_state ? '{KEY}' AND
            onboarding_state#>>'{{{KEY},sha}}' IS DISTINCT FROM '{sha}') THEN RAISE EXCEPTION 'other maintenance'; END IF;
@@ -131,18 +155,23 @@ def maintenance(action, sha):
                       jsonb_build_array(a.control_version,a.config_revision,a.authorization_version)))
         THEN RAISE EXCEPTION 'discovery checkpoint changed'; END IF;
         IF {BUSY} THEN RAISE EXCEPTION 'waiting for active work'; END IF;
+        {check_target}
         END $$;
-        UPDATE lead.agents a SET desired_state='paused',onboarding_state=onboarding_state ||
-            jsonb_build_object('{KEY}',jsonb_build_object('sha','{sha}','before',{FINGERPRINT}))
-        WHERE desired_state='running' AND NOT onboarding_state ? '{KEY}';"""
+        {mark}"""
     else:
         query = f"""DO $$ BEGIN
         IF EXISTS(SELECT FROM lead.agents a WHERE onboarding_state ? '{KEY}' AND
             (onboarding_state#>>'{{{KEY},sha}}' IS DISTINCT FROM '{sha}' OR desired_state<>'paused'
-             OR onboarding_state#>'{{{KEY},before}}' IS DISTINCT FROM {FINGERPRINT}))
+             OR onboarding_state#>'{{{KEY},before}}' IS DISTINCT FROM {FINGERPRINT}
+             OR (onboarding_state->'{KEY}' ? 'previous_desired_state' AND
+                 onboarding_state#>>'{{{KEY},previous_desired_state}}' IS DISTINCT FROM 'paused')))
         THEN RAISE EXCEPTION 'state changed during maintenance'; END IF;
         END $$;
-        UPDATE lead.agents SET desired_state='running',onboarding_state=onboarding_state-'{KEY}'-'home_discovery_drain'
+        UPDATE lead.agents SET
+          desired_state=CASE WHEN onboarding_state#>>'{{{KEY},previous_desired_state}}'='paused'
+              THEN desired_state ELSE 'running' END,
+          onboarding_state=CASE WHEN onboarding_state#>>'{{{KEY},previous_desired_state}}'='paused'
+              THEN onboarding_state-'{KEY}' ELSE onboarding_state-'{KEY}'-'home_discovery_drain' END
         WHERE onboarding_state#>>'{{{KEY},sha}}'='{sha}';"""
     site_sql("BEGIN;" + LOCK + query + "COMMIT;")
 
@@ -204,6 +233,8 @@ def main(args):
     elif args[0] == "workflow" and len(args) == 3:
         verify_workflow(args[1], args[2])
     elif args[0] in ("hold", "restore") and len(args) == 2:
+        maintenance(*args)
+    elif args[0] == "hold-paused" and len(args) == 3:
         maintenance(*args)
     else:
         raise ValueError("unknown maintenance command")

@@ -16,8 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 bundle = importlib.import_module("build_tool_bundle")
 release = importlib.import_module("tool_release")
 installer = importlib.import_module("tool_install")
+scope = importlib.import_module("ci_scope")
 
 SHA, APP = "a" * 40, "b" * 40
+MAINTENANCE = "home_live_maintenance.py"
 
 
 @pytest.fixture
@@ -25,7 +27,7 @@ def source_bundle(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", repo], check=True)
-    for name in bundle.TOOL_FILES:
+    for name in scope.TOOL_FILES | {f"scripts/{MAINTENANCE}"}:
         p = repo / name
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("VALUE=1\n")
@@ -43,10 +45,10 @@ def test_deterministic_bundle_is_exact_git_source(source_bundle, tmp_path):
     second = tmp_path / "again.tar"
     bundle.build(repo, sha, second)
     assert out.read_bytes() == second.read_bytes()
-    assert set(release.unpack(out.read_bytes(), sha)) == bundle.TOOL_FILES
+    assert set(release.unpack(out.read_bytes(), sha)) == scope.TOOL_FILES | {f"scripts/{MAINTENANCE}"}
     with pytest.raises(ValueError, match="another revision"):
         release.unpack(out.read_bytes(), SHA)
-    (repo / "scripts/ci_scope.py").write_text("uncommitted")
+    (repo / "scripts" / MAINTENANCE).write_text("uncommitted")
     with pytest.raises(subprocess.CalledProcessError):
         bundle.build(repo, sha, tmp_path / "dirty.tar")
 
@@ -74,15 +76,20 @@ def test_untrusted_bundle_members_rejected(source_bundle, fault):
         release.unpack(stream.getvalue(), sha)
 
 
-def test_artifact_download_rechecks_identity_and_transport(source_bundle, monkeypatch):
-    _, sha, path = source_bundle
+def artifact_zip(sha, tar):
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:
-        archive.writestr("lead-tools.tar", path.read_bytes())
+        archive.writestr("lead-tools.tar", tar)
     raw = stream.getvalue()
-    ci = {"id": 7, "run_attempt": 1}
     item = dict(id=41, name=f"lead-tools-{sha}-1", expired=False, size_in_bytes=len(raw),
                 digest="sha256:" + hashlib.sha256(raw).hexdigest(), workflow_run={"id": 7, "head_sha": sha})
+    return item, raw
+
+
+def test_artifact_download_rechecks_identity_and_transport(source_bundle, monkeypatch):
+    _, sha, path = source_bundle
+    item, raw = artifact_zip(sha, path.read_bytes())
+    ci = {"id": 7, "run_attempt": 1}
     called = []
     def verified(candidate, *, get, kind):
         assert kind == "tools" and candidate == sha
@@ -91,20 +98,81 @@ def test_artifact_download_rechecks_identity_and_transport(source_bundle, monkey
     monkeypatch.setattr(release, "verified_run", verified)
     def get(_):
         return {"total_count": 1, "artifacts": [item.copy()]}
-    files, proof = release.fetch(sha, get=get, download=lambda _: raw)
-    assert set(files) == bundle.TOOL_FILES and proof["artifact"] == 41
+    tool = "home_systemd_release.py"
+    files, proof = release.fetch(sha, tool=tool, get=get, download=lambda _: raw)
+    assert f"scripts/{tool}" in files and proof["artifact"] == 41
     assert len(called) == 2
     with pytest.raises(ValueError, match="transport digest"):
-        release.fetch(sha, get=get, download=lambda _: b"wrong")
+        release.fetch(sha, tool=tool, get=get, download=lambda _: b"wrong")
     item["expired"] = True
     with pytest.raises(ValueError, match="provenance"):
-        release.fetch(sha, get=get, download=lambda _: raw)
+        release.fetch(sha, tool=tool, get=get, download=lambda _: raw)
     item["expired"] = False
     def changed(_):
         ci["run_attempt"] = 2
         return raw
     with pytest.raises(ValueError, match="CI changed"):
-        release.fetch(sha, get=get, download=changed)
+        release.fetch(sha, tool=tool, get=get, download=changed)
+
+
+def test_only_application_verified_artifact_can_supply_maintenance_tool(source_bundle):
+    _, sha, path = source_bundle
+    item, raw = artifact_zip(sha, path.read_bytes())
+    application = False
+    attempt = 1
+
+    def get(path):
+        if path == f"compare/{sha}...main":
+            return {"merge_base_commit": {"sha": sha}}
+        if path.startswith("actions/workflows/ci.yml/runs?"):
+            return {"total_count": 1, "workflow_runs": [{"id": 7, "run_attempt": attempt,
+                    "head_sha": sha, "head_branch": "main", "path": ".github/workflows/ci.yml",
+                    "event": "push", "status": "completed", "conclusion": "success"}]}
+        if path == f"actions/runs/7/attempts/{attempt}/jobs?per_page=100":
+            names = {"scope", "checks", "verified", "namespace", "tool-bundle"}
+            names |= {"backend", "frontend"} if application else {"delivery"}
+            step = "Application verification" if application else "Tool verification"
+            return {"jobs": [{"name": n, "conclusion": "success", "steps":
+                    [{"name": step, "conclusion": "success"}] if n == "verified" else []} for n in names]}
+        assert path == f"actions/runs/7/artifacts?name=lead-tools-{sha}-1&per_page=2"
+        return {"total_count": 1, "artifacts": [item]}
+
+    def download(_):
+        return raw
+
+    release.fetch(sha, tool="home_systemd_release.py", get=get, download=download)
+    with pytest.raises(ValueError, match="Application verification required"):
+        release.fetch(sha, tool=MAINTENANCE, get=get, download=download)
+
+    application = True
+    files, proof = release.fetch(sha, tool=MAINTENANCE, get=get, download=download)
+    assert files[f"scripts/{MAINTENANCE}"] == b"VALUE=1\n"
+    assert proof == {"sha": sha, "ci_run": 7, "ci_attempt": 1, "artifact": 41}
+
+    def superseded(_):
+        nonlocal attempt
+        attempt = 2
+        return raw
+
+    with pytest.raises(ValueError, match="Tool CI changed"):
+        release.fetch(sha, tool=MAINTENANCE, get=get, download=superseded)
+
+
+def test_legacy_bundle_remains_readable_for_ordinary_tools(source_bundle):
+    _, sha, path = source_bundle
+    stream = io.BytesIO()
+    with tarfile.open(path) as source, tarfile.open(fileobj=stream, mode="w") as target:
+        for member in source.getmembers():
+            if member.name == f"scripts/{MAINTENANCE}":
+                continue
+            data = source.extractfile(member).read()
+            if member.name == "manifest.json":
+                manifest = json.loads(data)
+                manifest["files"] = [f for f in manifest["files"] if f["path"] != f"scripts/{MAINTENANCE}"]
+                data = json.dumps(manifest).encode()
+                member.size = len(data)
+            target.addfile(member, io.BytesIO(data))
+    assert set(release.unpack(stream.getvalue(), sha)) == scope.TOOL_FILES
 
 
 @pytest.fixture
@@ -139,6 +207,27 @@ def test_install_and_retry_preserve_original_backup_and_do_not_rewrite(install_c
     assert writes.count(target) == 1
     assert (target.stat().st_mode & 0o777) == 0o755
     assert json.loads((store / "tool-backups" / SHA / (target.name + ".json")).read_text())["old"] == installer.digest(old)
+
+
+def test_maintenance_install_updates_only_existing_trusted_file(install_case):
+    tools, store, ordinary, old, new, _ = install_case
+    target = tools / MAINTENANCE
+
+    def apply():
+        return installer.install(tools, store, target.name, new, SHA, installer.digest(old), APP,
+                                 current=lambda: APP, git_source=lambda *_: new)
+
+    with pytest.raises(FileNotFoundError):
+        apply()
+    target.symlink_to(ordinary)
+    with pytest.raises(ValueError, match="Untrusted tool/store path"):
+        apply()
+    target.unlink()
+    target.write_bytes(old)
+    result = apply()
+    assert result["application_sha"] == APP and result["service_restarts"] is False
+    assert target.read_bytes() == new and ordinary.read_bytes() == old
+    assert Path(result["backup"]).read_bytes() == old
 
 
 def test_failure_after_atomic_swap_restores_old_tool(install_case):
@@ -190,7 +279,7 @@ def test_cli_lost_reply_preserves_original_identity_and_resumes_readback(tmp_pat
     files = {"scripts/tool_install.py": (root / "scripts/tool_install.py").read_bytes(),
              "scripts/home_systemd_release.py": b"VALUE=2\n"}
     evidence = tmp_path / "private" / "receipt.json"
-    monkeypatch.setattr(release, "fetch", lambda _: (files, {"sha": SHA, "ci_run": 7,
+    monkeypatch.setattr(release, "fetch", lambda _, *, tool: (files, {"sha": SHA, "ci_run": 7,
                                                           "ci_attempt": 1, "artifact": 41}))
     old = {"old": "0" * 64, "app": APP}
     new = {"old": hashlib.sha256(files["scripts/home_systemd_release.py"]).hexdigest(), "app": APP}

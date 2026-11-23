@@ -14,6 +14,8 @@ TOOL_FILES = {
     "scripts/prepare_home_image.py", "scripts/home_release_operator.py",
     "scripts/home_systemd_release.py",
 }
+APPLICATION_TOOL_FILES = {"scripts/home_live_maintenance.py"}
+BUNDLED_TOOL_FILES = TOOL_FILES | APPLICATION_TOOL_FILES
 TOOL_TESTS = {
     "tests/test_ci_delivery.py", "tests/test_tool_release.py",
     "tests/test_home_release.py", "tests/test_prepare_home_image.py",
@@ -99,7 +101,7 @@ def main():
             raise ValueError("Manual/unknown event uses full application verification")
         changes = changed_files(args.root, base, head, merge_base=name == "pull_request")
         kind = classify(changes)
-        tools = any(p in TOOL_FILES | TOOL_CONFIG | TOOL_TESTS for p, _, _ in changes)
+        tools = any(p in BUNDLED_TOOL_FILES | TOOL_CONFIG | TOOL_TESTS for p, _, _ in changes)
     except (KeyError, ValueError, subprocess.SubprocessError, UnicodeError):
         kind = "application"
         tools = True
