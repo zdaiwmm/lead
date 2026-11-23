@@ -190,9 +190,8 @@ def test_production_redirect_attributes_pv_and_deduplicates_both_device_counts(
     production, process_pending_clicks
 ):
     aid, connection, read_key, link_key = production
-    code = token_urlsafe(12)
+    codes = [token_urlsafe(12), token_urlsafe(12)]
     payload = {
-        "code": code,
         "platform": "github",
         "destination_url": "https://site.example/?id=1",
     }
@@ -200,13 +199,12 @@ def test_production_redirect_attributes_pv_and_deduplicates_both_device_counts(
     day = datetime.now(TZ).date().isoformat()
     with TestClient(app, base_url="https://collector.example") as client:
         assert (
-            client.post(
-                chamber_analytics.LINKS_PATH, json=payload, headers=auth(link_key)
-            ).status_code
-            == 204
+            all(client.post(
+                chamber_analytics.LINKS_PATH, json={**payload, "code": code}, headers=auth(link_key)
+            ).status_code == 204 for code in codes)
         )
         first_cookie = None
-        for _ in range(2):
+        for code in codes:
             click = client.get(
                 "/chamber/r/" + code,
                 follow_redirects=False,
@@ -247,6 +245,17 @@ def test_production_redirect_attributes_pv_and_deduplicates_both_device_counts(
             ).raise_for_status()
             for period in ("today", "all")
         }
+        historical = (datetime.now(TZ) - timedelta(days=1)).isoformat()
+        params = [("day", day), ("range", "today"), *(("link", f"0,{code},{historical}") for code in codes)]
+        records = client.get(chamber_analytics.REPORT_PATH, params=params, headers=auth(read_key)).raise_for_status()
+    assert records.json() == {
+        "day": day,
+        "range": "today",
+        "records": [{
+            "slot": 0, "clicks": 2, "click_devices": 1, "pv": 2, "site_devices": 1,
+            "click_devices_min": None, "site_devices_min": None,
+        }],
+    }
     assert response.status_code == 200, response.text
     assert response.json() == {
         "day": day,
@@ -453,6 +462,9 @@ def test_ranged_bridge_validates_requested_scope_and_transport(monkeypatch):
 
     report = ranged_report(day, "all")
     assert chamber_analytics.fetch_promotion_dashboard(aid, "all", day) == report
+    report["totals"] = {**report["totals"], "clicks": 3, "click_devices": None, "click_devices_min": 2}
+    assert chamber_analytics.fetch_promotion_dashboard(aid, "all", day, device_bounds=True) == report
+    assert outbound[-1].url.params["device_bounds"] == "true"
     monkeypatch.setattr(chamber_analytics, "MAX_REPORT_BYTES", 16)
     with pytest.raises(chamber_analytics.ChamberAnalyticsUnavailable):
         chamber_analytics.fetch_promotion_dashboard(aid, "all", day)
@@ -485,3 +497,174 @@ def test_ranged_report_rejects_invalid_payload(invalid):
         buckets[0]["channels"][0]["device_id"] = uid()
     with pytest.raises(chamber_analytics.ValidationError):
         chamber_analytics.RangedReport.model_validate_json(json.dumps(report))
+
+
+def _registered_fixture_link(c, aid, platform="telegram", *, placement="chamber", destination="https://site.example/"):
+    code = token_urlsafe(12)
+    return distribution.register(
+        c, aid, platform, destination, intent="chamber:" + code, placement=placement, code=code
+    )
+
+
+def _redirect_fact(c, link, at, device, *, exclusion=None):
+    c.execute(
+        """INSERT INTO lead.visit_sessions
+           (tenant_id,agent_id,tracking_link_id,source,source_session_id,trust_level,rule_version,
+            started_at,last_seen_at,anonymous_id,exclusion_reason)
+           VALUES(lead.ctx_tenant(),lead.ctx_agent(),%s,'redirect',%s,'redirect_observed','fixture',%s,%s,%s,%s)""",
+        (link["id"], uid(), at, at, device, exclusion),
+    )
+
+
+def _page_fact(c, connection, link, at, device, *, counted=True):
+    visit = one(c, """INSERT INTO lead.visit_sessions
+        (tenant_id,agent_id,tracking_link_id,source,source_session_id,trust_level,rule_version,started_at,last_seen_at)
+        VALUES(lead.ctx_tenant(),lead.ctx_agent(),%s,%s,%s,'client_observed','fixture',%s,%s) RETURNING id""",
+        (link["id"], "site:" + connection, uid(), at, at))["id"]
+    c.execute("""INSERT INTO lead.pixel_receipts
+          (tenant_id,agent_id,connection_id,event_id,event_name,anonymous_id,visit_session_id,
+           trust_level,counted,payload_sha256,occurred_at,received_at)
+          VALUES(lead.ctx_tenant(),lead.ctx_agent(),%s,%s,'PageView',%s,%s,'client_observed',%s,%s,%s,%s)""",
+        (connection, uid(), device, visit, counted, "a"*64, at, at))
+
+
+def test_device_bounds_cover_historical_snapshots_and_current_facts_only_on_opt_in(production):
+    aid, connection, read_key, _ = production
+    now = datetime.now(TZ)
+    old = now - timedelta(days=45)
+    with tx(aid) as c:
+        link = _registered_fixture_link(c, aid)
+        shared_device = uid()
+        for when, devices in (
+            (old, [shared_device, uid(), uid(), None]),
+            (now, [shared_device, uid(), uid(), None, None]),
+        ):
+            for device in devices:
+                _redirect_fact(c, link, when, device)
+        diagnostic = _registered_fixture_link(c, aid, "diagnostic", placement="diagnostic")
+        _redirect_fact(c, diagnostic, now, uid())
+        c.execute("UPDATE lead.analytics_connections SET last_pageview_at=%s WHERE id=%s", (now, connection))
+        _page_fact(c, connection, link, now, uid())
+        _page_fact(c, connection, link, now, None)
+        _page_fact(c, connection, link, now, uid(), counted=False)
+    refresh_scope(current_tenant(), aid, "live")
+    day = now.date().isoformat()
+    with TestClient(app, base_url="https://collector.example") as client:
+        path = chamber_analytics.REPORT_PATH
+        headers = auth(read_key)
+        legacy = client.get(path, params={"day": day, "range": "all"}, headers=headers).raise_for_status()
+        assert legacy.json()["totals"] == {"clicks": 9, "click_devices": None, "pv": 2, "site_devices": None}
+        assert b"devices_min" not in legacy.content
+        for period, count, minimum in (("today", 5, 3), ("all", 9, 5)):
+            report = client.get(path, params={
+                "day": day, "range": period, "device_bounds": "true",
+            }, headers=headers).raise_for_status().json()
+            assert report["totals"] == {
+                "clicks": count, "click_devices": None, "click_devices_min": minimum,
+                "pv": 2, "site_devices": None, "site_devices_min": 1,
+            }
+            assert report["channels"] == [{"platform": "telegram", **report["totals"]}]
+            assert any(bucket["totals"].get("click_devices_min") == 3 for bucket in report["buckets"])
+        publication = (now - timedelta(days=50)).isoformat()
+        entry = f"1,{link['public_code']},{publication}"
+        records = client.get(path, params={"day": day, "range": "all", "link": entry}, headers=headers)
+        assert records.raise_for_status().json()["records"] == [{
+            "slot": 1, "clicks": 9, "click_devices": None, "click_devices_min": 5,
+            "pv": 2, "site_devices": None, "site_devices_min": 1,
+        }]
+
+
+def test_link_report_restricts_window_registration_and_scope(production):
+    aid, _, read_key, link_key = production
+    now = datetime.now(TZ)
+    published_at = datetime.combine(now.date(), time.min, TZ)
+    with tx(aid) as c:
+        registered = _registered_fixture_link(c, aid)
+        ordinary = _registered_fixture_link(c, aid, placement="manual")
+        wrong_origin = _registered_fixture_link(c, aid, destination="https://site.example:444/")
+        for link in (registered, ordinary, wrong_origin):
+            _redirect_fact(c, link, now, uid())
+        _redirect_fact(c, registered, published_at - timedelta(seconds=1), uid())
+        _redirect_fact(c, registered, now, uid(), exclusion="known_bot")
+        _redirect_fact(c, registered, now, uid(), exclusion="coverage_probe")
+        _redirect_fact(c, registered, now + timedelta(days=1), uid())
+    other = domain.create_agent(runtime_engine="growth")
+    with tx(other) as c:
+        foreign = _registered_fixture_link(c, other)
+        _redirect_fact(c, foreign, now, uid())
+
+    def link_param(slot, link, start=published_at):
+        return ("link", f"{slot},{link['public_code']},{start.isoformat()}")
+
+    day = now.date().isoformat()
+    path = chamber_analytics.REPORT_PATH
+    params = [("day", day), ("range", "today")]
+    valid = link_param(0, registered)
+    mixed = link_param(0, ordinary)
+    with TestClient(app, base_url="https://collector.example") as client:
+        assert client.get(path, params=[*params, valid], headers=auth(link_key)).status_code == 401
+        assert client.get(path, params=[("day", day), valid], headers=auth(read_key)).status_code == 422
+        for links in (
+            [valid, valid],
+            [valid, link_param(0, ordinary, published_at - timedelta(days=1))],
+            [link_param(10, registered)],
+            [link_param(0, registered, published_at.replace(tzinfo=None))],
+            [link_param(0, registered, now + timedelta(days=1))],
+            [valid, ("device_bounds", "true")],
+            [valid] * 41,
+        ):
+            invalid = client.get(path, params=[*params, *links], headers=auth(read_key))
+            assert invalid.status_code == 422
+            assert registered["public_code"] not in invalid.text
+            assert published_at.isoformat() not in invalid.text
+        valid_and_unmapped = [
+            *params, valid, link_param(1, ordinary), link_param(2, wrong_origin), link_param(3, foreign)
+        ]
+        report = client.get(path, params=valid_and_unmapped, headers=auth(read_key)).raise_for_status().json()
+        assert report["records"] == [{
+            "slot": 0, "clicks": 1, "click_devices": 1, "click_devices_min": None,
+            "pv": None, "site_devices": None, "site_devices_min": None,
+        }]
+        report = client.get(path, params=[*params, valid, mixed], headers=auth(read_key)).raise_for_status().json()
+        assert report["records"] == []
+
+
+def test_link_bridge_only_requests_and_accepts_bounded_slots(monkeypatch):
+    aid, read_key, link_key = uid(), token_urlsafe(32), token_urlsafe(32)
+    now = datetime.now(TZ)
+    day = now.date()
+    code = token_urlsafe(12)
+    link = chamber_analytics.RecordLink(slot=2, code=code, published_at=now)
+    monkeypatch.setenv(chamber_analytics.ORIGIN, "https://collector.example")
+    monkeypatch.setenv(chamber_analytics.LOCAL_AGENT, aid)
+    monkeypatch.setenv(chamber_analytics.READ_KEY, read_key)
+    monkeypatch.setenv(chamber_analytics.LINK_KEY, link_key)
+    requests = []
+    totals = {
+        "clicks": 6, "click_devices": None, "click_devices_min": 4,
+        "pv": None, "site_devices": None, "site_devices_min": None,
+    }
+    response = {"day": day.isoformat(), "range": "all", "records": [{"slot": 2, **totals}]}
+
+    def remote(request):
+        requests.append(request)
+        return httpx.Response(200, stream=httpx.ByteStream(json.dumps(response).encode()))
+
+    monkeypatch.setattr(chamber_analytics.httpx, "Client", partial(httpx.Client, transport=httpx.MockTransport(remote)))
+    assert chamber_analytics.fetch_promotion_links(uid(), "all", day, [link]) is None
+    assert chamber_analytics.fetch_promotion_links(aid, "all", day, []) == {}
+    assert not requests
+    assert chamber_analytics.fetch_promotion_links(aid, "all", day, [link]) == {2: totals}
+    request, = requests
+    assert request.url.path == chamber_analytics.REPORT_PATH
+    assert request.url.params.get_list("link") == [f"2,{code},{now.isoformat()}"]
+    assert request.headers["authorization"] == auth(read_key)["Authorization"]
+    for invalid in (
+        [{"slot": 1, **totals}],
+        [{"slot": 2, **totals, "device_id": uid()}],
+        [{"slot": 2, **totals, "click_devices_min": 7}],
+        [{"slot": 2, **totals}, {"slot": 2, **totals}],
+    ):
+        response["records"] = invalid
+        with pytest.raises(chamber_analytics.ChamberAnalyticsUnavailable):
+            chamber_analytics.fetch_promotion_links(aid, "all", day, [link])

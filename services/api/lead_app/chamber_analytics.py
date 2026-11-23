@@ -11,14 +11,26 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from psycopg.errors import UniqueViolation
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from . import analytics, distribution
 from .analytics_ingest import scoped_tx
 from .analytics_reporting import TZ
 from .config import env
-from .db import one, tx
-from .growth.promotion_dashboard import PromotionRange, read_promotion_dashboard
+from .db import all_rows, one, tx
+from .growth.promotion_dashboard import (
+    NON_CHANNELS,
+    PromotionRange,
+    read_promotion_dashboard,
+)
+from .growth.promotion_link_report import read_link_report
 from .identity_store import public_tenant
 from .promotion import CODE_PATTERN
 from .scope import tenant_scope
@@ -35,6 +47,8 @@ LINKS_PATH = "/_chamber/analytics/v1/links"
 SECRET_PATTERN = r"[A-Za-z0-9_-]{32,128}"
 MAX_REPORT_BYTES = 64 * 1024
 MAX_LINK_BYTES = 8 * 1024
+MAX_RECORD_SLOTS = 10
+MAX_RECORD_LINKS = 40
 
 
 class ChamberAnalyticsUnavailable(RuntimeError):
@@ -43,6 +57,10 @@ class ChamberAnalyticsUnavailable(RuntimeError):
 
 
 Count = Annotated[int, Field(strict=True, ge=0)]
+PositiveCount = Annotated[int, Field(strict=True, gt=0)]
+RecordSlot = Annotated[int, Field(strict=True, ge=0, lt=MAX_RECORD_SLOTS)]
+Code = Annotated[str, Field(strict=True, pattern=rf"^{CODE_PATTERN}$")]
+ReportDay = Annotated[str, Field(strict=True, pattern=r"^\d{4}-\d{2}-\d{2}$")]
 Channel = Annotated[str, Field(pattern=r"^[a-z_][a-z0-9_-]{0,39}$")]
 
 
@@ -81,7 +99,22 @@ class DailyReport(BaseModel):
         return self
 
 
-class PlatformCounts(Counts):
+class BoundedCounts(Counts):
+    click_devices_min: PositiveCount | None = None
+    site_devices_min: PositiveCount | None = None
+
+    @model_validator(mode="after")
+    def coherent_bounds(self):
+        for events, devices, minimum in (
+            (self.clicks, self.click_devices, self.click_devices_min),
+            (self.pv, self.site_devices, self.site_devices_min),
+        ):
+            if minimum is not None and (devices is not None or (events is not None and minimum > events)):
+                raise ValueError("Invalid minimum device count")
+        return self
+
+
+class PlatformCounts(BoundedCounts):
     platform: Channel
 
 
@@ -89,18 +122,18 @@ class PromotionBucket(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     start: Annotated[str, Field(strict=True, max_length=35)]
-    totals: Counts
+    totals: BoundedCounts
     channels: list[PlatformCounts]
 
 
 class RangedReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    day: Annotated[str, Field(strict=True, pattern=r"^\d{4}-\d{2}-\d{2}$")]
+    day: ReportDay
     range: PromotionRange
     pixel_connected: Annotated[bool, Field(strict=True)]
     history_complete: Annotated[bool, Field(strict=True)]
-    totals: Counts
+    totals: BoundedCounts
     channels: list[PlatformCounts]
     buckets: Annotated[list[PromotionBucket], Field(min_length=24, max_length=30)]
 
@@ -129,10 +162,38 @@ class RangedReport(BaseModel):
         return self
 
 
+class RecordLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slot: RecordSlot
+    code: Code
+    published_at: AwareDatetime
+
+
+class RecordCounts(BoundedCounts):
+    slot: RecordSlot
+    click_devices_min: PositiveCount | None
+    site_devices_min: PositiveCount | None
+
+
+class RecordReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    day: ReportDay
+    range: PromotionRange
+    records: Annotated[list[RecordCounts], Field(max_length=MAX_RECORD_SLOTS)]
+
+    @model_validator(mode="after")
+    def unique_slots(self):
+        if len({row.slot for row in self.records}) != len(self.records):
+            raise ValueError("Duplicate promotion record slot")
+        return self
+
+
 class LinkSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    code: Annotated[str, Field(pattern=rf"^{CODE_PATTERN}$")]
+    code: Code
     platform: Channel
     destination_url: Annotated[str, Field(min_length=1, max_length=2000)]
 
@@ -238,21 +299,54 @@ def fetch_daily_report(aid, day):
     return report.model_dump(mode="json")
 
 
-def fetch_promotion_dashboard(aid, period: PromotionRange, day):
+def fetch_promotion_dashboard(aid, period: PromotionRange, day, *, device_bounds=False):
     values = _local_settings(aid)
     if values is None:
         return None
     requested_day = str(day)
-    payload = _request(
-        values, READ_KEY, "GET", REPORT_PATH, params={"day": requested_day, "range": period}
-    )
+    params = {"day": requested_day, "range": period}
+    if device_bounds:
+        params["device_bounds"] = "true"
+    payload = _request(values, READ_KEY, "GET", REPORT_PATH, params=params)
     try:
         report = RangedReport.model_validate_json(payload)
         if report.day != requested_day or report.range != period:
             raise ValueError("Unexpected promotion reporting window")
     except ValueError:
         raise ChamberAnalyticsUnavailable() from None
-    return report.model_dump(mode="json")
+    return report.model_dump(mode="json", exclude_unset=True)
+
+
+def _validate_record_links(links):
+    if not 1 <= len(links) <= MAX_RECORD_LINKS:
+        raise ValueError("Invalid promotion link count")
+    codes = set()
+    publication_times = {}
+    for link in links:
+        if link.code in codes or publication_times.setdefault(link.slot, link.published_at) != link.published_at:
+            raise ValueError("Ambiguous promotion link selection")
+        codes.add(link.code)
+    return publication_times.keys()
+
+
+def fetch_promotion_links(aid, period: PromotionRange, day, links: list[RecordLink]) -> dict[int, dict] | None:
+    values = _local_settings(aid)
+    if values is None:
+        return None
+    if not links:
+        return {}
+    requested_day = str(day)
+    try:
+        slots = _validate_record_links(links)
+        params = [("day", requested_day), ("range", period)]
+        params.extend(("link", f"{link.slot},{link.code},{link.published_at.isoformat()}") for link in links)
+        payload = _request(values, READ_KEY, "GET", REPORT_PATH, params=params)
+        report = RecordReport.model_validate_json(payload)
+        if report.day != requested_day or report.range != period or any(row.slot not in slots for row in report.records):
+            raise ValueError("Unexpected promotion record report")
+    except ValueError:
+        raise ChamberAnalyticsUnavailable() from None
+    return {row.slot: row.model_dump(mode="json", exclude={"slot"}) for row in report.records}
 
 
 def register_production_link(aid, code, platform, destination):
@@ -344,9 +438,18 @@ def _ensure_site_owner(c, connection, origin):
         raise HTTPException(503, "Chamber 站点连接不可用")
 
 
-def _ranged_response(data):
+def _report_response(report):
+    body = report.model_dump_json(exclude_unset=True).encode("utf-8")
+    if len(body) > MAX_REPORT_BYTES:
+        raise HTTPException(503, "Chamber 生产统计暂时不可用")
+    return Response(body, media_type="application/json")
+
+
+def _ranged_response(data, *, device_bounds):
+    fields = BoundedCounts.model_fields if device_bounds else Counts.model_fields
+
     def counts(row):
-        return {field: row[field] for field in Counts.model_fields}
+        return {field: row[field] for field in fields if field in row}
 
     def channels(rows):
         return [{"platform": row["platform"], **counts(row)} for row in rows]
@@ -364,32 +467,87 @@ def _ranged_response(data):
                 for bucket in data["buckets"]
             ],
         )
-        body = report.model_dump_json().encode("utf-8")
-        if len(body) > MAX_REPORT_BYTES:
-            raise ValueError("Report body exceeds limit")
     except ValueError:
         raise HTTPException(503, "Chamber 生产统计暂时不可用") from None
-    return Response(body, media_type="application/json")
+    return _report_response(report)
 
 
-@router.get(REPORT_PATH, response_model=DailyReport | RangedReport)
+def _parse_record_links(values, now):
+    if not 0 < len(values) <= MAX_RECORD_LINKS:
+        raise HTTPException(422, "推广记录查询范围无效")
+    links = []
+    try:
+        for value in values:
+            if len(value) > 80:
+                raise ValueError("Invalid promotion link selection")
+            slot, code, published = value.split(",", 2)
+            if not re.fullmatch("[0-9]", slot) or not published:
+                raise ValueError("Invalid promotion link selection")
+            link = RecordLink(slot=int(slot), code=code, published_at=datetime.fromisoformat(published))
+            if link.published_at > now:
+                raise ValueError("Promotion publication is in the future")
+            links.append(link)
+        _validate_record_links(links)
+    except (ValueError, OverflowError):
+        raise HTTPException(422, "推广记录查询范围无效") from None
+    return links
+
+
+def _registered_links(c, origin, links):
+    rows = all_rows(c, """
+        SELECT id,public_code,destination_url,allowed_host FROM lead.tracking_links
+        WHERE tenant_id=lead.ctx_tenant() AND agent_id=lead.ctx_agent()
+          AND placement='chamber' AND intent_key='chamber:'||public_code
+          AND public_code=ANY(%s) AND NOT (platform=ANY(%s))
+    """, ([link.code for link in links], NON_CHANNELS))
+    allowed_host = urlsplit(origin).hostname
+    registered = {}
+    for row in rows:
+        try:
+            if row["allowed_host"] == allowed_host and _https_origin(row["destination_url"]) == origin:
+                registered[row["public_code"]] = row["id"]
+        except ValueError:
+            continue
+    incomplete = {link.slot for link in links if link.code not in registered}
+    return [
+        (link.slot, registered[link.code], link.published_at)
+        for link in links if link.slot not in incomplete
+    ]
+
+
+@router.get(REPORT_PATH, response_model=DailyReport | RangedReport | RecordReport)
 def production_daily_report(
     day: date,
     connection: Annotated[str, Depends(_report_connection)],
     period: Annotated[PromotionRange | None, Query(alias="range")] = None,
+    link: Annotated[list[str] | None, Query()] = None,
+    device_bounds: Annotated[Literal["true"] | None, Query()] = None,
 ):
     from .analytics_reporting import read_daily_promotion
 
     now = datetime.now(TZ)
+    bounds = device_bounds is not None
+    if period is None and (link is not None or bounds) or link is not None and bounds:
+        raise HTTPException(422, "推广记录和设备下限须分别指定范围")
     if period is not None and day != now.date():
         raise HTTPException(422, "推广范围统计仅支持当前北京时间")
+    links = _parse_record_links(link, now) if link is not None else None
     tenant, aid, origin = _site_owner(connection)
     with tenant_scope(tenant, None), scoped_tx(tenant, aid, "live") as c:
         _ensure_site_owner(c, connection, origin)
         if period is None:
             return read_daily_promotion(c, aid, day)
-        data = read_promotion_dashboard(c, aid, period, now, [])
-    return _ranged_response(data)
+        if links is not None:
+            data = read_link_report(c, connection, period, now, _registered_links(c, origin, links))
+        else:
+            data = read_promotion_dashboard(c, aid, period, now, [], device_bounds=bounds)
+    if links is not None:
+        try:
+            report = RecordReport(day=day.isoformat(), range=period, records=data)
+        except ValueError:
+            raise HTTPException(503, "Chamber 生产统计暂时不可用") from None
+        return _report_response(report)
+    return _ranged_response(data, device_bounds=bounds)
 
 
 def _register_source(connection, source):

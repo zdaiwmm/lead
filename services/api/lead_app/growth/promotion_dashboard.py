@@ -7,11 +7,26 @@ from ..db import all_rows, one
 
 PromotionRange = Literal["today", "all"]
 
+COUNTED_REDIRECT = "v.source='redirect' AND v.trust_level='redirect_observed' AND v.exclusion_reason IS NULL"
+COUNTED_PAGE_VIEW = """p.scope_key='live' AND p.event_name='PageView' AND p.counted
+    AND v.source<>'redirect' AND v.source NOT LIKE 'pixel-test:%%' AND v.exclusion_reason IS NULL"""
+TRAFFIC_COUNTS = """
+    count(*) FILTER(WHERE kind='click') clicks,
+    CASE WHEN NOT coalesce(bool_or(device IS NULL) FILTER(WHERE kind='click'),false)
+        THEN count(DISTINCT device) FILTER(WHERE kind='click') END click_devices,
+    count(*) FILTER(WHERE kind='page') pv,
+    CASE WHEN NOT coalesce(bool_or(device IS NULL) FILTER(WHERE kind='page'),false)
+        THEN count(DISTINCT device) FILTER(WHERE kind='page') END site_devices,
+    count(DISTINCT device) FILTER(WHERE kind='click') click_devices_known,
+    count(DISTINCT device) FILTER(WHERE kind='page') site_devices_known
+"""
+
+
 _METRICS = ("clicks", "click_devices", "pv", "site_devices")
 _UNKNOWN = dict.fromkeys(_METRICS)
-_NON_CHANNELS = ["lab", "site", "unattributed", "promotion", "direct"]
+NON_CHANNELS = ["lab", "site", "unattributed", "promotion", "direct", "diagnostic"]
 
-_LIVE_FACTS = """
+_LIVE_FACTS = f"""
 WITH pending_days AS (
     SELECT day FROM lead.analytics_report_dirty
     WHERE %(today_view)s AND tenant_id=lead.ctx_tenant() AND agent_id=lead.ctx_agent() AND scope_key='live'
@@ -27,7 +42,7 @@ WITH pending_days AS (
     JOIN lead.visit_sessions v ON v.started_at>=w.start_at AND v.started_at<w.end_at
     JOIN lead.tracking_links l ON (l.tenant_id,l.agent_id,l.id)=(v.tenant_id,v.agent_id,v.tracking_link_id)
     WHERE v.tenant_id=lead.ctx_tenant() AND v.agent_id=lead.ctx_agent()
-      AND v.source='redirect' AND v.trust_level='redirect_observed' AND v.exclusion_reason IS NULL
+      AND {COUNTED_REDIRECT}
       AND NOT (l.platform=ANY(%(non_channels)s))
     UNION ALL
     SELECT p.occurred_at, l.platform, 'page', p.connection_id::text||':'||p.anonymous_id::text
@@ -36,8 +51,7 @@ WITH pending_days AS (
     JOIN lead.visit_sessions v ON (v.tenant_id,v.agent_id,v.id)=(p.tenant_id,p.agent_id,p.visit_session_id)
     JOIN lead.tracking_links l ON (l.tenant_id,l.agent_id,l.id)=(v.tenant_id,v.agent_id,v.tracking_link_id)
     WHERE p.tenant_id=lead.ctx_tenant() AND p.agent_id=lead.ctx_agent()
-      AND p.scope_key='live' AND p.event_name='PageView' AND p.counted AND p.received_at<=%(now)s
-      AND v.source<>'redirect' AND v.source NOT LIKE 'pixel-test:%%' AND v.exclusion_reason IS NULL
+      AND {COUNTED_PAGE_VIEW} AND p.received_at<=%(now)s
       AND NOT (l.platform=ANY(%(non_channels)s))
 ), eligible_platforms AS (
     SELECT unnest(%(published_platforms)s::text[]) AS platform
@@ -50,22 +64,17 @@ WITH pending_days AS (
 )
 """
 
-_TODAY_METRICS = _LIVE_FACTS + """
+_TODAY_METRICS = _LIVE_FACTS + f"""
 , hourly AS (
     SELECT date_trunc('hour',at_time AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai' AS bucket,
            platform,kind,device
     FROM facts WHERE at_time>=%(start)s
 )
-SELECT bucket,platform,count(*) FILTER(WHERE kind='click') clicks,
-    CASE WHEN NOT coalesce(bool_or(device IS NULL) FILTER(WHERE kind='click'),false)
-        THEN count(DISTINCT device) FILTER(WHERE kind='click') END click_devices,
-    count(*) FILTER(WHERE kind='page') pv,
-    CASE WHEN NOT coalesce(bool_or(device IS NULL) FILTER(WHERE kind='page'),false)
-        THEN count(DISTINCT device) FILTER(WHERE kind='page') END site_devices
+SELECT bucket,platform,{TRAFFIC_COUNTS}
 FROM hourly
 GROUP BY GROUPING SETS ((bucket,platform),(bucket),(platform),())
 UNION ALL
-SELECT NULL,platform,0,0,0,0 FROM eligible_platforms e
+SELECT NULL,platform,0,0,0,0,0,0 FROM eligible_platforms e
 WHERE NOT EXISTS(SELECT 1 FROM hourly h WHERE h.platform=e.platform)
 """
 
@@ -128,6 +137,8 @@ SELECT counts.day,counts.platform,counts.clicks,
     CASE WHEN NOT coalesce(counts.unknown_click_device,false) THEN coalesce(devices.click_devices,0) END click_devices,
     CASE WHEN NOT coalesce(counts.unknown_pv,false) THEN counts.pv END pv,
     CASE WHEN NOT coalesce(counts.unknown_pv OR counts.unknown_site_device,false) THEN coalesce(devices.site_devices,0) END site_devices,
+    coalesce(devices.click_devices,0) click_devices_known,
+    coalesce(devices.site_devices,0) site_devices_known,
     NOT EXISTS(SELECT 1 FROM lead.analytics_report_dirty
         WHERE tenant_id=lead.ctx_tenant() AND agent_id=lead.ctx_agent() AND scope_key='live'
           AND day<%(trend_day)s) AS history_complete
@@ -136,7 +147,16 @@ FROM counts LEFT JOIN devices ON counts.day IS NOT DISTINCT FROM devices.day
 """
 
 
-def read_promotion_dashboard(c, aid, period: PromotionRange, now, publications):
+def device_lower_bounds(row, counts, *, pixel_connected):
+    metrics = ("click_devices", "site_devices") if pixel_connected else ("click_devices",)
+    return {
+        f"{metric}_min": row[f"{metric}_known"]
+        for metric in metrics
+        if counts[metric] is None and row[f"{metric}_known"] > 0
+    }
+
+
+def read_promotion_dashboard(c, aid, period: PromotionRange, now, publications, *, device_bounds=False):
     today = now.astimezone(TZ).date()
     start = datetime.combine(today, time.min, TZ)
     trend_day = today - timedelta(days=29)
@@ -153,7 +173,7 @@ def read_promotion_dashboard(c, aid, period: PromotionRange, now, publications):
         c, _TODAY_METRICS if today_view else _ALL_METRICS,
         {"now": now, "start": query_start, "trend_day": trend_day,
          "today_view": today_view, "snapshot_before": today if today_view else trend_day,
-         "published_platforms": list(counts), "non_channels": _NON_CHANNELS, "pixel_connected": pixel_connected},
+         "published_platforms": list(counts), "non_channels": NON_CHANNELS, "pixel_connected": pixel_connected},
     )
     platforms = sorted(set(counts) | {row["platform"] for row in rows if row["platform"] is not None})
     history_complete = today_view or rows[0]["history_complete"]
@@ -165,13 +185,17 @@ def read_promotion_dashboard(c, aid, period: PromotionRange, now, publications):
         by_window = {(row["day"], row["platform"]): row for row in rows}
 
     def metrics(window, platform=None):
-        if window is None and not history_complete:
-            return _UNKNOWN
         row = by_window.get((window, platform))
-        return {
-            key: None if not pixel_connected and key in ("pv", "site_devices") else row[key] if row else 0
-            for key in _METRICS
-        }
+        if window is None and not history_complete:
+            counts = dict(_UNKNOWN)
+        else:
+            counts = {
+                key: None if not pixel_connected and key in ("pv", "site_devices") else row[key] if row else 0
+                for key in _METRICS
+            }
+        if device_bounds and row:
+            counts.update(device_lower_bounds(row, counts, pixel_connected=pixel_connected))
+        return counts
 
     channels = [
         {"platform": platform, "promotions": counts.get(platform, 0), **metrics(None, platform)}
