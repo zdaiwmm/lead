@@ -898,9 +898,39 @@ def reviewed_executor_image_files(mirror, sha, extra):
     name = 'scripts/build_home_image.sh'
     if name not in extra:
         return set()
-    require(run('git', '--git-dir', mirror, 'rev-parse', f'{sha}:{name}') ==
-            '7079b3b48ec7d727800c5959ba6f321dfb24c07c', 'executor image builder requires compatibility review')
+    # The second builder adds the reviewed Chamber files to the archive.
+    require(run('git', '--git-dir', mirror, 'rev-parse', f'{sha}:{name}') in {
+        '7079b3b48ec7d727800c5959ba6f321dfb24c07c',
+        'f60d7260051594732adf4fd0c099a0ec100257f2',
+    }, 'executor image builder requires compatibility review')
     return {name}
+
+
+CHAMBER_IMAGE_FILES = {
+    'infra/chamber-shortlink/location.conf': '5bf00146de0cb0738d338a23cb753ffdbd9eca85',
+    'infra/chamber-shortlink/production-location.conf': '1369e23981d49beaf38d476e9e60ba07af1cbff2',
+    'infra/chamber-shortlink/relay.py': 'eb7f6197321c762e01d21e72c0cba7e9cb7a5c58',
+    'infra/chamber-shortlink/tmpfiles.conf': '7c3988a13547f1e98938c53a52b44f22b0ca5579',
+}
+CHAMBER_REVIEWED_FILES = {
+    **CHAMBER_IMAGE_FILES,
+    'scripts/chamber_analytics_links.py': 'b1650ce515e3cec6bcf891f0b4ea4b14216c94d4',
+    'scripts/ci_install_camoufox.py': 'c3066208cb2498522a8092bbd1d683f5e3783398',
+}
+
+
+def reviewed_chamber_release_files(mirror, sha, extra):
+    paths = extra.intersection(CHAMBER_REVIEWED_FILES)
+    for name in sorted(paths):
+        expected = CHAMBER_REVIEWED_FILES[name]
+        require(run('git', '--git-dir', mirror, 'rev-parse', f'{sha}:{name}') == expected,
+                'Chamber release files require compatibility review')
+        if name in CHAMBER_IMAGE_FILES:
+            source = STORE / sha / name
+            require(source.is_file() and source.resolve(strict=True) == source
+                    and run('git', 'hash-object', '--no-filters', source) == expected,
+                    'Chamber image file differs from reviewed source')
+    return paths
 
 
 # This is a separate, anonymous transport. It never owns a business identity,
@@ -3118,6 +3148,7 @@ def deploy(sha):
         extra -= reviewed_reddit_site(mirror, sha, extra)
         extra -= reviewed_runtime_files(mirror, sha, extra)
         extra -= reviewed_executor_image_files(mirror, sha, extra)
+        extra -= reviewed_chamber_release_files(mirror, sha, extra)
         if extra:
             # The frame subsystem was already installed from this reviewed commit.
             # Only accept its EXACT reviewed blobs, and attest the installed components.
