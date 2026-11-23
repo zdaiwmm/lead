@@ -16,9 +16,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from . import analytics, distribution
 from .analytics_ingest import scoped_tx
 from .analytics_reporting import TZ
-from .growth.promotion_dashboard import PromotionRange, read_promotion_dashboard
 from .config import env
 from .db import one, tx
+from .growth.promotion_dashboard import PromotionRange, read_promotion_dashboard
 from .identity_store import public_tenant
 from .promotion import CODE_PATTERN
 from .scope import tenant_scope
