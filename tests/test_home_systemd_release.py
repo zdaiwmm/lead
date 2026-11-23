@@ -1138,13 +1138,58 @@ def test_incomplete_provision_resumes_readback_without_replaying(provisioning, m
     assert not any(a[0] == 'systemctl' for a in p.commands)
 
 
-def test_reviewed_executor_image_builder_is_exact(hook, monkeypatch):
+@pytest.mark.parametrize('blob', [
+    '7079b3b48ec7d727800c5959ba6f321dfb24c07c',
+    'f60d7260051594732adf4fd0c099a0ec100257f2',
+])
+def test_reviewed_executor_image_builder_is_exact(hook, monkeypatch, blob):
     name = 'scripts/build_home_image.sh'
-    monkeypatch.setattr(hook, 'run', lambda *a: '7079b3b48ec7d727800c5959ba6f321dfb24c07c')
+    monkeypatch.setattr(hook, 'run', lambda *a: blob)
     assert hook.reviewed_executor_image_files('/mirror', 'a' * 40, {name, 'scripts/arbitrary.py'}) == {name}
     monkeypatch.setattr(hook, 'run', lambda *a: 'other')
     with pytest.raises(hook.Refused, match='image builder'):
         hook.reviewed_executor_image_files('/mirror', 'a' * 40, {name})
+
+
+@pytest.mark.parametrize('drift', [None, 'source', 'image', 'missing', 'symlink', 'parent symlink'])
+def test_chamber_compatibility_checks_reviewed_source_and_mount(hook, monkeypatch, drift):
+    name = 'infra/chamber-shortlink/production-location.conf'
+    local_helper = 'scripts/chamber_analytics_links.py'
+    sha = 'b' * 40
+    revision = hook.STORE / sha
+    mounted = revision / name
+    mounted.parent.mkdir(parents=True)
+    source = Path(__file__).resolve().parents[1]
+    mounted.write_bytes((source / name).read_bytes())
+    if drift == 'image':
+        mounted.write_text('unexpected template')
+    if drift in ('missing', 'symlink'):
+        mounted.unlink()
+    if drift == 'symlink':
+        mounted.symlink_to(source / name)
+    if drift == 'parent symlink':
+        moved = revision / 'external'
+        mounted.parent.rename(moved)
+        mounted.parent.symlink_to(moved)
+
+    def command(*args, **kwargs):
+        if 'rev-parse' in args:
+            relative = args[-1].partition(':')[2]
+            blob_path = source / relative
+            if drift == 'source' and relative == name:
+                return 'unexpected blob'
+        else:
+            assert args[:3] == ('git', 'hash-object', '--no-filters')
+            blob_path = args[-1]
+        return subprocess.check_output(['git', 'hash-object', '--no-filters', blob_path], text=True).strip()
+
+    monkeypatch.setattr(hook, 'run', command)
+    extra = {name, local_helper, 'infra/chamber-shortlink/new.conf'}
+    if drift is None:
+        assert hook.reviewed_chamber_release_files('/mirror', sha, extra) == {name, local_helper}
+    else:
+        with pytest.raises(hook.Refused, match='Chamber .* (review|source)'):
+            hook.reviewed_chamber_release_files('/mirror', sha, extra)
 
 
 def test_independent_executor_can_precede_main_application_cutover(provisioning, monkeypatch):
