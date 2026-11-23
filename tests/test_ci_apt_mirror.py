@@ -68,6 +68,37 @@ def test_success_replaces_once_after_all_four_signatures(runner, monkeypatch):
     assert path.stat().st_mode & 0o777 == 0o644
 
 
+@pytest.mark.parametrize("failures, expected_downloads", [(1, 2), (3, 3)])
+def test_signed_download_retries_only_within_limit(runner, monkeypatch, failures, expected_downloads):
+    path, calls = runner
+    path.write_text("previous mirror")
+    original = mirror.subprocess.run
+    downloads = 0
+
+    def download(command, **kwargs):
+        nonlocal downloads
+        if command[0] == "curl" and "/noble-updates/" in command[-1]:
+            downloads += 1
+            output = Path(command[command.index("--output") + 1])
+            assert not output.exists()
+            if downloads <= failures:
+                output.write_text("partial transfer")
+                raise subprocess.CalledProcessError(28, command)
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(mirror.subprocess, "run", download)
+    if failures == 1:
+        mirror.main()
+        assert len([call for call in calls if call[0] == "gpgv"]) == 4
+        assert path.read_text() == mirror.MIRROR + "/\tpriority:1\n"
+    else:
+        with pytest.raises(subprocess.CalledProcessError) as error:
+            mirror.main()
+        assert error.value.returncode == 28
+        assert path.read_text() == "previous mirror"
+    assert downloads == expected_downloads
+
+
 @pytest.mark.parametrize("failure", ["download", "signature", "suite", "duplicate", "unsigned_suffix"])
 def test_any_suite_failure_leaves_existing_mirror_unchanged(runner, monkeypatch, failure):
     path, _ = runner

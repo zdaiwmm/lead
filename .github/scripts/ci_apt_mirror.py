@@ -13,6 +13,8 @@ MIRROR = "https://archive.ubuntu.com/ubuntu"
 SUITES = ("noble", "noble-updates", "noble-security", "noble-backports")
 MIRRORS = Path("/etc/apt/apt-mirrors.txt")
 KEYRING = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+CURL_TIMEOUT_EXIT = 28
+DOWNLOAD_ATTEMPTS = 3
 
 
 def guard():
@@ -26,12 +28,20 @@ def guard():
 def verified_suite(suite):
     with tempfile.TemporaryDirectory(prefix=f"lead-ci-{suite}-") as folder:
         signed, plain = Path(folder) / "InRelease", Path(folder) / "verified"
-        subprocess.run([
+        download = [
             "curl", "--fail", "--silent", "--show-error", "--proto", "=https",
             "--location", "--proto-redir", "=https", "--connect-timeout", "5",
             "--max-time", "15", "--max-filesize", "1048576", "--output", str(signed),
             f"{MIRROR}/dists/{suite}/InRelease",
-        ], check=True, timeout=20)
+        ]
+        for attempt in range(DOWNLOAD_ATTEMPTS):
+            try:
+                subprocess.run(download, check=True, timeout=20)
+                break
+            except subprocess.CalledProcessError as error:
+                if error.returncode != CURL_TIMEOUT_EXIT or attempt == DOWNLOAD_ATTEMPTS - 1:
+                    raise
+                signed.unlink(missing_ok=True)
         subprocess.run([
             "gpgv", "--keyring", KEYRING, "--output", str(plain), str(signed),
         ], check=True, timeout=15)
