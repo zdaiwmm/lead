@@ -33,6 +33,7 @@ import NewAgentDialog from "./website-agent-dialog";
 import WorkflowGuide from "./workflow-guide";
 import NotificationIndicator from "./notification-indicator";
 import LocalExecutor from "./local-executor";
+import GoogleOpportunitySettings from "./google-opportunity-settings";
 
 type Row = Record<string, any>;
 type View = "home" | "agent" | "settings";
@@ -912,6 +913,9 @@ export default function Lead() {
                       检查环境
                     </button>
                   </section>
+                  {user?.role === "owner" && (
+                    <GoogleOpportunitySettings key={current} aid={current!} />
+                  )}
                   <details className="settings-disclosure">
                     <summary>
                       <span>本地浏览器测试</span>

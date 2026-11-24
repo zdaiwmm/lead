@@ -178,7 +178,8 @@ class NativeResearchPage(ResearchPage):
                 await self.start(args['url'])
             elif public_url(args['url']) != self.page.url:
                 raise ValueError('native_page_requires_explicit_navigation')
-            return await super().command('read',{},command_id)
+            recorded = {} if self.lease.get('account_id') else {'opened_url':args['url']}
+            return await super().command('read',recorded,command_id)
         if operation == 'scope':
             descriptor = await self.descriptor()
             return {key:value for key,value in descriptor.items() if key not in ('cdp_url','headers')}

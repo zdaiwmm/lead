@@ -44,6 +44,8 @@ from .creative_pipeline import router as creative_router
 from .db import all_rows, audit, one, record, require_agent, tx
 from .events import router as event_router
 from .executor_nodes_api import router as executor_nodes_router
+from .google_opportunity import check_takeover_owner, is_google_takeover
+from .google_opportunity import router as google_opportunity_router
 from .growth.views import router as growth_router
 from .local_executor_api import router as local_executor_router
 from .operating_playbooks import router as playbook_router
@@ -87,6 +89,7 @@ app.include_router(executor_nodes_router)
 app.include_router(browser_pilot_router)
 app.include_router(admin_router)
 app.include_router(advanced_admin_router)
+app.include_router(google_opportunity_router)
 
 
 @app.get("/api/executor/download")
@@ -818,7 +821,10 @@ async def gateway(path, method="POST", body=None, timeout=100):
             else:
                 agent = require_agent(c, matched[1])
                 from .growth.store import enabled
-                if enabled(agent):
+                takeover = (body or {}).get("takeover")
+                if not takeover and urlsplit(path).query:
+                    takeover = parse_qs(urlsplit(path).query).get("takeover", [None])[0]
+                if enabled(agent) or is_google_takeover(c, takeover):
                     from .execution_routes import endpoint, request_route
                     base = endpoint(request_route(c, matched[1], path, body))
                 else:
@@ -1207,6 +1213,7 @@ def end_takeover(aid: UUID, takeover: UUID | None = None):
     aid = str(aid)
     with tx(aid) as c:
         require_agent(c, aid, True)
+        check_takeover_owner(c, takeover, include_active=True)
         if takeover:
             session = one(c, "SELECT * FROM lead.takeover_sessions WHERE id=%s", (takeover,))
             if session and session["purpose"] == "login" and not session["completed_account_id"]:
@@ -1320,6 +1327,7 @@ async def decide_read_dependency(aid: UUID,connection: UUID,body: ReadDependency
 async def screenshot(aid: UUID, request: Request, format: Literal["png", "jpeg"] = "png", takeover: UUID | None = None):
     with tx(str(aid)) as c:
         require_agent(c, str(aid))
+        check_takeover_owner(c, takeover)
     result = await gateway(
         f"/agents/{aid}/screenshot?format={format}" + (f"&takeover={takeover}" if takeover else ""), "GET"
     )
@@ -1337,6 +1345,7 @@ async def screenshot(aid: UUID, request: Request, format: Literal["png", "jpeg"]
 async def browser_input(aid: UUID, body: BrowserInput):
     with tx(str(aid)) as c:
         require_agent(c, str(aid))
+        check_takeover_owner(c, body.takeover)
     await gateway("/agents/" + str(aid) + "/input", body=body.model_dump(mode="json"))
     return {"ok": True}
 

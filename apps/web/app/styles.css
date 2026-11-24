@@ -1708,6 +1708,18 @@ progress::-moz-progress-bar {
   justify-content: center;
   padding: 24px;
 }
+.account-browser-native {
+  width: 100vw;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  inset: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
 .account-browser-panel {
   width: 1280px;
   max-width: 100%;
@@ -3270,6 +3282,46 @@ progress::-moz-progress-bar {
 }
 .settings-group > button {
   font-size: 12px;
+}
+.google-opportunity-bind {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0 24px;
+}
+.google-opportunity-bind label {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+}
+.google-opportunity-bind input {
+  max-width: 340px;
+  width: 100%;
+}
+.google-opportunity-policy {
+  min-width: 0;
+  margin: 0 0 16px;
+  padding: 0;
+  border: 0;
+}
+.google-opportunity-policy legend {
+  font-size: 13px;
+}
+.google-opportunity-policy input[type="checkbox"] {
+  width: auto;
+  min-height: 0;
+  accent-color: var(--action);
+}
+.google-opportunity-attempts {
+  display: grid;
+  gap: 10px;
+  padding: 0;
+  margin: 8px 0 0;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+.google-opportunity-attempts li {
+  display: grid;
+  gap: 4px;
 }
 .settings-disclosure {
   padding: 12px 0;
