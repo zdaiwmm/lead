@@ -22,12 +22,13 @@ from .config import CONFIG, STATE, env
 
 
 class BrowserForwardProxy:
-    def __init__(self, aid, upstream=None, slot_id=None, *, forward_guard=None):
+    def __init__(self, aid, upstream=None, slot_id=None, *, forward_guard=None, destination_allowed=None):
         self.aid = aid
         self.upstream = upstream
         # A managed Chromium owner supplies its live, non-reusable control
         # generation. None retains the existing Camoufox network contract.
         self.forward_guard = forward_guard
+        self.destination_allowed = destination_allowed
         self.bound_ipv6 = (upstream or {}).get("server") == "bound-ipv6"
         tunnel_key = "LEAD_IPV6_TUNNEL_" + aid.replace("-", "").upper()
         self.ipv6_tunnel = env().get(tunnel_key)
@@ -380,6 +381,8 @@ class BrowserForwardProxy:
                 host, port = authority.hostname, authority.port or 443
                 if port not in (80, 443) or not host:
                     raise ValueError("Unsupported CONNECT target")
+                if self.destination_allowed and not self.destination_allowed(host, port):
+                    raise ValueError("Destination outside this browser operation")
                 ip = await self.resolve(host)
                 up_reader, remote = await self.connect(ip, port)
                 self.check_control(control_token)
@@ -391,6 +394,8 @@ class BrowserForwardProxy:
                 if p.scheme != "http" or not p.hostname or p.username or p.password:
                     raise ValueError("Invalid HTTP proxy target")
                 port = p.port or 80
+                if self.destination_allowed and not self.destination_allowed(p.hostname, port):
+                    raise ValueError("Destination outside this browser operation")
                 if (
                     p.hostname == "127.0.0.1"
                     and port == 8088

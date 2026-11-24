@@ -242,3 +242,110 @@ async def test_browser_recovery_uses_current_probe_task_and_original_transport(m
     assert remembered==['account_read' if mode=='account' else 'public_read']
     assert result.output['recovery_checks'][0]['resource']=='original-resource'
     assert result.output['recovery_checks'][0]['condition_revision']=='original-condition'
+
+
+@pytest.mark.parametrize("change,expected", [
+    ({}, True),
+    ({"url": "https://different.example/login"}, False),
+    ({"url": "http://directory.example/login"}, False),
+    ({"evidence_id": None}, False),
+    ({"read_only": False}, False),
+    ({"text": "Browse tools for makers."}, False),
+    ({"elements": []}, False),
+])
+def test_google_opportunity_requires_rendered_gate_with_current_origin(change, expected):
+    from uuid import uuid4
+
+    gate = {
+        "url": "https://directory.example/login",
+        "title": "Submit to the directory",
+        "text": "Sign in to submit a new tool.",
+        "elements": [{"tag": "button", "name": "Continue with Google"}],
+        "evidence_id": str(uuid4()),
+        "read_only": True,
+        **change,
+    }
+    receipt = tools.opportunity_login_receipt("https://directory.example/submit", gate)
+    assert bool(receipt) is expected
+
+
+@pytest.mark.parametrize("status,observation,account_evidence", [
+    ("connected", "https://directory.example/submit", True),
+    ("connected", "https://different.example/submit", False),
+    ("connected", None, False),
+    ("needs_owner", None, False),
+    ("unavailable", None, False),
+])
+async def test_google_connection_does_not_stop_independent_distribution_research(
+    monkeypatch, status, observation, account_evidence,
+):
+    from uuid import uuid4
+
+    from lead_app import browser_tools, google_opportunity
+    from lead_app.growth.contracts import EvidenceRef, TaskSpec, utcnow
+
+    candidate = "https://directory.example/submit"
+    same_site = "https://directory.example/alternatives"
+    independent = "https://another.example/submit"
+    login = "https://directory.example/login"
+    task_id, evidence_id = str(uuid4()), str(uuid4())
+    calls = []
+
+    async def fetch(url, **kwargs):
+        calls.append(("fetch", url))
+        if url in (candidate, same_site):
+            return {"url": login, "title": "Log in", "text": "Sign in to continue."}
+        return {"url": url, "title": "Directory rules", "text": "Anyone can submit a listing."}
+
+    class Browser:
+        def __init__(self, *args, **kwargs):
+            assert kwargs["task_id"] == task_id
+
+        async def command(self, operation, args):
+            calls.append((operation, args["url"]))
+            return {"url": login, "title": "Log in", "text": "Sign in to continue.",
+                    "read_only": True, "evidence_id": evidence_id}
+
+        async def finish(self, state):
+            calls.append(("finish", state))
+
+    async def sign_in(aid, **scope):
+        calls.append(("sign_in", scope))
+        return {
+            "status": status,
+            "observation": None if not observation else {"url": observation, "title": "Submit",
+                "text": "This directory accepts product listings.", "links": ["https://wrong.example"]},
+        }
+
+    def remember(aid, page, *, source_type):
+        calls.append((source_type, page["url"]))
+        return EvidenceRef(kind="document", id=uuid4()), True
+
+    monkeypatch.setattr(tools, "fetch_product", fetch)
+    monkeypatch.setattr(tools, "_remember", remember)
+    monkeypatch.setattr(tools, "opportunity_research_enabled", lambda *args: True)
+    monkeypatch.setattr(browser_tools, "BrowserTools", Browser)
+    monkeypatch.setattr(google_opportunity, "try_opportunity_sign_in", sign_in)
+
+    spec = TaskSpec(kind="research", purpose="distribution", review_at=utcnow(),
+                    payload={"urls": [candidate, same_site, independent]})
+    from lead_app.growth import runtime
+
+    monkeypatch.setattr(runtime, "check_research_resource", lambda *args: None)
+    result = await tools.research("fixture", {"id": task_id}, spec)
+
+    assert calls[:4] == [
+        ("fetch", candidate), ("open", candidate), ("finish", "failed"),
+        ("sign_in", {"task_id": task_id, "url": candidate,
+                     "observed_url": login, "evidence_id": evidence_id}),
+    ]
+    assert calls[-3:] == [("fetch", same_site), ("fetch", independent), ("public_read", independent)]
+    assert result.outcome == "completed"
+    assert result.output["pages"][-1]["url"] == independent
+    if account_evidence:
+        assert ("account_read", candidate) in calls
+        assert result.output["pages"][0]["access_mode"] == "account"
+        assert result.output["pages"][0]["observed_links"] == []
+    else:
+        assert len(result.output["pages"]) == 1
+        assert result.output["read_errors"][0]["google_sign_in"] == {"status": status}

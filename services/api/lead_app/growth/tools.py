@@ -1,6 +1,7 @@
 """Bounded tool handlers. No handler chooses a new business direction or grants authority."""
 import asyncio
 import json
+import re
 from contextvars import ContextVar
 from datetime import timedelta
 from typing import Literal
@@ -320,10 +321,11 @@ def _remember(aid, page, *, source_type="public_read", connection=None):
 
 
 class SourceReadError(ValueError):
-    def __init__(self, scope, condition, wait=None):
+    def __init__(self, scope, condition, wait=None, *, login_receipt=None):
         super().__init__(condition)
         self.failure_scope = {**scope, "condition": condition}
         self.wait = wait
+        self.login_receipt = login_receipt
 
 
 def source_scope(url, data, *, provider="direct_http", operation="read"):
@@ -352,6 +354,94 @@ def source_failure(page):
     return "unknown"
 
 
+def opportunity_site(url):
+    from ..browser_execution import origin
+    from ..operating_followups import public_candidate
+
+    try:
+        site = origin(url)
+        scheme, _, port = site
+        if scheme == "https" and port == 443 and public_candidate(url) == url:
+            return site
+    except ValueError:
+        pass
+    return None
+
+
+GOOGLE_SIGN_IN = re.compile(r"(?:sign in|log in|continue) with google|(?:使用|通过)\s*Google\s*(?:账号|帐号)?\s*(?:登录|登入)", re.I)
+SIGN_IN_GATE = re.compile(
+    r"(?:sign|log)\s*in to (?:continue|view|submit|access)|you must be logged in|"
+    r"请先登录|登录后(?:才|方)?能(?:继续|查看|提交)", re.I,
+)
+
+
+def opportunity_login_receipt(url, page):
+    """Accept only an actual read-only browser observation of a same-site login gate."""
+    from ..browser_execution import origin
+
+    observed_url, evidence_id = page.get("url"), page.get("evidence_id")
+    if page.get("read_only") is not True or not isinstance(observed_url, str):
+        return None
+    try:
+        site = opportunity_site(url)
+        if not site or origin(observed_url) != site:
+            return None
+        evidence_id = str(UUID(str(evidence_id)))
+    except ValueError:
+        return None
+    condition = source_failure(page)
+    google_only_gate = (
+        not condition
+        and SIGN_IN_GATE.search(page.get("text", "")[:1500])
+        and any(GOOGLE_SIGN_IN.fullmatch(element.get("name", "").strip())
+                for element in page.get("elements", []) if element.get("tag") in ("a", "button")
+                or element.get("role") == "button")
+    )
+    if condition != "login_required" and not google_only_gate:
+        return None
+    return {"observed_url": observed_url, "evidence_id": evidence_id}
+
+
+def opportunity_research_enabled(aid, row, spec, data):
+    if data.access_mode != "public" or spec.purpose == "product" or not row.get("experiment_id"):
+        return False
+    from ..google_opportunity import automatic_enabled
+
+    with tx(aid) as c:
+        return bool(one(c, """SELECT id FROM lead.growth_experiments
+            WHERE id=%s AND specification->>'question_type'='distribution' AND state='active'""",
+            (row["experiment_id"],)) and automatic_enabled(c))
+
+
+async def try_opportunity_source(aid, row, error, url):
+    from ..browser_execution import origin
+    from ..google_opportunity import try_opportunity_sign_in
+
+    try:
+        result = await asyncio.wait_for(
+            try_opportunity_sign_in(aid, task_id=str(row["id"]), url=url, **error.login_receipt),
+            timeout=36,
+        )
+    except (ValueError, OSError, httpx.HTTPError):
+        return None, {"status": "unavailable"}
+    status = result.get("status") if isinstance(result, dict) else None
+    if status not in {"disabled", "no_google_login", "connected", "needs_owner", "unsupported", "unverified", "unavailable"}:
+        return None, {"status": "unavailable"}
+    outcome = {"status": status}
+    page = result.get("observation")
+    if status == "connected" and isinstance(page, dict):
+        observed_url, body, title = page.get("url"), page.get("text"), page.get("title", "")
+        if not all(isinstance(value, str) for value in (observed_url, body, title)):
+            return None, outcome
+        try:
+            same_site = origin(observed_url) == opportunity_site(url)
+        except ValueError:
+            same_site = False
+        if same_site and not source_failure(page):
+            return {"url": observed_url, "text": body, "title": title, "access_mode": "account"}, outcome
+    return None, outcome
+
+
 def read_error(error, url, data, *, operation="read"):
     scope = getattr(error, "failure_scope", None) or {
         **source_scope(url, data, operation=operation),
@@ -371,7 +461,7 @@ def research_unavailable(errors, missing=False):
     return WorkResult(outcome="failed", failure_code="research_input_missing" if missing else "source_unavailable", output=output)
 
 
-async def _read_source(aid,row,data,url,*,external_links=False,check_resources=False,required_provider=None,allow_browser=True):
+async def _read_source(aid,row,data,url,*,external_links=False,check_resources=False,required_provider=None,allow_browser=True,opportunity_sign_in=False):
     from ..operating_work import unavailable_source
     scope = source_scope(url, data, operation="search" if external_links else "read")
     if data.access_mode == "public" and required_provider != "browser":
@@ -387,9 +477,15 @@ async def _read_source(aid,row,data,url,*,external_links=False,check_resources=F
         except (OSError,httpx.TransportError):
             page = None
         if page is not None and (not page.get("requires_javascript") or unavailable_source(page)):
-            if condition := source_failure(page):
-                raise SourceReadError(scope, condition)
-            return {**page, "access_mode": data.access_mode, "attempt_scope": scope}
+            condition = source_failure(page)
+            sign_in_hint = condition == "login_required" or (
+                not condition and SIGN_IN_GATE.search(page.get("text", "")[:1500])
+                and GOOGLE_SIGN_IN.search(page.get("text", "")[:1500])
+            )
+            if not (sign_in_hint and opportunity_sign_in and allow_browser):
+                if condition:
+                    raise SourceReadError(scope, condition)
+                return {**page, "access_mode": data.access_mode, "attempt_scope": scope}
     if not allow_browser:
         # An account-owned task cannot borrow its logged-in Profile for an
         # unrelated public search or candidate. Its explicit account URLs keep
@@ -412,8 +508,10 @@ async def _read_source(aid,row,data,url,*,external_links=False,check_resources=F
             condition = conditions.get(rendered['error']) if isinstance(rendered['error'],str) else None
             raise SourceReadError(scope, condition if data.access_mode=='account' and condition
                                   and rendered.get('condition')==condition else "transport")
-        if condition := source_failure(rendered):
-            raise SourceReadError(scope, condition)
+        condition = source_failure(rendered)
+        receipt = opportunity_login_receipt(url, rendered) if opportunity_sign_in else None
+        if condition or receipt:
+            raise SourceReadError(scope, condition or "login_required", login_receipt=receipt)
         if external_links:
             rendered["links"] = observed_source_urls([item["href"] for item in rendered.get("elements",[]) if item.get("href")],rendered["url"])
         state = "succeeded"
@@ -625,21 +723,39 @@ Search snippets are discovery hints; Lead must read the actual source before it 
             raise discovery_error
         return research_unavailable(errors, missing=not errors)
     evidence, pages, progress = local_refs, local_pages, provider_progress
+    automatic_sign_in = opportunity_research_enabled(aid, row, spec, data)
+    attempted_sign_in = set()
     # Direct/browser reads are bounded; the fallback owns only its public research run.
     for url in list(dict.fromkeys(urls))[:4]:
         read_data = data if url in explicit_urls else public_data
+        site = opportunity_site(url) if automatic_sign_in else None
         try:
             page = await _read_source(aid,row,read_data,url,check_resources=True,
-                allow_browser=data.access_mode == "public" or read_data.access_mode == "account")
-            ref, added = await asyncio.to_thread(_remember, aid, page,
-                source_type="account_read" if read_data.access_mode == "account" else "public_read")
-            if ref:
-                evidence.append(ref)
-                progress = progress or added
-                pages.append({"url": page["url"], "title": page.get("title"), "document_id": str(ref.id),
-                              "observed_links": page.get("links", []), "trust": "observed_source_claims"})
+                allow_browser=data.access_mode == "public" or read_data.access_mode == "account",
+                opportunity_sign_in=bool(site and site not in attempted_sign_in))
         except (ValueError,OSError,httpx.HTTPError) as error:
+            failure = read_error(error, url, read_data)
+            if not (site and site not in attempted_sign_in and getattr(error, "login_receipt", None)):
+                errors.append(failure)
+                continue
+            attempted_sign_in.add(site)
+            page, outcome = await try_opportunity_source(aid, row, error, url)
+            if not page:
+                errors.append({**failure, "google_sign_in": outcome})
+                continue
+        account_read = page["access_mode"] == "account"
+        try:
+            ref, added = await asyncio.to_thread(_remember, aid, page,
+                source_type="account_read" if account_read else "public_read")
+        except (ValueError, OSError, httpx.HTTPError) as error:
             errors.append(read_error(error, url, read_data))
+            continue
+        if ref:
+            evidence.append(ref)
+            progress = progress or added
+            pages.append({"url": page["url"], "title": page.get("title"), "document_id": str(ref.id),
+                          "observed_links": page.get("links", []), "trust": "observed_source_claims",
+                          **({"access_mode": "account"} if account_read else {})})
     if not evidence:
         if discovery_error:
             raise discovery_error

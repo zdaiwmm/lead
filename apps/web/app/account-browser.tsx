@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowLeft,
   ArrowRight,
@@ -14,6 +15,11 @@ import type { ConnectionLogin } from "./connection-details";
 import ConnectionReadDependencies from "./connection-read-dependencies";
 import { api, workspaceHeaders } from "./api-client";
 type Row = Record<string, any>;
+type ManualLoginFlow = {
+  open: () => Promise<{ takeover_id: string }>;
+  verify: (takeover: string) => Promise<void>;
+  instructions: string;
+};
 export default function AccountBrowser({
   aid,
   platform,
@@ -26,6 +32,7 @@ export default function AccountBrowser({
   onClose,
   onVerified,
   verifyLabel = "验证并完成",
+  manualLogin,
 }: {
   aid: string;
   platform: string;
@@ -38,6 +45,7 @@ export default function AccountBrowser({
   onClose: () => void;
   onVerified?: (started?: boolean) => Promise<void>;
   verifyLabel?: string;
+  manualLogin?: ManualLoginFlow;
 }) {
   const [state, setState] = useState("opening");
   const [image, setImage] = useState<{
@@ -80,6 +88,7 @@ export default function AccountBrowser({
   const [latency, setLatency] = useState<number | null>(null);
   const [challenge, setChallenge] = useState<Row | null>(null);
   const root = useRef<HTMLDivElement>(null);
+  const manualDialog = useRef<HTMLDialogElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const keyboard = useRef<HTMLTextAreaElement>(null);
   const imageUrl = useRef("");
@@ -325,7 +334,9 @@ export default function AccountBrowser({
         return;
       }
       let recovered = false;
-      if (verify && (!automaticConnection.current || challenge)) {
+      if (verify && manualLogin) {
+        await manualLogin.verify(takeover.current);
+      } else if (verify && (!automaticConnection.current || challenge)) {
         const currentChallenge = challenge || (await api(`/agents/${aid}/browser/challenge/status`, {
           platform, takeover: takeover.current,
         })).challenge;
@@ -360,7 +371,9 @@ export default function AccountBrowser({
     active.current = false;
     const previousFocus = document.activeElement as HTMLElement | null;
     const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    const dialog = manualDialog.current;
+    if (dialog) dialog.showModal();
+    else document.body.style.overflow = "hidden";
     closeButton.current?.focus();
     let canceled = false;
     frameTag.current = "";
@@ -382,7 +395,7 @@ export default function AccountBrowser({
       initialDetails.current = { site_url: details.site_url, login: undefined };
       connection.current = {
         key,
-        promise: api(`/agents/${aid}/connect`, { platform, account_id: requestedAccountId, new_account: newAccount, ...details }),
+        promise: manualLogin ? manualLogin.open() : api(`/agents/${aid}/connect`, { platform, account_id: requestedAccountId, new_account: newAccount, ...details }),
       };
       onCredentialsSent?.();
     }
@@ -419,6 +432,7 @@ export default function AccountBrowser({
     let checkingChallenge = false;
     const challengePoll = setInterval(async () => {
       if (
+        manualLogin ||
         canceled ||
         !active.current ||
         stopping.current ||
@@ -472,10 +486,11 @@ export default function AccountBrowser({
       scrollDelta.current = 0;
       queue.current = [];
       if (imageUrl.current) URL.revokeObjectURL(imageUrl.current);
-      document.body.style.overflow = previousOverflow;
+      if (dialog) dialog.close();
+      else document.body.style.overflow = previousOverflow;
       previousFocus?.focus();
     };
-  }, [aid, platform, requestedAccountId, newAccount, retry, shot]);
+  }, [aid, platform, requestedAccountId, newAccount, retry, shot, manualLogin]);
   useEffect(() => {
     const target = viewport.current;
     if (!target) return;
@@ -496,21 +511,24 @@ export default function AccountBrowser({
     target.addEventListener("wheel", wheel, { passive: false });
     return () => target.removeEventListener("wheel", wheel);
   }, [state]); // Input is queued in the active session.
-  return (
+  const content = (
     <div
       className="account-browser-overlay"
       ref={root}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="account-browser-title"
+      role={manualLogin ? undefined : "dialog"}
+      aria-modal={manualLogin ? undefined : "true"}
+      aria-labelledby={manualLogin ? undefined : "account-browser-title"}
       onKeyDown={(e) => {
+        if (manualLogin && (e.key === "Escape" || e.key === "Tab")) e.stopPropagation();
         if (
           e.key === "Escape" &&
           e.target !== keyboard.current &&
           !verifying &&
           !closing
-        )
+        ) {
+          if (manualLogin) e.preventDefault();
           close();
+        }
         if (e.key === "Tab") {
           const elements = root.current?.querySelectorAll<HTMLElement>(
             "button:not(:disabled), textarea:not(:disabled)",
@@ -535,7 +553,7 @@ export default function AccountBrowser({
             <div>
               <h2 id="account-browser-title">{(automatic && controlMode === "owner") || challenge ? "完成验证" : "连接"} {name}</h2>
               <span className="muted small" role="status">
-                {automatic ? controlMode === "owner" ? ownerAction || "请在原窗口完成本人步骤，再继续连接" : "平台正在自动连接；关闭窗口后仍会在后台核对" : challenge ? "请在原窗口完成真人验证，其他账号继续运行" : "在受控窗口中登录账号"}
+                {manualLogin?.instructions ?? (automatic ? controlMode === "owner" ? ownerAction || "请在原窗口完成本人步骤，再继续连接" : "平台正在自动连接；关闭窗口后仍会在后台核对" : challenge ? "请在原窗口完成真人验证，其他账号继续运行" : "在受控窗口中登录账号")}
               </span>
             </div>
           </div>
@@ -744,9 +762,25 @@ export default function AccountBrowser({
             )}
           </span>
           <span>{automatic && controlMode !== "owner" ? "自动连接中，画面仅供查看" : "点击画面即可输入 · 支持粘贴与滚轮"}</span>
-          <span className="muted">{automatic ? controlMode === "owner" ? "本人步骤期间自动操作已暂停" : "其他账号继续运行" : "接管期间 Agent 已暂停"}</span>
+          <span className="muted">{manualLogin ? "其他运营任务继续运行" : automatic ? controlMode === "owner" ? "本人步骤期间自动操作已暂停" : "其他账号继续运行" : "接管期间 Agent 已暂停"}</span>
         </footer>
       </div>
     </div>
+  );
+  if (!manualLogin) return content;
+  return createPortal(
+    <dialog
+      ref={manualDialog}
+      className="account-browser-native"
+      aria-labelledby="account-browser-title"
+      onCancel={(event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        if (!verifying && !closing) close();
+      }}
+    >
+      {content}
+    </dialog>,
+    document.body,
   );
 }

@@ -33,6 +33,8 @@ from .config import BROWSER_BUILD, BROWSER_SDK, STATE, env, proxy_for
 from .db import j, one, record, require_agent, tx, uid
 from .domain import PLATFORMS
 from .forward_proxy import BrowserForwardProxy
+from .google_opportunity import is_profile as is_google_profile
+from .google_opportunity_flow import router as google_opportunity_router
 from .scope import current_tenant, scoped_agent_method, service_scope
 from .security import internal_token, token
 from .telemetry import TelemetryMiddleware
@@ -94,6 +96,7 @@ class Actor:
         self.forward_proxy = None
         self.disconnected = False
         self.native_runtime = None
+        self.google_authority = None
         from .browser_metering import Counter
 
         self.counter = Counter(self.folder / "storage")
@@ -173,7 +176,12 @@ class Actor:
                 sort_keys=True,
             ).encode()
         ).hexdigest()
-        self.forward_proxy = await BrowserForwardProxy(self.aid, proxy, None if self.profile["slot"]=="default" else str(self.profile["id"])).start()
+        google = is_google_profile(self.profile)
+        self.forward_proxy = await BrowserForwardProxy(
+            self.aid, proxy, None if self.profile["slot"] == "default" else str(self.profile["id"]),
+            forward_guard=self.google_control_token if google else None,
+            destination_allowed=self.google_destination if google else None,
+        ).start()
         launch_settings = dict(
             browser=BROWSER_BUILD,
             user_data_dir=str(folder / "storage"),
@@ -224,6 +232,8 @@ class Actor:
             accept_downloads=False,
             i_know_what_im_doing=True,
         )
+        if google:
+            launch_settings["service_workers"] = "block"
         if env().get("LEAD_BROWSER_MAIN_WORLD_EVAL") == "1":
             launch_settings["main_world_eval"] = True
         try:
@@ -254,17 +264,20 @@ class Actor:
             # Website isolation from local services. Only the authenticated lab path
             # is reachable on loopback; all social requests must resolve publicly.
             await self.context.route("**/*", self.route)
-            await self.context.add_cookies(
-                [
-                    {
-                        "name": "lead_lab",
-                        "value": token("lab:" + self.aid),
-                        "url": "http://127.0.0.1:8088",
-                        "httpOnly": True,
-                        "sameSite": "Strict",
-                    }
-                ]
-            )
+            if google:
+                await self.context.route_web_socket("**/*", lambda socket: socket.close())
+            else:
+                await self.context.add_cookies(
+                    [
+                        {
+                            "name": "lead_lab",
+                            "value": token("lab:" + self.aid),
+                            "url": "http://127.0.0.1:8088",
+                            "httpOnly": True,
+                            "sameSite": "Strict",
+                        }
+                    ]
+                )
             self.page = (
                 self.context.pages[0]
                 if self.context.pages
@@ -321,7 +334,22 @@ class Actor:
             await self.close()
             raise
 
+    def google_control_token(self):
+        return self.google_authority.control_token() if self.google_authority else None
+
+    def google_destination(self, host, port):
+        return self.google_authority is not None and self.google_authority.host_allowed(host, port)
+
     async def route(self, route):
+        if is_google_profile(self.profile):
+            request = route.request
+            authority = self.google_authority
+            if authority and authority.allow(
+                request.url, request.method, navigation=request.is_navigation_request(),
+                resource_type=request.resource_type,
+            ):
+                return await route.continue_()
+            return await route.abort()
         p = urlsplit(route.request.url)
         if p.scheme in ("data", "blob", "about"):
             return await route.continue_()
@@ -1199,6 +1227,9 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
 )
+
+
+app.include_router(google_opportunity_router)
 
 
 @app.exception_handler(Exception)
